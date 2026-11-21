@@ -30,25 +30,166 @@ OPS_STATE_DIR=.ssdlc/devloop
 OPS_TEMPLATE_VARS='REPO DEVLOOP_USER SUPERVISOR_USER AGENT_USER DEVLOOP_HOME AGENT_HOME DEVLOOP_CLONE STATE_DIR STATE_PATH LAUNCHER_CMD DEVLOOP_PATH AGENT_PATH SERVICE_NAME REPO_LOCK_DIR REPO_LOCK_GROUP'
 
 # Nella home dell'utente degli agent (#438), come CLI_DIRS, CLI_SEALED e CLIS di
-# devloop/agentuser.py: le directory delle CLI, dove l'utente degli agent non crea nulla e che
-# non rinomina; ciò che porta istruzioni, configurazione o binari, dove non scrive nulla; le CLI
-# di ~/.local/bin. Sono di root, leggibili dall'utente degli agent: un turno non cambia ciò che
+# devloop/agentuser.py: le directory delle CLI, di root, del gruppo dell'utente degli agent e con
+# lo sticky bit (1770, #517), dove l'utente degli agent crea e sostituisce le proprie voci ma non
+# rinomina né rimuove quelle di root; ciò che porta istruzioni, configurazione, plugin o binari,
+# dove non scrive nulla, con un segnaposto di root dove non esiste (un file se il nome ha
+# un'estensione, altrimenti una directory); le CLI di ~/.local/bin. Un turno non cambia ciò che
 # usano i turni dopo.
-AGENT_CLI_DIRS=(.claude .codex .gemini .gemini/antigravity-cli)
+# ~/.gemini/config è di agy: config.json abilita i plugin, mcp_config.json elenca i server MCP che
+# carica, projects i suoi progetti, tutti sigillati; resta dell'utente degli agent solo .migrated.
+AGENT_CLI_DIRS=(.claude .codex .gemini .gemini/config .gemini/antigravity-cli)
 AGENT_CLI_SEALED=(
     .claude/settings.json .claude/CLAUDE.md .claude/rules .claude/agents .claude/commands
     .claude/skills .claude/hooks .claude/output-styles .claude/plugins
     .codex/config.toml .codex/AGENTS.md .codex/AGENTS.override.md .codex/prompts
-    .codex/rules .codex/skills .codex/packages
-    .gemini/settings.json .gemini/GEMINI.md .gemini/antigravity-cli/settings.json
+    .codex/rules .codex/skills .codex/packages .codex/plugins .codex/memories
+    .gemini/settings.json .gemini/GEMINI.md .gemini/config/config.json
+    .gemini/config/mcp_config.json .gemini/config/projects
+    .gemini/antigravity-cli/settings.json
     .local
 )
 AGENT_CLIS=(claude codex agy)
+# Le sole voci che le CLI possono tenere nelle directory di AGENT_CLI_DIRS (#517), oltre a quelle
+# sigillate e alle directory delle CLI, di root: <directory>/<modello del nome>:<tipi>, come
+# CLI_ALLOWED di devloop/agentuser.py (f un file, d una directory). Una voce che manca qui si
+# aggiunge con una PR, in entrambe le liste; l'overlay può solo toglierne ([agent_user]
+# cli_denied).
+AGENT_CLI_ALLOWED=(
+    .claude/.credentials.json:f '.claude/.credentials.json.*:f' .claude/backups:d .claude/cache:d
+    .claude/projects:d .claude/sessions:d .claude/todos:d .claude/shell-snapshots:d
+    .claude/statsig:d .claude/plans:d .claude/file-history:d .claude/session-env:d
+    .claude/debug:d .claude/ide:d .claude/paste-cache:d .claude/telemetry:d
+    .claude/history.jsonl:f .claude/stats-cache.json:f
+    .codex/auth.json:f '.codex/.auth-*:f' .codex/auth.lock:f .codex/auth.json.lock:f
+    .codex/.sandbox_migration:fd .codex/.sqlite-maintenance.lock:f .codex/cache:d
+    '.codex/goals_1.sqlite*:f' .codex/installation_id:f '.codex/logs_2.sqlite*:f'
+    '.codex/memories_1.sqlite*:f' .codex/models_cache.json:f '.codex/queue_1.sqlite*:f'
+    .codex/sessions:d .codex/shell_snapshots:d '.codex/state_5.sqlite*:f'
+    .codex/thread-writer-locks:d '.codex/thread_history_1.sqlite*:f' .codex/tmp:d
+    .gemini/config/.migrated:f
+    .gemini/antigravity-cli/antigravity-oauth-token:f .gemini/antigravity-cli/bin:d
+    .gemini/antigravity-cli/brain:d .gemini/antigravity-cli/builtin:d
+    .gemini/antigravity-cli/cache:d .gemini/antigravity-cli/cli.log:f
+    '.gemini/antigravity-cli/conversation_summaries.db*:f'
+    .gemini/antigravity-cli/conversations:d .gemini/antigravity-cli/crashes:d
+    .gemini/antigravity-cli/implicit:d .gemini/antigravity-cli/installation_id:f
+    .gemini/antigravity-cli/jetbox_summaries_proto.pb:f
+    '.gemini/antigravity-cli/jetbox_summaries_proto.pb.*.tmp:f'
+    .gemini/antigravity-cli/jetski_state.pbtxt:f
+    '.gemini/antigravity-cli/jetski_state.pbtxt.*.tmp:f'
+    .gemini/antigravity-cli/last_check.timestamp:f .gemini/antigravity-cli/log:d
+    .gemini/antigravity-cli/presence:d .gemini/antigravity-cli/updater:d
+)
+
+# agent_cli_entry_known DIR NAME TYPE: la voce NAME, di tipo TYPE (%y di find), della directory
+# delle CLI DIR (relativa alla home) è nella lista, o è sigillata o una directory delle CLI.
+# Torna 0 se è nota (sigillata e directory delle CLI: il proprietario lo controlla chi chiama),
+# 1 se manca dalla lista, 2 se è nella lista con un altro tipo.
+agent_cli_entry_known() {
+    local dir=$1 name=$2 type=$3 entry pattern types matched=0
+    for entry in "${AGENT_CLI_DIRS[@]}" "${AGENT_CLI_SEALED[@]}"; do
+        [ "$entry" = "$dir/$name" ] && return 0
+    done
+    for entry in "${AGENT_CLI_ALLOWED[@]}"; do
+        pattern=${entry%:*} types=${entry##*:}
+        [ "${pattern%/*}" = "$dir" ] || continue
+        # shellcheck disable=SC2254 # il modello del nome è un glob
+        case $name in
+            ${pattern##*/})
+                matched=1
+                case $types in *"$type"*) return 0 ;; esac ;;
+        esac
+    done
+    return $((matched + 1))
+}
 # Le voci che le CLI creano al primo uso dentro AGENT_CLI_DIRS (#494), dove l'utente degli agent
 # non crea nulla: setup-agent-user.sh le crea sue (700), come CLI_WRITABLE di
 # devloop/agentuser.py. Una CLI che si ferma con `permission denied` su una voce nuova di una
 # directory sigillata vuole una voce in più qui (ops/host/migrate.md).
 AGENT_CLI_WRITABLE=(.gemini/antigravity-cli/bin)
+
+# codex_memories FILE [DEST]: la configurazione di codex FILE spegne in modo esplicito le sue
+# memorie (#517), con [features] memories = false, e nessun profilo ([profiles.<nome>.features])
+# le riaccende, come codex_config_problems di devloop/agentuser.py: altrimenti codex
+# rileggerebbe in un turno le memorie (memories_1.sqlite) che un altro vi ha lasciato. Torna 0
+# se è così, 1 se non lo è (con il motivo su stdout). Con DEST, se manca solo la riga (anche
+# FILE che non esiste), scrive in DEST FILE con la riga aggiunta (nella tabella [features], o in
+# una nuova in fondo) e torna 3; una riga con un altro valore non la cambia: torna 1.
+codex_memories() {
+    python3 - "$@" <<'EOF'
+import re, sys, tomllib
+path, dest = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else None)
+LIMIT = 1 << 20
+
+
+def no(why):
+    print(f'{path} {why}')
+    sys.exit(1)
+
+
+def shown(value):
+    return str(value).lower() if isinstance(value, bool) else repr(value)
+
+
+def profiles(data):
+    found = data.get('profiles')
+    for name, profile in (found.items() if isinstance(found, dict) else ()):
+        on = profile.get('features') if isinstance(profile, dict) else None
+        if isinstance(on, dict) and 'memories' in on and on['memories'] is not False:
+            no(f'imposta [profiles.{name}.features] memories = {shown(on["memories"])}')
+
+
+try:
+    with open(path, 'rb') as fh:
+        raw = fh.read(LIMIT + 1)
+except FileNotFoundError:
+    if dest is None:
+        no('non esiste')
+    raw = b''
+except OSError as exc:
+    no(f'non si legge ({exc.strerror})')
+if len(raw) > LIMIT:
+    no(f'supera {LIMIT} byte')
+try:
+    text = raw.decode('utf-8')
+    data = tomllib.loads(text)
+except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+    no(f'non è un TOML valido ({exc})')
+features = data.get('features')
+if isinstance(features, dict) and 'memories' in features:
+    if features['memories'] is not False:
+        no(f'imposta [features] memories = {shown(features["memories"])}')
+    profiles(data)
+    sys.exit(0)
+profiles(data)
+if dest is None:
+    no('non imposta [features] memories = false')
+lines = text.splitlines(keepends=True)
+header = re.compile(r'[ \t]*\[[ \t]*features[ \t]*\][ \t]*(#.*)?\r?\n?')
+for i, line in enumerate(lines):
+    if header.fullmatch(line):
+        lines[i] = line if line.endswith('\n') else line + '\n'
+        lines.insert(i + 1, 'memories = false\n')
+        break
+else:
+    if lines:
+        lines[-1] = lines[-1] if lines[-1].endswith('\n') else lines[-1] + '\n'
+        lines.append('\n')
+    lines += ['[features]\n', 'memories = false\n']
+new = ''.join(lines)
+try:
+    written = tomllib.loads(new).get('features')
+except tomllib.TOMLDecodeError:
+    written = None
+if not (isinstance(written, dict) and written.get('memories') is False):
+    no('non imposta [features] memories = false, e la riga non si aggiunge da sola: '
+       'aggiungerla a mano')
+with open(dest, 'w', encoding='utf-8') as fh:
+    fh.write(new)
+sys.exit(3)
+EOF
+}
 
 say() { printf '%s\n' "$*"; }
 step() { printf '\n==> %s\n' "$*"; }

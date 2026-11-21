@@ -37,9 +37,44 @@ def review():
             'checks_performed': ['read diff']}
 
 
+def cli_listing(entries=(), dirs=agentuser.CLI_DIRS):
+    """The output of the listing of the directories of the CLIs (#517) as the agent user would
+    print it: every directory of ``dirs`` there, holding the directories of the CLIs below it
+    and ``entries``, ``(dir, type, uid, name)``."""
+    out = []
+    for d in dirs:
+        out.append(f'D:{d}')
+        out += [f'e:d:0:{c.rpartition("/")[2]}' for c in agentuser.CLI_DIRS
+                if c.rpartition('/')[0] == d]
+        out += [f'e:{t}:{u}:{n}' for where, t, u, n in entries if where == d]
+    return ''.join(f'{r}\0' for r in [*out, 'E:']).encode()
+
+
+CODEX_CONFIG = b'model = "gpt-5"\n\n[features]\nmemories = false\n'
+
+
+def cli_state(argv, entries=(), codex_config=CODEX_CONFIG):
+    """The answer of a fake launch mechanism to the listing of the directories of the CLIs, and
+    to the reading of the configuration of codex (#517), or None for another command."""
+    if 'cli-state' in argv:
+        return SimpleNamespace(returncode=0, stdout=cli_listing(entries), stderr=b'')
+    if 'codex-config' in argv:
+        return SimpleNamespace(returncode=0, stdout=codex_config, stderr=b'')
+    return None
+
+
+def cli_dirs(home):
+    """The directories of the CLIs in ``home``, as setup-agent-user.sh makes them (#517)."""
+    for d in agentuser.CLI_DIRS:
+        Path(home, d).mkdir(parents=True, exist_ok=True)
+
+
 class LocalUser(AgentUser):
     """An agent user whose commands run as the current user, without sudo: the real probe and
-    the real process groups, on any machine."""
+    the real process groups, on any machine. The current user stands for root as the owner of
+    the sealed entries (#517)."""
+
+    root_uid = os.geteuid()
 
     def __init__(self, home, kills=None):
         super().__init__('devloop-agent', home=home)
@@ -62,7 +97,7 @@ class LaunchTests(unittest.TestCase):
 
     def record(self, argv, **kw):
         self.calls.append((argv, kw))
-        return SimpleNamespace(returncode=0, stdout='', stderr='')
+        return cli_state(argv) or SimpleNamespace(returncode=0, stdout='', stderr='')
 
     def test_commands_run_as_the_agent_user_through_sudo(self):
         self.assertEqual(self.user.command(['claude', '-p']), SUDO + ['claude', '-p'])
@@ -249,7 +284,8 @@ class SafeDirectoryTests(unittest.TestCase):
                 return SimpleNamespace(returncode=0, stdout='ok', stderr='')
             return SimpleNamespace(returncode=0, stdout=json.dumps(
                 {'is_error': False, 'structured_output': review()}), stderr='')
-        user = AgentUser('devloop-agent', home='/home/devloop-agent')
+        user = AgentUser('devloop-agent', home='/home/devloop-agent',
+                         run=lambda argv, **kw: cli_state(argv))
         env = cli.agent_environment(CFG, self.tmp / 'gh', user)
         runner = agents.AgentRunner(self.tmp / 'logs', 10, run=fake_run, env=env,
                                     agent_user=user, shared_dir=self.tmp / 'agent-shared')
@@ -273,6 +309,12 @@ class SafeDirectoryTests(unittest.TestCase):
             """The real git probe as the current user; the other probe finds nothing."""
 
             def probe(self, items):
+                return []
+
+            def cli_state(self, clear=()):
+                return []
+
+            def codex_config(self):
                 return []
         agentuser.check(GitOnly(self.tmp), keys, state, me='devloop', env=OTHER_OWNER)
 
@@ -488,8 +530,8 @@ class SharedDirAttackTests(unittest.TestCase):
         self.key = self.private / 'dispatcher.pem'
         self.key.write_text(json.dumps(review()))  # it would even parse as the final message
         self.user = AgentUser('devloop-agent', home='/home/devloop-agent',
-                              run=lambda argv, **kw: SimpleNamespace(returncode=0, stdout='',
-                                                                     stderr=''))
+                              run=lambda argv, **kw: cli_state(argv) or SimpleNamespace(
+                                  returncode=0, stdout='', stderr=''))
 
     def runner(self, fake_run):
         return agents.AgentRunner(self.logs, 10, run=fake_run, agent_user=self.user,
@@ -607,6 +649,7 @@ class TerminationTests(unittest.TestCase):
     def test_a_turn_that_times_out_is_killed_as_the_agent_user(self):
         with tempfile.TemporaryDirectory() as tmp:
             user = LocalUser(tmp)
+            user.cli_state = lambda clear=(): []  # the command below would run it too
             # The launch mechanism runs a CLI that never ends instead of codex.
             user.command = lambda argv: ['sh', '-c', 'sleep 30 & sleep 30']
             runner = agents.AgentRunner(Path(tmp) / 'logs', 1, agent_user=user,
@@ -639,6 +682,10 @@ class StartupCheckTests(unittest.TestCase):
         (self.state / 'turn-journal.jsonl').write_text('')
         self.calls = []
         self.env_checks = []
+        self.cli_states = []
+        self.cli_entries = ()
+        self.codex_configs = []
+        self.codex_config = CODEX_CONFIG
 
     def fake(self, problems=(), returncode=0, stderr='', git=(0, '')):
         """An agent user whose probe reports ``problems``, ``(code, path)`` pairs, whose git
@@ -647,6 +694,12 @@ class StartupCheckTests(unittest.TestCase):
         self.git_probes = []
 
         def run(argv, **kw):
+            if 'cli-state' in argv:  # the directories of the CLIs hold only the list (#517)
+                self.cli_states.append(argv)
+                return cli_state(argv, self.cli_entries)
+            if 'codex-config' in argv:  # the memories of codex off (#517)
+                self.codex_configs.append(argv)
+                return cli_state(argv, codex_config=self.codex_config)
             if 'git-probe' in argv:
                 self.git_probes.append((argv, kw['env']))
                 # What the dispatcher's git made: the agent user writes nothing there (#500).
@@ -788,6 +841,8 @@ class StartupCheckTests(unittest.TestCase):
             self.skipTest('root reads and writes everything')
         user = LocalUser(self.tmp)
         (self.tmp / agentuser.AGY_BIN).mkdir(parents=True)  # the agent user's (#494)
+        (self.tmp / '.codex').mkdir()
+        (self.tmp / agentuser.CODEX_CONFIG).write_bytes(CODEX_CONFIG)  # #517
         git_dir = self.tmp / 'repo/.git/worktrees/pr-1'
         git_dir.mkdir(parents=True)
         (git_dir / 'commondir').write_text('../..\n')
@@ -885,6 +940,8 @@ class EnvironmentCheckTests(unittest.TestCase):
         probe (#500) find nothing."""
         def run(argv, **kw):
             self.calls.append((argv, kw))
+            if 'cli-state' in argv or 'codex-config' in argv:
+                return cli_state(argv)
             if 'probe' in argv or 'git-probe' in argv:
                 return SimpleNamespace(returncode=0, stdout='', stderr='')
             out = kw['env'][agentuser.ENV_PROBE] if keeps_env else ''
@@ -1132,6 +1189,7 @@ class CliFilesTests(unittest.TestCase):
             '.claude.json': '{}\n',  # the state of Claude Code, the agent user's
             '.codex/config.toml': 'model = "x"\n',
             '.gemini/antigravity-cli/settings.json': '{}\n',
+            '.gemini/config/mcp_config.json': '{}\n',  # the MCP servers of agy (#517)
             '.local/bin/claude': ATTACK.replace('@OUTPUT@', output),
             '.local/lib/claude-code/cli.js': '// the package\n',
         }
@@ -1196,12 +1254,15 @@ class CliFilesTests(unittest.TestCase):
         self.assertEqual(len([a for a in attempts if a.startswith('refused')]), 28)
         self.assertEqual(self.snapshot(), before)
         # The real probe finds nothing a turn could write, create, rename or remove in the
-        # home: only the owner, which on the host is root.
+        # home: only the owner, which on the host is root, and the directories of the CLIs
+        # read-only here, which on the host are sticky and writable (#517).
         found = LocalUser(self.home).probe(agentuser.cli_items(self.home))
         inside = {(code, path) for code, path in found
                   if Path(path).is_relative_to(self.home) and Path(path) != self.home}
         self.assertTrue(inside)
-        self.assertEqual({code for code, _ in inside}, {'o'})
+        self.assertEqual({code for code, _ in inside}, {'o', 'k', 'u'})
+        self.assertEqual({path for code, path in inside if code != 'o'},
+                         {str(self.home / d) for d in agentuser.CLI_DIRS})
         # Without the --settings of devloop, with the environment alone, the same next turn
         # would load what the first one wrote: the fake follows Claude Code's precedence.
         schema = self.tmp / 'schema.json'
@@ -1231,8 +1292,9 @@ class CliFilesTests(unittest.TestCase):
         for problem in (('w', home / '.claude/settings.json'), ('w', home / '.claude/CLAUDE.md'),
                         ('w', home / '.codex/config.toml'), ('w', home / '.claude/rules'),
                         ('w', home / '.gemini/antigravity-cli/settings.json'),
-                        ('w', home / '.claude'), ('o', home / '.claude'), ('m', home / '.claude'),
+                        ('k', home / '.claude'), ('o', home / '.claude'), ('m', home / '.claude'),
                         ('c', home / '.codex/AGENTS.md'), ('c', home / '.claude/skills'),
+                        ('c', home / '.codex/plugins'),
                         ('w', home / '.local'), ('w', home / '.local/bin/claude'),
                         ('w', package / 'codex'), ('o', home)):
             with self.subTest(problem=problem):
@@ -1346,9 +1408,13 @@ class CliFilesTests(unittest.TestCase):
         found = LocalUser(self.home).probe(agentuser.cli_items(self.home))
         self.assertEqual([(code, path) for code, path in found
                           if Path(path).is_relative_to(agy_bin)], [])
+        # Only the owner, root's on the host, and the directories of the CLIs, read-only here
+        # and sticky and writable on the host (#517).
         self.assertEqual({code for code, path in found
-                          if Path(path).is_relative_to(self.home) and Path(path) != self.home},
-                         {'o'})  # only the owner, root's on the host
+                          if Path(path).is_relative_to(self.home) and Path(path) != self.home
+                          and (code != 'k' and code != 'u'
+                               or path not in {str(self.home / d) for d in agentuser.CLI_DIRS})},
+                         {'o'})
         (agy_bin / 'agentapi').unlink()
         agy_bin.parent.chmod(0o755)  # root removes it on the host
         agy_bin.rmdir()
@@ -1368,8 +1434,8 @@ class CliCheckTests(unittest.TestCase):
         agentuser.check(self.fake(), self.keys, self.state, me='devloop')
         kinds = self.kinds()
         home = Path('/home/devloop-agent')
-        self.assertEqual(kinds['fixed'], [str(home / d) for d in (
-            '.claude', '.codex', '.gemini', '.gemini/antigravity-cli')])
+        self.assertEqual(kinds['cli'], [str(home / d) for d in (
+            '.claude', '.codex', '.gemini', '.gemini/config', '.gemini/antigravity-cli')])
         for name in ('.claude/settings.json', '.claude/CLAUDE.md', '.codex/config.toml',
                      '.gemini/antigravity-cli/settings.json', '.local', '.claude/skills',
                      '.claude/hooks', '.claude/rules', '.codex/AGENTS.md', '.codex/packages'):
@@ -1398,7 +1464,7 @@ class CliCheckTests(unittest.TestCase):
         home = '/home/devloop-agent'
         agentuser.check(self.fake(), self.keys, self.state, me='devloop')
         self.assertIn(f'{home}/.gemini/antigravity-cli/bin', self.kinds()['rw'])
-        for kind in ('fixed', 'sealed', 'bin'):
+        for kind in ('cli', 'sealed', 'bin'):
             self.assertNotIn(f'{home}/.gemini/antigravity-cli/bin', self.kinds()[kind])
         with self.assertRaises(AgentUserError) as ctx:
             agentuser.check(self.fake([('u', f'{home}/.gemini/antigravity-cli/bin')]),
@@ -1418,6 +1484,7 @@ class AgyWrapperTests(unittest.TestCase):
         self.home = self.tmp / 'home'
         self.bin = self.home / agentuser.AGY_BIN
         self.bin.mkdir(parents=True)
+        cli_dirs(self.home)
         self.user = LocalUser(self.home)  # the real probe, as the current user
 
     def wrapper(self, data=None):

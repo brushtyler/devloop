@@ -21,10 +21,9 @@ from .agents import AgentError, TurnCancelled
 from .apps import DISPATCHER, IMPLEMENT, PR_COMMENT, RERUN, REVIEW
 from .budget import BudgetRefused
 from .dispatch_base import BaseBroken, HostTests
-from .context import (_credential_refused, _failure_text, _format_conflicts, _format_findings,
-                      _review_failure,
-                      _start_failure, _template, _trusted_comments, docs_diff_section,
-                      docs_map_section, docs_review_section, format_ci_summary,
+from .context import (_cli_state_refused, _failure_text, _format_conflicts, _format_findings,
+                      _review_failure, _start_failure, _template, _trusted_comments,
+                      docs_diff_section, docs_map_section, docs_review_section, format_ci_summary,
                       format_fix_requests, format_operator_comments, format_operator_decisions,
                       format_previous_rounds, owner_assessments, prompt_values)
 from .github import GitHubError, GitHubUncertain, job_id
@@ -1289,7 +1288,7 @@ class ActionsMixin:
                 # the tool, not a conflict to resolve: ``tool_failure`` prevails.
                 return fail(f'Il passo `sync` è fallito: {_failure_text(exc)}'
                             f'{self._log_hint(exc)}', exc.tail,
-                            cls=('configuration' if _credential_refused(exc)  # #507
+                            cls=('configuration' if _cli_state_refused(exc)  # #517
                                  else TOOL_FAILURE if _start_failure(exc) else None))
             if result['status'] == 'blocked':
                 return self._blocked(pr.number, used, result['blocked_reason'].strip()

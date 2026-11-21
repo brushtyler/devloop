@@ -4,8 +4,7 @@
 # sudoers, l'utente degli agent (non legge key_dir né state_dir, non scrive .git né le directory
 # che contengono worktree e turni, è nell'overlay, esegue git nei worktree di devloop, non cambia
 # istruzioni, configurazione e binari delle sue CLI; l'ambiente dei turni gli arriva con sudo -E,
-# che sudo-rs ignora), il token di claude (età, scadenza, nessun .credentials.json rimasto; #507),
-# il lock per repository (directory comune, gruppo, overlay; ADR 0006, R8),
+# che sudo-rs ignora), il lock per repository (directory comune, gruppo, overlay; ADR 0006, R8),
 # servizio, CLI degli agent (--version, e un `git --version` con il loro strumento di shell,
 # #494) e `devloop apps`. Con più progetti sullo stesso host si esegue una volta per progetto,
 # con i suoi parametri (--params).
@@ -262,8 +261,11 @@ to() {
     case $T in /*) ;; *) T=${1%/*}/$T ;; esac
 }
 fixed() {
-    local q=$1 h=${2:-0} d
-    [ -e "$q" ] && [ -w "$q" ] && no "scrivibile:" "$q"
+    [ -e "$1" ] && [ -w "$1" ] && no "scrivibile:" "$1"
+    above "$1" "${2:-0}"
+}
+above() {
+    local q=$1 h=$2 d
     while [ "$q" != / ] && [ -n "$q" ]; do
         mine "$q" && no "suo:" "$q"
         d=${q%/*}; d=${d:-/}
@@ -291,14 +293,20 @@ sealed() {
 }
 case $1 in
     fixed) fixed "$2" ;;
+    cli) if [ -e "$2" ] || [ -L "$2" ]; then
+             { [ -d "$2" ] && ! [ -L "$2" ] && [ -k "$2" ]; } || no "senza sticky bit:" "$2"
+             { [ -w "$2" ] && [ -x "$2" ]; } || no "non scrivibile:" "$2"
+         fi
+         above "$2" 0 ;;
     sealed) sealed "$2" ;;
     bin) fixed "$2"
          t=$(readlink -e -- "$2") && [ "$t" != "$2" ] && { fixed "$t"; sealed "${t%/*}"; } ;;
 esac
 [ "$bad" = 0 ]'
 for dir in "${AGENT_CLI_DIRS[@]}"; do
-    check_as "$AGENT_USER" "$AGENT_USER non crea nulla in $AGENT_HOME/$dir e non la sostituisce" \
-        /usr/bin/bash -c "$CLI_PROBE" _ fixed "$AGENT_HOME/$dir"
+    check_dir "$AGENT_HOME/$dir" 1770 root
+    check_as "$AGENT_USER" "$AGENT_USER scrive in $AGENT_HOME/$dir, con lo sticky bit, e non la sostituisce (#517)" \
+        /usr/bin/bash -c "$CLI_PROBE" _ cli "$AGENT_HOME/$dir"
 done
 for entry in "${AGENT_CLI_SEALED[@]}"; do
     check_as "$AGENT_USER" "$AGENT_USER non scrive né sostituisce $AGENT_HOME/$entry" \
@@ -308,110 +316,40 @@ for cli in "${AGENT_CLIS[@]}"; do
     check_as "$AGENT_USER" "$AGENT_USER non scrive né sostituisce $AGENT_HOME/.local/bin/$cli e il file a cui porta" \
         /usr/bin/bash -c "$CLI_PROBE" _ bin "$AGENT_HOME/.local/bin/$cli"
 done
+# Le directory delle CLI contengono solo le voci della lista (#517), come controlla devloop prima
+# di ogni turno: una voce sconosciuta, o di un altro tipo, è un errore. Che le voci sigillate e
+# le directory delle CLI siano di root lo controllano le verifiche qui sopra.
+for dir in "${AGENT_CLI_DIRS[@]}"; do
+    [ -d "$AGENT_HOME/$dir" ] && ! [ -L "$AGENT_HOME/$dir" ] || continue
+    bad=0
+    while IFS= read -r -d '' record; do
+        type=${record%%/*} name=${record#*/}
+        if agent_cli_entry_known "$dir" "$name" "$type"; then
+            known=0
+        else
+            known=$?
+        fi
+        case $known in
+            1) fail "$AGENT_HOME/$dir/$name non è nella lista AGENT_CLI_ALLOWED: devloop rifiuta i turni finché c'è (rimuoverla come $AGENT_USER a loop fermo, o aggiungerla con una PR)"; bad=1 ;;
+            2) fail "$AGENT_HOME/$dir/$name è di tipo $type, che la lista AGENT_CLI_ALLOWED non ammette per quel nome"; bad=1 ;;
+        esac
+    done < <(find "$AGENT_HOME/$dir" -mindepth 1 -maxdepth 1 -printf '%y/%f\0' 2>/dev/null)
+    [ "$bad" = 1 ] || ok "$AGENT_HOME/$dir contiene solo voci della lista"
+done
+# Le memorie di codex spente in modo esplicito (#517), come controlla devloop all'avvio: i turni
+# di codex girano in parallelo, e nessuno deve rileggere ciò che un altro lascia in
+# memories_1.sqlite.
+if codex_why=$(codex_memories "$AGENT_HOME/.codex/config.toml"); then
+    ok "$AGENT_HOME/.codex/config.toml imposta [features] memories = false"
+else
+    fail "${codex_why:-$AGENT_HOME/.codex/config.toml non si legge}: devloop non parte (setup-agent-user.sh aggiunge [features] memories = false)"
+fi
 # Le voci che le CLI creano al primo uso (#494): restano dell'utente degli agent, che le scrive.
 for entry in "${AGENT_CLI_WRITABLE[@]}"; do
     check_as "$AGENT_USER" "$AGENT_USER scrive in $AGENT_HOME/$entry (setup-agent-user.sh)" \
         /usr/bin/bash -c '[ -d "$1" ] && ! [ -L "$1" ] && [ -w "$1" ] && [ -x "$1" ]' _ \
         "$AGENT_HOME/$entry"
 done
-
-# Il token di lunga durata dei turni di claude (#507), come lo legge devloop/claudetoken.py: con
-# [claude_token] enabled nell'overlay, un solo claude.<AAAA-MM-GG>.oauth-token nella key_dir di
-# devloop, 600 e di $DEVLOOP_USER, con la sua età; oltre max_days (al più 90), o senza una data
-# valida, è un errore, da rotate_days un avviso. Il .credentials.json che resta a $AGENT_USER
-# sarebbe un secondo canale di accesso: con il token è un errore.
-step "Token di claude per $AGENT_USER (#507)"
-while IFS=$'\t' read -r level message; do
-    case $level in
-        ok) ok "$message" ;;
-        warn) warn "$message" ;;
-        fail) fail "$message" ;;
-        *) say "  $message" ;;
-    esac
-done < <(python3 - "$OVERLAY" "$DEVLOOP_KEY_DIR" "$DEVLOOP_USER" \
-    "$AGENT_HOME/.claude/.credentials.json" "$AGENT_USER" <<'EOF'
-import datetime, os, pwd, re, sys, tomllib
-overlay, key_dir, owner, credentials, agent = sys.argv[1:6]
-CAP = 90
-def out(level, message):
-    print(f'{level}\t{message}')
-try:
-    with open(overlay, 'rb') as f:
-        table = tomllib.load(f).get('claude_token', {})
-except (OSError, ValueError):
-    table = {}
-enabled = table.get('enabled') is True
-max_days = table.get('max_days', CAP)
-rotate_days = table.get('rotate_days', 30)
-if not isinstance(max_days, int) or not 1 <= max_days <= CAP:
-    out('fail', f'{overlay}: [claude_token] max_days = {max_days!r}, deve essere da 1 a {CAP}: '
-                'devloop non parte')
-    max_days = CAP
-try:
-    found = sorted(n for n in os.listdir(key_dir)
-                   if n.startswith('claude.') and n.endswith('.oauth-token'))
-except OSError:
-    found = []
-leftover = os.path.lexists(credentials)
-if not enabled:
-    out('say', f'[claude_token] non attivo in {overlay}: claude usa il login di {agent}')
-    if found:
-        out('warn', f'{key_dir}: ' + ', '.join(found) + ' presente, ma [claude_token] enabled '
-                    'non è true: devloop non lo usa')
-    sys.exit(0)
-if not found:
-    out('fail', f'nessun token di claude (claude.<AAAA-MM-GG>.oauth-token) in {key_dir}: i '
-                'turni di claude sono rifiutati (claude setup-token, ops/host/migrate.md)')
-elif len(found) > 1:
-    out('fail', f'{len(found)} token di claude in {key_dir} (' + ', '.join(found) + '): ne '
-                'resta uno solo, dopo aver revocato gli altri')
-else:
-    name = found[0]
-    path = os.path.join(key_dir, name)
-    info = os.lstat(path)
-    try:
-        user = pwd.getpwuid(info.st_uid).pw_name
-    except KeyError:
-        user = str(info.st_uid)
-    mode = info.st_mode & 0o777
-    if os.path.islink(path) or (mode, user) != (0o600, owner):
-        out('fail', f'{path} è {mode:o} {user}' + (' (un link)' if os.path.islink(path) else '')
-                    + f', deve essere un file 600 {owner}')
-    else:
-        out('ok', f'{path}: 600, {owner}')
-    middle = name[len('claude.'):-len('.oauth-token')]
-    try:
-        if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', middle):
-            raise ValueError
-        issued = datetime.date.fromisoformat(middle)
-    except ValueError:
-        issued = None
-    today = datetime.datetime.now(datetime.timezone.utc).date()
-    if issued is None:
-        out('fail', f'{name}: nessuna data di emissione valida nel nome: devloop lo considera '
-                    'scaduto')
-    else:
-        age = (today - issued).days
-        if age < 0:
-            out('fail', f'{name}: data di emissione {issued} nel futuro: devloop lo considera '
-                        'scaduto')
-        elif age >= max_days:
-            out('fail', f'{name}: emesso il {issued}, {age} giorni fa, oltre max_days = '
-                        f'{max_days}: scaduto, i turni di claude sono rifiutati; ruotarlo '
-                        '(ops/host/migrate.md)')
-        elif age >= rotate_days:
-            out('warn', f'{name}: emesso il {issued}, {age} giorni fa, da rotate_days = '
-                        f'{rotate_days}: da ruotare prima di max_days = {max_days}')
-        else:
-            out('ok', f'{name}: emesso il {issued}, {age} giorni fa (rotazione a {rotate_days}, '
-                      f'scadenza a {max_days})')
-if leftover:
-    out('fail', f'{credentials} c\'è ancora: con il token è un secondo canale di accesso, va '
-                'tolto (ops/host/migrate.md)')
-else:
-    out('ok', f'nessun {credentials}')
-EOF
-)
 
 step "sudoers dell'utente degli agent ($AGENT_SUDOERS_FILE)"
 check_sudoers "$AGENT_SUDOERS_FILE" sudoers-agent setup-agent-user.sh

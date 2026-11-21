@@ -11,8 +11,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from . import claudetoken
-from .agentuser import SCHEMAS, TURNS, AgentUserError, SharedDir
+from .agentuser import SCHEMAS, TURNS, AgentUserError, SharedDir, cleared_for
 from .markdown import agent_bot, devloop_version, header, parse_version
 from .schema import load_schema, schema_path, validate, with_defaults, SchemaError
 from .unavailability import delimited, reset_seconds
@@ -717,47 +716,11 @@ class StartFailure(AgentError):
     change: its escalation is a ``tool_failure`` whatever the step."""
 
 
-class CredentialRefused(AgentError):
-    """A claude turn refused before it started (#507): the long-lived token of
-    ``[claude_token]`` is missing, unreadable, without a valid issue date, or older than
-    ``max_days``. Not a failure of the tool nor of the change: its escalation is a
-    ``configuration``, to the operator, who rotates the token."""
-
-
-def _redact_text(value, token):
-    """``value`` with ``token`` replaced in it: a string, bytes, or a tuple or list of them."""
-    if isinstance(value, str):
-        return claudetoken.redact(value, token)
-    if isinstance(value, bytes):
-        return value.replace(token.encode('utf-8'), b'[REDACTED]')
-    if isinstance(value, (tuple, list)):
-        return type(value)(_redact_text(v, token) for v in value)
-    return value
-
-
-def _redact_error(exc, token):
-    """Remove ``token`` from the message of ``exc`` and from every attribute it carries
-    (``tail``, ``reason``, ``permission``, ``command``, a partial output…, #507)."""
-    try:
-        exc.args = _redact_text(exc.args, token)
-        for name, value in list(vars(exc).items()):
-            setattr(exc, name, _redact_text(value, token))
-    except (AttributeError, TypeError):
-        pass
-
-
-def _without_token(done, token):
-    """The completed run ``done`` with ``token`` removed from its stdout and stderr (#507):
-    every diagnostic, excerpt and telemetry of the turn is read from there."""
-    if not token:
-        return done
-    return _Completed(done.returncode, _redact_text(done.stdout, token),
-                      _redact_text(done.stderr, token))
-
-
-class _Completed:
-    def __init__(self, returncode, stdout, stderr):
-        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+class CliStateRefused(AgentError):
+    """A turn refused before it started (#517): a directory of the agent user's CLIs holds an
+    entry that is not in the list of the code (``agentuser.CLI_ALLOWED``), a sealed entry that
+    is not root's, or cannot be read. Not a failure of the tool nor of the change: its
+    escalation is a ``configuration``, to the operator, and names the entry."""
 
 
 class ToolChanged(StartFailure):
@@ -797,19 +760,25 @@ class AgentRunner:
     agy's shell tool in that user's home is read as that user: anything but the wrapper agy
     writes there refuses the turn before it starts (``ToolChanged``, #494).
 
-    ``claude_token`` (``claudetoken.ClaudeToken``, #507), if given, is read before each claude
-    turn and passed to its CLI only, as ``CLAUDE_CODE_OAUTH_TOKEN``: a token that may not be
-    used refuses the turn before it starts (``CredentialRefused``). The token is replaced with
-    ``[REDACTED]`` in the turn's log, in the tail and the command of its output, and in its
-    output."""
+    Before every turn, with an agent user, the directories of its CLIs are listed as that user
+    (``AgentUser.cli_state``, #517): an entry that is not in the list of the code refuses the
+    turn before it starts (``CliStateRefused``). Before it, what the CLI of the turn would read
+    again as context (``agentuser.CLI_CLEARED``) is removed. The turns of a CLI that keeps such
+    memories (agy) run one at a time: a turn waits for the one of the same CLI that runs,
+    which could leave it memories while both run, and is cancelled while it waits (#521). The
+    turns of different CLIs, and those of claude and codex, whose memories are off, still run
+    together."""
 
     def __init__(self, log_dir, timeout, run=subprocess.run, env=None, on_turn=None, stall=None,
-                 clock=time.time, sleep=time.sleep, agent_user=None, shared_dir=None,
-                 claude_token=None):
+                 clock=time.time, sleep=time.sleep, agent_user=None, shared_dir=None):
         if agent_user is not None and shared_dir is None:
             raise ValueError('an agent user needs a shared directory')
         self.agent_user = agent_user
-        self.claude_token = claude_token
+        # The turns of each CLI running now (#517): parallel actions share the runner. A turn
+        # of a CLI with memories to clear waits on ``_cli_idle`` until none of its CLI runs.
+        self._running = {}
+        self._running_lock = threading.Lock()
+        self._cli_idle = threading.Condition(self._running_lock)
         self.shared_dir = None if shared_dir is None else Path(shared_dir)
         self.shared = None if shared_dir is None else SharedDir(shared_dir)
         self.log_dir = Path(log_dir)
@@ -888,15 +857,53 @@ class AgentRunner:
         cancel = getattr(self._local, 'cancel', None)
         if cancel is not None and cancel.is_set():  # no longer needed (#521): never started
             raise TurnCancelled(f'{agent.key}: turn cancelled before it started')
+        if self.agent_user is None:
+            return self._started(agent, mode, prompt, schema_name, workdir, label)
+        self._check_cli_state(agent)
+        try:
+            return self._started(agent, mode, prompt, schema_name, workdir, label)
+        finally:
+            with self._cli_idle:
+                self._running[agent.kind] -= 1
+                self._cli_idle.notify_all()
+
+    def _check_cli_state(self, agent):
+        """Before a turn of ``agent`` (#517): when its CLI keeps memories to clear
+        (``agentuser.cleared_for``), wait until no other turn of that CLI runs, so that no turn
+        reads what another one leaves there, and remove them; a turn cancelled while it waits
+        raises ``TurnCancelled`` (#521). Then refuse the turn (``CliStateRefused``) when a
+        directory of the CLIs holds an entry that is not in the list of the code, or cannot be
+        read. Otherwise the turn counts as running until it ends."""
+        clear = cleared_for(agent.kind)
+        cancel = getattr(self._local, 'cancel', None)
+        with self._cli_idle:
+            while clear and self._running.get(agent.kind, 0):
+                if cancel is not None and cancel.is_set():
+                    raise TurnCancelled(f'{agent.key}: turn cancelled before it started')
+                self._cli_idle.wait(timeout=1)
+            running = self._running.get(agent.kind, 0)
+            try:
+                problems = self.agent_user.cli_state(clear)
+            except AgentUserError as exc:
+                problems = [str(exc)]
+            if problems:
+                raise CliStateRefused(
+                    f'{agent.key}: turn refused before it started, the directories of the CLIs '
+                    f'of {self.agent_user.name} hold what devloop does not admit: '
+                    f'{"; ".join(problems)}. With the loop stopped, remove it as '
+                    f'{self.agent_user.name} and find which turn or test wrote it, or add the '
+                    'entry to the list with a PR (ops/host/migrate.md)')
+            self._running[agent.kind] = running + 1
+
+    def _started(self, agent, mode, prompt, schema_name, workdir, label):
         self.log_dir.mkdir(parents=True, exist_ok=True)
         stem = self.log_dir / f'{time.strftime("%Y%m%dT%H%M%S")}-{label}-{agent.key}'
         logged = stem.with_suffix('.last.json')
         if self.agent_user is not None and agent.kind == 'agy':
             self._check_agy_bin(agent)
-        token = self._claude_token(agent)
         if self.agent_user is None:
             return self._turn(agent, mode, prompt, schema_name, workdir, stem, logged,
-                              schema_path(schema_name), token=token)
+                              schema_path(schema_name))
         # The agent user cannot read state_dir nor the pinned copy (#415): the schema and the
         # final message of codex pass through the shared directory. The schema is a new file
         # in a directory the agent user cannot write; the final message is written in a new
@@ -931,7 +938,7 @@ class AgentRunner:
 
         try:
             return self._turn(agent, mode, prompt, schema_name, workdir, stem,
-                              turn_dir / FINAL_MESSAGE, schema_file, collect, token=token)
+                              turn_dir / FINAL_MESSAGE, schema_file, collect)
         finally:
             try:
                 collect()  # the final message of a turn that was stopped, as evidence
@@ -939,19 +946,6 @@ class AgentRunner:
                 pass
             self._discard(SCHEMAS, schema_file)
             self._discard(TURNS, turn_dir)
-
-    def _claude_token(self, agent):
-        """The token of a claude turn (#507), or None without ``claude_token`` or for another
-        CLI. ``CredentialRefused`` when the token may not be used: its message names the file
-        and why, never the token."""
-        if self.claude_token is None or agent.kind != 'claude':
-            return None
-        try:
-            return self.claude_token.value()
-        except claudetoken.TokenRefused as exc:
-            raise CredentialRefused(f'{agent.key}: turn refused before it started, the claude '
-                                    f'token cannot be used: {exc}. Rotate it with `claude '
-                                    f'setup-token` ({claudetoken.PROCEDURE})') from None
 
     def _check_agy_bin(self, agent):
         """Refuse the agy turn (``ToolChanged``) when the agent user's ``bin`` of agy's shell
@@ -983,25 +977,7 @@ class AgentRunner:
             pass
 
     def _turn(self, agent, mode, prompt, schema_name, workdir, stem, out_file, schema_file,
-              collect=None, token=None):
-        """``_cli_turn``; with ``token`` (#507), a failure is raised without it: its message,
-        its tail, its ``reason`` and every other text it carries end in the escalation, in the
-        dispatcher's log and in the ledger. ``_cli_turn`` already removes the token from the
-        output of the CLI before reading it; this is the last guard."""
-        try:
-            return self._cli_turn(agent, mode, prompt, schema_name, workdir, stem, out_file,
-                                  schema_file, collect, token)
-        except AgentError as exc:
-            if token:
-                error, seen = exc, set()
-                while error is not None and id(error) not in seen:  # and those it came from
-                    seen.add(id(error))
-                    _redact_error(error, token)
-                    error = error.__cause__ or error.__context__
-            raise
-
-    def _cli_turn(self, agent, mode, prompt, schema_name, workdir, stem, out_file, schema_file,
-                  collect, token):
+              collect=None):
         prompt = turn_prompt(agent, mode, prompt)
         argv, stdin = build_command(agent, mode, prompt, schema_file=schema_file,
                                     out_file=out_file)
@@ -1017,14 +993,8 @@ class AgentRunner:
         if self.agent_user is not None:  # git trusts the worktree of the turn, not ours (#500)
             env = self.agent_user.git_env(os.environ if env is None else env, workdir)
         kwargs = {'env': env} if env is not None else {}
-        # What the output of the turn is cleaned with: the token among the secrets (#507).
-        shown = self._env
         if agent.kind == 'claude':
             kwargs['env'] = {**(os.environ if env is None else env), **CLAUDE_TURN_ENV}
-            if token:  # this CLI only, never the tests nor the other agents (#507)
-                kwargs['env'][claudetoken.ENV] = token
-                shown = {**(os.environ if self._env is None else self._env),
-                         claudetoken.ENV: token}
         # Its own process group: a timeout also stops the commands the CLI left in the background.
         run = self._run
         watched = run is subprocess.run and self._stall is not None
@@ -1045,9 +1015,8 @@ class AgentRunner:
                        timeout=self.timeout, **extra)
 
         def write_log(status, stdout, stderr):
-            text = (f'$ {cli} ({mode})\n{status}\n--- stdout\n{stdout}'
-                    f'\n--- stderr\n{stderr}')
-            log.write_text(claudetoken.redact(text, token), encoding='utf-8')
+            log.write_text(f'$ {cli} ({mode})\n{status}\n--- stdout\n{stdout}'
+                           f'\n--- stderr\n{stderr}', encoding='utf-8')
 
         def stopped_log(status, stdout='', stderr=''):
             # The comment of a failed turn cites the log: it exists even when the turn did not
@@ -1070,35 +1039,32 @@ class AgentRunner:
                 retried = ' (again, after one retry)'
                 done = launch()
         except AgentError as exc:  # the stall check stopped the turn
-            out, err = (_redact_text(partial_text(p), token)
-                        for p in (getattr(exc, 'partial_output', None) or ('', '')))
+            out, err = (partial_text(p) for p in (getattr(exc, 'partial_output', None)
+                                                  or ('', '')))
             stopped_log(f'stopped: {exc}', out, err)
-            self.last_command = public_command(agent.kind, out, workdir, shown)
+            self.last_command = public_command(agent.kind, out, workdir, self._env)
             exc.log = log
             raise
         except Cancelled as exc:  # no longer needed (#521): neither a failure nor a timeout
-            out, err = (_redact_text(partial_text(p), token) for p in exc.partial_output)
+            out, err = (partial_text(p) for p in exc.partial_output)
             message = f'{agent.key} cancelled: its result is no longer needed'
             stopped_log(message, out, err)
-            self.last_command = public_command(agent.kind, out, workdir, shown)
+            self.last_command = public_command(agent.kind, out, workdir, self._env)
             raise TurnCancelled(message, log) from None
         except subprocess.TimeoutExpired as exc:
-            out, err = (_redact_text(partial_text(p), token) for p in (exc.output, exc.stderr))
+            out, err = partial_text(exc.output), partial_text(exc.stderr)
             message = f'{agent.key} timed out after {self.timeout}s'
             stopped_log(message, out, err)
-            self.last_command = public_command(agent.kind, out, workdir, shown)
+            self.last_command = public_command(agent.kind, out, workdir, self._env)
             error = AgentError(message, log)
-            error.tail = output_tail(out, err, workdir, shown)
+            error.tail = output_tail(out, err, workdir, self._env)
             error.timed_out = True
             raise error from exc
         except OSError as exc:
             stopped_log(f'could not start{retried}: {exc}')
             raise StartFailure(f'{agent.key} could not start{retried}: {exc}', log) from exc
-        # The token out of the output before anything reads it (#507): a match, an excerpt or
-        # a cut message never holds it, nor a part of it.
-        done = _without_token(done, token)
         self.last_report = telemetry(agent.kind, done.stdout)
-        self.last_command = public_command(agent.kind, done.stdout, workdir, shown)
+        self.last_command = public_command(agent.kind, done.stdout, workdir, self._env)
         write_log(f'exit {done.returncode}', done.stdout, done.stderr)
         if collect is not None:
             try:
@@ -1118,7 +1084,7 @@ class AgentRunner:
                 raise PermissionDenied(message, log, permission,
                                        denied_target(agent.kind, done.stdout),
                                        denied_command(agent.kind, done.stdout, workdir,
-                                                      shown))
+                                                      self._env))
             # No diagnostic of a denial, only agy's note of an empty run (#222).
             empty = stopped == 'no output' and empty_run(agent.kind, done.stdout, done.stderr)
             if empty:
@@ -1139,8 +1105,7 @@ class AgentRunner:
             output = extract_output(agent.kind, done.stdout, out_file)
             # A field the output may lack is filled in before the check (#434): a review
             # without ``operator_reason`` is a ``decision``, not a failure of the tool.
-            output = validate(with_defaults(schema_name, output), load_schema(schema_name))
-            return claudetoken.redact_output(output, token)  # never echoed back (#507)
+            return validate(with_defaults(schema_name, output), load_schema(schema_name))
         except EnvelopeError as exc:
             reason = unavailable_reason(agent, None, text)
             if reason:

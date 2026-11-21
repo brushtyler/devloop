@@ -6,11 +6,14 @@
 # directory che le contengono; nessun accesso al resto dello state_dir; sessioni leggibili da
 # devloop) e il sudoers che permette a devloop di avviare solo le CLI, bash e kill come
 # quell'utente.
-# Un solo utente esegue implementer e reviewer (#438): la sua home e i file delle CLI che portano
-# istruzioni, configurazione o binari (AGENT_CLI_DIRS, AGENT_CLI_SEALED di ops/lib.sh, ~/.local
-# compreso) diventano di root, così un turno non li cambia per i turni dopo. L'utente degli agent
-# scrive solo credenziali, sessioni, cache e log: le voci che le CLI vi hanno già creato restano
-# sue, e lo script crea sue quelle che le CLI creano al primo uso (AGENT_CLI_WRITABLE). --unseal rende all'utente degli agent le directory delle CLI, per installarle, aggiornarle
+# Un solo utente esegue implementer e reviewer (#438): la sua home e le directory delle CLI
+# (AGENT_CLI_DIRS di ops/lib.sh) diventano di root, del suo gruppo e con lo sticky bit (1770,
+# #517), e i file che portano istruzioni, configurazione, plugin o binari (AGENT_CLI_SEALED,
+# ~/.local compreso) di root e non scrivibili, con un segnaposto di root dove mancano: un turno
+# non li cambia per i turni dopo. L'utente degli agent crea e sostituisce nelle directory delle
+# CLI solo le proprie voci (credenziali, lock, sessioni, cache e log), e devloop ammette solo
+# quelle della lista AGENT_CLI_ALLOWED: lo script segnala le altre. Crea sue le voci che le CLI
+# creano al primo uso (AGENT_CLI_WRITABLE). --unseal rende all'utente degli agent le directory delle CLI, per installarle, aggiornarle
 # o fare un login a loop fermo; devloop non parte finché lo script non viene rieseguito senza.
 # Idempotente: si può rieseguire, fa solo ciò che manca. Non scrive segreti. Le CLI, i loro
 # login e la chiave [agent_user] nell'overlay restano passi manuali (ops/README.md).
@@ -113,19 +116,30 @@ if [ "$UNSEAL" = 1 ]; then
         || run install -d -m 755 -o "$AGENT_USER" -g "$AGENT_GROUP" "$AGENT_HOME/.local/bin"
     warn "$AGENT_USER può ora cambiare istruzioni, configurazione e binari delle CLI: devloop non parte finché non si riesegue lo script senza --unseal"
 else
-    step "Directory delle CLI di $AGENT_USER: di root (#438)"
-    # Vi entra, ma non vi crea nulla (un file di istruzioni, un agent, una skill, un hook) e non
-    # le rinomina.
-    for dir in "${AGENT_CLI_DIRS[@]}" .local .local/bin; do
+    step "Directory delle CLI di $AGENT_USER: di root, sticky (#517)"
+    # Come la home: vi crea e sostituisce le proprie voci (credenziali salvate con un file
+    # temporaneo e un rename, lock, cache), ma non rinomina né rimuove quelle di root, né le
+    # directory stesse. Ciò che non deve creare (un file di istruzioni, un agent, una skill, un
+    # hook) è un segnaposto di root, qui sotto; ciò che non è nella lista AGENT_CLI_ALLOWED
+    # devloop lo rifiuta prima di ogni turno.
+    for dir in "${AGENT_CLI_DIRS[@]}"; do
+        owned "$AGENT_HOME/$dir" 1770 root "$AGENT_GROUP"
+        # Con un'ACL (quella che una versione precedente dava a ~/.claude e ~/.codex per
+        # $DEVLOOP_USER, quando erano 755) chmod cambia la maschera, non la voce del gruppo, che
+        # resterebbe r-x: il gruppo dell'utente degli agent deve poter scrivere.
+        ensure_acl "$AGENT_HOME/$dir" "g::rwx" "group::rwx"
+    done
+    step "~/.local di $AGENT_USER: di root (#438)"
+    for dir in .local .local/bin; do
         owned "$AGENT_HOME/$dir" 755 root root
     done
 fi
 
 step "Voci che le CLI creano al primo uso: di $AGENT_USER (#494)"
-# Dentro le directory delle CLI l'utente degli agent non crea nulla: le voci che una CLI vi crea
-# al primo uso (AGENT_CLI_WRITABLE di ops/lib.sh, per agy la directory del wrapper del suo
-# strumento di shell) le crea lo script, sue. devloop controlla ciò che vi scrive prima di ogni
-# turno di agy.
+# Le voci che una CLI crea al primo uso (AGENT_CLI_WRITABLE di ops/lib.sh, per agy la directory
+# del wrapper del suo strumento di shell) le crea lo script, sue, anche se dal #517 l'utente
+# degli agent potrebbe crearle da sé. devloop controlla ciò che vi scrive prima di ogni turno di
+# agy.
 for entry in "${AGENT_CLI_WRITABLE[@]}"; do
     if [ -L "$AGENT_HOME/$entry" ]; then
         todo "$AGENT_HOME/$entry è un link: sostituirlo con una directory di $AGENT_USER"
@@ -172,10 +186,24 @@ if [ "$UNSEAL" != 1 ]; then
             -o \( ! -type l \( -perm /022 -o ! -perm -040 \) \) \
             -o \( -type d ! -perm -010 \) \) -print -quit 2>/dev/null)" ]
     }
+    # placeholder ENTRY: il segnaposto di root della voce sigillata ENTRY che non esiste (#517),
+    # perché nelle directory delle CLI, scrivibili, l'utente degli agent non possa crearla: un
+    # file vuoto se il nome ha un'estensione ({} per un .json, che la CLI legge), altrimenti una
+    # directory vuota. Di root e del gruppo dell'utente degli agent, che lo legge ma non lo
+    # scrive, e non lo rinomina né lo rimuove (sticky bit).
+    placeholder() {
+        local path=$AGENT_HOME/$1 name=${1##*/} source=/dev/null
+        case $name in
+            ?*.*)
+                case $name in *.json) source=$OPS_DIR/host/placeholder.json ;; esac
+                run install -m 644 -o root -g "$AGENT_GROUP" "$source" "$path" ;;
+            *) run install -d -m 755 -o root -g "$AGENT_GROUP" "$path" ;;
+        esac
+    }
     for entry in "${AGENT_CLI_SEALED[@]}"; do
         path="$AGENT_HOME/$entry"
         if ! [ -e "$path" ] && ! [ -L "$path" ]; then
-            ok "$path non esiste: $AGENT_USER non può crearlo"
+            placeholder "$entry"
         elif unsealed "$path"; then
             run chown -hR "root:$AGENT_GROUP" "$path"
             # chmod segue un link dato come argomento: il target si controlla qui sotto.
@@ -210,6 +238,57 @@ if [ "$UNSEAL" != 1 ]; then
                 || todo "$link porta a $target: renderlo di root, leggibile e non scrivibile da $AGENT_USER, o sostituire il link"
         done < <(find "$path" -type l -print0 2>/dev/null)
     done
+
+    step "codex senza memorie: [features] memories = false in ~/.codex/config.toml (#517)"
+    # Le memorie di codex (memories_1.sqlite) restano spente in modo esplicito, così un cambio
+    # del default di codex non le riaccende: un turno non rilegge ciò che un altro vi lascia, e i
+    # turni di codex girano in parallelo. devloop e check-host.sh rifiutano un config.toml senza
+    # la riga, o che la imposta a un altro valore: lo script aggiunge la riga che manca, non ne
+    # cambia una che c'è.
+    CODEX_CONFIG="$AGENT_HOME/.codex/config.toml"
+    if [ -L "$CODEX_CONFIG" ]; then
+        todo "$CODEX_CONFIG è un link: impostare a mano [features] memories = false nel file a cui porta"
+    else
+        codex_new=$(mktemp)
+        codex_status=0
+        codex_why=$(codex_memories "$CODEX_CONFIG" "$codex_new") || codex_status=$?
+        case $codex_status in
+            0) ok "$CODEX_CONFIG imposta [features] memories = false" ;;
+            3) codex_mode=$(stat -c %a "$CODEX_CONFIG" 2>/dev/null) || codex_mode=644
+               if [ "$DRY_RUN" = 1 ]; then
+                   say "  [dry-run] scriverebbe $CODEX_CONFIG (mode $codex_mode, proprietario root):"
+                   sed 's/^/    | /' "$codex_new"
+               else
+                   run install -m "$codex_mode" -o root -g "$AGENT_GROUP" "$codex_new" "$CODEX_CONFIG"
+               fi ;;
+            *) todo "${codex_why:-$CODEX_CONFIG non si legge}: impostare a mano [features] memories = false; devloop non parte finché manca" ;;
+        esac
+        rm -f "$codex_new"
+    fi
+
+    step "Voci delle directory delle CLI: solo quelle della lista (#517)"
+    # devloop rifiuta ogni turno finché una directory delle CLI contiene una voce che non è
+    # nella lista (AGENT_CLI_ALLOWED), né sigillata né una directory delle CLI: lo script la
+    # segnala, non la rimuove.
+    unknown=0
+    for dir in "${AGENT_CLI_DIRS[@]}"; do
+        [ -d "$AGENT_HOME/$dir" ] && ! [ -L "$AGENT_HOME/$dir" ] || continue
+        while IFS= read -r -d '' record; do
+            type=${record%%/*} name=${record#*/}
+            if agent_cli_entry_known "$dir" "$name" "$type"; then
+                continue
+            else
+                known=$?
+            fi
+            unknown=1
+            if [ "$known" = 2 ]; then
+                todo "$AGENT_HOME/$dir/$name è di tipo $type, che la lista AGENT_CLI_ALLOWED non ammette per quel nome: rimuoverla come $AGENT_USER, a loop fermo"
+            else
+                todo "$AGENT_HOME/$dir/$name non è nella lista AGENT_CLI_ALLOWED: rimuoverla come $AGENT_USER, a loop fermo, o aggiungerla alla lista con una PR (ops/host/migrate.md)"
+            fi
+        done < <(find "$AGENT_HOME/$dir" -mindepth 1 -maxdepth 1 -printf '%y/%f\0' 2>/dev/null)
+    done
+    [ "$unknown" = 1 ] || ok "le directory delle CLI contengono solo voci della lista"
 fi
 
 step "Sessioni di $AGENT_USER leggibili da $DEVLOOP_USER"

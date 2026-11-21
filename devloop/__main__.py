@@ -17,7 +17,6 @@ from .agents import AgentRunner, isolated_env
 from .agentuser import GH_CONFIG, SHARED_DIR, WORKTREES_DIR, AgentUser, AgentUserError, SharedDir
 from .agentuser import check as check_isolation
 from .apps import DISPATCHER, MERGER, Identities
-from .claudetoken import ClaudeToken, RotationAlert
 from .config import (INSTALL_ROOT, PROJECT_CONFIG, ConfigError, Reloader, compose_sources,
                      fingerprint, load_config, missing_project_tables, read_sources,
                      repo_lock_name)
@@ -447,8 +446,7 @@ def build(args):
                          on_turn=lambda agent, prompt: current.turn(
                              agent.key, prompt, agent.model if agent.fallback_for else None),
                          stall=stall, agent_user=agent_user,
-                         shared_dir=shared if agent_user else None,
-                         claude_token=claude_token_of(cfg))
+                         shared_dir=shared if agent_user else None)
     # Merges (#172) run with the merger's app (#201), the only one that gets contents=write,
     # or without it with the local gh login devloop runs with.
     # Without the dispatcher lock, status and a dry run read the journal of the turns and never
@@ -476,7 +474,6 @@ def build(args):
                             advisory_results=AdvisoryResults(state),
                             advisory_failures=AdvisoryFailures(state),
                             main_alerts=MainAlerts(state),
-                            token_alerts=RotationAlert(state),
                             housekeeping=Housekeeping(state, ws, gh, ledger=ledger,
                                                       log=tick_log))
     # What the trace T1 (ADR 0006, K1) records of the start: the files this configuration came
@@ -490,17 +487,6 @@ def build(args):
     return cfg, state, dispatcher
 
 
-def claude_token_of(cfg):
-    """The ``ClaudeToken`` of ``[claude_token]`` (#507), in the ``key_dir`` of the apps
-    (``$DEVLOOP_APP_KEY_DIR`` or ``[apps] key_dir``), or None when it is not enabled: Claude
-    Code then uses its own login, as before."""
-    policy = cfg.claude_token
-    if not policy.enabled:
-        return None
-    return ClaudeToken(os.environ.get('DEVLOOP_APP_KEY_DIR') or cfg.app_key_dir,
-                       policy.rotate_days, policy.max_days)
-
-
 def agent_user_of(cfg, factory=AgentUser):
     """The ``AgentUser`` of ``[agent_user] name`` (#415), or None when it is empty. An unknown
     user is a ConfigError."""
@@ -508,7 +494,7 @@ def agent_user_of(cfg, factory=AgentUser):
     if not name:
         return None
     try:
-        return factory(name)
+        return factory(name, cli_denied=cfg.agent_user.cli_denied)
     except AgentUserError as exc:
         raise ConfigError(str(exc)) from exc
 
