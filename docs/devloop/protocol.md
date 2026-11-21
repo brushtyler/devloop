@@ -519,7 +519,8 @@ and the attempt for a retry, the defaults for an acceptance and, for a decision,
 <reason>` (#491) records the round without a verdict it replaces (`round`) and the reviewers of
 its quorum that gave none (`reviewers`); `applied` and written after the latest review record of
 the PR, it voids that round as the `/devloop rereview` of a trusted user does: the next review
-opens a new round, which counts against `max_review_rounds`. A round granted with `/devloop grant-round` (#405) carries the
+opens a new round, which counts against `max_review_rounds`. While no review record follows it,
+another `/devloop rereview` of the supervisor is `refused`. A round granted with `/devloop grant-round` (#405) carries the
 analysis of the causes in `reason`, the `head` it was granted on, the rounds granted to the PR
 with this one (`granted`), the cap of the PR (`cap`) and what remains (`left`), the grants of the
 UTC day with this one (`daily`), the daily cap (`daily_cap`) and what remains (`daily_left`):

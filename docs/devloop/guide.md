@@ -369,8 +369,11 @@ the rereview opens a new round instead, whose reviewers are chosen with the curr
 configuration, with a new receipt, and which counts against `max_review_rounds` as every round
 does. When every reviewer of the quorum of the latest round has a verdict (`approve`,
 `request_changes`, `needs_operator`), or one of them asked for the operator, the command is
-refused with the reason, so that the supervisor cannot repeat a review to override a verdict. The
-details are in [Escalations to the supervisor](#escalations-to-the-supervisor). The command does
+refused with the reason, so that the supervisor cannot repeat a review to override a verdict. It
+is refused as well when a new review was already asked after the latest review record and its
+round wrote no record: such a round does not count against `max_review_rounds`, so a second
+rereview would repeat it without limit; the supervisor uses `/devloop retry`, within its limit, or
+hands the PR to the operator. The details are in [Escalations to the supervisor](#escalations-to-the-supervisor). The command does
 not touch the merge: on a PR whose merge is the operator's (`operator_only_paths`) it stays the
 operator's. For the users in `trusted_users` nothing changes: their `/devloop rereview` is the
 request described above, and is never a command of an escalation.
@@ -1167,8 +1170,11 @@ one wins; without one, the latest that does not apply is answered.
   with the reason, and the escalation stays where it is, when every reviewer of the quorum of the
   latest round has a verdict (`approve`, `request_changes`, `needs_operator`) or one of them asked
   for the operator, so that a new review never overrides a verdict; when no round of the head
-  waits for a reviewer (then a `retry` already opens a round with the current configuration); on
-  any other escalation or step. Its input and what made the escalation non-critical are checked
+  waits for a reviewer (then a `retry` already opens a round with the current configuration);
+  when a new review was already asked after the latest review record, by a trusted user or by a
+  rereview of the supervisor applied, and its round wrote no record (a round without records does
+  not count against `max_review_rounds`, so a second rereview would have no limit); on any other
+  escalation or step. Its input and what made the escalation non-critical are checked
   again as for a retry; on a PR the supervisor's agent implemented it is refused and goes to the
   operator, since `[delegations] retry_own_prs` admits only a retry. Applied, the dispatcher's
   `supervision` record voids the round as a trusted user's request does, and the PR goes back to

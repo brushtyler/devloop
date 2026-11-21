@@ -72,6 +72,32 @@ class NewRoundTests(Quorum):
         self.assertIn('round 2 of at most', self.runner.calls[-1][3])
         self.assertIn('agent:ready-to-merge', self.gh.labels[100])
 
+    def test_a_second_rereview_after_a_round_without_records_is_refused(self):
+        self.say(self.supervisor, header() + f'\n/devloop rereview {REASON}')
+        self.d.tick()
+        self.assertEqual(self.gh.labels[100], {REVIEW})
+        # The new round fails before any reviewer writes a verdict: it writes no record, so it
+        # does not count against max_review_rounds, and round 1 still misses SECOND's verdict.
+        self.runner.outputs = [agents.AgentError(f'{FIRST} timed out')]
+        self.d.tick()
+        self.assertEqual(self.gh.labels[100], {SUPER})
+        self.assertEqual([(r['reviewer'], r['round']) for r in self.records('review')],
+                         [(FIRST, 1)])
+        escalation = [r for r in self.records('notice') if r['event'] == 'escalation'][-1]
+        self.assertEqual((escalation['class'], escalation['key']['reviewer']),
+                         ('tool_failure', FIRST))
+        calls = len(self.runner.calls)
+        # A second rereview would repeat it without limit: refused, the escalation stays.
+        self.say(self.supervisor, header() + f'\n/devloop rereview {REASON}')
+        self.assertEqual(self.d.tick(), [Action('supervise', 100, f'rereview by {self.supervisor}')])
+        self.assertEqual(self.gh.labels[100], {SUPER})
+        self.assertEqual([(d['command'], d['outcome']) for d in self.records('supervision')],
+                         [('rereview', 'applied'), ('rereview', 'refused')])
+        body = ' '.join(self.gh.comments[-1][1].split())
+        self.assertIn('è già stata chiesta una nuova review', body)
+        self.assertIn('l\'escalation resta al supervisore', body)
+        self.assertEqual(len(self.runner.calls), calls)
+
 
 class RefusalTests(Case):
     """Level 1, as in test_devloop_supervision: the round of ``REV`` and a tool failure of a

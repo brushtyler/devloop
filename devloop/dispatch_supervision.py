@@ -650,7 +650,10 @@ class SupervisionMixin:
         applies only while a reviewer of the quorum of the latest round of this head has no
         verdict (``missing_verdicts``): when every one has a verdict, or one of them asked for
         the operator, it is refused and the escalation stays with the supervisor, so that a new
-        review never overrides a verdict. On a PR the supervisor's agent implemented it is
+        review never overrides a verdict. It is refused too when a new review was already asked
+        after the latest review record (``pr.rereview``: a trusted user's request, or a
+        rereview of the supervisor applied): a round that wrote no record does not count against
+        ``max_review_rounds``, and without this the command would have no limit. On a PR the supervisor's agent implemented it is
         refused and goes to the operator: ``[delegations] retry_own_prs`` admits only a retry
         there (ADR 0005, P5-2). With ``operator`` the PR is in ``agent:needs-operator``
         (``_operator_rereview``): a refusal leaves it there, with ``resume``, how the operator
@@ -688,6 +691,10 @@ class SupervisionMixin:
                else 'nessun round di review di questo head aspetta il verdetto di un reviewer '
                     f'del quorum: `/devloop {RETRY}` apre già un round con la configurazione '
                     'attuale' if not latest or latest[0]['head_sha'] != pr.head_sha
+               else 'dopo l\'ultimo round con un verdetto è già stata chiesta una nuova review, '
+                    'da un utente fidato o dal supervisore, e il suo round non ha scritto alcun '
+                    'verdetto: un\'altra lo ripeterebbe senza contare per `max_review_rounds`'
+               if pr.rereview
                else 'ogni reviewer del quorum dell\'ultimo round ha già un verdetto ('
                     + verdicts + '), e una nuova review lo scavalcherebbe' if not missing
                else '')
