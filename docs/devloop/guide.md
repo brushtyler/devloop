@@ -1043,7 +1043,7 @@ next to the review; one for the trust policy gets none (#434, see
 | `reviewer_decision`, `open_findings` | A reviewer asks for a decision; an approval leaves open findings only the operator can close (`ci` findings with the head's CI still running, or passed during the review, wait for it instead) | Yes |
 | `review_level`, `level_zero` | Not enough independent reviewers; a level-0 head that cannot be promoted | Yes |
 | `sync_sensitive`, `protected_paths` | A sync conflict on a sensitive or operator-only path; a change to `protected_paths` | Yes |
-| `tests_failed`, `blocked`, `interrupted`, `unattributable`, `lost_meta`, `inconsistent`, `configuration`, `failure` | Tests still failing (or no change), an agent that declared itself blocked, an interrupted implementation, findings without an owner, a lost PR marker, an inconsistent PR state, a configuration to decide, a `gh`, git or dispatcher error | Yes |
+| `tests_failed`, `blocked`, `interrupted`, `unattributable`, `lost_meta`, `inconsistent`, `configuration`, `failure` | Tests still failing (or no change), an agent that declared itself blocked, an interrupted implementation, findings without an owner, a lost PR marker, an inconsistent PR state, a configuration to decide (a claude turn refused for its [token](reference.md#claude-token), #507, also in a sync), a `gh`, git or dispatcher error | Yes |
 | `host_tests` | Local tests that fail on the base commit of the branch too, but pass in the CI of that commit: a [failure of the host](#tests-red-on-the-base-too), not of `main` | Yes |
 | `receipt_conflict` | The [receipt of the PR](protocol.md#pr-receipt) contradicts the markers at its promotion | Yes |
 | `retry_limit`, `supervisor_escalated`, `supervisor_refused` | The supervisor's retries are spent, it handed the escalation over, or it gave a command the escalation does not admit | Yes |
@@ -2495,6 +2495,16 @@ to it, and the same script without `--unseal` makes them root's again (#438, [Ag
 user](#agent-user)); until then devloop refuses to start. Log in to each CLI once, in an
 interactive session of the agent user (`sudo -iu devloop-agent`), and check that
 `claude --version`, `codex --version` and `agy --version` answer there.
+
+With `~/.claude` root's, Claude Code cannot save the access token it renews, and its login of
+the agent user stops working when it expires. The claude turns then use a long-lived token
+instead (#507, [reference](reference.md#claude-token)): the operator generates it with `claude
+setup-token`, puts it in `key_dir` as `claude.<YYYY-MM-DD>.oauth-token` and sets
+`[claude_token] enabled = true`; devloop passes it to each claude turn only, as
+`CLAUDE_CODE_OAUTH_TOKEN`. One alert on `[run].alert_issue` from `rotate_days` (default 30)
+asks to rotate it; from `max_days` (default 90, at most 90) the claude turns are refused with an
+escalation `configuration`. The old token is revoked at each rotation, and the agent user's
+`~/.claude/.credentials.json` is removed ([ops/host/migrate.md](../../ops/host/migrate.md#token-di-claude-per-lutente-degli-agent-507)).
 
 **Updating them by hand, with the loop stopped** (decision of the operator, 2026-11-17). No turn
 may start while a binary is being replaced, so:

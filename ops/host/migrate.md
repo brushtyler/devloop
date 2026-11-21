@@ -87,6 +87,9 @@ Dal supervisore, come utente `supervisor`:
   senza, che rende di root istruzioni, configurazione e binari delle CLI (#438).
 - **Il token di sola lettura del supervisore**: uno nuovo
   ([ops/github/tokens.md](../github/tokens.md)), e si revoca quello della macchina vecchia.
+- **Il token di claude dei turni** (`[claude_token]`, #507): uno nuovo con `claude setup-token`
+  nella `key_dir` della macchina nuova, e si revoca quello della vecchia ([Token di claude per
+  l'utente degli agent](#token-di-claude-per-lutente-degli-agent-507)).
 - **Il servizio**: lo installa `setup-devloop.sh` da `ops/host/devloop.service`; non si copia
   l'unità della macchina vecchia.
 - **Il sudoers del supervisore**: lo installa `setup-supervisor.sh`.
@@ -553,6 +556,96 @@ almeno un worktree in `worktrees`). Poi il pin a mano (`sudo -u devloop -H pytho
 /home/devloop/ssdlc/scripts/devloop-pinned pin origin/main`) e `sudo systemctl start devloop`;
 all'avvio devloop rifà la stessa prova su un worktree di prova. Se git rifiuta il worktree,
 `sudo` non mantiene l'ambiente: il file si rimette com'era e si resta sul pin precedente.
+
+## Token di claude per l'utente degli agent (#507)
+
+Dal #438 `~/.claude` di `devloop-agent` è di root: Claude Code non riesce a salvare in
+`.credentials.json` il token che rinnova, e dopo la sua scadenza i turni di claude falliscono con
+`401 OAuth access token has expired`. Dal #507, con `[claude_token] enabled = true` nell'overlay,
+devloop passa a ogni turno di claude, e solo a quelli, un token OAuth di lunga durata generato
+dall'operatore con `claude setup-token`, come `CLAUDE_CODE_OAUTH_TOKEN` nell'ambiente isolato
+del turno; `~/.claude` resta sigillata.
+
+- **Il file.** `claude.<AAAA-MM-GG>.oauth-token` nella `key_dir` di `devloop`
+  (`/home/devloop/.ghapps`, quella delle chiavi delle app, che `devloop-agent` non legge né
+  attraversa), mode 600, di `devloop`, con il solo token su una riga. La data nel nome è il
+  giorno di emissione (UTC), come nel nome delle chiavi delle app. Ce ne dev'essere uno solo.
+- **La rotazione.** `setup-token` non sceglie la durata (circa un anno): la limita devloop. Da
+  `rotate_days` dopo l'emissione (default 30) scrive un avviso, una volta per token, su
+  `[run].alert_issue`. Da `max_days` (default 90, al più 90: un tetto del codice che l'overlay
+  può solo abbassare) rifiuta i turni di claude prima di avviarli, con un'escalation
+  `configuration` all'operatore che dice quale token è scaduto. Senza una data valida nel nome,
+  con una data nel futuro, senza il file, con più di un file o con un file leggibile da altri,
+  i turni di claude sono rifiutati allo stesso modo. Un `max_days` oltre 90 ferma devloop
+  all'avvio.
+- **Il segreto.** devloop legge il file a ogni turno di claude e passa il token solo alla CLI di
+  quel turno: mai ai test, agli altri agent, ai log, ai record, ai prompt o all'output, dove lo
+  sostituisce con `[REDACTED]` se il turno lo riporta.
+- **La verifica.** `check-host.sh`, passo `Token di claude per devloop-agent`, mostra l'età del
+  token; segnala come errore un token oltre `max_days`, senza data valida, mancante, doppio o
+  non 600 di `devloop`, e un `.credentials.json` rimasto a `devloop-agent`; come avviso un token
+  da ruotare.
+
+### Creazione
+
+Al primo passaggio (il passo sull'host della PR di #507), a loop fermo, dopo aver aggiornato il
+checkout dell'operatore e il clone di devloop come al passo 2 di [File delle CLI di root
+sull'utente degli agent](#file-delle-cli-di-root-sullutente-degli-agent-438):
+
+1. fermare il loop: `sudo systemctl stop devloop`;
+2. generare il token, come operatore, su una macchina con il browser e l'account di Claude dei
+   turni: `claude setup-token` lo stampa alla fine del login. Non va incollato in chat, issue,
+   file del repository o comandi che restano nella history;
+3. metterlo nella `key_dir`, con la data di oggi (UTC), incollandolo nello standard input di
+   `cat` (così non finisce negli argomenti di un comando né nella history), poi `Ctrl-D`:
+
+   ```bash
+   sudo -u devloop -H sh -c 'umask 077; cat > "$HOME/.ghapps/claude.$(date -u +%F).oauth-token"'
+   ```
+
+4. attivarlo nell'overlay (`/home/devloop/ssdlc/.ssdlc/devloop/config.local.toml`):
+
+   ```toml
+   [claude_token]
+   enabled = true
+   ```
+
+5. togliere le credenziali di prima di `devloop-agent`, che resterebbero un secondo canale di
+   accesso, come root: `sudo rm -f /home/devloop-agent/.claude/.credentials.json`;
+6. verificare, come root: `sudo bash /root/repos/ssdlc/ops/host/check-host.sh --no-apps`,
+   nessun errore nel passo `Token di claude per devloop-agent`;
+7. il pin a mano (`sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned pin
+   origin/main`) e `sudo systemctl start devloop`.
+
+**Rollback.** `enabled = false` nell'overlay e il riavvio: Claude Code torna al login di
+`devloop-agent`, che dopo il passo 5 va rifatto (fra `setup-agent-user.sh --unseal` e una nuova
+esecuzione dello script senza, come in [ops/README.md](../README.md#5-utente-degli-agent-e-cli)),
+e il rinnovo resta quello rotto del #438.
+
+### Rotazione
+
+Dopo l'avviso su `[run].alert_issue`, e comunque prima di `max_days`:
+
+1. `sudo systemctl stop devloop`: con due file nella `key_dir` i turni di claude sono rifiutati;
+2. `claude setup-token`, come operatore, per il token nuovo;
+3. il file nuovo, come al passo 3 della creazione, e la rimozione del vecchio:
+   `sudo -u devloop -H rm /home/devloop/.ghapps/claude.<data vecchia>.oauth-token`;
+4. `sudo bash /root/repos/ssdlc/ops/host/check-host.sh --no-apps` e `sudo systemctl start
+   devloop`;
+5. **revocare il token vecchio** su claude.ai, dalle impostazioni dell'account dove sono elencate
+   le autorizzazioni di Claude Code: altrimenti resta valido fino alla sua scadenza naturale,
+   circa un anno.
+
+Un'escalation `configuration` per un token scaduto si risolve allo stesso modo; poi l'operatore
+riprende le issue e le PR che ne hanno avuta una.
+
+### Revoca
+
+Un token esposto (in un log, in una chat, su una macchina persa) si revoca subito su claude.ai,
+come al passo 5 della rotazione, e se ne crea uno nuovo come nella rotazione. Finché il file
+nella `key_dir` ha il token revocato, i turni di claude falliscono con un `401`. Alla migrazione su
+un'altra macchina si crea un token nuovo sulla macchina nuova e si revoca quello della vecchia,
+come per le chiavi delle app.
 
 ## Dati di ssdlc nei prompt
 

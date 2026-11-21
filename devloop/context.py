@@ -12,7 +12,7 @@ import re
 import string
 from pathlib import Path
 
-from .agents import AgentError, StartFailure
+from .agents import AgentError, CredentialRefused, StartFailure
 from .config import LEGACY_NEEDS_OPERATOR
 from .markdown import without_attribution
 from .planning import FIX_COMMAND
@@ -540,6 +540,12 @@ def _start_failure(exc):
     """Whether the failed turn ``exc`` is an agent that could not start (#218), also when the
     chain of models wraps it (``ModelsUnavailable``)."""
     return isinstance(exc, StartFailure) or isinstance(exc.__cause__, StartFailure)
+
+
+def _credential_refused(exc):
+    """Whether the failed turn ``exc`` is a claude turn refused for its token (#507), also when
+    the chain of models wraps it: an escalation ``configuration``, never a ``tool_failure``."""
+    return isinstance(exc, CredentialRefused) or isinstance(exc.__cause__, CredentialRefused)
 
 
 def _describe_bases(checks, branch):
