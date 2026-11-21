@@ -51,8 +51,8 @@ writes but cannot rename nor own; what they hold that carries instructions or co
 ``~/.local`` (``CLI_SEALED``: nothing writable in them, and a placeholder of root where one does
 not exist, so that the agent user cannot create it), and each CLI in ``~/.local/bin`` with the
 directory of the file it leads to (``CLIS``). The directories of the CLIs may hold only the
-entries of ``CLI_ALLOWED``, of their type, besides the sealed ones and the directories of the
-CLIs, of root: at the start (``check``) and before each turn (``AgentUser.cli_state``, from
+entries of ``CLI_ALLOWED``, of their type (a link only as ``CLI_LINKS`` allows, #525), besides
+the sealed ones and the directories of the CLIs, of root: at the start (``check``) and before each turn (``AgentUser.cli_state``, from
 ``agents.AgentRunner``) anything else is refused, and a turn refused so is an escalation
 ``configuration`` that names the entry; ``[agent_user] cli_denied`` may only shorten the list.
 Before each turn of agy, what it would read again as context in a later session
@@ -134,7 +134,8 @@ CLIS = ('claude', 'codex', 'agy')
 # The entries the agent user's CLIs may keep in ``CLI_DIRS`` (#517), besides the sealed ones of
 # root and the directories of ``CLI_DIRS`` themselves: ``(<dir>/<pattern>, <types>)``, the
 # pattern a shell pattern of the name (``fnmatch``), the types those of ``find -printf %y``
-# (``f`` a regular file, ``d`` a directory). Before each turn, at the start and in
+# (``f`` a regular file, ``d`` a directory, ``l`` a symbolic link: only an entry of
+# ``CLI_LINKS``, under its rule). Before each turn, at the start and in
 # ``ops/host/check-host.sh`` the directories may hold nothing else: an unknown entry refuses the
 # turn (``AgentUser.cli_state``). ``[agent_user] cli_denied`` may only take entries away from
 # this list; one more goes through a PR, here and in ``AGENT_CLI_ALLOWED`` of ``ops/lib.sh``.
@@ -166,7 +167,7 @@ CLI_ALLOWED = (
     ('.gemini/antigravity-cli/antigravity-oauth-token', 'f'),
     ('.gemini/antigravity-cli/bin', 'd'), ('.gemini/antigravity-cli/brain', 'd'),
     ('.gemini/antigravity-cli/builtin', 'd'), ('.gemini/antigravity-cli/cache', 'd'),
-    ('.gemini/antigravity-cli/cli.log', 'f'),
+    ('.gemini/antigravity-cli/cli.log', 'fl'),
     ('.gemini/antigravity-cli/conversation_summaries.db*', 'f'),
     ('.gemini/antigravity-cli/conversations', 'd'), ('.gemini/antigravity-cli/crashes', 'd'),
     ('.gemini/antigravity-cli/implicit', 'd'),
@@ -177,6 +178,14 @@ CLI_ALLOWED = (
     ('.gemini/antigravity-cli/jetski_state.pbtxt.*.tmp', 'f'),
     ('.gemini/antigravity-cli/last_check.timestamp', 'f'), ('.gemini/antigravity-cli/log', 'd'),
     ('.gemini/antigravity-cli/presence', 'd'), ('.gemini/antigravity-cli/updater', 'd'))
+# The entries of ``CLI_ALLOWED`` that may be a symbolic link (#525), each with the directory
+# next to it the link must lead into: ``(<dir>/<name>, <inside>)``. The target must be
+# ``<inside>/<file>``, relative, a single name in that directory (neither ``.`` nor ``..``, no
+# other ``/``); any other link with that name is refused (``link_allowed``). agy makes
+# ``cli.log`` at each start a link to the log of the day, ``log/cli-<YYYYMMDD_HHMMSS>.log``;
+# ``log`` is in the list only as a directory, never a link. Claude Code and codex make no link
+# in their directories (the links of ``.codex/packages`` are sealed).
+CLI_LINKS = (('.gemini/antigravity-cli/cli.log', 'log'),)
 # The entries of ``CLI_ALLOWED`` a CLI may read again, in a later session, as context (#517):
 # the memories, knowledge and summaries of agy, which has no known setting that turns them off.
 # Before each turn of agy they are removed, as the agent user, and the turns of agy run one at a
@@ -762,6 +771,15 @@ def allowed_entries(denied=()):
     return found
 
 
+def link_allowed(target, inside):
+    """Whether ``target``, what a link of ``CLI_LINKS`` holds, leads to a file of ``inside``,
+    the directory next to the link (#525): exactly ``<inside>/<name>``, relative, ``<name>``
+    neither empty, ``.`` nor ``..``. An absolute path, a ``..``, another directory or a deeper
+    path is refused."""
+    parts = target.split('/')
+    return len(parts) == 2 and parts[0] == inside and parts[1] not in ('', '.', '..')
+
+
 def cleared_for(kind):
     """The patterns of ``CLI_CLEARED`` in the directories of the CLI ``kind`` (#517)."""
     return tuple(p for p in CLI_CLEARED if CLI_OF[p.rpartition('/')[0]] == kind)
@@ -811,7 +829,8 @@ def codex_config_problems(path, data):
 # ``<dir>`` whose name matches the pattern to remove first (``CLI_CLEARED``), and ``l:<dir>``,
 # the directories to list. NUL-terminated records: ``L:<dir>`` a link, ``M:<dir>`` missing,
 # ``N:<dir>`` not a directory, otherwise ``D:<dir>`` and ``e:<type>:<uid>:<name>`` for each
-# entry (``find``'s ``%y`` and ``%U``); ``E:`` at the end, when everything was read. An exit
+# entry (``find``'s ``%y`` and ``%U``), followed by ``t:<target>`` when it is a symbolic link
+# (``%l``, #525); ``E:`` at the end, when everything was read. An exit
 # status other than 0 when an entry cannot be removed or a directory listed. Removing never
 # follows a link; only the system's tools, as for ``_PROBE``.
 _CLI_STATE_PROBE = r'''PATH=/usr/bin:/bin
@@ -829,7 +848,8 @@ for a; do
            elif ! [ -d "$d" ]; then printf 'N:%s\0' "$r"
            else
                printf 'D:%s\0' "$r"
-               find "$d" -mindepth 1 -maxdepth 1 -printf 'e:%y:%U:%f\0' || exit 1
+               find "$d" -mindepth 1 -maxdepth 1 -printf 'e:%y:%U:%f\0' \
+                   -type l -printf 't:%l\0' || exit 1
            fi ;;
     esac
 done
@@ -841,12 +861,15 @@ def cli_state_problems(home, records, denied=(), root_uid=0):
     """The problems of ``CLI_DIRS`` in ``home`` from ``records``, the output of
     ``_CLI_STATE_PROBE`` (bytes, #517). Each directory must be listed, and hold only entries
     of ``allowed_entries(denied)`` of the right type, the sealed entries of ``CLI_SEALED``
-    and the directories of ``CLI_DIRS``, these two of ``root_uid``. Each problem names the
-    entry."""
+    and the directories of ``CLI_DIRS``, these two of ``root_uid``. A symbolic link only as an
+    entry of ``CLI_LINKS``, whose target, the ``t:`` record after it, ``link_allowed`` accepts
+    (#525). Each problem names the entry."""
     home = Path(home)
     allowed = allowed_entries(denied)
+    links = dict(CLI_LINKS)
     problems, listed, current, ended = [], set(), None, False
-    for record in records.split(b'\0'):
+    listing = records.split(b'\0')
+    for index, record in enumerate(listing):
         kind, _, rest = record.partition(b':')
         where = os.fsdecode(rest)
         if kind == b'E':
@@ -874,16 +897,32 @@ def cli_state_problems(home, records, denied=(), root_uid=0):
                 elif entry in CLI_DIRS and kind != 'd':
                     problems.append(f'{home / entry} is not a directory (type {kind!r})')
                 continue
-            matched = [types for pattern, types in allowed[current]
+            matched = [(pattern, types) for pattern, types in allowed[current]
                        if fnmatch.fnmatchcase(name, pattern)]
             if not matched:
                 problems.append(f'{home / current} holds {_shown(name)} (type {kind!r}), '
                                 'which is not in the list of the entries the CLIs may keep '
                                 '(CLI_ALLOWED of devloop/agentuser.py)')
-            elif not any(kind in types for types in matched):
+                continue
+            fitting = [pattern for pattern, types in matched if kind in types]
+            if not fitting:
                 problems.append(f'{home / current} holds {_shown(name)} of type {kind!r}, '
                                 f'where the list of the entries of the CLIs wants '
-                                f'{matched[0]!r}')
+                                f'{matched[0][1]!r}')
+            elif kind == 'l':
+                # #525: a link only where CLI_LINKS allows it, to a file of its directory.
+                target = None
+                if index + 1 < len(listing) and listing[index + 1].startswith(b't:'):
+                    target = os.fsdecode(listing[index + 1][2:])
+                inside = links.get(f'{current}/{fitting[0]}')
+                if target is None:
+                    problems.append(f'{home / current} holds {_shown(name)}, a symbolic link '
+                                    'whose target could not be read')
+                elif inside is None or not link_allowed(target, inside):
+                    problems.append(f'{home / current} holds {_shown(name)}, a symbolic link '
+                                    f'to {_shown(target)}, which does not lead to a file of '
+                                    f'{inside}/ next to it with a relative path (CLI_LINKS of '
+                                    'devloop/agentuser.py)')
     for parent in CLI_DIRS:
         if parent not in listed:
             problems.append(f'{home / parent} was not listed')

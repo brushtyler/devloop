@@ -214,6 +214,50 @@ class ListTests(unittest.TestCase):
         self.assertIn("holds 'auth.json' of type 'l', where the list of the entries of the CLIs "
                       "wants 'f'", problems[1])
 
+    def test_the_log_link_of_agy_into_its_log_directory_is_accepted(self):
+        # #525: agy makes cli.log at each start a link to the log of the day.
+        for target in ('log/cli-20261121_132524.log', 'log/cli.log'):
+            with self.subTest(target=target):
+                self.assertEqual(self.problems([('.gemini/antigravity-cli', 'l', 1001,
+                                                 'cli.log', target)]), [])
+        self.assertEqual(self.problems([('.gemini/antigravity-cli', 'f', 1001, 'cli.log')]),
+                         [])
+
+    def test_a_log_link_of_agy_that_leads_elsewhere_is_refused(self):
+        # #525: an absolute path, a '..', another directory, a deeper path, the directory itself.
+        where = f'{HOME}/.gemini/antigravity-cli'
+        for target in ('/home/devloop-agent/.gemini/antigravity-cli/log/cli-1.log',
+                       '/etc/passwd', '../antigravity-cli/log/cli-1.log', 'log/../cli-1.log',
+                       'log/..', 'log/.', 'log/', 'log', 'log//cli-1.log', 'log/sub/cli-1.log',
+                       './log/cli-1.log', 'brain/cli-1.log', 'logs/cli-1.log', 'cli-1.log',
+                       '../../.claude/CLAUDE.md', ''):
+            with self.subTest(target=target):
+                problems = self.problems([('.gemini/antigravity-cli', 'l', 1001, 'cli.log',
+                                           target)])
+                self.assertEqual(problems, [f"{where} holds 'cli.log', a symbolic link to "
+                                            f"{target!r}, which does not lead to a file of log/ "
+                                            "next to it with a relative path (CLI_LINKS of "
+                                            "devloop/agentuser.py)"])
+        # A link whose target the listing does not give is refused too.
+        self.assertEqual(self.problems([('.gemini/antigravity-cli', 'l', 1001, 'cli.log')]),
+                         [f"{where} holds 'cli.log', a symbolic link whose target could not "
+                          "be read"])
+        # Any other name stays refused as a link, also one into log/.
+        problems = self.problems([('.gemini/antigravity-cli', 'l', 1001, 'installation_id',
+                                   'log/cli-1.log')])
+        self.assertEqual(len(problems), 1)
+        self.assertIn("holds 'installation_id' of type 'l'", problems[0])
+        # Taken away by the configuration, it is refused in any form.
+        problems = self.problems([('.gemini/antigravity-cli', 'l', 1001, 'cli.log',
+                                   'log/cli-1.log')],
+                                 denied=('.gemini/antigravity-cli/cli.log',))
+        self.assertIn("holds 'cli.log' (type 'l'), which is not in the list", problems[0])
+
+    def test_link_allowed(self):
+        self.assertTrue(agentuser.link_allowed('log/cli-20261121_132524.log', 'log'))
+        for target in ('/log/x', '../log/x', 'log/..', 'log/sub/x', 'log/', 'x', 'logs/x'):
+            self.assertFalse(agentuser.link_allowed(target, 'log'), target)
+
     def test_a_directory_of_the_clis_the_agent_user_replaced_is_refused(self):
         records = (b'D:.claude\0D:.codex\0D:.gemini\0e:d:1001:config\0'
                    b'e:d:1001:antigravity-cli\0D:.gemini/config\0D:.gemini/antigravity-cli\0E:\0')
@@ -248,10 +292,18 @@ class ListTests(unittest.TestCase):
     def test_the_lists_are_consistent(self):
         allowed = dict(agentuser.CLI_ALLOWED)
         self.assertEqual(len(allowed), len(agentuser.CLI_ALLOWED))  # no entry twice
+        links = dict(agentuser.CLI_LINKS)
+        self.assertEqual(len(links), len(agentuser.CLI_LINKS))
         for entry, types in agentuser.CLI_ALLOWED:
             self.assertIn(entry.rpartition('/')[0], agentuser.CLI_DIRS, entry)
-            self.assertTrue(types and set(types) <= {'f', 'd'}, entry)
+            self.assertTrue(types and set(types) <= {'f', 'd', 'l'}, entry)
+            # A link only with its rule (#525), into a directory of the list next to it.
+            self.assertEqual('l' in types, entry in links, entry)
+            if entry in links:
+                inside = f'{entry.rpartition("/")[0]}/{links[entry]}'
+                self.assertEqual(allowed.get(inside), 'd', entry)
             self.assertNotIn(entry, agentuser.CLI_SEALED)
+        self.assertEqual(agentuser.CLI_LINKS, (('.gemini/antigravity-cli/cli.log', 'log'),))
         for entry in agentuser.CLI_CLEARED:  # what is removed is among the entries allowed
             self.assertIn(entry, allowed)
         for entry in agentuser.CLI_WRITABLE:
@@ -302,6 +354,26 @@ class RealProbeTests(unittest.TestCase):
                   '.claude/CLAUDE.md', '.gemini/antigravity-cli/cli.log')
         self.make('.claude/projects', '.codex/plugins', directory=True)
         self.assertEqual(self.user.cli_state(), [])
+
+    def test_the_log_link_of_agy_is_read_with_its_target(self):
+        # #525: the real listing gives the target of the link, as agy makes it.
+        agy = self.home / '.gemini/antigravity-cli'
+        (agy / 'log').mkdir()
+        (agy / 'log/cli-20261121_132524.log').write_text('started\n')
+        link = agy / 'cli.log'
+        link.symlink_to('log/cli-20261121_132524.log')
+        self.assertEqual(self.user.cli_state(), [])
+        outside = self.tmp / 'elsewhere.log'
+        outside.write_text('x\n')
+        for target in (str(outside), '../antigravity-cli/log/cli-20261121_132524.log',
+                       'brain/cli.log'):
+            with self.subTest(target=target):
+                link.unlink()
+                link.symlink_to(target)
+                problems = self.user.cli_state()
+                self.assertEqual(len(problems), 1, problems)
+                self.assertIn(f"holds 'cli.log', a symbolic link to {target!r}, which does not "
+                              "lead to a file of log/", problems[0])
 
     def test_an_unknown_entry_is_found_with_its_name(self):
         self.make('.codex/hooks.json')

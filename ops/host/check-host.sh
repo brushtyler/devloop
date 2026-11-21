@@ -322,9 +322,9 @@ done
 for dir in "${AGENT_CLI_DIRS[@]}"; do
     [ -d "$AGENT_HOME/$dir" ] && ! [ -L "$AGENT_HOME/$dir" ] || continue
     bad=0
-    while IFS= read -r -d '' record; do
+    while IFS= read -r -d '' record && IFS= read -r -d '' target; do
         type=${record%%/*} name=${record#*/}
-        if agent_cli_entry_known "$dir" "$name" "$type"; then
+        if agent_cli_entry_known "$dir" "$name" "$type" "$target"; then
             known=0
         else
             known=$?
@@ -332,8 +332,9 @@ for dir in "${AGENT_CLI_DIRS[@]}"; do
         case $known in
             1) fail "$AGENT_HOME/$dir/$name non è nella lista AGENT_CLI_ALLOWED: devloop rifiuta i turni finché c'è (rimuoverla come $AGENT_USER a loop fermo, o aggiungerla con una PR)"; bad=1 ;;
             2) fail "$AGENT_HOME/$dir/$name è di tipo $type, che la lista AGENT_CLI_ALLOWED non ammette per quel nome"; bad=1 ;;
+            3) fail "$AGENT_HOME/$dir/$name è un link a $target, fuori dalla directory che AGENT_CLI_LINKS ammette per quel nome: devloop rifiuta i turni finché c'è (rimuoverlo come $AGENT_USER a loop fermo)"; bad=1 ;;
         esac
-    done < <(find "$AGENT_HOME/$dir" -mindepth 1 -maxdepth 1 -printf '%y/%f\0' 2>/dev/null)
+    done < <(find "$AGENT_HOME/$dir" -mindepth 1 -maxdepth 1 -printf '%y/%f\0%l\0' 2>/dev/null)
     [ "$bad" = 1 ] || ok "$AGENT_HOME/$dir contiene solo voci della lista"
 done
 # Le memorie di codex spente in modo esplicito (#517), come controlla devloop all'avvio: i turni

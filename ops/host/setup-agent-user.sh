@@ -273,20 +273,22 @@ if [ "$UNSEAL" != 1 ]; then
     unknown=0
     for dir in "${AGENT_CLI_DIRS[@]}"; do
         [ -d "$AGENT_HOME/$dir" ] && ! [ -L "$AGENT_HOME/$dir" ] || continue
-        while IFS= read -r -d '' record; do
+        while IFS= read -r -d '' record && IFS= read -r -d '' target; do
             type=${record%%/*} name=${record#*/}
-            if agent_cli_entry_known "$dir" "$name" "$type"; then
+            if agent_cli_entry_known "$dir" "$name" "$type" "$target"; then
                 continue
             else
                 known=$?
             fi
             unknown=1
-            if [ "$known" = 2 ]; then
+            if [ "$known" = 3 ]; then
+                todo "$AGENT_HOME/$dir/$name è un link a $target, fuori dalla directory che AGENT_CLI_LINKS ammette per quel nome: rimuoverlo come $AGENT_USER, a loop fermo"
+            elif [ "$known" = 2 ]; then
                 todo "$AGENT_HOME/$dir/$name è di tipo $type, che la lista AGENT_CLI_ALLOWED non ammette per quel nome: rimuoverla come $AGENT_USER, a loop fermo"
             else
                 todo "$AGENT_HOME/$dir/$name non è nella lista AGENT_CLI_ALLOWED: rimuoverla come $AGENT_USER, a loop fermo, o aggiungerla alla lista con una PR (ops/host/migrate.md)"
             fi
-        done < <(find "$AGENT_HOME/$dir" -mindepth 1 -maxdepth 1 -printf '%y/%f\0' 2>/dev/null)
+        done < <(find "$AGENT_HOME/$dir" -mindepth 1 -maxdepth 1 -printf '%y/%f\0%l\0' 2>/dev/null)
     done
     [ "$unknown" = 1 ] || ok "le directory delle CLI contengono solo voci della lista"
 fi

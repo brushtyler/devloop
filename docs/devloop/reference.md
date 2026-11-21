@@ -1612,7 +1612,11 @@ is in the [guide](guide.md#agent-user) and in the [ops guide](../../ops/README.m
   Then, and before every turn of any CLI, devloop lists the
   five directories as the agent user (`AgentUser.cli_state`, `/usr/bin/bash` with the system's
   `find`): each may hold only the entries of `CLI_ALLOWED` less `[agent_user] cli_denied`, with
-  their type (`f` a regular file, `d` a directory; a link is never one), the sealed entries and
+  their type (`f` a regular file, `d` a directory; a link, `l`, only for an entry of
+  `CLI_LINKS`: `~/.gemini/antigravity-cli/cli.log`, which agy makes at each start a link to the
+  log of the day, and only when the link leads, with a relative path, to a file right inside
+  `log/` next to it, `log/<name>`; an absolute path, a `..`, another directory or a deeper path
+  is refused, #525), the sealed entries and
   the directories of the CLIs, these two root's. Anything else stops devloop at startup, or
   refuses the turn before its CLI starts (`agents.CliStateRefused`), with an escalation of class
   `configuration` that names the entry; so does a listing that fails or does not end. Before

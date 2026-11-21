@@ -418,6 +418,46 @@ l'ha scritto, e si rimuove come `devloop-agent` ciò che non è il wrapper. Se i
 perché agy è stato aggiornato e lo scrive in un altro modo, serve una PR che aggiorni
 `agy_wrapper` di `devloop/agentuser.py`.
 
+### Il link `cli.log` di agy (#525)
+
+agy crea a ogni avvio `~/.gemini/antigravity-cli/cli.log` come link simbolico al log del giorno
+(`cli.log -> log/cli-<YYYYMMDD_HHMMSS>.log`). Prima del #525 la lista ammetteva `cli.log` solo
+come file, e dopo ogni turno di agy il turno seguente era rifiutato con un'escalation
+`configuration`. Dal #525 `cli.log` può essere anche un link (`CLI_LINKS` di
+`devloop/agentuser.py`, `AGENT_CLI_LINKS` di `ops/lib.sh`), solo se porta, con un percorso
+relativo, a un file direttamente dentro `log/` accanto a lui (`log/<nome>`). Un link con un
+percorso assoluto, con `..`, verso un'altra directory o più in fondo in `log/` resta rifiutato,
+all'avvio, prima di ogni turno, in `check-host.sh` e in `setup-agent-user.sh`. Claude Code e codex
+non creano link nelle loro directory (i link di `~/.codex/packages` sono sigillati).
+
+Il rimedio temporaneo, fino al pin della PR del #525, era togliere agy dal gruppo dei reviewer
+nell'overlay (`[roles] reviewers = ["codex-reviewer", "claude-reviewer"]`) e rimuovere il link
+prima dell'avvio. Per rimettere agy nel gruppo dei reviewer **dopo il pin** di quella PR (quello
+automatico dopo il merge o quello a mano), a loop fermo (`sudo systemctl stop devloop`):
+
+1. verificare che la copia fissata contenga la PR: il commit in uso, che
+   `sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned status` mostra, deve
+   essere quello del merge o uno successivo;
+2. verificare le directory delle CLI, come root, con
+   `sudo bash /root/repos/ssdlc/ops/host/check-host.sh --no-apps`: nel passo
+   `File delle CLI di devloop-agent` deve esserci
+   `ok: /home/devloop-agent/.gemini/antigravity-cli contiene solo voci della lista`. Il link
+   `cli.log -> log/…`, se c'è, non è più un errore; uno che porta altrove sì, e va rimosso come
+   `devloop-agent`:
+   `sudo -u devloop-agent rm /home/devloop-agent/.gemini/antigravity-cli/cli.log`;
+3. nell'overlay rimettere `agy-reviewer` in `[roles] reviewers`, nella posizione di prima:
+
+   ```bash
+   sudo -u devloop -H "${EDITOR:-vi}" /home/devloop/ssdlc/.ssdlc/devloop/config.local.toml
+   ```
+
+   Se l'overlay aveva solo quella riga per escludere agy, si può anche togliere la chiave:
+   vale allora il gruppo di `config.toml` (`["codex-reviewer", "agy-reviewer",
+   "claude-reviewer"]`);
+4. `sudo systemctl start devloop`. All'avvio devloop rifà le verifiche delle directory delle
+   CLI; dopo il primo turno di agy, `check-host.sh --no-apps` deve dare ancora `ok` su
+   `~/.gemini/antigravity-cli`, con il link ricreato da agy.
+
 ## Attivazione dell'utente degli agent (#415)
 
 Finché l'overlay non imposta `[agent_user] name`, gli agent e i test girano come `devloop`:

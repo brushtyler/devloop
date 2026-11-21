@@ -52,7 +52,8 @@ AGENT_CLI_SEALED=(
 AGENT_CLIS=(claude codex agy)
 # Le sole voci che le CLI possono tenere nelle directory di AGENT_CLI_DIRS (#517), oltre a quelle
 # sigillate e alle directory delle CLI, di root: <directory>/<modello del nome>:<tipi>, come
-# CLI_ALLOWED di devloop/agentuser.py (f un file, d una directory). Una voce che manca qui si
+# CLI_ALLOWED di devloop/agentuser.py (f un file, d una directory, l un link: solo una voce di
+# AGENT_CLI_LINKS, con la sua regola). Una voce che manca qui si
 # aggiunge con una PR, in entrambe le liste; l'overlay può solo toglierne ([agent_user]
 # cli_denied).
 AGENT_CLI_ALLOWED=(
@@ -70,7 +71,7 @@ AGENT_CLI_ALLOWED=(
     .gemini/config/.migrated:f
     .gemini/antigravity-cli/antigravity-oauth-token:f .gemini/antigravity-cli/bin:d
     .gemini/antigravity-cli/brain:d .gemini/antigravity-cli/builtin:d
-    .gemini/antigravity-cli/cache:d .gemini/antigravity-cli/cli.log:f
+    .gemini/antigravity-cli/cache:d .gemini/antigravity-cli/cli.log:fl
     '.gemini/antigravity-cli/conversation_summaries.db*:f'
     .gemini/antigravity-cli/conversations:d .gemini/antigravity-cli/crashes:d
     .gemini/antigravity-cli/implicit:d .gemini/antigravity-cli/installation_id:f
@@ -81,13 +82,34 @@ AGENT_CLI_ALLOWED=(
     .gemini/antigravity-cli/last_check.timestamp:f .gemini/antigravity-cli/log:d
     .gemini/antigravity-cli/presence:d .gemini/antigravity-cli/updater:d
 )
+# Le voci di AGENT_CLI_ALLOWED che possono essere un link (#525), come CLI_LINKS di
+# devloop/agentuser.py: <voce>:<directory accanto alla voce>. Il link deve portare a un file di
+# quella directory, con il percorso relativo <directory>/<nome> (un solo nome, né . né ..);
+# ogni altro link con quel nome è rifiutato. agy crea a ogni avvio cli.log -> log/cli-<data>.log.
+AGENT_CLI_LINKS=(.gemini/antigravity-cli/cli.log:log)
 
-# agent_cli_entry_known DIR NAME TYPE: la voce NAME, di tipo TYPE (%y di find), della directory
-# delle CLI DIR (relativa alla home) è nella lista, o è sigillata o una directory delle CLI.
-# Torna 0 se è nota (sigillata e directory delle CLI: il proprietario lo controlla chi chiama),
-# 1 se manca dalla lista, 2 se è nella lista con un altro tipo.
+# agent_cli_link_allowed TARGET INSIDE: il contenuto TARGET di un link di AGENT_CLI_LINKS porta a
+# un file della directory INSIDE accanto al link: esattamente INSIDE/<nome>, relativo, <nome>
+# né vuoto né . né .., come link_allowed di devloop/agentuser.py.
+agent_cli_link_allowed() {
+    local target=$1 inside=$2 rest
+    case $target in
+        "$inside"/*) rest=${target#"$inside"/} ;;
+        *) return 1 ;;
+    esac
+    case $rest in
+        '' | . | .. | */*) return 1 ;;
+    esac
+    return 0
+}
+
+# agent_cli_entry_known DIR NAME TYPE [TARGET]: la voce NAME, di tipo TYPE (%y di find), della
+# directory delle CLI DIR (relativa alla home) è nella lista, o è sigillata o una directory delle
+# CLI; TARGET è il contenuto del link, quando TYPE è l. Torna 0 se è nota (sigillata e directory
+# delle CLI: il proprietario lo controlla chi chiama), 1 se manca dalla lista, 2 se è nella lista
+# con un altro tipo, 3 se è un link ammesso per quel nome che porta fuori dalla sua directory.
 agent_cli_entry_known() {
-    local dir=$1 name=$2 type=$3 entry pattern types matched=0
+    local dir=$1 name=$2 type=$3 target=${4-} entry pattern types link matched=0
     for entry in "${AGENT_CLI_DIRS[@]}" "${AGENT_CLI_SEALED[@]}"; do
         [ "$entry" = "$dir/$name" ] && return 0
     done
@@ -98,7 +120,15 @@ agent_cli_entry_known() {
         case $name in
             ${pattern##*/})
                 matched=1
-                case $types in *"$type"*) return 0 ;; esac ;;
+                case $types in
+                    *"$type"*)
+                        [ "$type" = l ] || return 0
+                        for link in "${AGENT_CLI_LINKS[@]}"; do
+                            [ "${link%:*}" = "$pattern" ] || continue
+                            agent_cli_link_allowed "$target" "${link##*:}" && return 0
+                        done
+                        return 3 ;;
+                esac ;;
         esac
     done
     return $((matched + 1))
