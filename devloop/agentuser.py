@@ -46,11 +46,17 @@ turns after it use. The files of the CLIs that carry instructions or configurati
 themselves, belong to root (``ops/host/setup-agent-user.sh``); the agent user writes only its
 credentials, sessions, caches and logs. ``check`` refuses an installation where the agent user
 can write, own (an owner changes the mode), create, rename or remove any of them
-(``cli_items``): the directories of the CLIs
-(``CLI_DIRS``: no new entry, such as an instruction file, an agent, a skill or a hook a turn
-would add), what they hold that carries instructions or configuration and ``~/.local``
-(``CLI_SEALED``: nothing writable in them), and each CLI in ``~/.local/bin`` with the directory
-of the file it leads to (``CLIS``). A directory above them that the agent user can write protects
+(``cli_items``): the directories of the CLIs (``CLI_DIRS``), root's and sticky (#517), which it
+writes but cannot rename nor own; what they hold that carries instructions or configuration and
+``~/.local`` (``CLI_SEALED``: nothing writable in them, and a placeholder of root where one does
+not exist, so that the agent user cannot create it), and each CLI in ``~/.local/bin`` with the
+directory of the file it leads to (``CLIS``). The directories of the CLIs may hold only the
+entries of ``CLI_ALLOWED``, of their type, besides the sealed ones and the directories of the
+CLIs, of root: at the start (``check``) and before each turn (``AgentUser.cli_state``, from
+``agents.AgentRunner``) anything else is refused, and a turn refused so is an escalation
+``configuration`` that names the entry; ``[agent_user] cli_denied`` may only shorten the list.
+Before each turn of a CLI, what it would read again as context in a later session
+(``CLI_CLEARED``) is removed. A directory above them that the agent user can write protects
 them only when it is sticky and neither it nor the entry is the agent user's: the home, which
 the agent user writes, is root's and sticky. A link among them, or inside a sealed one, is
 followed, and what it leads to must be protected the same way; the sealed files must stay
@@ -70,6 +76,7 @@ import base64
 import binascii
 import contextlib
 import errno
+import fnmatch
 import hashlib
 import os
 import pwd
@@ -97,19 +104,84 @@ SCHEMAS = 'schemas'
 TURNS = 'turns'
 TMP = 'tmp'
 GH_CONFIG = 'gh-config'
-# In the agent user's home (#438): the directories of the CLIs, where the agent user may create
-# nothing and that it may not rename; in them, what carries instructions or configuration, and
-# the installed CLIs, where nothing may be writable; the CLIs devloop starts from ``.local/bin``.
+# In the agent user's home (#438): the directories of the CLIs, root's, of the agent user's
+# group and sticky (#517, ``CLI_DIR_MODE``): the agent user creates and replaces its own entries
+# there (credentials, locks, temporary files, caches), but never renames nor removes those of
+# root, and the directories themselves stay where they are. In them, what carries instructions,
+# configuration, plugins or extensions, and the installed CLIs, where nothing may be writable:
+# each one that does not exist is a placeholder of root (``ops/host/setup-agent-user.sh``; a
+# file when its name has a suffix, ``placeholder_is_file``), so the agent user cannot create
+# it. The CLIs devloop starts from ``.local/bin``.
 CLI_DIRS = ('.claude', '.codex', '.gemini', '.gemini/antigravity-cli')
+CLI_DIR_MODE = 0o1770
 CLI_SEALED = (
     '.claude/settings.json', '.claude/CLAUDE.md', '.claude/rules', '.claude/agents',
     '.claude/commands', '.claude/skills', '.claude/hooks', '.claude/output-styles',
     '.claude/plugins',
     '.codex/config.toml', '.codex/AGENTS.md', '.codex/AGENTS.override.md', '.codex/prompts',
-    '.codex/rules', '.codex/skills', '.codex/packages',
+    '.codex/rules', '.codex/skills', '.codex/packages', '.codex/plugins', '.codex/memories',
     '.gemini/settings.json', '.gemini/GEMINI.md', '.gemini/antigravity-cli/settings.json',
     '.local')
 CLIS = ('claude', 'codex', 'agy')
+# The entries the agent user's CLIs may keep in ``CLI_DIRS`` (#517), besides the sealed ones of
+# root and the directories of ``CLI_DIRS`` themselves: ``(<dir>/<pattern>, <types>)``, the
+# pattern a shell pattern of the name (``fnmatch``), the types those of ``find -printf %y``
+# (``f`` a regular file, ``d`` a directory). Before each turn, at the start and in
+# ``ops/host/check-host.sh`` the directories may hold nothing else: an unknown entry refuses the
+# turn (``AgentUser.cli_state``). ``[agent_user] cli_denied`` may only take entries away from
+# this list; one more goes through a PR, here and in ``AGENT_CLI_ALLOWED`` of ``ops/lib.sh``.
+CLI_ALLOWED = (
+    # Claude Code: the login (saved with a temporary file and a rename), its backups and caches,
+    # the sessions and what each session keeps for itself.
+    ('.claude/.credentials.json', 'f'), ('.claude/.credentials.json.*', 'f'),
+    ('.claude/backups', 'd'), ('.claude/cache', 'd'), ('.claude/projects', 'd'),
+    ('.claude/sessions', 'd'), ('.claude/todos', 'd'), ('.claude/shell-snapshots', 'd'),
+    ('.claude/statsig', 'd'), ('.claude/plans', 'd'), ('.claude/file-history', 'd'),
+    ('.claude/session-env', 'd'), ('.claude/debug', 'd'), ('.claude/ide', 'd'),
+    ('.claude/paste-cache', 'd'), ('.claude/telemetry', 'd'), ('.claude/history.jsonl', 'f'),
+    ('.claude/stats-cache.json', 'f'),
+    # Codex: the login (a temporary .auth-* renamed over auth.json, with its locks), its
+    # databases with their journals, sessions, caches and temporary files.
+    ('.codex/auth.json', 'f'), ('.codex/.auth-*', 'f'), ('.codex/auth.lock', 'f'),
+    ('.codex/auth.json.lock', 'f'), ('.codex/.sandbox_migration', 'fd'),
+    ('.codex/.sqlite-maintenance.lock', 'f'), ('.codex/cache', 'd'),
+    ('.codex/goals_1.sqlite*', 'f'), ('.codex/installation_id', 'f'),
+    ('.codex/logs_2.sqlite*', 'f'), ('.codex/memories_1.sqlite*', 'f'),
+    ('.codex/models_cache.json', 'f'), ('.codex/queue_1.sqlite*', 'f'),
+    ('.codex/sessions', 'd'), ('.codex/shell_snapshots', 'd'), ('.codex/state_5.sqlite*', 'f'),
+    ('.codex/thread-writer-locks', 'd'), ('.codex/thread_history_1.sqlite*', 'f'),
+    ('.codex/tmp', 'd'),
+    ('.gemini/config', 'fd'),
+    # agy: the login (rewritten in place), the wrapper of its shell tool (``AGY_BIN``), its
+    # state, logs, caches and the temporary files of its summaries.
+    ('.gemini/antigravity-cli/antigravity-oauth-token', 'f'),
+    ('.gemini/antigravity-cli/bin', 'd'), ('.gemini/antigravity-cli/brain', 'd'),
+    ('.gemini/antigravity-cli/builtin', 'd'), ('.gemini/antigravity-cli/cache', 'd'),
+    ('.gemini/antigravity-cli/cli.log', 'f'),
+    ('.gemini/antigravity-cli/conversation_summaries.db*', 'f'),
+    ('.gemini/antigravity-cli/conversations', 'd'), ('.gemini/antigravity-cli/crashes', 'd'),
+    ('.gemini/antigravity-cli/implicit', 'd'),
+    ('.gemini/antigravity-cli/installation_id', 'f'),
+    ('.gemini/antigravity-cli/jetbox_summaries_proto.pb', 'f'),
+    ('.gemini/antigravity-cli/jetbox_summaries_proto.pb.*.tmp', 'f'),
+    ('.gemini/antigravity-cli/jetski_state.pbtxt', 'f'),
+    ('.gemini/antigravity-cli/jetski_state.pbtxt.*.tmp', 'f'),
+    ('.gemini/antigravity-cli/last_check.timestamp', 'f'), ('.gemini/antigravity-cli/log', 'd'),
+    ('.gemini/antigravity-cli/presence', 'd'), ('.gemini/antigravity-cli/updater', 'd'))
+# The entries of ``CLI_ALLOWED`` a CLI may read again, in a later session, as context (#517):
+# the memories of codex and the memories, knowledge and summaries of agy. Before each turn of
+# that CLI they are removed, as the agent user, unless another turn of the same CLI is still
+# running (``agents.AgentRunner``): the CLI starts them again empty. The auto memory of Claude
+# Code, in ``.claude/projects``, is off in every claude turn instead (``agents``).
+CLI_CLEARED = (
+    '.codex/memories_1.sqlite*',
+    '.gemini/antigravity-cli/brain', '.gemini/antigravity-cli/builtin',
+    '.gemini/antigravity-cli/conversation_summaries.db*', '.gemini/antigravity-cli/implicit',
+    '.gemini/antigravity-cli/jetbox_summaries_proto.pb',
+    '.gemini/antigravity-cli/jetbox_summaries_proto.pb.*.tmp')
+# The CLI each directory of ``CLI_DIRS`` belongs to: what ``CLI_CLEARED`` removes before its turns.
+CLI_OF = {'.claude': 'claude', '.codex': 'codex', '.gemini': 'agy',
+          '.gemini/antigravity-cli': 'agy'}
 # The entries the CLIs create on their first use inside the directories of ``CLI_DIRS``, where
 # the agent user creates nothing (#494): ``ops/host/setup-agent-user.sh`` creates them as the
 # agent user's, mode 700, and the startup check wants them writable. agy writes the wrapper of
@@ -128,7 +200,9 @@ WRAPPER_LIMIT = 4096
 # above it: in a directory it writes, only the sticky bit protects an entry, and only when
 # neither the entry nor the directory is its own. A link among them is followed one step at a
 # time, and what it leads to is fixed too; a link that cannot be read, or a chain of links that
-# does not end, is refused (l). ``sealed``, a fixed one where nothing may be writable (w) or its
+# does not end, is refused (l). ``cli``, a directory of the CLIs (#517): when it exists, sticky
+# and not a link (k), writable and enterable (u), and, like a fixed one, neither its own (o) nor created,
+# renamed or removed above it. ``sealed``, a fixed one where nothing may be writable (w) or its
 # own (o) either, the first path found, where everything must be readable and the directories
 # enterable (n), and where a link leads to a sealed path. ``bin``, a fixed executable whose
 # resolved file is fixed too, and sealed its directory. The tools come from the system's
@@ -147,8 +221,11 @@ to() {
     case $T in /*) ;; *) T=${1%/*}/$T ;; esac
 }
 fixed() {
-    local q=$1 h=${2:-0} d
-    [ -e "$q" ] && [ -w "$q" ] && out w "$q"
+    [ -e "$1" ] && [ -w "$1" ] && out w "$1"
+    above "$1" "${2:-0}"
+}
+above() {
+    local q=$1 h=$2 d
     while [ "$q" != / ] && [ -n "$q" ]; do
         mine "$q" && out o "$q"
         d=${q%/*}; d=${d:-/}
@@ -185,6 +262,11 @@ for a; do
         rw) { [ -w "$p" ] && [ -x "$p" ]; } || out u "$p" ;;
         rd) [ -r "$p" ] || out n "$p" ;;
         fixed) fixed "$p" ;;
+        cli) if [ -e "$p" ] || [ -L "$p" ]; then
+                 { [ -d "$p" ] && ! [ -L "$p" ] && [ -k "$p" ]; } || out k "$p"
+                 { [ -w "$p" ] && [ -x "$p" ]; } || out u "$p"
+             fi
+             above "$p" 0 ;;
         sealed) sealed "$p" ;;
         bin) fixed "$p"
              t=$(readlink -f -- "$p" 2>/dev/null) && [ -e "$t" ] && [ "$t" != "$p" ] \
@@ -198,7 +280,8 @@ _GIT_PROBE = ('export PATH=/usr/bin:/bin GIT_OPTIONAL_LOCKS=0; '
               'git -C "$1" status --porcelain >/dev/null')
 _PROBLEMS = {'r': 'can read', 'x': 'can enter', 'w': 'can write', 'e': 'cannot enter',
              'u': 'cannot write', 'n': 'cannot read', 'c': 'can create', 'o': 'owns',
-             'm': 'can rename or remove', 'l': 'cannot follow the link'}
+             'm': 'can rename or remove', 'l': 'cannot follow the link',
+             'k': 'finds no sticky directory at'}
 # A directory opened without following a link in its last component.
 _DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
@@ -237,10 +320,15 @@ def trusted_paths(worktree):
 class AgentUser:
     """The system user ``name`` the agents run as. ``home``: its home directory (default: from
     the password database), where its CLIs keep their logins and session transcripts. ``run``
-    runs the probes and the kills (``subprocess.run``)."""
+    runs the probes and the kills (``subprocess.run``). ``cli_denied``: the entries of
+    ``CLI_ALLOWED`` the configuration takes away (``[agent_user] cli_denied``, #517)."""
 
-    def __init__(self, name, home=None, run=subprocess.run):
+    # The owner of the sealed entries and of the directories of the CLIs (#517).
+    root_uid = 0
+
+    def __init__(self, name, home=None, run=subprocess.run, cli_denied=()):
         self.name = name
+        self.cli_denied = tuple(cli_denied)
         if home is None:
             try:
                 home = pwd.getpwnam(name).pw_dir
@@ -310,6 +398,30 @@ class AgentUser:
             raise AgentUserError(f'cannot read {self.home / AGY_BIN} as {self.name} (exit '
                                  f'{done.returncode}): {detail or "no output"}')
         return wrapper_problems(self.home, done.stdout or b'')
+
+    def cli_state(self, clear=()):
+        """The problems of ``CLI_DIRS`` in the agent user's home (#517), read as that user
+        (``_CLI_STATE_PROBE``, ``cli_state_problems``): an entry neither in ``CLI_ALLOWED``
+        (less ``cli_denied``) nor a sealed one of root. Before reading them, the entries of
+        ``clear``, patterns of ``CLI_CLEARED``, are removed. Raises AgentUserError when they
+        cannot be listed or removed."""
+        argv = self.command([BASH, '-c', _CLI_STATE_PROBE, 'cli-state', str(self.home),
+                             *(f'x:{p}' for p in clear), *(f'l:{d}' for d in CLI_DIRS)])
+        env = self.environment({'PATH': os.environ.get('PATH', '/usr/bin:/bin'),
+                                'LC_ALL': 'C'})
+        try:
+            done = self._run(argv, capture_output=True, timeout=120, env=env)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise AgentUserError(f'cannot run commands as {self.name}: {exc}') from exc
+        if done.returncode != 0:
+            detail = os.fsdecode(done.stderr or b'').strip()[:500]
+            raise AgentUserError(f'cannot list or clear the directories of the CLIs in '
+                                 f'{self.home} as {self.name} (exit {done.returncode}): '
+                                 f'{detail or "no output"}')
+        stdout = done.stdout or b''
+        if isinstance(stdout, str):
+            stdout = os.fsencode(stdout)
+        return cli_state_problems(self.home, stdout, self.cli_denied, self.root_uid)
 
     def check_environment(self):
         """Raise AgentUserError when the environment devloop passes with ``sudo -E`` does not
@@ -585,6 +697,121 @@ def wrapper_problems(home, records):
     return problems
 
 
+def placeholder_is_file(entry):
+    """Whether the placeholder of root of the sealed ``entry`` (#517) is a file (a name with a
+    suffix, such as ``CLAUDE.md`` or ``config.toml``) or a directory (``skills``, ``.local``),
+    as ``ops/host/setup-agent-user.sh`` creates it."""
+    return bool(Path(entry).suffix)
+
+
+def allowed_entries(denied=()):
+    """``CLI_ALLOWED`` without the entries of ``denied`` (#517), by directory: ``{<dir>:
+    [(<pattern>, <types>)]}``. An entry of ``denied`` not in ``CLI_ALLOWED`` is a ValueError:
+    the configuration may only take entries away, never add one."""
+    known = dict(CLI_ALLOWED)
+    unknown = [entry for entry in denied if entry not in known]
+    if unknown:
+        raise ValueError(f'not entries of the list of the code (CLI_ALLOWED of '
+                         f'devloop/agentuser.py): {", ".join(map(repr, unknown))}; the '
+                         'configuration may only take entries away, a new one goes through a PR')
+    found = {d: [] for d in CLI_DIRS}
+    for entry, types in CLI_ALLOWED:
+        if entry not in denied:
+            parent, _, pattern = entry.rpartition('/')
+            found[parent].append((pattern, types))
+    return found
+
+
+def cleared_for(kind):
+    """The patterns of ``CLI_CLEARED`` in the directories of the CLI ``kind`` (#517)."""
+    return tuple(p for p in CLI_CLEARED if CLI_OF[p.rpartition('/')[0]] == kind)
+
+
+# Run as the agent user (#517): ``$1`` the home, then ``x:<dir>/<pattern>``, the entries of
+# ``<dir>`` whose name matches the pattern to remove first (``CLI_CLEARED``), and ``l:<dir>``,
+# the directories to list. NUL-terminated records: ``L:<dir>`` a link, ``M:<dir>`` missing,
+# ``N:<dir>`` not a directory, otherwise ``D:<dir>`` and ``e:<type>:<uid>:<name>`` for each
+# entry (``find``'s ``%y`` and ``%U``); ``E:`` at the end, when everything was read. An exit
+# status other than 0 when an entry cannot be removed or a directory listed. Removing never
+# follows a link; only the system's tools, as for ``_PROBE``.
+_CLI_STATE_PROBE = r'''PATH=/usr/bin:/bin
+h=$1; shift
+for a; do
+    k=${a%%:*} r=${a#*:}
+    case $k in
+        x) d=$h/${r%/*}
+           if [ -d "$d" ] && ! [ -L "$d" ]; then
+               find "$d" -mindepth 1 -maxdepth 1 -name "${r##*/}" -exec rm -rf -- {} + || exit 1
+           fi ;;
+        l) d=$h/$r
+           if [ -L "$d" ]; then printf 'L:%s\0' "$r"
+           elif ! [ -e "$d" ]; then printf 'M:%s\0' "$r"
+           elif ! [ -d "$d" ]; then printf 'N:%s\0' "$r"
+           else
+               printf 'D:%s\0' "$r"
+               find "$d" -mindepth 1 -maxdepth 1 -printf 'e:%y:%U:%f\0' || exit 1
+           fi ;;
+    esac
+done
+printf 'E:\0'
+'''
+
+
+def cli_state_problems(home, records, denied=(), root_uid=0):
+    """The problems of ``CLI_DIRS`` in ``home`` from ``records``, the output of
+    ``_CLI_STATE_PROBE`` (bytes, #517). Each directory must be listed, and hold only entries
+    of ``allowed_entries(denied)`` of the right type, the sealed entries of ``CLI_SEALED``
+    and the directories of ``CLI_DIRS``, these two of ``root_uid``. Each problem names the
+    entry."""
+    home = Path(home)
+    allowed = allowed_entries(denied)
+    problems, listed, current, ended = [], set(), None, False
+    for record in records.split(b'\0'):
+        kind, _, rest = record.partition(b':')
+        where = os.fsdecode(rest)
+        if kind == b'E':
+            ended = True
+        elif kind in (b'L', b'M', b'N'):
+            listed.add(where)
+            problems.append(f'{home / where} is ' + {b'L': 'a symbolic link',
+                                                      b'M': 'missing',
+                                                      b'N': 'not a directory'}[kind])
+        elif kind == b'D':
+            listed.add(where)
+            current = where if where in allowed else None
+        elif kind == b'e' and current is not None:
+            fields = rest.split(b':', 2)
+            if len(fields) != 3:
+                problems.append(f'{home / current}: an entry could not be read')
+                continue
+            kind, uid, name = (os.fsdecode(f) for f in fields)
+            entry = f'{current}/{name}'
+            if entry in CLI_DIRS or entry in CLI_SEALED:
+                if uid != str(root_uid):
+                    what = 'directory of the CLIs' if entry in CLI_DIRS else 'sealed entry'
+                    problems.append(f'{home / entry} is a {what} that is not root\'s (owner '
+                                    f'{uid}): the agent user made it')
+                elif entry in CLI_DIRS and kind != 'd':
+                    problems.append(f'{home / entry} is not a directory (type {kind!r})')
+                continue
+            matched = [types for pattern, types in allowed[current]
+                       if fnmatch.fnmatchcase(name, pattern)]
+            if not matched:
+                problems.append(f'{home / current} holds {_shown(name)} (type {kind!r}), '
+                                'which is not in the list of the entries the CLIs may keep '
+                                '(CLI_ALLOWED of devloop/agentuser.py)')
+            elif not any(kind in types for types in matched):
+                problems.append(f'{home / current} holds {_shown(name)} of type {kind!r}, '
+                                f'where the list of the entries of the CLIs wants '
+                                f'{matched[0]!r}')
+    for parent in CLI_DIRS:
+        if parent not in listed:
+            problems.append(f'{home / parent} was not listed')
+    if not ended:
+        problems.append(f'the listing of the directories of the CLIs in {home} did not end')
+    return problems
+
+
 def _entries(path):
     """``path`` itself and what it lists, as the dispatcher's user sees it."""
     path = Path(path)
@@ -598,7 +825,7 @@ def cli_items(home):
     """The probe items of the CLIs in ``home``, the agent user's home (#438): what a turn must
     not change for the turns after it, and what the CLIs must write (#494)."""
     home = Path(home)
-    return ([('fixed', home / d) for d in CLI_DIRS]
+    return ([('cli', home / d) for d in CLI_DIRS]
             + [('sealed', home / p) for p in CLI_SEALED]
             + [('bin', home / '.local' / 'bin' / cli) for cli in CLIS]
             + [('rw', home / p) for p in CLI_WRITABLE])
@@ -723,6 +950,7 @@ def check(agent_user, key_dir, state_dir, local_config=None, me=None, git_dir=No
         except OSError as exc:
             raise AgentUserError(f'the shared directory {shared.path}: {exc}') from exc
         found = agent_user.probe(items)
+        unknown = agent_user.cli_state()  # only the entries of the list (#517)
         refused = None
         # The git probe only where the agent user cannot write the shared directory: the
         # repository is made there by the dispatcher's user, in a directory of its own (#500).
@@ -743,6 +971,7 @@ def check(agent_user, key_dir, state_dir, local_config=None, me=None, git_dir=No
                 pass
     problems = [f'{agent_user.name} {_PROBLEMS[problem]} {path}'
                 for problem, path in dict.fromkeys(found)]
+    problems += unknown
     if refused:
         problems.append(refused)
     if problems:

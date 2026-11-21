@@ -87,9 +87,6 @@ Dal supervisore, come utente `supervisor`:
   senza, che rende di root istruzioni, configurazione e binari delle CLI (#438).
 - **Il token di sola lettura del supervisore**: uno nuovo
   ([ops/github/tokens.md](../github/tokens.md)), e si revoca quello della macchina vecchia.
-- **Il token di claude dei turni** (`[claude_token]`, #507): uno nuovo con `claude setup-token`
-  nella `key_dir` della macchina nuova, e si revoca quello della vecchia ([Token di claude per
-  l'utente degli agent](#token-di-claude-per-lutente-degli-agent-507)).
 - **Il servizio**: lo installa `setup-devloop.sh` da `ops/host/devloop.service`; non si copia
   l'unità della macchina vecchia.
 - **Il sudoers del supervisore**: lo installa `setup-supervisor.sh`.
@@ -374,8 +371,8 @@ root; e lì manca `ops/params.env`.
        --settings '{"permissions": {"allow": ["command(git --version)"]}}'
    ```
 
-   Ognuna deve rispondere con `git version …`. Se una si ferma con `permission denied` su una
-   voce di una directory sigillata, vedere [qui sotto](#una-cli-si-ferma-con-permission-denied);
+   Ognuna deve rispondere con `git version …`. Se poi una directory delle CLI contiene una voce
+   che devloop non ammette, vedere [qui sotto](#una-voce-sconosciuta-in-una-directory-delle-cli);
 6. il pin a mano (`sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned pin
    origin/main`) e `sudo systemctl start devloop`.
 
@@ -383,26 +380,32 @@ root; e lì manca `ops/params.env`.
 `sudo bash /root/repos/ssdlc/ops/host/setup-agent-user.sh --unseal`: devloop di #438 però non
 parte finché non si richiudono.
 
-### Una CLI si ferma con `permission denied`
+### Una voce sconosciuta in una directory delle CLI
 
-Le directory delle CLI sono di root: una CLI che al primo uso, o dopo un aggiornamento, vuole
-creare una voce in una di esse si ferma. Per esempio agy, prima di #494, non eseguiva nessun
-comando di shell: `mkdir /home/devloop-agent/.gemini/antigravity-cli/bin: permission denied`.
-In devloop appare come un permesso negato o un `tool_failure` dei turni di quella CLI;
-`check-host.sh` lo segnala nel passo `CLI degli agent` (`non esegue git --version con il suo
-strumento di shell`). Le voci note (`AGENT_CLI_WRITABLE` di `ops/lib.sh`, `CLI_WRITABLE` di
-`devloop/agentuser.py`) le crea `setup-agent-user.sh`, di `devloop-agent`. Per una voce nuova, a
-loop fermo (`sudo systemctl stop devloop`):
+Dal #517 le directory delle CLI sono scrivibili, con lo sticky bit
+([qui sotto](#directory-delle-cli-con-lo-sticky-bit-517)), e possono contenere solo le voci della
+lista del codice (`CLI_ALLOWED` di `devloop/agentuser.py`, `AGENT_CLI_ALLOWED` di `ops/lib.sh`).
+Una CLI che al primo uso, o dopo un aggiornamento, crea una voce nuova, o un turno o i test che
+ne lasciano una, fanno rifiutare a devloop ogni turno successivo, prima di avviarlo, con
+un'escalation `configuration` che nomina la voce; all'avvio devloop non parte, e
+`check-host.sh` e `setup-agent-user.sh` la segnalano. A loop fermo
+(`sudo systemctl stop devloop`):
 
-1. aprire le directory delle CLI, come root:
-   `sudo bash /root/repos/ssdlc/ops/host/setup-agent-user.sh --unseal`;
-2. avviare la CLI come `devloop-agent` con il comando che si fermava (per lo strumento di shell,
-   il prompt del passo 5 qui sopra): crea la voce, che resta sua;
-3. richiudere, come root: `sudo bash /root/repos/ssdlc/ops/host/setup-agent-user.sh`, poi
-   `sudo bash /root/repos/ssdlc/ops/host/check-host.sh --no-apps`;
-4. aggiungere la voce, con una PR, a `AGENT_CLI_WRITABLE` di `ops/lib.sh` e a `CLI_WRITABLE` di
-   `devloop/agentuser.py`: lo script la crea su un host nuovo, e il controllo all'avvio di devloop
-   la conosce.
+1. guardare che cosa è, come `devloop-agent`, per esempio
+   `sudo -u devloop-agent ls -la /home/devloop-agent/.codex`, e cercare nei log di `state_dir`
+   il turno o i test che l'hanno scritta;
+2. se non serve alla CLI, o porta istruzioni, plugin o binari, rimuoverla come `devloop-agent`;
+3. se è una voce di stato della CLI (un login, un lock, una cache, un database, un temporaneo),
+   aggiungerla con una PR, con il suo tipo, a `CLI_ALLOWED` di `devloop/agentuser.py` e
+   `AGENT_CLI_ALLOWED` di `ops/lib.sh`, dicendo se la CLI la rilegge come contesto in una
+   sessione successiva (allora va anche in `CLI_CLEARED`, o spenta, o sigillata). Fino al pin di
+   quella PR la voce va rimossa;
+4. verificare: `sudo bash /root/repos/ssdlc/ops/host/check-host.sh --no-apps`, poi riprendere le
+   issue e le PR che hanno avuto l'escalation.
+
+Le voci che le CLI creano al primo uso e che devono essere di `devloop-agent` prima del primo uso
+(`AGENT_CLI_WRITABLE` di `ops/lib.sh`, `CLI_WRITABLE` di `devloop/agentuser.py`) le crea
+`setup-agent-user.sh`.
 
 Una voce che le CLI scrivono non deve portare istruzioni o binari ai turni dopo. Per `bin` di
 agy, dove agy riscrive a ogni avvio dello strumento di shell il wrapper `agentapi`
@@ -507,8 +510,8 @@ aggiorna come `devloop`; ogni comando dice l'utente con cui gira.
    ```
 
    Nel passo `CLI degli agent` ogni CLI esegue come `devloop-agent` il comando git --version
-   con il suo strumento di shell (#494). Una CLI che si ferma con `permission denied` su una directory
-   sigillata: [Una CLI si ferma con `permission denied`](#una-cli-si-ferma-con-permission-denied).
+   con il suo strumento di shell (#494). Una voce che una CLI crea e che devloop non ammette:
+   [Una voce sconosciuta in una directory delle CLI](#una-voce-sconosciuta-in-una-directory-delle-cli).
 
    Con sudo-rs (`ERRORE: sudo è sudo-rs …`, `ERRORE: l'ambiente non arriva a devloop-agent con
    sudo -E …`) gli agent girerebbero senza l'ambiente che devloop prepara (#496): come root,
@@ -557,95 +560,72 @@ almeno un worktree in `worktrees`). Poi il pin a mano (`sudo -u devloop -H pytho
 all'avvio devloop rifà la stessa prova su un worktree di prova. Se git rifiuta il worktree,
 `sudo` non mantiene l'ambiente: il file si rimette com'era e si resta sul pin precedente.
 
-## Token di claude per l'utente degli agent (#507)
+## Directory delle CLI con lo sticky bit (#517)
 
-Dal #438 `~/.claude` di `devloop-agent` è di root: Claude Code non riesce a salvare in
-`.credentials.json` il token che rinnova, e dopo la sua scadenza i turni di claude falliscono con
-`401 OAuth access token has expired`. Dal #507, con `[claude_token] enabled = true` nell'overlay,
-devloop passa a ogni turno di claude, e solo a quelli, un token OAuth di lunga durata generato
-dall'operatore con `claude setup-token`, come `CLAUDE_CODE_OAUTH_TOKEN` nell'ambiente isolato
-del turno; `~/.claude` resta sigillata.
+Dal #438 le directory delle CLI di `devloop-agent` erano di root, `755`: le CLI che salvano con un
+file temporaneo e un `rename`, o che creano lock, non riuscivano a scrivere. Claude Code non
+salvava il token rinnovato (turni falliti con `401`, #507), codex non potrebbe salvare
+`auth.json` al primo rinnovo (un `.auth-XXXX` rinominato sopra `auth.json`, con `auth.lock` e
+`auth.json.lock`), agy non scriveva alcuni suoi file. Dal #517, decisione dell'operatore:
 
-- **Il file.** `claude.<AAAA-MM-GG>.oauth-token` nella `key_dir` di `devloop`
-  (`/home/devloop/.ghapps`, quella delle chiavi delle app, che `devloop-agent` non legge né
-  attraversa), mode 600, di `devloop`, con il solo token su una riga. La data nel nome è il
-  giorno di emissione (UTC), come nel nome delle chiavi delle app. Ce ne dev'essere uno solo.
-- **La rotazione.** `setup-token` non sceglie la durata (circa un anno): la limita devloop. Da
-  `rotate_days` dopo l'emissione (default 30) scrive un avviso, una volta per token, su
-  `[run].alert_issue`. Da `max_days` (default 90, al più 90: un tetto del codice che l'overlay
-  può solo abbassare) rifiuta i turni di claude prima di avviarli, con un'escalation
-  `configuration` all'operatore che dice quale token è scaduto. Senza una data valida nel nome,
-  con una data nel futuro, senza il file, con più di un file o con un file leggibile da altri,
-  i turni di claude sono rifiutati allo stesso modo. Un `max_days` oltre 90 ferma devloop
-  all'avvio.
-- **Il segreto.** devloop legge il file a ogni turno di claude e passa il token solo alla CLI di
-  quel turno: mai ai test, agli altri agent, ai log, ai record, ai prompt o all'output, dove lo
-  sostituisce con `[REDACTED]` se il turno lo riporta.
-- **La verifica.** `check-host.sh`, passo `Token di claude per devloop-agent`, mostra l'età del
-  token; segnala come errore un token oltre `max_days`, senza data valida, mancante, doppio o
-  non 600 di `devloop`, e un `.credentials.json` rimasto a `devloop-agent`; come avviso un token
-  da ruotare.
+- `~/.claude`, `~/.codex`, `~/.gemini` e `~/.gemini/antigravity-cli` sono come la home: di root,
+  del gruppo di `devloop-agent`, `1770`. `devloop-agent` vi crea e sostituisce le proprie voci,
+  ma non rinomina né rimuove quelle di root;
+- ogni voce sigillata (`AGENT_CLI_SEALED` di `ops/lib.sh`, con in più `~/.codex/plugins` e
+  `~/.codex/memories`) che non esiste diventa un segnaposto di root (un file vuoto, `{}` per un
+  `.json`, o una directory vuota), che `devloop-agent` non può creare, scrivere, rinominare né
+  rimuovere;
+- le directory possono contenere solo le voci della lista del codice (`CLI_ALLOWED` di
+  `devloop/agentuser.py`, `AGENT_CLI_ALLOWED` di `ops/lib.sh`), oltre a quelle sigillate e alle
+  directory delle CLI, di root. devloop lo verifica all'avvio e prima di ogni turno, come
+  `devloop-agent`: una voce sconosciuta rifiuta il turno con un'escalation `configuration` che la
+  nomina ([qui sopra](#una-voce-sconosciuta-in-una-directory-delle-cli)). L'overlay può solo
+  togliere voci dalla lista (`[agent_user] cli_denied`);
+- le memorie che una CLI rilegge fra un turno e l'altro (`memories_1.sqlite*` di codex; `brain`,
+  `implicit`, `builtin`, `conversation_summaries.db*` e `jetbox_summaries_proto.pb*` di agy)
+  devloop le rimuove prima di ogni turno di quella CLI, se nessun altro turno della stessa CLI è
+  in corso; la memoria automatica di Claude Code resta spenta (#438);
+- il token di lunga durata di claude di #507 (`[claude_token]`) è tolto: una configurazione che
+  nomina ancora la tabella ferma devloop all'avvio.
 
-### Creazione
+### Passo sull'host
 
-Al primo passaggio (il passo sull'host della PR di #507), a loop fermo, dopo aver aggiornato il
-checkout dell'operatore e il clone di devloop come al passo 2 di [File delle CLI di root
-sull'utente degli agent](#file-delle-cli-di-root-sullutente-degli-agent-438):
+A loop fermo, dopo il merge e prima del pin, come root dal checkout dell'operatore aggiornato
+come al passo 2 di [File delle CLI di root sull'utente degli
+agent](#file-delle-cli-di-root-sullutente-degli-agent-438):
 
 1. fermare il loop: `sudo systemctl stop devloop`;
-2. generare il token, come operatore, su una macchina con il browser e l'account di Claude dei
-   turni: `claude setup-token` lo stampa alla fine del login. Non va incollato in chat, issue,
-   file del repository o comandi che restano nella history;
-3. metterlo nella `key_dir`, con la data di oggi (UTC), incollandolo nello standard input di
-   `cat` (così non finisce negli argomenti di un comando né nella history), poi `Ctrl-D`:
+2. se è stato attivato il token di #507: togliere la tabella `[claude_token]` dall'overlay
+   (`/home/devloop/ssdlc/.ssdlc/devloop/config.local.toml`), rimuovere il file
+   (`sudo -u devloop -H rm /home/devloop/.ghapps/claude.<data>.oauth-token`) e revocare il token
+   su claude.ai, dalle impostazioni dell'account dove sono elencate le autorizzazioni di Claude
+   Code. Se il login di `devloop-agent` era stato tolto, rifarlo dopo il passo 3, in una sessione
+   interattiva di `devloop-agent` (`sudo -iu devloop-agent`): ora la CLI lo salva da sé;
+3. rieseguire lo script dell'utente degli agent, prima in prova:
 
    ```bash
-   sudo -u devloop -H sh -c 'umask 077; cat > "$HOME/.ghapps/claude.$(date -u +%F).oauth-token"'
+   sudo bash /root/repos/ssdlc/ops/host/setup-agent-user.sh --dry-run
+   sudo bash /root/repos/ssdlc/ops/host/setup-agent-user.sh
    ```
 
-4. attivarlo nell'overlay (`/home/devloop/ssdlc/.ssdlc/devloop/config.local.toml`):
+   Rende le quattro directory `1770`, di root e del gruppo di `devloop-agent`, crea i segnaposto
+   di root delle voci sigillate che mancano, rende di root `~/.codex/plugins` (oggi di
+   `devloop-agent`), e segnala come `da fare a mano` ogni voce che non è nella lista. Una voce
+   segnalata si rimuove come `devloop-agent` (per esempio
+   `sudo -u devloop-agent rm -r /home/devloop-agent/.codex/<voce>`), o si aggiunge alla lista
+   con una PR, come [qui sopra](#una-voce-sconosciuta-in-una-directory-delle-cli);
+4. verificare, come root: `sudo bash /root/repos/ssdlc/ops/host/check-host.sh --no-apps`,
+   nessun errore nel passo `File delle CLI di devloop-agent` (le directory `1770 root`, scrivibili
+   e con lo sticky bit; le voci sigillate di root; le directory con le sole voci della lista) né
+   nel passo `CLI degli agent`;
+5. il pin a mano (`sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned pin
+   origin/main`) e `sudo systemctl start devloop`. All'avvio devloop rifà le stesse verifiche.
 
-   ```toml
-   [claude_token]
-   enabled = true
-   ```
-
-5. togliere le credenziali di prima di `devloop-agent`, che resterebbero un secondo canale di
-   accesso, come root: `sudo rm -f /home/devloop-agent/.claude/.credentials.json`;
-6. verificare, come root: `sudo bash /root/repos/ssdlc/ops/host/check-host.sh --no-apps`,
-   nessun errore nel passo `Token di claude per devloop-agent`;
-7. il pin a mano (`sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned pin
-   origin/main`) e `sudo systemctl start devloop`.
-
-**Rollback.** `enabled = false` nell'overlay e il riavvio: Claude Code torna al login di
-`devloop-agent`, che dopo il passo 5 va rifatto (fra `setup-agent-user.sh --unseal` e una nuova
-esecuzione dello script senza, come in [ops/README.md](../README.md#5-utente-degli-agent-e-cli)),
-e il rinnovo resta quello rotto del #438.
-
-### Rotazione
-
-Dopo l'avviso su `[run].alert_issue`, e comunque prima di `max_days`:
-
-1. `sudo systemctl stop devloop`: con due file nella `key_dir` i turni di claude sono rifiutati;
-2. `claude setup-token`, come operatore, per il token nuovo;
-3. il file nuovo, come al passo 3 della creazione, e la rimozione del vecchio:
-   `sudo -u devloop -H rm /home/devloop/.ghapps/claude.<data vecchia>.oauth-token`;
-4. `sudo bash /root/repos/ssdlc/ops/host/check-host.sh --no-apps` e `sudo systemctl start
-   devloop`;
-5. **revocare il token vecchio** su claude.ai, dalle impostazioni dell'account dove sono elencate
-   le autorizzazioni di Claude Code: altrimenti resta valido fino alla sua scadenza naturale,
-   circa un anno.
-
-Un'escalation `configuration` per un token scaduto si risolve allo stesso modo; poi l'operatore
-riprende le issue e le PR che ne hanno avuta una.
-
-### Revoca
-
-Un token esposto (in un log, in una chat, su una macchina persa) si revoca subito su claude.ai,
-come al passo 5 della rotazione, e se ne crea uno nuovo come nella rotazione. Finché il file
-nella `key_dir` ha il token revocato, i turni di claude falliscono con un `401`. Alla migrazione su
-un'altra macchina si crea un token nuovo sulla macchina nuova e si revoca quello della vecchia,
-come per le chiavi delle app.
+**Rollback.** La copia di prima rifiuta di partire con le directory delle CLI scrivibili da
+`devloop-agent`. Per tornare al pin precedente, a loop fermo, si richiudono come root
+(`chown root:root` e `chmod 755` su `~/.claude`, `~/.codex`, `~/.gemini` e
+`~/.gemini/antigravity-cli` di `devloop-agent`), poi il pin a mano; i segnaposto restano, e il
+rinnovo dei login torna quello rotto del #438.
 
 ## Dati di ssdlc nei prompt
 

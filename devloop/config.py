@@ -11,7 +11,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import claudetoken
+from .agentuser import allowed_entries
 from .localtests import CI_LOG_FORMATS, SELECTIONS, Tests
 from .localtests import MODES as LOCAL_TESTS_MODES
 from .policy import MAX_LEVEL, MIN_LEVEL, ZERO_LEVEL, ReviewPolicy
@@ -171,20 +171,12 @@ class AgentUserPolicy:
     """``[agent_user]`` (#415): ``name``, the system user the agent CLIs and the test command
     run as, through sudo (``agentuser``), or '' to run them as the dispatcher's user, as before;
     ``check``, the startup check that the user cannot read ``key_dir`` nor ``state_dir`` (on by
-    default; off only in development)."""
+    default; off only in development); ``cli_denied``, entries of the list of the code of what
+    the directories of the agent user's CLIs may hold (``agentuser.CLI_ALLOWED``, #517) that
+    they may not hold here: the configuration only shortens that list, never extends it."""
     name: str = ''
     check: bool = True
-
-
-@dataclass(frozen=True)
-class ClaudeTokenPolicy:
-    """``[claude_token]`` (#507): with ``enabled``, every claude turn gets the long-lived token
-    of ``key_dir`` as ``CLAUDE_CODE_OAUTH_TOKEN`` (``claudetoken``); one alert from
-    ``rotate_days`` after its issue, and the turns refused from ``max_days``, at most
-    ``claudetoken.MAX_DAYS``. Off by default: Claude Code uses its own login, as before."""
-    enabled: bool = False
-    rotate_days: int = claudetoken.ROTATE_DAYS
-    max_days: int = claudetoken.MAX_DAYS
+    cli_denied: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -650,8 +642,6 @@ class Config:
     gc: GCPolicy = field(default_factory=GCPolicy)
     # The system user of the agents and of the tests (#415).
     agent_user: AgentUserPolicy = field(default_factory=AgentUserPolicy)
-    # The long-lived token of the claude turns (#507).
-    claude_token: ClaudeTokenPolicy = field(default_factory=ClaudeTokenPolicy)
     # Code paths and their documents, listed in the implement, fix and review prompts (#203).
     docs: DocsMap = field(default_factory=DocsMap)
     # The project's data in the prompts (ADR 0006, R4).
@@ -1224,7 +1214,8 @@ _USER_NAME = re.compile(r'[a-z_][a-z0-9_-]{0,31}')
 
 def parse_agent_user(table):
     """``[agent_user]`` (#415): ``name``, a system user name or '' (default: off); ``check``, a
-    boolean (default true)."""
+    boolean (default true); ``cli_denied`` (#517), a list of entries of
+    ``agentuser.CLI_ALLOWED`` (default none): any other is refused."""
     if not isinstance(table, dict):
         raise ConfigError('agent_user: expected a table')
     unknown = set(table) - {f.name for f in dataclasses.fields(AgentUserPolicy)}
@@ -1240,40 +1231,17 @@ def parse_agent_user(table):
         if not isinstance(table['check'], bool):
             raise ConfigError('agent_user.check: expected true or false')
         values['check'] = table['check']
+    if 'cli_denied' in table:
+        denied = table['cli_denied']
+        if not isinstance(denied, list) or not all(isinstance(e, str) for e in denied):
+            raise ConfigError('agent_user.cli_denied: expected a list of entries of the CLIs, '
+                              'such as ".codex/memories_1.sqlite*"')
+        try:
+            allowed_entries(denied)
+        except ValueError as exc:
+            raise ConfigError(f'agent_user.cli_denied: {exc}') from None
+        values['cli_denied'] = tuple(dict.fromkeys(denied))
     return AgentUserPolicy(**values)
-
-
-def parse_claude_token(table):
-    """``[claude_token]`` (#507): ``enabled``, a boolean (default false); ``rotate_days``
-    (default 30) and ``max_days`` (default 90), whole numbers of at least 1, ``max_days`` at
-    most ``claudetoken.MAX_DAYS``, the cap of the code that the configuration may only lower,
-    and ``rotate_days`` at most ``max_days``."""
-    if not isinstance(table, dict):
-        raise ConfigError('claude_token: expected a table')
-    unknown = set(table) - {f.name for f in dataclasses.fields(ClaudeTokenPolicy)}
-    if unknown:
-        raise ConfigError(f'claude_token: unknown keys {sorted(unknown)}')
-    values = {}
-    if 'enabled' in table:
-        if not isinstance(table['enabled'], bool):
-            raise ConfigError('claude_token.enabled: expected true or false')
-        values['enabled'] = table['enabled']
-    for key, cap in (('rotate_days', None), ('max_days', claudetoken.MAX_DAYS)):
-        if key not in table:
-            continue
-        value = table[key]
-        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
-            raise ConfigError(f'claude_token.{key}: expected a whole number of days, at least 1')
-        if cap is not None and value > cap:
-            raise ConfigError(f'claude_token.{key}: {value} is beyond {cap}, the cap of the '
-                              'code, which the configuration may only lower')
-        values[key] = value
-    policy = ClaudeTokenPolicy(**values)
-    if policy.rotate_days > policy.max_days:
-        raise ConfigError(f'claude_token.rotate_days: {policy.rotate_days} is beyond max_days '
-                          f'= {policy.max_days}: the alert of the rotation would never come '
-                          'before the turns are refused')
-    return policy
 
 
 def _no_tokens(table, where):
@@ -1720,6 +1688,7 @@ def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
     it enters the version of the review policy, and so every receipt. ``agent_test_cmd``, when
     given, is the test command the default commands of agy derive from instead of
     ``test_cmd``: the agents' permissions are the installation's and the overlay's (D2)."""
+    refuse_removed(data, 'config')
     if 'test_cmd' not in data:
         # The installation has none since ADR 0006, R3: it is a fact of the project.
         raise ConfigError("config: missing 'test_cmd': set it in the project file on the host, "
@@ -1924,7 +1893,6 @@ def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
         ci=parse_ci(data.get('ci', {})),
         gc=parse_gc(data.get('gc', {})),
         agent_user=parse_agent_user(data.get('agent_user', {})),
-        claude_token=parse_claude_token(data.get('claude_token', {})),
         delegations=delegations,
         docs=parse_docs(data),
         prompts=parse_prompts(data.get('prompts', {}), merge),
@@ -2022,8 +1990,7 @@ OVERLAY_KEYS = {
     'ci': dict.fromkeys(('grace_minutes', 'required_timeout_minutes')),
     'gc': dict.fromkeys(('pins', 'keep_pins', 'worktrees', 'logs', 'log_days',
                          'interval_minutes')),
-    'agent_user': dict.fromkeys(('name', 'check')),
-    'claude_token': dict.fromkeys(('enabled', 'rotate_days', 'max_days')),
+    'agent_user': dict.fromkeys(('name', 'check', 'cli_denied')),
     'docs': {'map': {'*': None}},
     'tests': {'selection': None, 'source_prefixes': None, 'dir_modules': {'*': None},
               'ci_log_format': None},
@@ -2035,6 +2002,28 @@ OVERLAY_KEYS = {
     # Every key of [budget] (#365) is checked by ``parse_budget``, a token cap with its message.
     'budget': {'*': None},
 }
+
+
+# The tables devloop no longer has, with why and what to do: a configuration that names one is
+# refused with that message, not with the generic one of an unknown key.
+REMOVED_TABLES = {
+    'claude_token': (
+        '[claude_token] was removed (#517): the long-lived token of the claude turns (#507) is '
+        'no longer used, since the agent user\'s CLIs save their own logins in directories with '
+        'the sticky bit (ops/host/setup-agent-user.sh). Remove the table from the '
+        'configuration, the token file claude.<date>.oauth-token from key_dir, and revoke the '
+        'token on claude.ai (ops/host/migrate.md, "Directory delle CLI con lo sticky bit '
+        '(#517)")'),
+}
+
+
+def refuse_removed(table, where):
+    """Raise ConfigError when ``table``, a configuration read from ``where``, names a table of
+    ``REMOVED_TABLES``."""
+    if isinstance(table, dict):
+        for key in table:
+            if key in REMOVED_TABLES:
+                raise ConfigError(f'{where}: {REMOVED_TABLES[key]}')
 
 
 def _check_overlay(table, schema, where):
@@ -2067,6 +2056,7 @@ def apply_overlay(data, overlay):
     """``data`` with the keys of ``overlay`` (the local config, #174) set over it: tables merge
     key by key, any other value (a list too) replaces the one below. A key that config.toml
     cannot have is refused."""
+    refuse_removed(overlay, 'local config')
     _check_overlay(overlay, OVERLAY_KEYS, '')
     return _merge(data, overlay)
 
@@ -2206,6 +2196,7 @@ def compose(data, project=None, overlay=None):
     file added on top. ``project`` and ``overlay`` are parsed tables, or None without the file.
     A key the project file cannot have is refused, naming it."""
     if project is not None:
+        refuse_removed(project, 'project file')
         _check_project(project, PROJECT_KEYS, OVERLAY_KEYS)
         data = _merge(data, _facts(project))
     if overlay is not None:

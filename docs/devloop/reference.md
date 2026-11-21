@@ -122,19 +122,21 @@ not a whole number of at least 1, or an unknown key, stops devloop at startup.
 user the agent CLIs and the test command run as, and `check` (default `true`), the startup check
 that it cannot read `key_dir` nor `state_dir`, nor change the instructions, the configuration
 and the binaries of its CLIs (#438), and that it can write what its CLIs create on their first
-use (#494). Every claude turn, with or without an agent user, gets
+use (#494), and `cli_denied` (default `[]`, #517), entries of the list of the code of what the
+directories of its CLIs may hold (`CLI_ALLOWED` in `devloop/agentuser.py`, written as there,
+such as `".codex/memories_1.sqlite*"`) that they may not hold on this host: the configuration
+only shortens the list, so an entry that is not in it stops devloop at startup, and a new one
+goes through a pull request. Every claude turn, with or without an agent user, gets
 `--settings` with the auto memory off (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`,
 `autoMemoryEnabled: false`), over the settings of the project in the worktree; a `--settings` in
 the `write_args` or `review_args` of a claude agent stops devloop at startup. A `name` that is
 not a system user name, a `check`
-that is not a boolean, or an unknown key, stops devloop at startup, and so does a `name` the
-system does not know.
-`[claude_token]` sets the [long-lived token of the claude turns](#claude-token) (#507):
-`enabled` (default `false`), `rotate_days` (default 30) and `max_days` (default 90, at most 90,
-a cap of the code that the configuration and the overlay may only lower). An `enabled` that is
-not a boolean, a `rotate_days` or `max_days` that is not a whole number of at least 1, a
-`max_days` beyond 90, a `rotate_days` beyond `max_days`, or an unknown key, stops devloop at
-startup. It applies at the next start.
+that is not a boolean, a `cli_denied` that is not a list of entries of the list of the code, or
+an unknown key, stops devloop at startup, and so does a `name` the
+system does not know. `[claude_token]`, the long-lived token of the claude turns of #507, was
+removed (#517): a configuration file that names that table (`config.toml`, the project file or
+the overlay) stops devloop at startup with a message that says to remove it, delete the token
+file from `key_dir` and revoke the token.
 `[docs] map` sets the
 [documentation map](#documentation-map). Operator overrides go into the
 [local overlay](guide.md#local-config-as-an-overlay), not into this file. A running
@@ -1435,38 +1437,6 @@ environment are kept. This prevents accidental use of the operator's credentials
 deliberate access: code running as the same system user can still read files. The isolation
 comes from the [agent user](#agent-user), which cannot read the keys at all.
 
-### Claude token
-
-The agent user's `~/.claude` is root's (#438), so Claude Code cannot save the access token it
-renews. With `[claude_token] enabled = true` (#507) every claude turn, and only those (never the
-test command nor the other agents), gets in its environment `CLAUDE_CODE_OAUTH_TOKEN`, a
-long-lived token the operator generates with `claude setup-token` (`devloop/claudetoken.py`):
-
-- **File.** `claude.<YYYY-MM-DD>.oauth-token` in `key_dir` (`$DEVLOOP_APP_KEY_DIR` or
-  `[apps] key_dir`), which the agent user cannot read nor enter; the date in the name is the
-  day the token was issued (UTC). Read at each claude turn: exactly one such file, a regular
-  file opened without following a link, with a single link, not readable by group or others,
-  holding the token alone on one line.
-- **Age.** From `rotate_days` after the issue the dispatcher publishes one alert on
-  `[run].alert_issue`, with the procedure of the rotation, per token file
-  (`claude-token-alerted.json` in `state_dir`; with the outbox an uncertain alert is only
-  reconciled; without `alert_issue`, a warning in the log once per process). From `max_days`,
-  and for a name without a valid date, a date in the future, no file, more than one, or one
-  that cannot be read as above, every claude turn is refused before its CLI starts
-  (`CredentialRefused`) with an escalation `configuration` to the operator, which names the
-  file and why; the log warns once per process and problem.
-- **Secret.** The token is never in the dispatcher's own environment, a log, a record, a prompt
-  or a comment: devloop replaces it with `[REDACTED]` in the CLI's stdout and stderr before
-  reading them, so the turn's log, its telemetry, the tail and the command of its output, the
-  message of a failed turn (also when cut) and the reason of an unavailable model never hold
-  it, nor a part of it; the message and every text attribute of a failed turn's error, and of
-  the errors it was raised from, are cleaned again before they leave the runner.
-
-Off, Claude Code uses its own login, as before. Creation, rotation and revocation are in
-[ops/host/migrate.md](../../ops/host/migrate.md#token-di-claude-per-lutente-degli-agent-507);
-`ops/host/check-host.sh` shows the age of the token and reports an expired one, and a
-`.credentials.json` left to the agent user.
-
 ### Identities of a project
 
 The identities and the trust of a project are the operator's, in the
@@ -1589,6 +1559,20 @@ is in the [guide](guide.md#agent-user) and in the [ops guide](../../ops/README.m
   `SETENV`, and sudo 1.9 refuses `-E` without it: either way devloop exits before taking the
   lock and says which, with the fix of sudo-rs (`update-alternatives --set sudo
   /usr/bin/sudo.ws`, as root).
+- **Directories of the CLIs** (#517). `~/.claude`, `~/.codex`, `~/.gemini` and
+  `~/.gemini/antigravity-cli` of the agent user are root's, of its group, mode `1770`: the probe
+  above wants each a sticky directory it can write but does not own (problem "finds no sticky
+  directory at", "cannot write"), and a placeholder of root for each sealed entry
+  (`CLI_SEALED`) that does not exist. Then, and before every turn of any CLI, devloop lists the
+  four directories as the agent user (`AgentUser.cli_state`, `/usr/bin/bash` with the system's
+  `find`): each may hold only the entries of `CLI_ALLOWED` less `[agent_user] cli_denied`, with
+  their type (`f` a regular file, `d` a directory; a link is never one), the sealed entries and
+  the directories of the CLIs, these two root's. Anything else stops devloop at startup, or
+  refuses the turn before its CLI starts (`agents.CliStateRefused`), with an escalation of class
+  `configuration` that names the entry; so does a listing that fails or does not end. Before
+  the listing, the entries of `CLI_CLEARED` of the CLI of the turn (the memories of codex, the
+  memories, knowledge and summaries of agy) are removed, without following links, when no
+  other turn of that CLI is running in the same process.
 - **Transcripts.** The stall check and `devloop follow` read the session transcripts in the agent
   user's home.
 

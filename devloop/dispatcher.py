@@ -186,14 +186,12 @@ from pathlib import Path
 from .agents import (TAIL_LINES, AgentError, ModelsUnavailable, ModelUnavailable, NoOutput,
                      PermissionDenied, background_unfinished, denied_retry_note)
 from .apps import DISPATCHER, ISSUE_COMMENT, PR_COMMENT, SUPERVISOR, app_login
-from .claudetoken import PROCEDURE as TOKEN_PROCEDURE
-from .claudetoken import RotationAlert, TokenRefused
 from .budget import BUDGET, OUTSIDE, BudgetRefused, extension_text
 from .budget import of_issue as budget_of_issue
 from .budget import reserve as budget_reserve
 from .budget import status_lines as budget_status_lines
 from .config import INSTALL_ROOT, LEGACY_NEEDS_OPERATOR, ConfigError, key_role
-from .context import (LABEL_STYLE, _credential_refused, _describe_bases, _failure_text,
+from .context import (LABEL_STYLE, _cli_state_refused, _describe_bases, _failure_text,
                       _open_findings_reason,
                       _render_issue_comments, both_labels_warning, issue_decisions,
                       label_transition, refused_approvals, transition_labels)
@@ -631,13 +629,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
     def __init__(self, cfg, gh: Backend, ws, runner, log=print, identities=None, activity=None,
                  ledger=None, merger=None, pinner=None, memory=None, clock=time.time,
                  advisory_results=None, advisory_failures=None, housekeeping=None,
-                 main_alerts=None, token_alerts=None):
+                 main_alerts=None):
         self.cfg = cfg
-        # The claude token whose rotation was last alerted (#507, ``RotationAlert``): in
-        # ``state_dir`` from ``devloop``, in memory without it; and what this process last
-        # logged of the token (``_watch_claude_token``).
-        self.token_alerts = token_alerts if token_alerts is not None else RotationAlert()
-        self._token_logged = None
         # The commit of the base branch whose red CI was last alerted (#459, ``MainAlerts``):
         # in ``state_dir`` from ``devloop``, in memory without it; and the one this process
         # last logged.
@@ -1467,7 +1460,6 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         if not dry_run:
             self._housekeeping()
             self._watch_journal()
-            self._watch_claude_token()
             self._resume_publications()
             self._signal_dropped()
             self._watch_main()
@@ -1526,7 +1518,6 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                 return []
             self.log(restart_line(self._restart[0], iso(self._restart[1]), len(running)))
         self._watch_journal()
-        self._watch_claude_token()
         self._resume_publications()
         self._signal_dropped()
         self._watch_main()
@@ -1950,12 +1941,13 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                        'finché la storia non copre il turno. Una nuova head non resta sospesa '
                        'in silenzio: la sua review consultiva viene ritentata e, se rifiutata, '
                        'segnalata con un\'altra escalation.')
-        if _credential_refused(exc):
-            reason += ('\n\nIl token di lunga durata dei turni di claude (`[claude_token]`) non '
-                       'è utilizzabile: l\'operatore lo ruota con `claude setup-token` e revoca '
-                       'quello vecchio, come in `ops/host/migrate.md`, sezione "Token di claude '
-                       'per l\'utente degli agent (#507)".')
-        cls = ('configuration' if _credential_refused(exc)  # the claude token (#507)
+        if _cli_state_refused(exc):
+            reason += ('\n\nLe directory delle CLI dell\'utente degli agent contengono una voce '
+                       'che devloop non ammette (#517). A loop fermo, l\'operatore la rimuove '
+                       'come utente degli agent e cerca il turno o i test che l\'hanno scritta, '
+                       'oppure la aggiunge alla lista con una PR, come in `ops/host/migrate.md`, '
+                       'sezione "Directory delle CLI con lo sticky bit (#517)".')
+        cls = ('configuration' if _cli_state_refused(exc)  # the CLIs' entries (#517)
                else TOOL_FAILURE if isinstance(exc, AgentError)
                else 'untrusted' if isinstance(exc, UntrustedChange)
                else BUDGET if isinstance(exc, BudgetRefused)
@@ -2172,80 +2164,6 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         except JournalError as exc:
             self.log(f'  the alert of the size of the journal is not recorded in it: {exc}')
         self.log(f'  alert of the size of the journal published on #{issue}')
-
-    def _watch_claude_token(self):
-        """The age of the claude token (#507), with ``[claude_token] enabled`` (the runner's
-        ``claude_token``). A token that may not be used (missing, without a valid date, beyond
-        ``max_days``) is a warning in the log, once per process and problem: the turns refuse
-        it themselves, with an escalation ``configuration``. From ``rotate_days`` the operator
-        gets one alert on ``[run].alert_issue`` per token file, with the procedure of the
-        rotation, recorded in ``state_dir`` (``RotationAlert``); without ``alert_issue`` a
-        warning in the log, once per process. With the outbox an alert whose outcome is
-        uncertain is only reconciled. A failed alert is tried again at the next tick."""
-        token = getattr(self.runner, 'claude_token', None)
-        if token is None:
-            return
-        try:
-            current = token.status()
-        except TokenRefused as exc:
-            current, problem = None, str(exc)
-        else:
-            problem = current.problem
-        if problem and self._token_logged != problem:
-            self._token_logged = problem
-            self.log(f'WARNING: claude token: {problem}: the claude turns are refused until the '
-                     f'operator rotates it ({TOKEN_PROCEDURE})')
-        if current is None or not current.rotate:
-            return
-        name = current.path.name
-        issue = self.cfg.run.alert_issue
-        if self.token_alerts.alerted(name):
-            return
-        if self._token_logged != name and not problem:
-            self._token_logged = name
-            self.log(f'WARNING: claude token {name} issued {current.age} days ago, from '
-                     f'rotate_days = {token.rotate_days}: rotate it before max_days = '
-                     f'{token.max_days} ({TOKEN_PROCEDURE})'
-                     + ('' if issue else '; no [run].alert_issue is configured: this warning is '
-                                         'only in the log'))
-        if not issue:
-            return
-        key = f'claude_token:{name}'
-        outbox = getattr(self.identities, 'outbox', None)
-        try:
-            state = outbox.alerts().get(key) if outbox is not None else None
-        except (GitHubError, JournalError) as exc:
-            self.log(f'  the alert of the claude token cannot be checked: {exc}')
-            return
-        if state is not None and state != PUBLISHED:
-            return  # uncertain: the outbox reconciles it, and no other alert meanwhile
-        if state is None:
-            expired = (f' e ha già superato `max_days` = {token.max_days}: i turni di claude '
-                       'sono rifiutati' if problem else
-                       f'; dopo `max_days` = {token.max_days} giorni i turni di claude saranno '
-                       'rifiutati')
-            body = publishable(
-                dispatcher_header()
-                + '\n## Token di claude da ruotare\n\n'
-                + f'Il token di lunga durata dei turni di claude (`{name}` nella `key_dir`) è '
-                  f'stato emesso il {current.issued}, {current.age} giorni fa: ha raggiunto '
-                  f'`rotate_days` = {token.rotate_days}{expired}.\n\n'
-                + 'Per ruotarlo, a loop fermo: `claude setup-token` come operatore, il token '
-                  'nuovo nella `key_dir` di devloop come `claude.<AAAA-MM-GG>.oauth-token` '
-                  '(mode 600, la data di oggi), il file vecchio rimosso, il token vecchio '
-                  'revocato su claude.ai, poi il riavvio. La procedura è in '
-                  '`ops/host/migrate.md`, sezione "Token di claude per l\'utente degli agent '
-                  '(#507)". Questo avviso si pubblica una volta per token.')
-            try:
-                self._alert(issue, body, [key])
-            except Exception as exc:  # one attempt per tick: its class, never its output
-                self._alert_failed('the alert of the claude token', issue, exc, [key])
-                return
-            self.log(f'  alert of the rotation of the claude token published on #{issue}')
-        try:
-            self.token_alerts.mark(name)
-        except OSError as exc:
-            self.log(f'  the alert of the claude token is not recorded, it may repeat: {exc}')
 
     def _alert(self, issue, body, covers):
         """Publish an alert on ``issue`` (#397). With the outbox, its publication names what it

@@ -1046,7 +1046,7 @@ next to the review; one for the trust policy gets none (#434, see
 | `reviewer_decision`, `open_findings` | A reviewer asks for a decision; an approval leaves open findings only the operator can close (`ci` findings with the head's CI still running, or passed during the review, wait for it instead) | Yes |
 | `review_level`, `level_zero` | Not enough independent reviewers; a level-0 head that cannot be promoted | Yes |
 | `sync_sensitive`, `protected_paths` | A sync conflict on a sensitive or operator-only path; a change to `protected_paths` | Yes |
-| `tests_failed`, `blocked`, `interrupted`, `unattributable`, `lost_meta`, `inconsistent`, `configuration`, `failure` | Tests still failing (or no change), an agent that declared itself blocked, an interrupted implementation, findings without an owner, a lost PR marker, an inconsistent PR state, a configuration to decide (a claude turn refused for its [token](reference.md#claude-token), #507, also in a sync), a `gh`, git or dispatcher error | Yes |
+| `tests_failed`, `blocked`, `interrupted`, `unattributable`, `lost_meta`, `inconsistent`, `configuration`, `failure` | Tests still failing (or no change), an agent that declared itself blocked, an interrupted implementation, findings without an owner, a lost PR marker, an inconsistent PR state, a configuration to decide (a turn refused for an entry of the directories of the CLIs that is not in the [list](#agent-user), #517, also in a sync), a `gh`, git or dispatcher error | Yes |
 | `host_tests` | Local tests that fail on the base commit of the branch too, but pass in the CI of that commit: a [failure of the host](#tests-red-on-the-base-too), not of `main` | Yes |
 | `receipt_conflict` | The [receipt of the PR](protocol.md#pr-receipt) contradicts the markers at its promotion | Yes |
 | `retry_limit`, `supervisor_escalated`, `supervisor_refused` | The supervisor's retries are spent, it handed the escalation over, or it gave a command the escalation does not admit | Yes |
@@ -2418,25 +2418,50 @@ a host already in service is in
   CLIs are root's, and `devloop-agent` writes only its credentials, sessions, caches and logs.
   Its home is root's and sticky (`1770`, its group): it creates the state and cache entries of
   the CLIs there (such as `~/.claude.json`, which stays its own) but cannot rename nor remove
-  root's. `~/.claude`, `~/.codex`, `~/.gemini`, `~/.gemini/antigravity-cli` and `~/.local` are
-  root's: it enters them but creates nothing there (an instruction file, an agent, a skill, a
-  hook). What carries instructions, configuration or binaries is root's, of the group of
-  `devloop-agent`, which reads it but cannot write it: `CLI_SEALED` in `devloop/agentuser.py`
-  (`settings.json`, `CLAUDE.md`, `rules`, `agents`, `commands`, `skills`, `hooks`,
-  `output-styles` and `plugins` of `~/.claude`; `config.toml`, `AGENTS.md`,
-  `AGENTS.override.md`, `prompts`, `rules`, `skills` and `packages` of `~/.codex`;
-  `~/.gemini/settings.json`, `~/.gemini/GEMINI.md`, `~/.gemini/antigravity-cli/settings.json`;
-  all of `~/.local`). The startup check above also refuses to start when, as `devloop-agent`, it
-  can write, own (an owner changes the mode), create, rename or remove any of them, or a CLI of
+  root's. `~/.claude`, `~/.codex`, `~/.gemini` and `~/.gemini/antigravity-cli` are the same
+  (#517, decision of the operator): root's, of its group, `1770`, so the CLIs save their logins
+  with a temporary file and a `rename` (`.credentials.json` of claude, `auth.json` of codex with
+  its `auth.lock`), create their locks, caches and temporary files, but `devloop-agent` neither
+  renames nor removes what is root's there, nor the directories themselves. `~/.local` stays
+  root's, `755`. What carries instructions, configuration, plugins or binaries is root's, of the
+  group of `devloop-agent`, which reads it but cannot write it: `CLI_SEALED` in
+  `devloop/agentuser.py` (`settings.json`, `CLAUDE.md`, `rules`, `agents`, `commands`, `skills`,
+  `hooks`, `output-styles` and `plugins` of `~/.claude`; `config.toml`, `AGENTS.md`,
+  `AGENTS.override.md`, `prompts`, `rules`, `skills`, `packages`, `plugins` and `memories` of
+  `~/.codex`; `~/.gemini/settings.json`, `~/.gemini/GEMINI.md`,
+  `~/.gemini/antigravity-cli/settings.json`; all of `~/.local`). Each one that does not exist is
+  a placeholder of root, made by the setup script (an empty file when the name has a suffix,
+  `{}` for a JSON file, an empty directory otherwise), so `devloop-agent` cannot create it. The
+  startup check above also refuses to start when, as `devloop-agent`, it can write, own (an
+  owner changes the mode), create, rename or remove any of them, or a CLI of
   `~/.local/bin`, the file it leads to and that file's directory; in a directory above them that
   it can write, only the sticky bit protects an entry, and only when neither the entry nor the
   directory is its own. A link along these paths, or inside them, is followed one step at a
   time, and what it leads to must be protected the same way; a link that cannot be followed (a
   loop) is refused. It also refuses a file of them that `devloop-agent` cannot read, or a
-  directory it cannot enter. The check runs only the system's tools (`PATH=/usr/bin:/bin`),
-  never those of `~/.local/bin`, which comes first in the PATH of `devloop-agent`.
-- What a CLI creates on its first use inside the directories of the CLIs, where `devloop-agent`
-  creates nothing, stays its own (#494): `CLI_WRITABLE` in `devloop/agentuser.py`,
+  directory it cannot enter, and a directory of the CLIs that is not sticky, or that it cannot
+  write. The check runs only the system's tools (`PATH=/usr/bin:/bin`), never those of
+  `~/.local/bin`, which comes first in the PATH of `devloop-agent`.
+- The directories of the CLIs may hold only the entries of a list in the code, each with its
+  type (#517, `CLI_ALLOWED` in `devloop/agentuser.py`, `AGENT_CLI_ALLOWED` in `ops/lib.sh`:
+  logins and their temporary files and locks, sessions, caches, logs, databases of the CLIs),
+  besides the sealed entries and the directories of the CLIs, which must be root's. At the
+  start, in `ops/host/check-host.sh` and before every turn, devloop lists them as
+  `devloop-agent`: an unknown entry, one of another type (a link where a file is expected), or a
+  sealed one that `devloop-agent` made, refuses the turn before its CLI starts, with an
+  escalation `configuration` to the operator that names the entry (also in a sync, and when the
+  chain of models wraps it); a listing that fails refuses it too. `[agent_user] cli_denied` in
+  the overlay may take entries away from the list ([reference](reference.md#agent-user)), never
+  add one: a new entry goes through a pull request.
+- What a CLI may read again as context in a later session (#517): the memories of codex
+  (`~/.codex/memories_1.sqlite*`) and the memories, knowledge and summaries of agy (`brain`,
+  `implicit`, `builtin`, `conversation_summaries.db*` and `jetbox_summaries_proto.pb*` of
+  `~/.gemini/antigravity-cli`) are removed, as `devloop-agent`, before each turn of that CLI
+  (`CLI_CLEARED`), unless another turn of the same CLI is still running: removing them would take
+  them from under that turn, and turns that run together share the home anyway. The CLI starts
+  them again empty. `~/.codex/memories` is sealed, and the auto memory of Claude Code is off
+  (below).
+- What a CLI creates on its first use inside the directories of the CLIs stays its own (#494): `CLI_WRITABLE` in `devloop/agentuser.py`,
   `~/.gemini/antigravity-cli/bin`, where agy writes the wrapper of its shell tool. The setup
   script creates it as `devloop-agent`'s, mode `700`, and the startup check refuses to start
   when `devloop-agent` cannot write it. Since a turn could leave there an executable for the
@@ -2499,15 +2524,10 @@ user](#agent-user)); until then devloop refuses to start. Log in to each CLI onc
 interactive session of the agent user (`sudo -iu devloop-agent`), and check that
 `claude --version`, `codex --version` and `agy --version` answer there.
 
-With `~/.claude` root's, Claude Code cannot save the access token it renews, and its login of
-the agent user stops working when it expires. The claude turns then use a long-lived token
-instead (#507, [reference](reference.md#claude-token)): the operator generates it with `claude
-setup-token`, puts it in `key_dir` as `claude.<YYYY-MM-DD>.oauth-token` and sets
-`[claude_token] enabled = true`; devloop passes it to each claude turn only, as
-`CLAUDE_CODE_OAUTH_TOKEN`. One alert on `[run].alert_issue` from `rotate_days` (default 30)
-asks to rotate it; from `max_days` (default 90, at most 90) the claude turns are refused with an
-escalation `configuration`. The old token is revoked at each rotation, and the agent user's
-`~/.claude/.credentials.json` is removed ([ops/host/migrate.md](../../ops/host/migrate.md#token-di-claude-per-lutente-degli-agent-507)).
+Each CLI renews and saves its own login in its directory, sticky since #517: the long-lived
+token of claude of #507 (`[claude_token]`) was removed, and a configuration that still names
+that table is refused at startup with what to do
+([ops/host/migrate.md](../../ops/host/migrate.md#directory-delle-cli-con-lo-sticky-bit-517)).
 
 **Updating them by hand, with the loop stopped** (decision of the operator, 2026-11-17). No turn
 may start while a binary is being replaced, so:

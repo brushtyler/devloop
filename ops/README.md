@@ -285,32 +285,46 @@ configurazione o i binari delle CLI per i turni dopo, per esempio aggiungendo a
 - la home di `devloop-agent` è di root, `1770`, del gruppo di `devloop-agent`, con lo sticky bit:
   `devloop-agent` vi crea le voci di stato e di cache delle CLI (per esempio `~/.claude.json`), ma
   non rinomina né rimuove quelle di root;
-- `~/.claude`, `~/.codex`, `~/.gemini`, `~/.gemini/antigravity-cli`, `~/.local` e `~/.local/bin`
-  sono di root, `755`: `devloop-agent` vi entra ma non vi crea nulla (un file di istruzioni, un
-  agent, una skill, un hook);
-- ciò che porta istruzioni, configurazione o binari (`AGENT_CLI_SEALED` di `ops/lib.sh`, come in
-  `devloop/agentuser.py`: `~/.claude/settings.json`, scritto senza aggiornamenti automatici,
-  `~/.claude/CLAUDE.md`, `rules`, `agents`, `commands`, `skills`, `hooks`, `output-styles` e
-  `plugins` di `~/.claude`, `~/.codex/config.toml`, `AGENTS.md`, `AGENTS.override.md`,
-  `prompts`, `rules`, `skills` e `packages` di `~/.codex`, `~/.gemini/settings.json`,
-  `~/.gemini/GEMINI.md`, `~/.gemini/antigravity-cli/settings.json` e tutto `~/.local`) diventa di
-  root, del gruppo di `devloop-agent`, leggibile e attraversabile dal gruppo e senza scrittura
-  per gruppo e altri (`chmod -R g+rX,go-w`): un `settings.json` 600 o una directory 700 restano
-  leggibili da `devloop-agent`, che non li scrive e non ne cambia il modo. Un link che porta
+- `~/.claude`, `~/.codex`, `~/.gemini` e `~/.gemini/antigravity-cli` sono come la home (#517):
+  di root, del gruppo di `devloop-agent`, `1770`. Le CLI vi salvano i loro login con un file
+  temporaneo e un `rename` (`.credentials.json` di claude, `auth.json` di codex con `auth.lock`),
+  e vi creano lock, cache e temporanei; `devloop-agent` non vi rinomina né rimuove ciò che è di
+  root, né le directory stesse. `~/.local` e `~/.local/bin` sono di root, `755`;
+- ciò che porta istruzioni, configurazione, plugin o binari (`AGENT_CLI_SEALED` di `ops/lib.sh`,
+  come in `devloop/agentuser.py`: `~/.claude/settings.json`, scritto senza aggiornamenti
+  automatici, `~/.claude/CLAUDE.md`, `rules`, `agents`, `commands`, `skills`, `hooks`,
+  `output-styles` e `plugins` di `~/.claude`, `~/.codex/config.toml`, `AGENTS.md`,
+  `AGENTS.override.md`, `prompts`, `rules`, `skills`, `packages`, `plugins` e `memories` di
+  `~/.codex`, `~/.gemini/settings.json`, `~/.gemini/GEMINI.md`,
+  `~/.gemini/antigravity-cli/settings.json` e tutto `~/.local`) diventa di root, del gruppo di
+  `devloop-agent`, leggibile e attraversabile dal gruppo e senza scrittura per gruppo e altri
+  (`chmod -R g+rX,go-w`): un `settings.json` 600 o una directory 700 restano leggibili da
+  `devloop-agent`, che non li scrive e non ne cambia il modo. Ognuna che non esiste diventa un
+  segnaposto di root (#517: un file vuoto se il nome ha un'estensione, `{}` per un `.json`,
+  altrimenti una directory vuota), che `devloop-agent` non può creare né rinominare o rimuovere
+  nelle directory con lo sticky bit. Un link che porta
   fuori da ciò che è sigillato (anche un eseguibile di `~/.local/bin` che porta fuori da
   `~/.local` e da `~/.codex/packages`), o una directory delle CLI che è un link, è segnalato da
   rendere di root a mano: `chown -h` cambia il link, non il file a cui porta;
-- restano di `devloop-agent` le altre voci che le CLI hanno creato nelle loro directory:
-  credenziali, sessioni (`~/.claude/projects`, `~/.codex/sessions`, che lo script crea), cache e
-  log. Le voci che una CLI crea al primo uso in una directory sigillata (`AGENT_CLI_WRITABLE` di
-  `ops/lib.sh`, come `CLI_WRITABLE` di `devloop/agentuser.py`: `~/.gemini/antigravity-cli/bin`,
-  dove agy scrive il wrapper del suo strumento di shell) le crea lo script, di `devloop-agent`,
-  `700`; prima di ogni turno di agy devloop rifiuta il turno se `bin` contiene altro che il
-  wrapper che agy vi scrive (#494). Una CLI che dopo un aggiornamento vuole creare una voce nuova
-  nella sua directory non ci riesce e si ferma con `permission denied`: si apre e si richiude come
-  qui sotto, e la voce va aggiunta all'elenco
-  ([host/migrate.md](host/migrate.md#una-cli-si-ferma-con-permission-denied)). Ciò che vi resta scrivibile non porta istruzioni
-  ai turni dopo: devloop avvia ogni turno di Claude Code senza la memoria automatica di
+- restano di `devloop-agent` le altre voci che le CLI creano nelle loro directory: credenziali,
+  sessioni (`~/.claude/projects`, `~/.codex/sessions`, che lo script crea), cache, database e
+  log. Le directory possono contenere solo le voci della lista del codice, con il loro tipo
+  (#517: `AGENT_CLI_ALLOWED` di `ops/lib.sh`, come `CLI_ALLOWED` di `devloop/agentuser.py`),
+  oltre a quelle sigillate e alle directory delle CLI, di root: devloop lo verifica all'avvio e
+  prima di ogni turno, come `devloop-agent`, e una voce sconosciuta rifiuta il turno con
+  un'escalation `configuration` che la nomina; `setup-agent-user.sh` e `check-host.sh` la
+  segnalano. Una voce nuova di una CLI si aggiunge alla lista con una PR
+  ([host/migrate.md](host/migrate.md#una-voce-sconosciuta-in-una-directory-delle-cli));
+  `[agent_user] cli_denied` nell'overlay può solo togliere voci dalla lista. Le voci che una CLI
+  crea al primo uso (`AGENT_CLI_WRITABLE` di `ops/lib.sh`, come `CLI_WRITABLE` di
+  `devloop/agentuser.py`: `~/.gemini/antigravity-cli/bin`, dove agy scrive il wrapper del suo
+  strumento di shell) le crea lo script, di `devloop-agent`, `700`; prima di ogni turno di agy
+  devloop rifiuta il turno se `bin` contiene altro che il wrapper che agy vi scrive (#494). Ciò
+  che vi resta scrivibile non porta istruzioni ai turni dopo: prima di ogni turno di codex o di
+  agy devloop rimuove le memorie che quella CLI rileggerebbe in una sessione successiva
+  (`memories_1.sqlite*` di codex; `brain`, `implicit`, `builtin`, `conversation_summaries.db*` e
+  `jetbox_summaries_proto.pb*` di agy), se nessun altro turno della stessa CLI è in corso;
+  `~/.codex/memories` è sigillata; devloop avvia ogni turno di Claude Code senza la memoria automatica di
   `~/.claude/projects` (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` nell'ambiente e, perché i settings
   del progetto nel worktree non la riaccendano, anche in `--settings`) e senza i server MCP di
   `~/.claude.json` (`--strict-mcp-config`). Un `--settings` nei `write_args` o nei `review_args`
@@ -380,20 +394,6 @@ suo installatore. Tutto come utente `devloop-agent` (`sudo -iu devloop-agent`), 
 
 Per ciascuna: login (`claude`, `codex`, `agy` avviati una volta in una sessione interattiva) e
 verifica con `~/.local/bin/<cli> --version`.
-
-**claude: token di lunga durata (#507).** Con `~/.claude` di root Claude Code non salva il token
-che rinnova, e il suo login smette di funzionare alla scadenza. Per i turni di claude l'operatore
-genera quindi con `claude setup-token` un token OAuth di lunga durata e lo mette nella `key_dir`
-di `devloop` come `claude.<AAAA-MM-GG>.oauth-token` (mode 600, la data di emissione nel nome),
-con `[claude_token] enabled = true` nell'overlay: devloop lo passa a ogni turno di claude, e solo
-a quelli, come `CLAUDE_CODE_OAUTH_TOKEN`, e non lo scrive mai in log, record, prompt o output.
-Va **ruotato ogni 1-3 mesi**: da `rotate_days` (default 30) devloop avvisa una volta su
-`[run].alert_issue`, da `max_days` (default 90, al più 90: l'overlay può solo abbassarlo) rifiuta
-i turni di claude con un'escalation `configuration`. A ogni rotazione il token vecchio va
-**revocato** su claude.ai. Con il token, il `~/.claude/.credentials.json` di `devloop-agent` va
-tolto: `check-host.sh` ne segnala la presenza. Creazione, rotazione e revoca, con i comandi, sono
-in [Token di claude per l'utente degli
-agent](host/migrate.md#token-di-claude-per-lutente-degli-agent-507).
 
 Gli aggiornamenti automatici restano spenti: devloop non deve avviare un turno mentre una CLI
 sostituisce il proprio eseguibile. Per Claude Code, `~/.claude/settings.json` con
@@ -481,12 +481,11 @@ esegua git nel primo worktree di `worktrees` (avviato da `devloop` con `sudo -n 
 `safe.directory` di quel worktree, come in un turno; senza worktree un avviso, #500),
 e che l'overlay abbia `[agent_user] name = "devloop-agent"`; la home di `devloop-agent` (1770,
 root) e, come `devloop-agent`, i file e i binari delle CLI, come il controllo all'avvio (#438);
+le directory delle CLI (1770, root, scrivibili e con lo sticky bit) e che contengano solo le voci
+della lista `AGENT_CLI_ALLOWED` (#517);
 che `sudo` non sia sudo-rs e che l'ambiente arrivi a `devloop-agent` con `sudo -n -E` come
 `devloop`, come il controllo all'avvio (#496; un errore con la correzione `update-alternatives
 --set sudo /usr/bin/sudo.ws`, o con il `SETENV` mancante);
-con `[claude_token] enabled`, il token di claude nella `key_dir` (uno solo, 600, di `devloop`)
-con la sua età, un avviso da `rotate_days` e un errore oltre `max_days` o senza una data valida,
-e un errore se resta `~/.claude/.credentials.json` di `devloop-agent` (#507);
 il lock per repository (la directory
 di root, 3770, del gruppo `devloop-repos`; `devloop` nel gruppo, `devloop-agent` e il supervisore
 fuori; `devloop-agent` che non vi entra; il file di `tmpfiles.d`; `repo_lock_dir` nell'overlay);

@@ -4,7 +4,6 @@ The scripts run here only with ``--dry-run`` and on temporary directories: a ``P
 records any command that would change the host (``sudo``, ``apt-get``, ``useradd``, …), and the
 tests check that none ran.
 """
-import datetime
 import getpass
 import grp
 import html
@@ -551,22 +550,25 @@ class RootStepsGuideTests(unittest.TestCase):
                 f'sudo -u devloop-agent -H /home/devloop-agent/.local/bin/{cli} ') and '"$P"' in c],
                 cli)
         self.assertNotIn('claude -p ciao', section)
-        # What to do when a CLI stops with permission denied on a sealed directory.
-        start = section.index('\n### Una CLI si ferma con `permission denied`\n')
+        # #517: what to do when a directory of the CLIs holds an entry devloop does not admit.
+        start = section.index('\n### Una voce sconosciuta in una directory delle CLI\n')
         case = section[start:]
         flat = ' '.join(case.split())
-        setup = f'sudo bash {self.OPERATOR}/ops/host/setup-agent-user.sh'
-        steps = [f'`{setup} --unseal`', 'avviare la CLI come `devloop-agent`', f'`{setup}`',
-                 '`AGENT_CLI_WRITABLE` di `ops/lib.sh`', '`CLI_WRITABLE` di `devloop/agentuser.py`']
+        steps = ['`sudo systemctl stop devloop`', 'come `devloop-agent`',
+                 'rimuoverla come `devloop-agent`', '`CLI_ALLOWED` di `devloop/agentuser.py`',
+                 '`AGENT_CLI_ALLOWED` di `ops/lib.sh`', '`CLI_CLEARED`',
+                 f'`sudo bash {self.OPERATOR}/ops/host/check-host.sh --no-apps`']
         at = -1
         for step in steps:
             with self.subTest(step=step):
                 self.assertIn(step, flat[at + 1:])
                 at = flat.index(step, at + 1)
         self.assertIn('con una PR', flat)
-        self.assertIn('(#una-cli-si-ferma-con-permission-denied)', section)
-        self.assertIn('(host/migrate.md#una-cli-si-ferma-con-permission-denied)',
+        self.assertIn('(#una-voce-sconosciuta-in-una-directory-delle-cli)', section)
+        self.assertIn('(host/migrate.md#una-voce-sconosciuta-in-una-directory-delle-cli)',
                       (OPS / 'README.md').read_text(encoding='utf-8'))
+        self.assertNotIn('permission-denied', (OPS / 'host/migrate.md').read_text(
+            encoding='utf-8'))
 
     def test_the_activation_has_every_step_and_the_rollback(self):
         text = self.section(self.ACTIVATION)
@@ -942,11 +944,27 @@ class DryRunTests(OpsTestCase):
         agent = self.home / 'agent'
         self.assertIn(f'[dry-run] useradd --create-home --home-dir {agent} --shell /bin/bash '
                       'opsdry-noagent', out)
-        # #438: the home root's and sticky, the directories of the CLIs and ~/.local root's;
-        # the sessions the agent user's.
+        # #438: the home root's and sticky, ~/.local root's; #517: the directories of the CLIs
+        # root's, of the agent user's group and sticky, as the home; the sessions the agent
+        # user's.
         self.assertIn(f'[dry-run] install -d -m 1770 -o root -g opsdry-noagent {agent}\n', out)
-        for name in (*agentuser.CLI_DIRS, '.local', '.local/bin'):
+        for name in agentuser.CLI_DIRS:
+            self.assertIn(f'[dry-run] install -d -m 1770 -o root -g opsdry-noagent '
+                          f'{agent}/{name}\n', out)
+        for name in ('.local', '.local/bin'):
             self.assertIn(f'[dry-run] install -d -m 755 -o root -g root {agent}/{name}\n', out)
+        self.assertNotIn(f'-m 755 -o root -g root {agent}/.claude\n', out)
+        # #517: each sealed entry that does not exist is a placeholder of root: a file when
+        # its name has a suffix ({} for a JSON file), a directory otherwise.
+        for name in agentuser.CLI_SEALED[:-1]:  # .local: created above
+            if name.endswith('.json'):
+                line = f'install -m 644 -o root -g opsdry-noagent {OPS}/host/placeholder.json'
+            elif agentuser.placeholder_is_file(name):
+                line = 'install -m 644 -o root -g opsdry-noagent /dev/null'
+            else:
+                line = 'install -d -m 755 -o root -g opsdry-noagent'
+            self.assertIn(f'[dry-run] {line} {agent}/{name}\n', out)
+        self.assertEqual(json.loads((OPS / 'host/placeholder.json').read_text()), {})
         self.assertIn(f'[dry-run] install -d -m 750 -o opsdry-noagent -g opsdry-noagent '
                       f'{agent}/.claude/projects', out)
         self.assertIn(f'scriverebbe {agent}/.claude/settings.json (mode 644, proprietario root)',
@@ -1004,8 +1022,16 @@ class DryRunTests(OpsTestCase):
         for name in ('.claude/CLAUDE.md', '.claude/skills', '.codex/config.toml', '.local'):
             self.assertIn(f'[dry-run] chown -hR root:opsdry-noagent {agent}/{name}\n', out)
             self.assertIn(f'[dry-run] chmod -R g+rX\\,go-w {agent}/{name}\n', out)
-        self.assertIn(f'ok: {agent}/.codex/AGENTS.md non esiste', out)
-        self.assertIn(f'ok: {agent}/.claude/rules non esiste', out)
+        # #517: what does not exist becomes a placeholder of root, which the agent user cannot
+        # create, rename nor remove in the sticky directories of the CLIs.
+        self.assertIn(f'[dry-run] install -m 644 -o root -g opsdry-noagent /dev/null '
+                      f'{agent}/.codex/AGENTS.md\n', out)
+        self.assertIn(f'[dry-run] install -d -m 755 -o root -g opsdry-noagent '
+                      f'{agent}/.claude/rules\n', out)
+        self.assertIn(f'[dry-run] install -d -m 755 -o root -g opsdry-noagent '
+                      f'{agent}/.codex/plugins\n', out)
+        self.assertNotIn(f'install -m 644 -o root -g opsdry-noagent /dev/null '
+                         f'{agent}/.claude/CLAUDE.md', out)  # it exists: sealed as it is
         self.assertNotIn('.credentials.json', out)
         self.assertNotIn(' porta a ', out)
         # --unseal gives the directories of the CLIs back, and says devloop will not start.
@@ -1108,11 +1134,58 @@ class DryRunTests(OpsTestCase):
         lists = subprocess.run(
             [BASH, '-c', f'. {OPS / "lib.sh"}; set +u; '
                          'printf "%s\\n" "${AGENT_CLI_DIRS[*]}" "${AGENT_CLI_SEALED[*]}" '
-                         '"${AGENT_CLIS[*]}" "${AGENT_CLI_WRITABLE[*]}"'],
+                         '"${AGENT_CLIS[*]}" "${AGENT_CLI_WRITABLE[*]}" '
+                         '"${AGENT_CLI_ALLOWED[*]}"'],
             capture_output=True, text=True, check=True).stdout.splitlines()
         self.assertEqual([line.split() for line in lists],
                          [list(agentuser.CLI_DIRS), list(agentuser.CLI_SEALED),
-                          list(agentuser.CLIS), list(agentuser.CLI_WRITABLE)])
+                          list(agentuser.CLIS), list(agentuser.CLI_WRITABLE),
+                          [f'{entry}:{types}' for entry, types in agentuser.CLI_ALLOWED]])
+
+    def test_the_shell_knows_the_entries_of_the_list_as_devloop_does(self):
+        # #517: agent_cli_entry_known of ops/lib.sh, for setup-agent-user.sh and check-host.sh,
+        # matches the names as cli_state_problems of devloop/agentuser.py.
+        cases = [('.claude', '.credentials.json', 'f', 0),
+                 ('.claude', '.credentials.json.tmp.4242', 'f', 0),
+                 ('.claude', 'CLAUDE.md', 'f', 0), ('.claude', 'skills', 'd', 0),
+                 ('.codex', '.auth-Xa12', 'f', 0), ('.codex', 'auth.lock', 'f', 0),
+                 ('.codex', 'memories_1.sqlite-shm', 'f', 0), ('.codex', 'plugins', 'd', 0),
+                 ('.gemini', 'antigravity-cli', 'd', 0), ('.gemini', 'config', 'd', 0),
+                 ('.gemini/antigravity-cli', 'jetbox_summaries_proto.pb.a1.tmp', 'f', 0),
+                 ('.codex', 'hooks.json', 'f', 1), ('.claude', 'agents.bak', 'd', 1),
+                 ('.gemini', 'mcp_config.json', 'f', 1), ('.codex', 'auth.json', 'l', 2),
+                 ('.claude', 'projects', 'f', 2)]
+        for directory, name, kind, expected in cases:
+            with self.subTest(name=name):
+                done = subprocess.run(
+                    [BASH, '-c', f'. {OPS / "lib.sh"}; set +e; agent_cli_entry_known "$@"; '
+                                 'echo $?', '_', directory, name, kind],
+                    capture_output=True, text=True, check=True)
+                self.assertEqual(done.stdout.strip(), str(expected))
+                listing = f'D:{directory}\0e:{kind}:0:{name}\0'.encode()
+                baseline = agentuser.cli_state_problems('/h', f'D:{directory}\0'.encode())
+                problems = agentuser.cli_state_problems('/h', listing)
+                self.assertEqual(bool(set(problems) - set(baseline)), expected != 0)
+
+    def test_setup_agent_user_reports_the_entries_not_in_the_list(self):
+        # #517: devloop refuses every turn while one is there; setup says so, removes nothing.
+        agent = self.home / 'agent'
+        (agent / '.codex').mkdir(parents=True)
+        (agent / '.codex/auth.json').write_text('{}\n')
+        (agent / '.codex/hooks.json').write_text('{}\n')
+        (agent / '.claude').mkdir()
+        (agent / '.claude/projects').write_text('not a directory\n')
+        params = self.params(DEVLOOP_USER=ME, AGENT_USER='opsdry-noagent')
+        done = self.run_script('host/setup-agent-user.sh', '--dry-run', '--params', str(params))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        out = done.stdout
+        self.assertIn(f'da fare a mano: {agent}/.codex/hooks.json non è nella lista '
+                      'AGENT_CLI_ALLOWED', out)
+        self.assertIn(f'da fare a mano: {agent}/.claude/projects è di tipo f', out)
+        self.assertNotIn('auth.json', out)
+        self.assertNotIn('contengono solo voci della lista', out)
+        self.assertTrue((agent / '.codex/hooks.json').exists())
+        self.assertEqual(self.mutating_calls(), [])
 
     def test_the_agent_user_must_differ_from_devloop(self):
         done = self.run_script('host/setup-agent-user.sh', '--dry-run', '--params',
@@ -1574,6 +1647,9 @@ class CheckHostTests(OpsTestCase):
         (self.agent / '.local/bin').mkdir(parents=True)
         for cli in ('claude', 'codex', 'agy'):
             self.exe(self.agent / '.local/bin' / cli)
+        for name in agentuser.CLI_DIRS:  # root's and sticky on the host (#517)
+            (self.agent / name).mkdir()
+            (self.agent / name).chmod(0o1770)
         self.agent.chmod(0o1770)  # root's on the host (#438)
         self.exe(self.supervisor / '.local/bin/claude')
         self.state = state = self.devloop / 'ssdlc/.ssdlc/devloop'
@@ -1624,10 +1700,12 @@ class CheckHostTests(OpsTestCase):
         # (test_the_directory_of_the_repository_locks_is_roots), nor the agent user's home.
         home = (f'  ERRORE: {self.agent} è 1770 {ME}, deve essere 1770 root '
                 '(setup-agent-user.sh)')
+        cli_dirs = {f'  ERRORE: {self.agent}/{d} è 1770 {ME}, deve essere 1770 root'
+                    for d in agentuser.CLI_DIRS}  # nor the directories of its CLIs (#517)
         errors = [line for line in done.stdout.splitlines()
                   if 'ERRORE' in line and 'sudoers' not in line
                   and line != f'  ERRORE: {self.locks} è di {ME}, deve essere di root'
-                  and line != home]
+                  and line != home and line not in cli_dirs]
         return done, errors
 
     def test_the_files_of_the_agent_clis_are_checked_as_the_agent_user(self):
@@ -1641,12 +1719,24 @@ class CheckHostTests(OpsTestCase):
                  if '/usr/bin/bash -c' in line and 'bad=0' in line]
         targets = [line.rsplit(' ', 2)[1:] for line in lines]
         self.assertEqual(targets, (
-            [['fixed', f'{self.agent}/{d}'] for d in agentuser.CLI_DIRS]
+            [['cli', f'{self.agent}/{d}'] for d in agentuser.CLI_DIRS]
             + [['sealed', f'{self.agent}/{p}'] for p in agentuser.CLI_SEALED]
             + [['bin', f'{self.agent}/.local/bin/{cli}'] for cli in agentuser.CLIS]))
         for line in lines:
             self.assertTrue(line.startswith('  [dry-run] sudo -u root -H -- /usr/bin/bash -c '),
                             line)
+
+    def test_an_entry_of_the_clis_not_in_the_list_is_an_error(self):
+        # #517: as devloop before each turn.
+        (self.agent / '.codex/auth.json').write_text('{}\n')
+        (self.agent / '.codex/auth.lock').write_text('')
+        (self.agent / '.gemini/antigravity-cli/mcp_config.json').write_text('{}\n')
+        done, errors = self.check()
+        self.assertEqual(errors, [f'  ERRORE: {self.agent}/.gemini/antigravity-cli/'
+                                  'mcp_config.json non è nella lista AGENT_CLI_ALLOWED: devloop '
+                                  f'rifiuta i turni finché c\'è (rimuoverla come root a loop '
+                                  'fermo, o aggiungerla con una PR)'])
+        self.assertIn(f'ok: {self.agent}/.codex contiene solo voci della lista', done.stdout)
 
     def test_the_probe_of_the_cli_files_refuses_what_the_agent_user_can_change(self):
         # The probe of check-host.sh, run as the current user who owns the temporary files.
@@ -1658,14 +1748,27 @@ class CheckHostTests(OpsTestCase):
         def run(kind, path, env=None):
             return subprocess.run([BASH, '-c', probe, '_', kind, str(path)],
                                   capture_output=True, text=True, timeout=60, env=env)
-        (self.agent / '.claude').mkdir()
         (self.agent / '.claude/CLAUDE.md').write_text('x\n')
+        # #517: a directory of the CLIs is writable and sticky, but not the agent user's.
+        done = run('cli', self.agent / '.claude')
+        self.assertEqual(done.returncode, 1)
+        self.assertIn(f'suo: {self.agent}/.claude', done.stderr)
+        self.assertNotIn('sticky', done.stderr)
+        self.assertNotIn('non scrivibile', done.stderr)
+        (self.agent / '.codex').chmod(0o755)
+        done = run('cli', self.agent / '.codex')
+        self.assertIn(f'senza sticky bit: {self.agent}/.codex', done.stderr)
+        (self.agent / '.codex').chmod(0o1770)
+        tmp = Path(tempfile.gettempdir())  # sticky, writable, root's: accepted
+        if tmp.stat().st_mode & 0o1000 and tmp.stat().st_uid == 0:
+            self.assertEqual(run('cli', tmp).returncode, 0, run('cli', tmp).stderr)
         done = run('sealed', self.agent / '.claude/CLAUDE.md')
         self.assertEqual(done.returncode, 1)
         self.assertIn(f'scrivibile: {self.agent}/.claude/CLAUDE.md', done.stderr)
         self.assertIn(f'suo: {self.agent}/.claude', done.stderr)
-        done = run('fixed', self.agent / '.codex/AGENTS.md')
-        self.assertIn(f'creabile: {self.agent}/.codex', done.stderr)
+        # Without its placeholder, a sealed entry can be created in the sticky directory.
+        done = run('sealed', self.agent / '.codex/AGENTS.md')
+        self.assertIn(f'creabile: {self.agent}/.codex/AGENTS.md', done.stderr)
         self.assertEqual(run('sealed', BASH).returncode, 0)
         self.assertEqual(run('bin', BASH).returncode, 0)
         # The tools of the agent user's PATH (~/.local/bin first) are not those the probe runs.
@@ -1899,87 +2002,6 @@ echo "sudo $*" >> "$OPS_TEST_CALLS"''')
         self.assertRegex(done.stdout, r'\[dry-run\] env DEVLOOP_ENV_PROBE=devloop-env-probe-\S+ '
                                       r'sudo -n -E -u root -- /usr/bin/bash -c ')
         self.assertEqual(self.mutating_calls(), [])
-
-    def claude_token(self, days_ago, mode=0o600, enabled=True):
-        """With ``[claude_token] enabled`` in the overlay, a token issued ``days_ago`` in the
-        key_dir of devloop (#507). Returns the name of its file."""
-        issued = (datetime.datetime.now(datetime.timezone.utc).date()
-                  - datetime.timedelta(days=days_ago))
-        name = f'claude.{issued.isoformat()}.oauth-token'
-        path = self.devloop / '.ghapps' / name
-        path.write_text('not a token\n')
-        path.chmod(mode)
-        if enabled:
-            overlay = self.state / 'config.local.toml'
-            overlay.write_text(overlay.read_text() + '[claude_token]\nenabled = true\n')
-        return name
-
-    def test_the_claude_token_shows_its_age(self):
-        name = self.claude_token(12)
-        done, errors = self.check()
-        self.assertEqual(errors, [], done.stdout)
-        out = done.stdout
-        self.assertIn(f'ok: {self.devloop}/.ghapps/{name}: 600, {ME}', out)
-        self.assertIn(f'ok: {name}: emesso il {name[7:17]}, 12 giorni fa (rotazione a 30, '
-                      'scadenza a 90)', out)
-        self.assertIn(f'ok: nessun {self.agent}/.claude/.credentials.json', out)
-        self.assertNotIn('not a token', out)
-
-    def test_a_claude_token_to_rotate_is_a_warning_and_an_expired_one_an_error(self):
-        name = self.claude_token(45)
-        done, errors = self.check()
-        self.assertEqual(errors, [])
-        self.assertIn(f'ATTENZIONE: {name}: emesso il {name[7:17]}, 45 giorni fa, da '
-                      'rotate_days = 30: da ruotare prima di max_days = 90', done.stdout)
-        (self.devloop / '.ghapps' / name).unlink()
-        name = self.claude_token(90, enabled=False)
-        done, errors = self.check()
-        self.assertEqual(done.returncode, 1)
-        self.assertEqual(errors, [f'  ERRORE: {name}: emesso il {name[7:17]}, 90 giorni fa, oltre '
-                                  'max_days = 90: scaduto, i turni di claude sono rifiutati; '
-                                  'ruotarlo (ops/host/migrate.md)'])
-
-    def test_a_lower_max_days_of_the_overlay_counts(self):
-        name = self.claude_token(40)
-        overlay = self.state / 'config.local.toml'
-        overlay.write_text(overlay.read_text() + 'rotate_days = 20\nmax_days = 40\n')
-        done, errors = self.check()
-        self.assertEqual(len(errors), 1, done.stdout)
-        self.assertIn(f'{name}: emesso il', errors[0])
-        self.assertIn('oltre max_days = 40', errors[0])
-
-    def test_a_claude_token_without_a_valid_date_or_open_is_an_error(self):
-        self.claude_token(3, mode=0o644)
-        bad = self.devloop / '.ghapps' / 'claude.yesterday.oauth-token'
-        bad.write_text('x\n')
-        bad.chmod(0o600)
-        done, errors = self.check()
-        self.assertEqual(errors[0][:len('  ERRORE: 2 token di claude')],
-                         '  ERRORE: 2 token di claude')
-        next(p for p in (self.devloop / '.ghapps').glob('claude.2*')).unlink()
-        done, errors = self.check()
-        self.assertEqual(errors, ['  ERRORE: claude.yesterday.oauth-token: nessuna data di '
-                                  'emissione valida nel nome: devloop lo considera scaduto'])
-
-    def test_a_missing_claude_token_is_an_error_once_enabled(self):
-        overlay = self.state / 'config.local.toml'
-        done, errors = self.check()
-        self.assertEqual(errors, [])
-        self.assertIn('[claude_token] non attivo', done.stdout)
-        overlay.write_text(overlay.read_text() + '[claude_token]\nenabled = true\n')
-        done, errors = self.check()
-        self.assertEqual(len(errors), 1)
-        self.assertIn('nessun token di claude', errors[0])
-
-    def test_the_credentials_left_to_the_agent_user_are_an_error(self):
-        self.claude_token(5)
-        credentials = self.agent / '.claude/.credentials.json'
-        credentials.parent.mkdir()
-        credentials.write_text('{}')
-        done, errors = self.check()
-        self.assertEqual(done.returncode, 1)
-        self.assertEqual(errors, [f'  ERRORE: {credentials} c\'è ancora: con il token è un '
-                                  'secondo canale di accesso, va tolto (ops/host/migrate.md)'])
 
     def test_an_overlay_without_the_agent_user_is_an_error(self):
         (self.state / 'config.local.toml').write_text(f'repo_lock_dir = "{self.locks}"\n'
