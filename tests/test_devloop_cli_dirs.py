@@ -251,6 +251,14 @@ class ListTests(unittest.TestCase):
                                             f"{target!r}, which does not lead to a file of log/ "
                                             "next to it with a relative path (CLI_LINKS of "
                                             "devloop/agentuser.py)"])
+        # 1/codex-reviewer/R1-1: a target of log/ that is not a regular file, such as a link
+        # again that leads out of log/, or a missing one, is refused.
+        problems = self.problems([('.gemini/antigravity-cli', 'l', 1001, 'cli.log',
+                                   'log/cli-1.log', False)])
+        self.assertEqual(problems, [f"{where} holds 'cli.log', a symbolic link to "
+                                    "'log/cli-1.log', which is not a regular file: a link "
+                                    "again, that could lead out of log/, or missing (CLI_LINKS "
+                                    "of devloop/agentuser.py)"])
         # A link whose target the listing does not give is refused too.
         self.assertEqual(self.problems([('.gemini/antigravity-cli', 'l', 1001, 'cli.log')]),
                          [f"{where} holds 'cli.log', a symbolic link whose target could not "
@@ -388,6 +396,41 @@ class RealProbeTests(unittest.TestCase):
                 self.assertIn(f"holds 'cli.log', a symbolic link to {target!r}, which does not "
                               "lead to a file of log/", problems[0])
 
+    def test_the_log_link_of_agy_may_not_lead_out_through_another_link(self):
+        # 1/codex-reviewer/R1-1: cli.log -> log/cli-1.log -> a file outside the home. The text
+        # of the first link is right, but what it leads to is a link again: refused, as a
+        # target in log/ that is missing or not a file.
+        agy = self.home / '.gemini/antigravity-cli'
+        (agy / 'log').mkdir()
+        outside = self.tmp / 'outside.log'
+        outside.write_text('x\n')
+        (agy / 'log/cli-1.log').symlink_to(outside)
+        (agy / 'cli.log').symlink_to('log/cli-1.log')
+        self.assertEqual((agy / 'cli.log').resolve(), outside.resolve())
+        expected = (f"{agy} holds 'cli.log', a symbolic link to 'log/cli-1.log', which is not "
+                    "a regular file: a link again, that could lead out of log/, or missing")
+        problems = self.user.cli_state()
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn(expected, problems[0])
+        (agy / 'log/cli-1.log').unlink()
+        (agy / 'log/cli-1.log').symlink_to('cli-2.log')  # a link that stays in log/ is a link
+        (agy / 'log/cli-2.log').write_text('x\n')
+        self.assertIn(expected, self.user.cli_state()[0])
+        (agy / 'log/cli-1.log').unlink()  # missing
+        self.assertIn(expected, self.user.cli_state()[0])
+        (agy / 'log/cli-1.log').mkdir()  # a directory
+        self.assertIn(expected, self.user.cli_state()[0])
+        (agy / 'log/cli-1.log').rmdir()
+        (agy / 'log/cli-1.log').write_text('started\n')  # the file, as agy makes it
+        self.assertEqual(self.user.cli_state(), [])
+        # A name with a newline at its end is read as it is, not as the name without it.
+        (agy / 'cli.log').unlink()
+        (agy / 'log/cli-1.log\n').symlink_to(outside)
+        (agy / 'cli.log').symlink_to('log/cli-1.log\n')
+        problems = self.user.cli_state()
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("which is not a regular file", problems[0])
+
     def test_an_unknown_entry_is_found_with_its_name(self):
         self.make('.codex/hooks.json')
         (self.home / '.claude/odd\nname').write_text('x\n')
@@ -482,6 +525,7 @@ class RealProbeTests(unittest.TestCase):
                                     '/usr/bin/bash', '-c'])
         self.assertTrue(argv[8].startswith('PATH=/usr/bin:/bin\n'))
         self.assertEqual(argv[9:], ['cli-state', str(HOME), 'x:.gemini/antigravity-cli/brain',
+                                    'k:.gemini/antigravity-cli/cli.log',
                                     *(f'l:{d}' for d in agentuser.CLI_DIRS)])
         self.assertEqual(kw['env']['HOME'], str(HOME))
 

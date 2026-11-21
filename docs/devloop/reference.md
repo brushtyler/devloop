@@ -1615,8 +1615,10 @@ is in the [guide](guide.md#agent-user) and in the [ops guide](../../ops/README.m
   their type (`f` a regular file, `d` a directory; a link, `l`, only for an entry of
   `CLI_LINKS`: `~/.gemini/antigravity-cli/cli.log`, which agy makes at each start a link to the
   log of the day, and only when the link leads, with a relative path, to a file right inside
-  `log/` next to it, `log/<name>`; an absolute path, a `..`, another directory or a deeper path
-  is refused, #525), the sealed entries and
+  `log/` next to it, `log/<name>`, and `log/<name>` is a regular file, not a link again that
+  could lead out of `log/` (the probe reads it with `k:<entry>`); an absolute path, a `..`,
+  another directory, a deeper path or a target that is a link, a directory or missing is
+  refused, #525), the sealed entries and
   the directories of the CLIs, these two root's. Anything else stops devloop at startup, or
   refuses the turn before its CLI starts (`agents.CliStateRefused`), with an escalation of class
   `configuration` that names the entry; so does a listing that fails or does not end. Before

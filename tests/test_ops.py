@@ -1346,19 +1346,41 @@ esac''')
                  (agy, 'cli.log', 'l', 'brain/cli-1.log', 3),
                  (agy, 'cli.log', 'l', './log/cli-1.log', 3), (agy, 'cli.log', 'l', '', 3),
                  (agy, 'cli.log', 'd', '', 2), (agy, 'log', 'l', 'brain', 2),
-                 (agy, 'installation_id', 'l', 'log/cli-1.log', 2)]
+                 (agy, 'installation_id', 'l', 'log/cli-1.log', 2),
+                 # 1/codex-reviewer/R1-1: into log/, but not to a regular file there: a link
+                 # again (out of log/ or not), a directory, nothing.
+                 (agy, 'cli.log', 'l', 'log/chained.log', 4),
+                 (agy, 'cli.log', 'l', 'log/inside.log', 4),
+                 (agy, 'cli.log', 'l', 'log/sub', 4), (agy, 'cli.log', 'l', 'log/missing.log', 4)]
+        log = self.home / agy / 'log'
+        log.mkdir(parents=True)
+        (log / 'cli-20261121_132524.log').write_text('started\n')
+        outside = self.tmp / 'outside.log'
+        outside.write_text('x\n')
+        (log / 'chained.log').symlink_to(outside)
+        (log / 'inside.log').symlink_to('cli-20261121_132524.log')
+        (log / 'sub').mkdir()
         for directory, name, kind, target, expected in cases:
             with self.subTest(name=name, kind=kind, target=target):
                 done = subprocess.run(
                     [BASH, '-c', f'. {OPS / "lib.sh"}; set +e; agent_cli_entry_known "$@"; '
-                                 'echo $?', '_', directory, name, kind, target],
+                                 'echo $?', '_', directory, name, kind, target, str(self.home)],
                     capture_output=True, text=True, check=True)
                 self.assertEqual(done.stdout.strip(), str(expected))
                 entry = f'e:{kind}:0:{name}\0' + (f't:{target}\0' if kind == 'l' else '')
+                regular = (f'F:{directory}/{name}\0'
+                           if (self.home / directory / target).is_file()
+                           and not (self.home / directory / target).is_symlink() else '')
                 problems = agentuser.cli_state_problems(
-                    '/h', f'D:{directory}\0{entry}'.encode())
+                    '/h', f'{regular}D:{directory}\0{entry}'.encode())
                 baseline = agentuser.cli_state_problems('/h', f'D:{directory}\0'.encode())
                 self.assertEqual(bool(set(problems) - set(baseline)), expected != 0)
+        # Without the home the target cannot be checked: the link is refused.
+        done = subprocess.run(
+            [BASH, '-c', f'. {OPS / "lib.sh"}; set +e; agent_cli_entry_known "$@"; echo $?',
+             '_', agy, 'cli.log', 'l', 'log/cli-20261121_132524.log'],
+            capture_output=True, text=True, check=True)
+        self.assertEqual(done.stdout.strip(), '4')
 
     def test_setup_agent_user_reports_the_entries_not_in_the_list(self):
         # #517: devloop refuses every turn while one is there; setup says so, removes nothing.
@@ -1370,6 +1392,7 @@ esac''')
         (agent / '.claude/projects').write_text('not a directory\n')
         # #525: the log link of agy into log/ is accepted, one out of it reported.
         (agent / '.gemini/antigravity-cli/log').mkdir(parents=True)
+        (agent / '.gemini/antigravity-cli/log/cli-20261121_132524.log').write_text('started\n')
         (agent / '.gemini/antigravity-cli/cli.log').symlink_to('log/cli-20261121_132524.log')
         (agent / '.gemini/antigravity-cli/installation_id').symlink_to('/etc/hostname')
         (agent / '.gemini/config').mkdir()
@@ -1397,6 +1420,15 @@ esac''')
                       '/var/log/cli.log, fuori dalla directory che AGENT_CLI_LINKS ammette per '
                       'quel nome', done.stdout)
         self.assertTrue((agent / '.gemini/antigravity-cli/cli.log').is_symlink())
+        # 1/codex-reviewer/R1-1: into log/, to a link again that leads out of it.
+        (agent / '.gemini/antigravity-cli/cli.log').unlink()
+        (agent / '.gemini/antigravity-cli/log/cli-1.log').symlink_to('/var/log/cli.log')
+        (agent / '.gemini/antigravity-cli/cli.log').symlink_to('log/cli-1.log')
+        done = self.run_script('host/setup-agent-user.sh', '--dry-run', '--params', str(params))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn(f'da fare a mano: {agent}/.gemini/antigravity-cli/cli.log è un link a '
+                      'log/cli-1.log, che non è un file regolare (un altro link, che potrebbe '
+                      'uscire dalla directory, o nulla)', done.stdout)
 
     def test_the_agent_user_must_differ_from_devloop(self):
         done = self.run_script('host/setup-agent-user.sh', '--dry-run', '--params',
@@ -1994,6 +2026,17 @@ class CheckHostTests(OpsTestCase):
                                           'dalla directory che AGENT_CLI_LINKS ammette per quel '
                                           'nome: devloop rifiuta i turni finché c\'è (rimuoverlo '
                                           'come root a loop fermo)'])
+        # 1/codex-reviewer/R1-1: cli.log -> log/cli-1.log -> a file out of the home.
+        outside = self.tmp / 'outside.log'
+        outside.write_text('x\n')
+        (agy / 'log/cli-1.log').symlink_to(outside)
+        link.unlink()
+        link.symlink_to('log/cli-1.log')
+        done, errors = self.check()
+        self.assertEqual(errors, [f'  ERRORE: {agy}/cli.log è un link a log/cli-1.log, che non '
+                                  'è un file regolare (un altro link, che potrebbe uscire dalla '
+                                  'directory, o nulla): devloop rifiuta i turni finché c\'è '
+                                  '(rimuoverlo come root a loop fermo)'])
 
     def test_the_probe_of_the_cli_files_refuses_what_the_agent_user_can_change(self):
         # The probe of check-host.sh, run as the current user who owns the temporary files.

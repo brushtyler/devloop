@@ -275,13 +275,15 @@ if [ "$UNSEAL" != 1 ]; then
         [ -d "$AGENT_HOME/$dir" ] && ! [ -L "$AGENT_HOME/$dir" ] || continue
         while IFS= read -r -d '' record && IFS= read -r -d '' target; do
             type=${record%%/*} name=${record#*/}
-            if agent_cli_entry_known "$dir" "$name" "$type" "$target"; then
+            if agent_cli_entry_known "$dir" "$name" "$type" "$target" "$AGENT_HOME"; then
                 continue
             else
                 known=$?
             fi
             unknown=1
-            if [ "$known" = 3 ]; then
+            if [ "$known" = 4 ]; then
+                todo "$AGENT_HOME/$dir/$name è un link a $target, che non è un file regolare (un altro link, che potrebbe uscire dalla directory, o nulla): rimuoverlo come $AGENT_USER, a loop fermo"
+            elif [ "$known" = 3 ]; then
                 todo "$AGENT_HOME/$dir/$name è un link a $target, fuori dalla directory che AGENT_CLI_LINKS ammette per quel nome: rimuoverlo come $AGENT_USER, a loop fermo"
             elif [ "$known" = 2 ]; then
                 todo "$AGENT_HOME/$dir/$name è di tipo $type, che la lista AGENT_CLI_ALLOWED non ammette per quel nome: rimuoverla come $AGENT_USER, a loop fermo"

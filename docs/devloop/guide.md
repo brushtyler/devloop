@@ -2475,7 +2475,8 @@ a host already in service is in
   start, in `ops/host/check-host.sh` and before every turn, devloop lists them as
   `devloop-agent`: an unknown entry, one of another type (a link where a file is expected), a
   link allowed for its name that leads elsewhere (#525: only `cli.log` of agy may be a link, to
-  `log/<name>` next to it, as agy makes it at each start; `CLI_LINKS` in `devloop/agentuser.py`,
+  `log/<name>` next to it, a regular file and not a link again, as agy makes it at each start;
+  `CLI_LINKS` in `devloop/agentuser.py`,
   `AGENT_CLI_LINKS` in `ops/lib.sh`), or a sealed one that `devloop-agent` made, refuses the turn before its CLI starts, with an
   escalation `configuration` to the operator that names the entry (also in a sync, and when the
   chain of models wraps it); a listing that fails refuses it too. `[agent_user] cli_denied` in

@@ -184,7 +184,8 @@ CLI_ALLOWED = (
 # The entries of ``CLI_ALLOWED`` that may be a symbolic link (#525), each with the directory
 # next to it the link must lead into: ``(<dir>/<name>, <inside>)``. The target must be
 # ``<inside>/<file>``, relative, a single name in that directory (neither ``.`` nor ``..``, no
-# other ``/``); any other link with that name is refused (``link_allowed``). agy makes
+# other ``/``), and that entry a regular file, not a link again that could lead elsewhere
+# (``_CLI_STATE_PROBE``); any other link with that name is refused (``link_allowed``). agy makes
 # ``cli.log`` at each start a link to the log of the day, ``log/cli-<YYYYMMDD_HHMMSS>.log``;
 # ``log`` is in the list only as a directory, never a link. Claude Code and codex make no link
 # in their directories (the links of ``.codex/packages`` are sealed).
@@ -436,7 +437,9 @@ class AgentUser:
         ``clear``, patterns of ``CLI_CLEARED``, are removed. Raises AgentUserError when they
         cannot be listed or removed."""
         argv = self.command([BASH, '-c', _CLI_STATE_PROBE, 'cli-state', str(self.home),
-                             *(f'x:{p}' for p in clear), *(f'l:{d}' for d in CLI_DIRS)])
+                             *(f'x:{p}' for p in clear),
+                             *(f'k:{entry}' for entry, _ in CLI_LINKS),
+                             *(f'l:{d}' for d in CLI_DIRS)])
         env = self.environment({'PATH': os.environ.get('PATH', '/usr/bin:/bin'),
                                 'LC_ALL': 'C'})
         try:
@@ -829,8 +832,11 @@ def codex_config_problems(path, data):
 
 
 # Run as the agent user (#517): ``$1`` the home, then ``x:<dir>/<pattern>``, the entries of
-# ``<dir>`` whose name matches the pattern to remove first (``CLI_CLEARED``), and ``l:<dir>``,
-# the directories to list. NUL-terminated records: ``L:<dir>`` a link, ``M:<dir>`` missing,
+# ``<dir>`` whose name matches the pattern to remove first (``CLI_CLEARED``), ``k:<entry>``,
+# the entries of ``CLI_LINKS``, and ``l:<dir>``, the directories to list. NUL-terminated
+# records: ``F:<entry>`` when ``<entry>`` is a symbolic link whose target, read next to it, is a
+# regular file and not a link again (#525: no way out of its directory through another link),
+# ``L:<dir>`` a link, ``M:<dir>`` missing,
 # ``N:<dir>`` not a directory, otherwise ``D:<dir>`` and ``e:<type>:<uid>:<name>`` for each
 # entry (``find``'s ``%y`` and ``%U``), followed by ``t:<target>`` when it is a symbolic link
 # (``%l``, #525); ``E:`` at the end, when everything was read. An exit
@@ -844,6 +850,12 @@ for a; do
         x) d=$h/${r%/*}
            if [ -d "$d" ] && ! [ -L "$d" ]; then
                find "$d" -mindepth 1 -maxdepth 1 -name "${r##*/}" -exec rm -rf -- {} + || exit 1
+           fi ;;
+        k) d=$h/$r
+           if [ -L "$d" ]; then
+               t=$(find "$d" -maxdepth 0 -printf '%l/') || exit 1
+               t=${d%/*}/${t%/}
+               if [ -f "$t" ] && ! [ -L "$t" ]; then printf 'F:%s\0' "$r"; fi
            fi ;;
         l) d=$h/$r
            if [ -L "$d" ]; then printf 'L:%s\0' "$r"
@@ -866,12 +878,14 @@ def cli_state_problems(home, records, denied=(), root_uid=0):
     of ``allowed_entries(denied)`` of the right type, the sealed entries of ``CLI_SEALED``
     and the directories of ``CLI_DIRS``, these two of ``root_uid``. A symbolic link only as an
     entry of ``CLI_LINKS``, whose target, the ``t:`` record after it, ``link_allowed`` accepts
-    (#525). Each problem names the entry."""
+    and an ``F:`` record says is a regular file, not a link again (#525). Each problem names
+    the entry."""
     home = Path(home)
     allowed = allowed_entries(denied)
     links = dict(CLI_LINKS)
     problems, listed, current, ended = [], set(), None, False
     listing = records.split(b'\0')
+    regular = {os.fsdecode(r[2:]) for r in listing if r.startswith(b'F:')}
     for index, record in enumerate(listing):
         kind, _, rest = record.partition(b':')
         where = os.fsdecode(rest)
@@ -926,6 +940,11 @@ def cli_state_problems(home, records, denied=(), root_uid=0):
                                     f'to {_shown(target)}, which does not lead to a file of '
                                     f'{inside}/ next to it with a relative path (CLI_LINKS of '
                                     'devloop/agentuser.py)')
+                elif f'{current}/{name}' not in regular:
+                    problems.append(f'{home / current} holds {_shown(name)}, a symbolic link '
+                                    f'to {_shown(target)}, which is not a regular file: a link '
+                                    f'again, that could lead out of {inside}/, or missing '
+                                    '(CLI_LINKS of devloop/agentuser.py)')
     for parent in CLI_DIRS:
         if parent not in listed:
             problems.append(f'{home / parent} was not listed')

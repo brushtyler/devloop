@@ -84,8 +84,9 @@ AGENT_CLI_ALLOWED=(
 )
 # Le voci di AGENT_CLI_ALLOWED che possono essere un link (#525), come CLI_LINKS di
 # devloop/agentuser.py: <voce>:<directory accanto alla voce>. Il link deve portare a un file di
-# quella directory, con il percorso relativo <directory>/<nome> (un solo nome, né . né ..);
-# ogni altro link con quel nome è rifiutato. agy crea a ogni avvio cli.log -> log/cli-<data>.log.
+# quella directory, con il percorso relativo <directory>/<nome> (un solo nome, né . né ..), e
+# quella voce deve essere un file regolare, non a sua volta un link che porti altrove; ogni altro
+# link con quel nome è rifiutato. agy crea a ogni avvio cli.log -> log/cli-<data>.log.
 AGENT_CLI_LINKS=(.gemini/antigravity-cli/cli.log:log)
 
 # agent_cli_link_allowed TARGET INSIDE: il contenuto TARGET di un link di AGENT_CLI_LINKS porta a
@@ -103,13 +104,15 @@ agent_cli_link_allowed() {
     return 0
 }
 
-# agent_cli_entry_known DIR NAME TYPE [TARGET]: la voce NAME, di tipo TYPE (%y di find), della
-# directory delle CLI DIR (relativa alla home) è nella lista, o è sigillata o una directory delle
-# CLI; TARGET è il contenuto del link, quando TYPE è l. Torna 0 se è nota (sigillata e directory
-# delle CLI: il proprietario lo controlla chi chiama), 1 se manca dalla lista, 2 se è nella lista
-# con un altro tipo, 3 se è un link ammesso per quel nome che porta fuori dalla sua directory.
+# agent_cli_entry_known DIR NAME TYPE [TARGET HOME]: la voce NAME, di tipo TYPE (%y di find),
+# della directory delle CLI DIR (relativa alla home) è nella lista, o è sigillata o una directory
+# delle CLI; TARGET è il contenuto del link, quando TYPE è l, e HOME la home in cui si trova DIR.
+# Torna 0 se è nota (sigillata e directory delle CLI: il proprietario lo controlla chi chiama), 1
+# se manca dalla lista, 2 se è nella lista con un altro tipo, 3 se è un link ammesso per quel nome
+# che porta fuori dalla sua directory, 4 se porta dentro la sua directory ma a una voce che non è
+# un file regolare (un altro link, che potrebbe uscirne, o nulla; senza HOME non si verifica).
 agent_cli_entry_known() {
-    local dir=$1 name=$2 type=$3 target=${4-} entry pattern types link matched=0
+    local dir=$1 name=$2 type=$3 target=${4-} home=${5-} entry pattern types link to matched=0
     for entry in "${AGENT_CLI_DIRS[@]}" "${AGENT_CLI_SEALED[@]}"; do
         [ "$entry" = "$dir/$name" ] && return 0
     done
@@ -125,7 +128,10 @@ agent_cli_entry_known() {
                         [ "$type" = l ] || return 0
                         for link in "${AGENT_CLI_LINKS[@]}"; do
                             [ "${link%:*}" = "$pattern" ] || continue
-                            agent_cli_link_allowed "$target" "${link##*:}" && return 0
+                            agent_cli_link_allowed "$target" "${link##*:}" || continue
+                            to=$home/$dir/$target
+                            [ -n "$home" ] && [ -f "$to" ] && ! [ -L "$to" ] && return 0
+                            return 4
                         done
                         return 3 ;;
                 esac ;;

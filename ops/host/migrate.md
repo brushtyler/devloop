@@ -425,8 +425,10 @@ agy crea a ogni avvio `~/.gemini/antigravity-cli/cli.log` come link simbolico al
 come file, e dopo ogni turno di agy il turno seguente era rifiutato con un'escalation
 `configuration`. Dal #525 `cli.log` può essere anche un link (`CLI_LINKS` di
 `devloop/agentuser.py`, `AGENT_CLI_LINKS` di `ops/lib.sh`), solo se porta, con un percorso
-relativo, a un file direttamente dentro `log/` accanto a lui (`log/<nome>`). Un link con un
-percorso assoluto, con `..`, verso un'altra directory o più in fondo in `log/` resta rifiutato,
+relativo, a un file direttamente dentro `log/` accanto a lui (`log/<nome>`), e `log/<nome>` è
+un file regolare, non a sua volta un link che potrebbe uscire da `log/`. Un link con un
+percorso assoluto, con `..`, verso un'altra directory o più in fondo in `log/`, o verso una voce
+di `log/` che è un link, una directory o non c'è, resta rifiutato,
 all'avvio, prima di ogni turno, in `check-host.sh` e in `setup-agent-user.sh`. Claude Code e codex
 non creano link nelle loro directory (i link di `~/.codex/packages` sono sigillati).
 
