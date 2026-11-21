@@ -33,6 +33,8 @@ merge or rebase the branch yourself.
   or any other background activity. Give the final answer only when the work is finished: the
   turn ends with it, without waiting for anything still running.
 - Do not commit, push or comment on GitHub. The dispatcher publishes your changes after you finish.
+- When an ADR or another document must cite a request below, a decision of the operator for
+  example, cite it with the link of its `Permalink:` line: the link GitHub gives its comment.
 - If a finding requires a product decision or contradicts the issue, return `status: "blocked"`.
 
 ## Final answer

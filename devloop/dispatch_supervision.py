@@ -1857,5 +1857,7 @@ class SupervisionMixin:
             if why:
                 self.log(f'  PR #{pr.number}: ignored `{FIX_COMMAND}` by {login}: {why}')
                 continue
-            found.append({'comment': ident, 'by': login, 'request': request})
+            # ``url``: the permalink of the command for the fix prompt (#506), not recorded.
+            found.append({'comment': ident, 'by': login, 'request': request,
+                          'url': comment.get('url')})
         return found
