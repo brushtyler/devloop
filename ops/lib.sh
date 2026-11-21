@@ -61,7 +61,7 @@ AGENT_CLI_ALLOWED=(
     .claude/projects:d .claude/sessions:d .claude/todos:d .claude/shell-snapshots:d
     .claude/statsig:d .claude/plans:d .claude/file-history:d .claude/session-env:d
     .claude/debug:d .claude/ide:d .claude/paste-cache:d .claude/telemetry:d
-    .claude/history.jsonl:f .claude/stats-cache.json:f
+    .claude/history.jsonl:f .claude/stats-cache.json:f .claude/.last-cleanup:f
     .codex/auth.json:f '.codex/.auth-*:f' .codex/auth.lock:f .codex/auth.json.lock:f
     .codex/.sandbox_migration:fd .codex/.sqlite-maintenance.lock:f .codex/cache:d
     '.codex/goals_1.sqlite*:f' .codex/installation_id:f '.codex/logs_2.sqlite*:f'

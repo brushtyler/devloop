@@ -149,6 +149,9 @@ CLI_ALLOWED = (
     ('.claude/session-env', 'd'), ('.claude/debug', 'd'), ('.claude/ide', 'd'),
     ('.claude/paste-cache', 'd'), ('.claude/telemetry', 'd'), ('.claude/history.jsonl', 'f'),
     ('.claude/stats-cache.json', 'f'),
+    # The date of its periodic cleanup, which Claude Code (2.1.326) writes again at each start
+    # (#525): a timestamp, neither instructions nor configuration.
+    ('.claude/.last-cleanup', 'f'),
     # Codex: the login (a temporary .auth-* renamed over auth.json, with its locks), its
     # databases with their journals, sessions, caches and temporary files.
     ('.codex/auth.json', 'f'), ('.codex/.auth-*', 'f'), ('.codex/auth.lock', 'f'),

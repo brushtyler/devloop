@@ -430,6 +430,12 @@ percorso assoluto, con `..`, verso un'altra directory o più in fondo in `log/` 
 all'avvio, prima di ogni turno, in `check-host.sh` e in `setup-agent-user.sh`. Claude Code e codex
 non creano link nelle loro directory (i link di `~/.codex/packages` sono sigillati).
 
+Con la stessa PR la lista ammette anche `~/.claude/.last-cleanup`, solo come file: Claude Code
+(2.1.326) vi scrive a ogni avvio la data della sua pulizia periodica (per esempio
+`2026-11-21T13:32:16.320Z`), e prima della PR ogni turno di qualunque CLI era rifiutato finché
+c'era. È un dato della CLI, senza istruzioni né configurazione. Dopo il pin non serve più
+rimuoverlo: il sorvegliante che lo faceva sull'host si può togliere.
+
 Il rimedio temporaneo, fino al pin della PR del #525, era togliere agy dal gruppo dei reviewer
 nell'overlay (`[roles] reviewers = ["codex-reviewer", "claude-reviewer"]`) e rimuovere il link
 prima dell'avvio. Per rimettere agy nel gruppo dei reviewer **dopo il pin** di quella PR (quello

@@ -1319,6 +1319,20 @@ esac''')
                 problems = agentuser.cli_state_problems('/h', listing)
                 self.assertEqual(bool(set(problems) - set(baseline)), expected != 0)
 
+    def test_the_shell_knows_the_cleanup_mark_of_claude_as_devloop_does(self):
+        # #525: Claude Code writes ~/.claude/.last-cleanup at each start; a file only.
+        for kind, expected in (('f', 0), ('d', 2), ('l', 2)):
+            with self.subTest(kind=kind):
+                done = subprocess.run(
+                    [BASH, '-c', f'. {OPS / "lib.sh"}; set +e; agent_cli_entry_known "$@"; '
+                                 'echo $?', '_', '.claude', '.last-cleanup', kind],
+                    capture_output=True, text=True, check=True)
+                self.assertEqual(done.stdout.strip(), str(expected))
+                listing = f'D:.claude\0e:{kind}:0:.last-cleanup\0'.encode()
+                baseline = agentuser.cli_state_problems('/h', b'D:.claude\0')
+                problems = agentuser.cli_state_problems('/h', listing)
+                self.assertEqual(bool(set(problems) - set(baseline)), expected != 0)
+
     def test_the_shell_knows_the_link_of_agy_as_devloop_does(self):
         # #525: cli.log of agy may be a link, only to a file of log/ next to it.
         agy = '.gemini/antigravity-cli'

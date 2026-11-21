@@ -214,6 +214,19 @@ class ListTests(unittest.TestCase):
         self.assertIn("holds 'auth.json' of type 'l', where the list of the entries of the CLIs "
                       "wants 'f'", problems[1])
 
+    def test_the_cleanup_mark_of_claude_is_accepted_as_a_file(self):
+        # #525: Claude Code (2.1.326) writes the date of its periodic cleanup in
+        # ~/.claude/.last-cleanup at each start: a file of the agent user, nothing else.
+        self.assertEqual(self.problems([('.claude', 'f', 1001, '.last-cleanup')]), [])
+        self.assertNotIn('.claude/.last-cleanup', agentuser.CLI_CLEARED)
+        self.assertNotIn('.claude/.last-cleanup', dict(agentuser.CLI_LINKS))
+        for kind in ('d', 'l'):
+            with self.subTest(kind=kind):
+                entry = ('.claude', kind, 1001, '.last-cleanup') + (('x',) if kind == 'l' else ())
+                problems = self.problems([entry])
+                self.assertEqual(len(problems), 1)
+                self.assertIn("holds '.last-cleanup'", problems[0])
+
     def test_the_log_link_of_agy_into_its_log_directory_is_accepted(self):
         # #525: agy makes cli.log at each start a link to the log of the day.
         for target in ('log/cli-20261121_132524.log', 'log/cli.log'):
