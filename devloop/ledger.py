@@ -55,7 +55,10 @@ NOT_REPORTED = 'non riportato'
 # The trace of the turns left open before #362, in state_dir: imported once by the journal.
 PENDING = LEGACY
 # The journal's outcome of a turn closed as ``close_turn`` says.
-JOURNAL_OUTCOME = {'success': RETURNED, 'failure': FAILED, 'unavailable': FAILED}
+# A turn ``cancelled`` (#521) ended without a result, stopped by devloop: ``failed`` for the
+# journal, which records whether the CLI returned, never ``uncertain``.
+JOURNAL_OUTCOME = {'success': RETURNED, 'failure': FAILED, 'unavailable': FAILED,
+                   'cancelled': FAILED}
 TURN_KINDS = ('implement', 'fix', 'sync', 'review', 'preflight', 'conclave', 'advisory')
 REGISTERS = ('round', 'fix')  # the records whose ``records`` hold sections (#325, #355)
 FIX = 'fix'  # the ``register`` of the sections of a fix register, as reads expand them
@@ -424,7 +427,8 @@ class Ledger:
 
     def close_turn(self, entry, outcome, report=None, error=None, last_command=None,
                    denied_command=None, denied_permission=None):
-        """Close a turn: ``outcome`` is ``success``, ``failure`` or ``unavailable``; ``report``
+        """Close a turn: ``outcome`` is ``success``, ``failure``, ``unavailable`` or
+        ``cancelled`` (stopped because its result was no longer needed, #521); ``report``
         the CLI's ``(fields, models)`` (``agents.telemetry``), None when the CLI did not
         complete; ``last_command`` the last command its output exposes, already cleaned
         (``agents.public_command``), None when it exposes none (#215); ``denied_command`` the

@@ -8,6 +8,7 @@ import secrets
 import subprocess
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from . import claudetoken
@@ -15,7 +16,7 @@ from .agentuser import SCHEMAS, TURNS, AgentUserError, SharedDir
 from .markdown import agent_bot, devloop_version, header, parse_version
 from .schema import load_schema, schema_path, validate, with_defaults, SchemaError
 from .unavailability import delimited, reset_seconds
-from .workspace import git_config_env, partial_text, run_in_group
+from .workspace import Cancelled, git_config_env, partial_text, run_in_group
 
 MODES = ('write', 'review')
 # With an agent user (#415): the file codex writes its final message to, in the directory of
@@ -275,6 +276,14 @@ class NoOutput(AgentError):
     without an error and without ``denied_actions``. The model was not usable for that turn,
     maybe only for a moment: the dispatcher moves on to the next model of the chain, or runs
     the last one once more, and never remembers it as unavailable (#151)."""
+
+
+class TurnCancelled(AgentError):
+    """A turn devloop stopped, or did not start, because its result was no longer needed
+    (#521): with ``second_reviewer = "parallel_cancel"`` the first reviewer of the round asked
+    for changes while the second still ran. Neither a failure of the tool nor of the change,
+    nor an uncertain turn: its record is closed ``cancelled``, no other model of the chain
+    runs, and it never escalates."""
 
 
 class ModelsUnavailable(AgentError):
@@ -822,6 +831,18 @@ class AgentRunner:
     def last_report(self, report):
         self._local.report = report
 
+    @contextmanager
+    def cancellable(self, event):
+        """The turns this thread runs inside the block stop when ``event`` is set (#521): one
+        that has not started yet raises ``TurnCancelled`` without starting, a running one has
+        its whole process group killed, and raises ``TurnCancelled``."""
+        previous = getattr(self._local, 'cancel', None)
+        self._local.cancel = event
+        try:
+            yield
+        finally:
+            self._local.cancel = previous
+
     @property
     def last_command(self):
         return getattr(self._local, 'command', None)
@@ -864,6 +885,9 @@ class AgentRunner:
         """Run one turn in ``workdir`` and return its schema-valid output."""
         self.last_report = None
         self.last_command = None
+        cancel = getattr(self._local, 'cancel', None)
+        if cancel is not None and cancel.is_set():  # no longer needed (#521): never started
+            raise TurnCancelled(f'{agent.key}: turn cancelled before it started')
         self.log_dir.mkdir(parents=True, exist_ok=True)
         stem = self.log_dir / f'{time.strftime("%Y%m%dT%H%M%S")}-{label}-{agent.key}'
         logged = stem.with_suffix('.last.json')
@@ -1014,6 +1038,9 @@ class AgentRunner:
                              watch_interval=self._stall.interval)
             if run is run_in_group and self.agent_user is not None:
                 extra['kill'] = self.agent_user.kill_group  # its processes, not ours (#415)
+            cancel = getattr(self._local, 'cancel', None)
+            if run is run_in_group and cancel is not None:
+                extra['cancel'] = cancel  # stopped once no longer needed (#521)
             return run(argv, input=stdin, cwd=workdir, capture_output=True, text=True,
                        timeout=self.timeout, **extra)
 
@@ -1049,6 +1076,12 @@ class AgentRunner:
             self.last_command = public_command(agent.kind, out, workdir, shown)
             exc.log = log
             raise
+        except Cancelled as exc:  # no longer needed (#521): neither a failure nor a timeout
+            out, err = (_redact_text(partial_text(p), token) for p in exc.partial_output)
+            message = f'{agent.key} cancelled: its result is no longer needed'
+            stopped_log(message, out, err)
+            self.last_command = public_command(agent.kind, out, workdir, shown)
+            raise TurnCancelled(message, log) from None
         except subprocess.TimeoutExpired as exc:
             out, err = (_redact_text(partial_text(p), token) for p in (exc.output, exc.stderr))
             message = f'{agent.key} timed out after {self.timeout}s'

@@ -153,6 +153,17 @@ advisory_reviewer = ""
 # than its own model's and the same as an agent's that may implement (agy falling back on Claude
 # while claude implements) stops devloop at startup. It enters the policy version.
 # fallback_provider_ban = false
+# When the second reviewer of a level 2 round starts (issue #521): "parallel" (the default) runs
+# both reviewers of the pair together, as before; "sequential" runs the first of the pair (the
+# first in the order of roles.reviewers) alone, and the second, on the same head, only once the
+# first approved (a needs_operator for the trust policy without findings of its own counts as
+# an approval); "parallel_cancel" runs them together, and stops the second's turn (its whole
+# process group) as soon as the first asks for changes, recording it as cancelled. In both
+# modes other than "parallel" a round the first reviewer closes by asking for changes, or for a
+# decision of the operator, is closed with its verdict alone and counts as any round. Quorum,
+# receipt and merge conditions do not change. It enters the policy version when it is not
+# "parallel". Any other value stops devloop at startup.
+# second_reviewer = "parallel"
 
 # Level 0 (issue #107): no review. It applies only when a trusted user added `label` to the PR
 # (the latest event of that label added it), the level computed above is 1, and the PR's full
