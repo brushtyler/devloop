@@ -2730,8 +2730,10 @@ lock** too (decision of the operator, L1 of ADR 0006, section 3.8):
   read-only and never through a symlink. A lock that exists is opened as it is, without
   creating or replacing it and with its owner and mode left alone; only a missing one is
   created, readable by the other devloop users;
-- a container of devloop (ADR 0006, R7) has to mount that directory of the host, so that the
-  lock spans the containers and the services of the host;
+- devloop has no container for now: R7 of ADR 0006 is suspended, because codex's sandbox does
+  not start in a container without `--privileged` (decision of the operator of 2026-11-21, on
+  #426), and every project is installed on the host. If a container comes back, it has to mount
+  that directory of the host, so that the lock spans the containers and the services of the host;
 - it holds **on one host only**: the same repository from two hosts is not excluded. Serving a
   repository from several hosts would need a lease on the tracker (L2 of the ADR), to be weighed
   with the fencing of step 4 of ADR 0001.
