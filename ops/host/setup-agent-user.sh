@@ -124,6 +124,10 @@ else
     # devloop lo rifiuta prima di ogni turno.
     for dir in "${AGENT_CLI_DIRS[@]}"; do
         owned "$AGENT_HOME/$dir" 1770 root "$AGENT_GROUP"
+        # Con un'ACL (quella che una versione precedente dava a ~/.claude e ~/.codex per
+        # $DEVLOOP_USER, quando erano 755) chmod cambia la maschera, non la voce del gruppo, che
+        # resterebbe r-x: il gruppo dell'utente degli agent deve poter scrivere.
+        ensure_acl "$AGENT_HOME/$dir" "g::rwx" "group::rwx"
     done
     step "~/.local di $AGENT_USER: di root (#438)"
     for dir in .local .local/bin; do

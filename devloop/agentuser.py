@@ -56,7 +56,7 @@ CLIs, of root: at the start (``check``) and before each turn (``AgentUser.cli_st
 ``agents.AgentRunner``) anything else is refused, and a turn refused so is an escalation
 ``configuration`` that names the entry; ``[agent_user] cli_denied`` may only shorten the list.
 Before each turn of a CLI, what it would read again as context in a later session
-(``CLI_CLEARED``) is removed. A directory above them that the agent user can write protects
+(``CLI_CLEARED``) is removed, and the turns of a CLI that keeps it run one at a time. A directory above them that the agent user can write protects
 them only when it is sticky and neither it nor the entry is the agent user's: the home, which
 the agent user writes, is root's and sticky. A link among them, or inside a sealed one, is
 followed, and what it leads to must be protected the same way; the sealed files must stay
@@ -169,12 +169,14 @@ CLI_ALLOWED = (
     ('.gemini/antigravity-cli/last_check.timestamp', 'f'), ('.gemini/antigravity-cli/log', 'd'),
     ('.gemini/antigravity-cli/presence', 'd'), ('.gemini/antigravity-cli/updater', 'd'))
 # The entries of ``CLI_ALLOWED`` a CLI may read again, in a later session, as context (#517):
-# the memories of codex and the memories, knowledge and summaries of agy. Before each turn of
-# that CLI they are removed, as the agent user, unless another turn of the same CLI is still
-# running (``agents.AgentRunner``): the CLI starts them again empty. The auto memory of Claude
-# Code, in ``.claude/projects``, is off in every claude turn instead (``agents``).
+# the memories of codex and the memories, knowledge and summaries of agy, and ``.gemini/config``,
+# whose content no one verified: whatever it holds does not reach the next turn. Before each
+# turn of that CLI they are removed, as the agent user, and the turns of that CLI run one at a
+# time, so that none reads what another one writes there meanwhile (``agents.AgentRunner``):
+# the CLI starts them again empty. The auto memory of Claude Code, in ``.claude/projects``, is
+# off in every claude turn instead (``agents``).
 CLI_CLEARED = (
-    '.codex/memories_1.sqlite*',
+    '.codex/memories_1.sqlite*', '.gemini/config',
     '.gemini/antigravity-cli/brain', '.gemini/antigravity-cli/builtin',
     '.gemini/antigravity-cli/conversation_summaries.db*', '.gemini/antigravity-cli/implicit',
     '.gemini/antigravity-cli/jetbox_summaries_proto.pb',

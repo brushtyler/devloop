@@ -1130,6 +1130,31 @@ class DryRunTests(OpsTestCase):
         self.assertEqual(agentuser.CLI_WRITABLE, ('.gemini/antigravity-cli/bin',))
         self.assertEqual(agentuser.AGY_BIN, agentuser.CLI_WRITABLE[0])
 
+    def test_setup_agent_user_gives_the_group_write_in_the_acl_of_an_earlier_version(self):
+        # 1/codex-reviewer/R1-1: an earlier version gave ~/.claude and ~/.codex, then 755, an
+        # ACL entry for devloop: chmod 1770 then changes the mask, not group::r-x, and the agent
+        # user could not write there. The script sets group::rwx where it is missing.
+        agent = self.home / 'agent'
+        for name in agentuser.CLI_DIRS:
+            (agent / name).mkdir(parents=True, exist_ok=True)
+        earlier = (f'{agent}/.claude|{agent}/.codex')
+        self.shim('getfacl', f'''for a in "$@"; do last=$a; done
+case "$last" in
+    {earlier}) printf '%s\\n' user::rwx "user:{ME}:--x" group::r-x mask::r-x other::r-x ;;
+    *) printf '%s\\n' user::rwx group::rwx other::--- ;;
+esac''')
+        params = self.params(DEVLOOP_USER=ME, AGENT_USER='opsdry-noagent')
+        done = self.run_script('host/setup-agent-user.sh', '--dry-run', '--params', str(params))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        out = done.stdout
+        for name in ('.claude', '.codex'):
+            self.assertIn(f'[dry-run] chmod 1770 {agent}/{name}\n', out)
+            self.assertIn(f'[dry-run] setfacl -m g::rwx {agent}/{name}\n', out)
+        for name in ('.gemini', '.gemini/antigravity-cli'):  # group::rwx already
+            self.assertNotIn(f'setfacl -m g::rwx {agent}/{name}\n', out)
+            self.assertIn(f'ACL di {agent}/{name}: group::rwx', out)
+        self.assertEqual(self.mutating_calls(), [])
+
     def test_the_lists_of_the_cli_files_are_those_of_the_startup_check(self):
         lists = subprocess.run(
             [BASH, '-c', f'. {OPS / "lib.sh"}; set +u; '

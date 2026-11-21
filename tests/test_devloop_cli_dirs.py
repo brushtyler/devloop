@@ -17,6 +17,10 @@ import dataclasses
 import errno
 import json
 import os
+import pwd
+import shutil
+import stat
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -114,6 +118,45 @@ class StickyDirectoryTests(unittest.TestCase):
         # check refuses that.
         missing = self.dir / f'{self.tag}-CLAUDE.md'
         self.assertIn(('c', str(missing)), LocalUser(self.dir).probe([('sealed', missing)]))
+
+
+class AclMigrationTests(unittest.TestCase):
+    """The ACL of ~/.claude and ~/.codex of an earlier setup-agent-user.sh, with the real
+    ``setfacl`` (1/codex-reviewer/R1-1): ``chmod 1770`` changes its mask, not the entry of the
+    group, and only ``setfacl -m g::rwx``, as the script runs it, lets the group write."""
+
+    SCRIPT = Path(__file__).resolve().parent.parent / 'ops/host/setup-agent-user.sh'
+
+    def acl(self, path):
+        done = subprocess.run(['getfacl', '-p', '--omit-header', str(path)],
+                              capture_output=True, text=True, check=True)
+        return [line.split('#')[0].strip() for line in done.stdout.splitlines() if line]
+
+    def test_the_group_gets_write_also_where_an_acl_was(self):
+        if not (shutil.which('setfacl') and shutil.which('getfacl')):
+            self.skipTest('no setfacl or getfacl')
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name) / '.claude'
+        path.mkdir(mode=0o755)
+        path.chmod(0o755)
+        me = pwd.getpwuid(os.geteuid()).pw_name
+        # The earlier setup: 755 and an entry for devloop that only traverses.
+        if subprocess.run(['setfacl', '-m', f'u:{me}:--x', str(path)],
+                          capture_output=True).returncode != 0:
+            self.skipTest('no ACL on this file system')
+        self.assertIn('group::r-x', self.acl(path))
+        path.chmod(0o1770)  # what `owned` does
+        self.assertIn('group::r-x', self.acl(path))  # the group still cannot write
+        self.assertIn('mask::rwx', self.acl(path))
+        subprocess.run(['setfacl', '-m', 'g::rwx', str(path)], check=True)
+        acl = self.acl(path)
+        self.assertIn('group::rwx', acl)
+        self.assertIn('mask::rwx', acl)
+        self.assertIn(f'user:{me}:--x', acl)  # devloop still only traverses
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o1770)
+        self.assertIn('ensure_acl "$AGENT_HOME/$dir" "g::rwx" "group::rwx"',
+                      self.SCRIPT.read_text())
 
 
 class ListTests(unittest.TestCase):
@@ -253,7 +296,7 @@ class RealProbeTests(unittest.TestCase):
                   '.gemini/antigravity-cli/jetbox_summaries_proto.pb',
                   '.gemini/antigravity-cli/antigravity-oauth-token')
         self.make('.gemini/antigravity-cli/brain', '.gemini/antigravity-cli/builtin',
-                  '.gemini/antigravity-cli/conversations', directory=True)
+                  '.gemini/antigravity-cli/conversations', '.gemini/config', directory=True)
         (self.home / '.gemini/antigravity-cli/implicit').symlink_to(outside)
         # A codex turn: the memories of codex go, those of agy stay, and the link left there
         # is refused in the listing.
@@ -263,7 +306,7 @@ class RealProbeTests(unittest.TestCase):
         self.assertFalse((self.home / '.codex/memories_1.sqlite').exists())
         self.assertFalse((self.home / '.codex/memories_1.sqlite-wal').exists())
         for kept in ('.codex/auth.json', '.codex/state_5.sqlite',
-                     '.gemini/antigravity-cli/brain/inside.md'):
+                     '.gemini/antigravity-cli/brain/inside.md', '.gemini/config/inside.md'):
             self.assertTrue((self.home / kept).exists(), kept)
         # An agy turn: clearing removes the link, never what it leads to.
         self.assertEqual(self.user.cli_state(agentuser.cleared_for('agy')), [])
@@ -271,6 +314,9 @@ class RealProbeTests(unittest.TestCase):
                      'jetbox_summaries_proto.pb'):
             self.assertFalse(os.path.lexists(self.home / '.gemini/antigravity-cli' / gone), gone)
         self.assertTrue((outside / 'keep.md').exists())
+        # ~/.gemini/config, whose content no one verified (1/codex-reviewer/R1-3), goes too.
+        self.assertFalse(os.path.lexists(self.home / '.gemini/config'))
+        self.assertIn('.gemini/config', agentuser.cleared_for('agy'))
         for kept in ('conversations/inside.md', 'antigravity-oauth-token'):
             self.assertTrue((self.home / '.gemini/antigravity-cli' / kept).exists(), kept)
         self.assertEqual(agentuser.cleared_for('claude'), ())
@@ -374,18 +420,72 @@ class RunnerTests(unittest.TestCase):
         self.assertIn('.codex/memories_1.sqlite*', self.states[0])
         self.assertIn('.gemini/antigravity-cli/brain', self.states[1])
 
-    def test_not_while_another_turn_of_the_same_cli_runs(self):
+    def blocked_turn(self, runner, kind):
+        """A turn of ``kind`` in a thread, held inside its CLI until the returned event."""
+        started, release = threading.Event(), threading.Event()
+
+        def hold():
+            started.set()
+            release.wait(30)
+        self.inner = hold
+        thread = threading.Thread(target=self.turn, args=(runner, kind))
+        thread.start()
+        self.addCleanup(thread.join, 30)
+        self.addCleanup(release.set)
+        self.assertTrue(started.wait(30))
+        return thread, release
+
+    def test_the_turns_of_a_cli_with_memories_run_one_at_a_time(self):
+        # 1/codex-reviewer/R1-2: a second codex turn would read what the first one writes in
+        # the memories of codex while both run: it waits for the first, then clears them.
         runner = self.runner()
-        # While a codex turn runs, a second codex turn starts, then a claude one, then agy.
-        self.inner = lambda: [self.turn(runner, kind, label='pr-2')
-                              for kind in ('codex', 'agy')]
-        self.turn(runner, 'codex')
+        first, release = self.blocked_turn(runner, 'codex')
+        second = threading.Thread(target=self.turn, args=(runner, 'codex', 'pr-2'))
+        second.start()
+        self.addCleanup(second.join, 30)
+        # Meanwhile claude, which keeps no memory to clear, and agy, another CLI, run.
+        self.turn(runner, 'claude', label='pr-3')
+        self.turn(runner, 'agy', label='pr-4')
+        second.join(0.5)
+        self.assertTrue(second.is_alive())  # still waiting
+        self.assertEqual(len(self.launched), 3)
         self.assertEqual(self.states, [list(agentuser.cleared_for('codex')), [],
                                        list(agentuser.cleared_for('agy'))])
-        # Once both ended, the next codex turn clears them again.
-        self.turn(runner, 'codex')
+        release.set()
+        first.join(30)
+        second.join(30)
+        self.assertFalse(second.is_alive())
+        self.assertEqual(len(self.launched), 4)
+        # The second codex turn cleared the memories the first one may have left.
         self.assertEqual(self.states[-1], list(agentuser.cleared_for('codex')))
-        self.assertEqual(runner._running, {'codex': 0, 'agy': 0})
+        self.assertEqual(runner._running, {'codex': 0, 'claude': 0, 'agy': 0})
+
+    def test_a_turn_cancelled_while_it_waits_never_starts(self):
+        runner = self.runner()
+        first, release = self.blocked_turn(runner, 'agy')
+        cancel, outcome = threading.Event(), []
+
+        def waiting():
+            with runner.cancellable(cancel):
+                try:
+                    self.turn(runner, 'agy', label='pr-2')
+                except agents.TurnCancelled as exc:
+                    outcome.append(exc)
+        second = threading.Thread(target=waiting)
+        second.start()
+        self.addCleanup(second.join, 30)
+        second.join(0.5)
+        self.assertTrue(second.is_alive())  # waiting for the first agy turn
+        cancel.set()
+        second.join(30)
+        self.assertFalse(second.is_alive())
+        self.assertEqual(len(outcome), 1)
+        self.assertIn('cancelled before it started', str(outcome[0]))
+        self.assertEqual(len(self.launched), 1)
+        self.assertEqual(len(self.states), 1)  # neither listed nor cleared
+        release.set()
+        first.join(30)
+        self.assertEqual(runner._running, {'agy': 0})
 
     def test_a_refused_or_failed_turn_does_not_stay_running(self):
         runner = self.runner()

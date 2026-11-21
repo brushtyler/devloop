@@ -323,7 +323,9 @@ configurazione o i binari delle CLI per i turni dopo, per esempio aggiungendo a
   che vi resta scrivibile non porta istruzioni ai turni dopo: prima di ogni turno di codex o di
   agy devloop rimuove le memorie che quella CLI rileggerebbe in una sessione successiva
   (`memories_1.sqlite*` di codex; `brain`, `implicit`, `builtin`, `conversation_summaries.db*` e
-  `jetbox_summaries_proto.pb*` di agy), se nessun altro turno della stessa CLI è in corso;
+  `jetbox_summaries_proto.pb*` di agy, e `~/.gemini/config`, di cui nessuno ha verificato il
+  contenuto), e i turni di codex, come quelli di agy, girano uno alla volta anche con le azioni
+  in parallelo, perché nessuno legga ciò che un altro vi scrive nel frattempo;
   `~/.codex/memories` è sigillata; devloop avvia ogni turno di Claude Code senza la memoria automatica di
   `~/.claude/projects` (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` nell'ambiente e, perché i settings
   del progetto nel worktree non la riaccendano, anche in `--settings`) e senza i server MCP di

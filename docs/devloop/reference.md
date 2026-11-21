@@ -392,7 +392,9 @@ This repository sets 3: implement, fix, sync and review of different issues and 
   a pin) runs alone: after every action planned before it has ended, and before any action
   planned after it starts. This is the rule of `devloop tick`; in `devloop run` a merge is not
   global, see [The merge lane](guide.md#the-merge-lane). `max_actions_per_tick` stays the limit on the total, and every agent
-  turn and test run keeps its usual timeout.
+  turn and test run keeps its usual timeout. With an [agent user](#agent-user), the turns of
+  codex, and those of agy, still run one at a time (#517): their memories are cleared before
+  each turn.
 - **Level-2 reviewers.** A review action runs together every reviewer its round still waits
   for (see [Level 2](#level-2-two-independent-reviewers)), so a round no longer takes two
   ticks.
@@ -1613,8 +1615,11 @@ is in the [guide](guide.md#agent-user) and in the [ops guide](../../ops/README.m
   refuses the turn before its CLI starts (`agents.CliStateRefused`), with an escalation of class
   `configuration` that names the entry; so does a listing that fails or does not end. Before
   the listing, the entries of `CLI_CLEARED` of the CLI of the turn (the memories of codex, the
-  memories, knowledge and summaries of agy) are removed, without following links, when no
-  other turn of that CLI is running in the same process.
+  memories, knowledge and summaries of agy, and `~/.gemini/config`, whose content was not
+  verified) are removed, without following links. The turns of codex, and those of agy, run one
+  at a time, also with [parallel actions](#parallel-actions): a turn waits until the one of the
+  same CLI that runs in the same process ends, so that no turn reads what another one writes
+  there meanwhile, and a turn cancelled while it waits never starts.
 - **Transcripts.** The stall check and `devloop follow` read the session transcripts in the agent
   user's home.
 

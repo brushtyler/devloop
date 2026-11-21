@@ -763,17 +763,21 @@ class AgentRunner:
     Before every turn, with an agent user, the directories of its CLIs are listed as that user
     (``AgentUser.cli_state``, #517): an entry that is not in the list of the code refuses the
     turn before it starts (``CliStateRefused``). Before it, what the CLI of the turn would read
-    again as context (``agentuser.CLI_CLEARED``) is removed, unless another turn of the same
-    CLI is running: removing it would take it from under that turn."""
+    again as context (``agentuser.CLI_CLEARED``) is removed. The turns of a CLI that keeps such
+    memories (codex, agy) run one at a time: a turn waits for the one of the same CLI that runs,
+    which could leave it memories while both run, and is cancelled while it waits (#521). The
+    turns of different CLIs, and those of claude, still run together."""
 
     def __init__(self, log_dir, timeout, run=subprocess.run, env=None, on_turn=None, stall=None,
                  clock=time.time, sleep=time.sleep, agent_user=None, shared_dir=None):
         if agent_user is not None and shared_dir is None:
             raise ValueError('an agent user needs a shared directory')
         self.agent_user = agent_user
-        # The turns of each CLI running now (#517): parallel actions share the runner.
+        # The turns of each CLI running now (#517): parallel actions share the runner. A turn
+        # of a CLI with memories to clear waits on ``_cli_idle`` until none of its CLI runs.
         self._running = {}
         self._running_lock = threading.Lock()
+        self._cli_idle = threading.Condition(self._running_lock)
         self.shared_dir = None if shared_dir is None else Path(shared_dir)
         self.shared = None if shared_dir is None else SharedDir(shared_dir)
         self.log_dir = Path(log_dir)
@@ -858,17 +862,25 @@ class AgentRunner:
         try:
             return self._started(agent, mode, prompt, schema_name, workdir, label)
         finally:
-            with self._running_lock:
+            with self._cli_idle:
                 self._running[agent.kind] -= 1
+                self._cli_idle.notify_all()
 
     def _check_cli_state(self, agent):
-        """Before a turn of ``agent`` (#517): remove what its CLI would read again as context,
-        when no other turn of that CLI is running, then refuse the turn (``CliStateRefused``)
-        when a directory of the CLIs holds an entry that is not in the list of the code, or
-        cannot be read. Otherwise the turn counts as running until it ends."""
-        with self._running_lock:
+        """Before a turn of ``agent`` (#517): when its CLI keeps memories to clear
+        (``agentuser.cleared_for``), wait until no other turn of that CLI runs, so that no turn
+        reads what another one leaves there, and remove them; a turn cancelled while it waits
+        raises ``TurnCancelled`` (#521). Then refuse the turn (``CliStateRefused``) when a
+        directory of the CLIs holds an entry that is not in the list of the code, or cannot be
+        read. Otherwise the turn counts as running until it ends."""
+        clear = cleared_for(agent.kind)
+        cancel = getattr(self._local, 'cancel', None)
+        with self._cli_idle:
+            while clear and self._running.get(agent.kind, 0):
+                if cancel is not None and cancel.is_set():
+                    raise TurnCancelled(f'{agent.key}: turn cancelled before it started')
+                self._cli_idle.wait(timeout=1)
             running = self._running.get(agent.kind, 0)
-            clear = () if running else cleared_for(agent.kind)
             try:
                 problems = self.agent_user.cli_state(clear)
             except AgentUserError as exc:

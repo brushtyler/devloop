@@ -582,9 +582,10 @@ salvava il token rinnovato (turni falliti con `401`, #507), codex non potrebbe s
   nomina ([qui sopra](#una-voce-sconosciuta-in-una-directory-delle-cli)). L'overlay può solo
   togliere voci dalla lista (`[agent_user] cli_denied`);
 - le memorie che una CLI rilegge fra un turno e l'altro (`memories_1.sqlite*` di codex; `brain`,
-  `implicit`, `builtin`, `conversation_summaries.db*` e `jetbox_summaries_proto.pb*` di agy)
-  devloop le rimuove prima di ogni turno di quella CLI, se nessun altro turno della stessa CLI è
-  in corso; la memoria automatica di Claude Code resta spenta (#438);
+  `implicit`, `builtin`, `conversation_summaries.db*` e `jetbox_summaries_proto.pb*` di agy, e
+  `~/.gemini/config`, di cui nessuno ha verificato il contenuto) devloop le rimuove prima di ogni
+  turno di quella CLI, e i turni di codex, come quelli di agy, girano uno alla volta anche con le
+  azioni in parallelo; la memoria automatica di Claude Code resta spenta (#438);
 - il token di lunga durata di claude di #507 (`[claude_token]`) è tolto: una configurazione che
   nomina ancora la tabella ferma devloop all'avvio.
 
@@ -608,7 +609,9 @@ agent](#file-delle-cli-di-root-sullutente-degli-agent-438):
    sudo bash /root/repos/ssdlc/ops/host/setup-agent-user.sh
    ```
 
-   Rende le quattro directory `1770`, di root e del gruppo di `devloop-agent`, crea i segnaposto
+   Rende le quattro directory `1770`, di root e del gruppo di `devloop-agent` (in `~/.claude` e
+   `~/.codex`, che hanno l'ACL di `devloop` di una versione precedente, imposta anche
+   `group::rwx`: con un'ACL `chmod` cambia solo la maschera), crea i segnaposto
    di root delle voci sigillate che mancano, rende di root `~/.codex/plugins` (oggi di
    `devloop-agent`), e segnala come `da fare a mano` ogni voce che non è nella lista. Una voce
    segnalata si rimuove come `devloop-agent` (per esempio

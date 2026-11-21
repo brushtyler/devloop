@@ -2480,10 +2480,13 @@ a host already in service is in
   (`~/.codex/memories_1.sqlite*`) and the memories, knowledge and summaries of agy (`brain`,
   `implicit`, `builtin`, `conversation_summaries.db*` and `jetbox_summaries_proto.pb*` of
   `~/.gemini/antigravity-cli`) are removed, as `devloop-agent`, before each turn of that CLI
-  (`CLI_CLEARED`), unless another turn of the same CLI is still running: removing them would take
-  them from under that turn, and turns that run together share the home anyway. The CLI starts
-  them again empty. `~/.codex/memories` is sealed, and the auto memory of Claude Code is off
-  (below).
+  (`CLI_CLEARED`). So is `~/.gemini/config`, whose content was not verified: whatever agy keeps
+  there does not reach the next turn. The CLI starts them again empty. Since turns that run
+  together share the home, the turns of codex, and those of agy, run one at a time, also with
+  [parallel actions](reference.md#parallel-actions): a turn waits until the one of the same CLI
+  ends, without a timeout of its own (that turn has one), and a turn cancelled while it waits
+  (`parallel_cancel`) never starts. The turns of claude, and of different CLIs, still run
+  together. `~/.codex/memories` is sealed, and the auto memory of Claude Code is off (below).
 - What a CLI creates on its first use inside the directories of the CLIs stays its own (#494): `CLI_WRITABLE` in `devloop/agentuser.py`,
   `~/.gemini/antigravity-cli/bin`, where agy writes the wrapper of its shell tool. The setup
   script creates it as `devloop-agent`'s, mode `700`, and the startup check refuses to start
