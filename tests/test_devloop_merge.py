@@ -444,6 +444,63 @@ class DirectiveTests(Case):
                     d._do_merge(p)
                     self.assert_not_merged()
 
+    def late(self, d, change):
+        """Apply ``change`` to the labels of PR #100 after every check of the merge, just before
+        its call (#519): after the reads the tick and the merge started from."""
+        checked = d._approvals_match
+
+        def approvals_match(*args, **kwargs):
+            bases = checked(*args, **kwargs)
+            change(self.gh.labels[100])
+            return bases
+        d._approvals_match = approvals_match
+
+    def test_a_label_added_just_before_the_merge_call_blocks_it(self):
+        """The labels of the PR are read again with the API just before the merge call (#519):
+        an ``agent:merge-hold``, or another label that holds the merge, added after the reads of
+        the tick stops it, with why in the log and on the PR."""
+        changes_ = {'merge-hold': lambda labels: labels.add(HOLD),
+                    'needs-operator': lambda labels: labels.add('agent:needs-operator'),
+                    'needs-supervisor': lambda labels: labels.add('agent:needs-supervisor'),
+                    'not ready': lambda labels: labels.discard(READY)}
+        for cfg in self.MODES:
+            for name, change in changes_.items():
+                with self.subTest(mode=cfg.merge.mode, change=name):
+                    d, p = self.ready(cfg)
+                    d.clock = lambda: 1795253402  # 2026-11-21T09:30:02Z
+                    self.late(d, change)
+                    d._do_merge(p)
+                    self.assert_not_merged()
+                    self.assertTrue(any(line.startswith('  not merged: labels read again at '
+                                                        '2026-11-21T09:30:02Z')
+                                        for line in self.logs))
+                    body = self.gh.comments[-1][1]
+                    self.assertIn('## Merge non eseguito', body)
+                    self.assertIn('alle 2026-11-21T09:30:02Z (UTC)', body)
+                    self.assertIsNone(markdown.read_marker(body, 'merged'))
+
+    def test_without_a_label_that_holds_it_the_merge_follows_a_new_read(self):
+        """Without such a label the merge goes ahead as before, after a read of the labels made
+        just before its call, whose time the ``merged`` comment gives (#519)."""
+        for cfg in self.MODES:
+            with self.subTest(mode=cfg.merge.mode):
+                d, p = self.ready(cfg)
+                d.clock = lambda: 1795253409  # 2026-11-21T09:30:09Z
+                calls = []
+                self.late(d, lambda labels: calls.append('checked'))
+                pr_state, merge_pr = self.gh.pr_state, self.gh.merge_pr
+                self.gh.pr_state = lambda n: (calls.append('pr_state'), pr_state(n))[1]
+                self.gh.merge_pr = lambda n, h: (calls.append('merge_pr'), merge_pr(n, h))[1]
+                d._do_merge(p)
+                self.assertEqual(self.gh.merged, [(100, SHA1)])
+                self.assertEqual(calls[-3:], ['checked', 'pr_state', 'merge_pr'])
+                (record,) = records(self.gh, 'merged')
+                self.assertEqual(record, {'head': SHA1, 'level': 1, 'mode': cfg.merge.mode,
+                                          'receipt': receipt()})
+                body = next(b for _, b in self.gh.comments if markdown.read_marker(b, 'merged'))
+                self.assertIn('Le label della PR le ha rilette subito prima della chiamata di '
+                              'merge, alle 2026-11-21T09:30:09Z (UTC).', ' '.join(body.split()))
+
     def test_the_snapshot_plans_no_merge_when_a_directive_fails(self):
         changes_ = {
             'ci pending': lambda gh: setattr(gh, 'ci', 'pending'),

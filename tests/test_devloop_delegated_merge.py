@@ -212,6 +212,8 @@ class MergeTests(Case):
         body = next(b for _, b in self.gh.comments if markdown.read_marker(b, 'merged'))
         self.assertIn('## Mergiata da devloop su delega del supervisore', body)
         self.assertIn('> Nessuna decisione nuova.', body)
+        # The labels read again just before the merge call (#519), with the time of that read.
+        self.assertIn('alle 2026-11-21T10:00:00Z (UTC)', body)
         (decision,) = self.decisions()
         self.assertEqual({k: decision[k] for k in ('command', 'by', 'outcome', 'head', 'daily',
                                                     'daily_cap', 'daily_left', 'opinion')},
@@ -383,6 +385,30 @@ class RefusalTests(Case):
         self.merge()
         self.command('/devloop hold aspetto', login='brushtyler')
         self.assert_refused(d, 'un `/devloop hold` scritto dopo il comando lo ha annullato')
+
+    def test_a_merge_hold_added_just_before_the_merge_call_refuses_it(self):
+        """The labels of the PR are read again just before the merge call (#519): an
+        ``agent:merge-hold`` added after every other check refuses the command, while the
+        dispatcher's ``agent:needs-operator`` of the ``operator_merge`` is the expected one."""
+        d = self.make()
+        self.merge()
+        checked = d._approvals_match
+
+        def approvals_match(*args, **kwargs):
+            bases = checked(*args, **kwargs)
+            self.gh.labels[100].add('agent:merge-hold')
+            return bases
+        d._approvals_match = approvals_match
+        self.apply(d)
+        self.assertEqual(self.gh.merged, [])
+        self.assertEqual(records(self.gh, 'merged'), [])
+        self.assertEqual(self.decisions()[-1]['outcome'], 'refused')
+        self.assertIn('le label della PR, rilette subito prima della chiamata di merge alle '
+                      '2026-11-21T10:00:00Z (UTC), non sono più quelle di un merge '
+                      'dell\'operatore: `agent:merge-hold`', self.text())
+        self.assertIn(f'la PR resta in `{OPERATOR}`', self.text())
+        self.assertTrue(any(line.startswith('  not merged: labels read again at ')
+                            for line in self.logs))
 
     def test_a_merge_mode_other_than_auto(self):
         # Another operator-only path, or a level "off", stays the operator's.
