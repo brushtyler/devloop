@@ -322,13 +322,20 @@ configurazione o i binari delle CLI per i turni dopo, per esempio aggiungendo a
   `devloop/agentuser.py`: `~/.gemini/antigravity-cli/bin`, dove agy scrive il wrapper del suo
   strumento di shell) le crea lo script, di `devloop-agent`, `700`; prima di ogni turno di agy
   devloop rifiuta il turno se `bin` contiene altro che il wrapper che agy vi scrive (#494). Ciò
-  che vi resta scrivibile non porta istruzioni ai turni dopo: prima di ogni turno di codex o di
-  agy devloop rimuove le memorie che quella CLI rileggerebbe in una sessione successiva
-  (`memories_1.sqlite*` di codex; `brain`, `implicit`, `builtin`, `conversation_summaries.db*` e
-  `jetbox_summaries_proto.pb*` di agy), e i turni di codex, come quelli di agy, girano uno alla
-  volta anche con le azioni
-  in parallelo, perché nessuno legga ciò che un altro vi scrive nel frattempo;
-  `~/.codex/memories` è sigillata; devloop avvia ogni turno di Claude Code senza la memoria automatica di
+  che vi resta scrivibile non porta istruzioni ai turni dopo: prima di ogni turno di agy, che
+  non ha un interruttore noto, devloop rimuove le memorie che rileggerebbe in una sessione
+  successiva (`brain`, `implicit`, `builtin`, `conversation_summaries.db*` e
+  `jetbox_summaries_proto.pb*`), e i turni di agy girano uno alla volta anche con le azioni in
+  parallelo, perché nessuno legga ciò che un altro vi scrive nel frattempo. Le memorie di codex
+  (`memories_1.sqlite*`) sono invece spente: lo script scrive nel `~/.codex/config.toml`
+  sigillato `[features] memories = false` in modo esplicito, così un cambio del default di
+  codex non le riaccende (aggiunge la riga che manca, nella tabella `[features]` o in una nuova
+  in fondo, e segnala da correggere a mano un valore diverso o un `config.toml` che è un link);
+  devloop all'avvio, leggendolo come `devloop-agent`, e `check-host.sh` rifiutano un
+  `config.toml` senza la riga, con `memories = true` o con un profilo
+  (`[profiles.<nome>.features]`) che le riaccende. I turni di codex non svuotano nulla e girano
+  in parallelo; `memories_1.sqlite*` resta fra le voci ammesse e `~/.codex/memories` è
+  sigillata; devloop avvia ogni turno di Claude Code senza la memoria automatica di
   `~/.claude/projects` (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` nell'ambiente e, perché i settings
   del progetto nel worktree non la riaccendano, anche in `--settings`) e senza i server MCP di
   `~/.claude.json` (`--strict-mcp-config`). Un `--settings` nei `write_args` o nei `review_args`

@@ -50,11 +50,16 @@ def cli_listing(entries=(), dirs=agentuser.CLI_DIRS):
     return ''.join(f'{r}\0' for r in [*out, 'E:']).encode()
 
 
-def cli_state(argv, entries=()):
-    """The answer of a fake launch mechanism to the listing of the directories of the CLIs, or
-    None for another command."""
+CODEX_CONFIG = b'model = "gpt-5"\n\n[features]\nmemories = false\n'
+
+
+def cli_state(argv, entries=(), codex_config=CODEX_CONFIG):
+    """The answer of a fake launch mechanism to the listing of the directories of the CLIs, and
+    to the reading of the configuration of codex (#517), or None for another command."""
     if 'cli-state' in argv:
         return SimpleNamespace(returncode=0, stdout=cli_listing(entries), stderr=b'')
+    if 'codex-config' in argv:
+        return SimpleNamespace(returncode=0, stdout=codex_config, stderr=b'')
     return None
 
 
@@ -307,6 +312,9 @@ class SafeDirectoryTests(unittest.TestCase):
                 return []
 
             def cli_state(self, clear=()):
+                return []
+
+            def codex_config(self):
                 return []
         agentuser.check(GitOnly(self.tmp), keys, state, me='devloop', env=OTHER_OWNER)
 
@@ -676,6 +684,8 @@ class StartupCheckTests(unittest.TestCase):
         self.env_checks = []
         self.cli_states = []
         self.cli_entries = ()
+        self.codex_configs = []
+        self.codex_config = CODEX_CONFIG
 
     def fake(self, problems=(), returncode=0, stderr='', git=(0, '')):
         """An agent user whose probe reports ``problems``, ``(code, path)`` pairs, whose git
@@ -687,6 +697,9 @@ class StartupCheckTests(unittest.TestCase):
             if 'cli-state' in argv:  # the directories of the CLIs hold only the list (#517)
                 self.cli_states.append(argv)
                 return cli_state(argv, self.cli_entries)
+            if 'codex-config' in argv:  # the memories of codex off (#517)
+                self.codex_configs.append(argv)
+                return cli_state(argv, codex_config=self.codex_config)
             if 'git-probe' in argv:
                 self.git_probes.append((argv, kw['env']))
                 # What the dispatcher's git made: the agent user writes nothing there (#500).
@@ -828,6 +841,8 @@ class StartupCheckTests(unittest.TestCase):
             self.skipTest('root reads and writes everything')
         user = LocalUser(self.tmp)
         (self.tmp / agentuser.AGY_BIN).mkdir(parents=True)  # the agent user's (#494)
+        (self.tmp / '.codex').mkdir()
+        (self.tmp / agentuser.CODEX_CONFIG).write_bytes(CODEX_CONFIG)  # #517
         git_dir = self.tmp / 'repo/.git/worktrees/pr-1'
         git_dir.mkdir(parents=True)
         (git_dir / 'commondir').write_text('../..\n')
@@ -925,7 +940,7 @@ class EnvironmentCheckTests(unittest.TestCase):
         probe (#500) find nothing."""
         def run(argv, **kw):
             self.calls.append((argv, kw))
-            if 'cli-state' in argv:
+            if 'cli-state' in argv or 'codex-config' in argv:
                 return cli_state(argv)
             if 'probe' in argv or 'git-probe' in argv:
                 return SimpleNamespace(returncode=0, stdout='', stderr='')

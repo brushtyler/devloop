@@ -8,6 +8,7 @@ import getpass
 import grp
 import html
 import importlib.util
+import itertools
 import json
 import os
 import re
@@ -1083,6 +1084,67 @@ class DryRunTests(OpsTestCase):
                       f'{config_dir}/projects\n', done.stdout)
         self.assertEqual(self.mutating_calls(), [])
 
+    def test_setup_agent_user_turns_the_memories_of_codex_off(self):
+        # Request of the operator on PR #523: the sealed ~/.codex/config.toml sets
+        # [features] memories = false in so many words; the script adds the line that is
+        # missing, and changes none that is there.
+        agent = self.home / 'agent'
+        config = agent / '.codex/config.toml'
+        params = self.params(DEVLOOP_USER=ME, AGENT_USER='opsdry-noagent')
+
+        def written(before):
+            if before is None:
+                config.unlink(missing_ok=True)
+            else:
+                config.parent.mkdir(parents=True, exist_ok=True)
+                config.write_text(before)
+            done = self.run_script('host/setup-agent-user.sh', '--dry-run', '--params',
+                                   str(params))
+            self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+            out = done.stdout
+            head = f'  [dry-run] scriverebbe {config} (mode '
+            if head not in out:
+                return out, None
+            lines = out.split(head, 1)[1].splitlines()[1:]
+            content = ''.join(line[6:] + '\n' for line in
+                              itertools.takewhile(lambda l: l.startswith('    | '), lines))
+            self.assertEqual(config.read_text() if before is not None else None, before)
+            return out, content
+        # Missing: the placeholder of root gets the line.
+        out, content = written(None)
+        self.assertIn(f'[dry-run] install -m 644 -o root -g opsdry-noagent /dev/null {config}\n',
+                      out)
+        self.assertIn(f'scriverebbe {config} (mode 644, proprietario root):', out)
+        self.assertEqual(content, '[features]\nmemories = false\n')
+        # Without [features]: a new table at the end.
+        out, content = written('model = "gpt-5"\n')
+        self.assertEqual(content, 'model = "gpt-5"\n\n[features]\nmemories = false\n')
+        # With [features]: the line in it.
+        out, content = written('model = "gpt-5"\n[features] # on\nshell_tool = true\n'
+                               '[tui]\nx = 1\n')
+        self.assertEqual(content, 'model = "gpt-5"\n[features] # on\nmemories = false\n'
+                                  'shell_tool = true\n[tui]\nx = 1\n')
+        # Already there: nothing to write.
+        out, content = written('[features]\nmemories = false\n')
+        self.assertIsNone(content)
+        self.assertIn(f'ok: {config} imposta [features] memories = false', out)
+        # Another value, or a table the line cannot be added to: reported, never changed.
+        for before, why in (('[features]\nmemories = true\n', 'imposta [features] memories = true'),
+                            ('features = { shell_tool = true }\n',
+                             'non imposta [features] memories = false, e la riga non si '
+                             'aggiunge da sola')):
+            with self.subTest(before=before):
+                out, content = written(before)
+                self.assertIsNone(content)
+                self.assertIn(f'da fare a mano: {config} {why}', out)
+        # A link: what it leads to is set by hand.
+        config.unlink()
+        config.symlink_to(self.tmp / 'elsewhere.toml')
+        done = self.run_script('host/setup-agent-user.sh', '--dry-run', '--params', str(params))
+        self.assertIn(f'da fare a mano: {config} è un link: impostare a mano [features] '
+                      'memories = false', done.stdout)
+        self.assertEqual(self.mutating_calls(), [])
+
     def test_setup_agent_user_keeps_the_files_of_the_clis_readable(self):
         # #438: a version before wrote settings.json 600, and a CLI may keep a directory 700:
         # once root's, the agent user still reads them, through its group, without writing.
@@ -1718,6 +1780,8 @@ class CheckHostTests(OpsTestCase):
             (self.agent / name).mkdir()
             (self.agent / name).chmod(0o1770)
         self.agent.chmod(0o1770)  # root's on the host (#438)
+        # The memories of codex off (request of the operator on PR #523).
+        (self.agent / '.codex/config.toml').write_text('[features]\nmemories = false\n')
         self.exe(self.supervisor / '.local/bin/claude')
         self.state = state = self.devloop / 'ssdlc/.ssdlc/devloop'
         (state / 'current').mkdir(parents=True)
@@ -1793,6 +1857,28 @@ class CheckHostTests(OpsTestCase):
             self.assertTrue(line.startswith('  [dry-run] sudo -u root -H -- /usr/bin/bash -c '),
                             line)
 
+    def test_a_configuration_of_codex_that_does_not_turn_its_memories_off_is_an_error(self):
+        # Request of the operator on PR #523: as the startup check of devloop, the
+        # configuration of codex must set [features] memories = false, in so many words.
+        config = self.agent / '.codex/config.toml'
+        done, errors = self.check()
+        self.assertEqual(errors, [])
+        self.assertIn(f'ok: {config} imposta [features] memories = false', done.stdout)
+        for data, why in (('model = "gpt-5"\n', 'non imposta [features] memories = false'),
+                          ('[features]\nmemories = true\n', 'imposta [features] memories = true'),
+                          ('[features]\nmemories = false\n[profiles.p.features]\nmemories = true\n',
+                           'imposta [profiles.p.features] memories = true'),
+                          (None, 'non esiste')):
+            with self.subTest(data=data):
+                if data is None:
+                    config.unlink()
+                else:
+                    config.write_text(data)
+                done, errors = self.check()
+                self.assertEqual(errors, [f'  ERRORE: {config} {why}: devloop non parte '
+                                          '(setup-agent-user.sh aggiunge [features] memories = '
+                                          'false)'])
+
     def test_an_entry_of_the_clis_not_in_the_list_is_an_error(self):
         # #517: as devloop before each turn.
         (self.agent / '.codex/auth.json').write_text('{}\n')
@@ -1862,6 +1948,7 @@ class CheckHostTests(OpsTestCase):
         (elsewhere / 'config.toml').write_text('x\n')
         (elsewhere / 'config.toml').chmod(0o444)
         (self.agent / '.codex').mkdir(exist_ok=True)
+        (self.agent / '.codex/config.toml').unlink(missing_ok=True)
         (self.agent / '.codex/config.toml').symlink_to(elsewhere / 'config.toml')
         done = run('sealed', self.agent / '.codex/config.toml')
         self.assertIn(f'suo: {elsewhere}/config.toml', done.stderr)

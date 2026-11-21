@@ -2479,16 +2479,22 @@ a host already in service is in
   chain of models wraps it); a listing that fails refuses it too. `[agent_user] cli_denied` in
   the overlay may take entries away from the list ([reference](reference.md#agent-user)), never
   add one: a new entry goes through a pull request.
-- What a CLI may read again as context in a later session (#517): the memories of codex
-  (`~/.codex/memories_1.sqlite*`) and the memories, knowledge and summaries of agy (`brain`,
-  `implicit`, `builtin`, `conversation_summaries.db*` and `jetbox_summaries_proto.pb*` of
-  `~/.gemini/antigravity-cli`) are removed, as `devloop-agent`, before each turn of that CLI
-  (`CLI_CLEARED`). The CLI starts them again empty. Since turns that run
-  together share the home, the turns of codex, and those of agy, run one at a time, also with
-  [parallel actions](reference.md#parallel-actions): a turn waits until the one of the same CLI
-  ends, without a timeout of its own (that turn has one), and a turn cancelled while it waits
-  (`parallel_cancel`) never starts. The turns of claude, and of different CLIs, still run
-  together. `~/.codex/memories` is sealed, and the auto memory of Claude Code is off (below).
+- What a CLI may read again as context in a later session (#517): the memories, knowledge and
+  summaries of agy (`brain`, `implicit`, `builtin`, `conversation_summaries.db*` and
+  `jetbox_summaries_proto.pb*` of `~/.gemini/antigravity-cli`), which no known setting of agy
+  turns off, are removed, as `devloop-agent`, before each agy turn (`CLI_CLEARED`). agy starts
+  them again empty. Since turns that run together share the home, the turns of agy run one at a
+  time, also with [parallel actions](reference.md#parallel-actions): a turn waits until the
+  agy turn that runs ends, without a timeout of its own (that turn has one), and a turn
+  cancelled while it waits (`parallel_cancel`) never starts. The memories of codex
+  (`~/.codex/memories_1.sqlite*`) are off instead: the sealed `~/.codex/config.toml` sets
+  `[features] memories = false` in so many words, so that a change of the default of codex does
+  not turn them on, and no profile of it may turn them on. The setup script writes the line,
+  and the startup check, which reads the file as `devloop-agent`, and `check-host.sh` refuse a
+  file without it or with another value. The turns of codex are neither cleared nor serialized:
+  they run together, as those of claude and of different CLIs. `memories_1.sqlite*` stays in
+  the list, `~/.codex/memories` stays sealed, and the auto memory of Claude Code is off
+  (below).
 - What a CLI creates on its first use inside the directories of the CLIs stays its own (#494): `CLI_WRITABLE` in `devloop/agentuser.py`,
   `~/.gemini/antigravity-cli/bin`, where agy writes the wrapper of its shell tool. The setup
   script creates it as `devloop-agent`'s, mode `700`, and the startup check refuses to start

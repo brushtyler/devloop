@@ -239,6 +239,33 @@ if [ "$UNSEAL" != 1 ]; then
         done < <(find "$path" -type l -print0 2>/dev/null)
     done
 
+    step "codex senza memorie: [features] memories = false in ~/.codex/config.toml (#517)"
+    # Le memorie di codex (memories_1.sqlite) restano spente in modo esplicito, così un cambio
+    # del default di codex non le riaccende: un turno non rilegge ciò che un altro vi lascia, e i
+    # turni di codex girano in parallelo. devloop e check-host.sh rifiutano un config.toml senza
+    # la riga, o che la imposta a un altro valore: lo script aggiunge la riga che manca, non ne
+    # cambia una che c'è.
+    CODEX_CONFIG="$AGENT_HOME/.codex/config.toml"
+    if [ -L "$CODEX_CONFIG" ]; then
+        todo "$CODEX_CONFIG è un link: impostare a mano [features] memories = false nel file a cui porta"
+    else
+        codex_new=$(mktemp)
+        codex_status=0
+        codex_why=$(codex_memories "$CODEX_CONFIG" "$codex_new") || codex_status=$?
+        case $codex_status in
+            0) ok "$CODEX_CONFIG imposta [features] memories = false" ;;
+            3) codex_mode=$(stat -c %a "$CODEX_CONFIG" 2>/dev/null) || codex_mode=644
+               if [ "$DRY_RUN" = 1 ]; then
+                   say "  [dry-run] scriverebbe $CODEX_CONFIG (mode $codex_mode, proprietario root):"
+                   sed 's/^/    | /' "$codex_new"
+               else
+                   run install -m "$codex_mode" -o root -g "$AGENT_GROUP" "$codex_new" "$CODEX_CONFIG"
+               fi ;;
+            *) todo "${codex_why:-$CODEX_CONFIG non si legge}: impostare a mano [features] memories = false; devloop non parte finché manca" ;;
+        esac
+        rm -f "$codex_new"
+    fi
+
     step "Voci delle directory delle CLI: solo quelle della lista (#517)"
     # devloop rifiuta ogni turno finché una directory delle CLI contiene una voce che non è
     # nella lista (AGENT_CLI_ALLOWED), né sigillata né una directory delle CLI: lo script la

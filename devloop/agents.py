@@ -764,9 +764,10 @@ class AgentRunner:
     (``AgentUser.cli_state``, #517): an entry that is not in the list of the code refuses the
     turn before it starts (``CliStateRefused``). Before it, what the CLI of the turn would read
     again as context (``agentuser.CLI_CLEARED``) is removed. The turns of a CLI that keeps such
-    memories (codex, agy) run one at a time: a turn waits for the one of the same CLI that runs,
+    memories (agy) run one at a time: a turn waits for the one of the same CLI that runs,
     which could leave it memories while both run, and is cancelled while it waits (#521). The
-    turns of different CLIs, and those of claude, still run together."""
+    turns of different CLIs, and those of claude and codex, whose memories are off, still run
+    together."""
 
     def __init__(self, log_dir, timeout, run=subprocess.run, env=None, on_turn=None, stall=None,
                  clock=time.time, sleep=time.sleep, agent_user=None, shared_dir=None):

@@ -55,8 +55,11 @@ entries of ``CLI_ALLOWED``, of their type, besides the sealed ones and the direc
 CLIs, of root: at the start (``check``) and before each turn (``AgentUser.cli_state``, from
 ``agents.AgentRunner``) anything else is refused, and a turn refused so is an escalation
 ``configuration`` that names the entry; ``[agent_user] cli_denied`` may only shorten the list.
-Before each turn of a CLI, what it would read again as context in a later session
-(``CLI_CLEARED``) is removed, and the turns of a CLI that keeps it run one at a time. A directory above them that the agent user can write protects
+Before each turn of agy, what it would read again as context in a later session
+(``CLI_CLEARED``) is removed, and its turns run one at a time. The memories of codex are off
+instead, and its turns run together: ``check`` refuses a ``~/.codex/config.toml`` without
+``[features] memories = false`` (``codex_config_problems``). A directory above them that the
+agent user can write protects
 them only when it is sticky and neither it nor the entry is the agent user's: the home, which
 the agent user writes, is root's and sticky. A link among them, or inside a sealed one, is
 followed, and what it leads to must be protected the same way; the sealed files must stay
@@ -84,6 +87,7 @@ import secrets
 import shutil
 import stat
 import subprocess
+import tomllib
 from pathlib import Path
 
 SUDO = 'sudo'
@@ -174,13 +178,13 @@ CLI_ALLOWED = (
     ('.gemini/antigravity-cli/last_check.timestamp', 'f'), ('.gemini/antigravity-cli/log', 'd'),
     ('.gemini/antigravity-cli/presence', 'd'), ('.gemini/antigravity-cli/updater', 'd'))
 # The entries of ``CLI_ALLOWED`` a CLI may read again, in a later session, as context (#517):
-# the memories of codex and the memories, knowledge and summaries of agy. Before each
-# turn of that CLI they are removed, as the agent user, and the turns of that CLI run one at a
+# the memories, knowledge and summaries of agy, which has no known setting that turns them off.
+# Before each turn of agy they are removed, as the agent user, and the turns of agy run one at a
 # time, so that none reads what another one writes there meanwhile (``agents.AgentRunner``):
-# the CLI starts them again empty. The auto memory of Claude Code, in ``.claude/projects``, is
-# off in every claude turn instead (``agents``).
+# agy starts them again empty. The memories of codex (``.codex/memories_1.sqlite*``) are off in
+# its configuration instead (``CODEX_CONFIG``), and its turns run together; the auto memory of
+# Claude Code, in ``.claude/projects``, is off in every claude turn (``agents``).
 CLI_CLEARED = (
-    '.codex/memories_1.sqlite*',
     '.gemini/antigravity-cli/brain', '.gemini/antigravity-cli/builtin',
     '.gemini/antigravity-cli/conversation_summaries.db*', '.gemini/antigravity-cli/implicit',
     '.gemini/antigravity-cli/jetbox_summaries_proto.pb',
@@ -193,6 +197,14 @@ CLI_OF = {'.claude': 'claude', '.codex': 'codex', '.gemini': 'agy', '.gemini/con
 # agent user's, mode 700, and the startup check wants them writable. agy writes the wrapper of
 # its shell tool, ``AGY_WRAPPER``, in ``AGY_BIN`` each time it starts it.
 CLI_WRITABLE = ('.gemini/antigravity-cli/bin',)
+# The configuration of codex in the agent user's home, sealed (#517): it turns off in so many
+# words the memories codex would read again as context in a later session
+# (``.codex/memories_1.sqlite*``), with ``[features] memories = false``, so that a change of
+# the default of codex does not turn them on; no profile turns them on either.
+# ``ops/host/setup-agent-user.sh`` writes it; ``check`` and ``ops/host/check-host.sh`` refuse a
+# file without it (``codex_config_problems``). ``CODEX_CONFIG_LIMIT``: the largest file read.
+CODEX_CONFIG = '.codex/config.toml'
+CODEX_CONFIG_LIMIT = 1 << 20
 AGY_BIN = '.gemini/antigravity-cli/bin'
 AGY_WRAPPER = 'agentapi'
 # The largest wrapper read back: the expected one is a few dozen bytes.
@@ -428,6 +440,28 @@ class AgentUser:
         if isinstance(stdout, str):
             stdout = os.fsencode(stdout)
         return cli_state_problems(self.home, stdout, self.cli_denied, self.root_uid)
+
+    def codex_config(self):
+        """The problems of ``CODEX_CONFIG`` in the agent user's home, read as that user, as
+        codex reads it (``codex_config_problems``, #517). Raises AgentUserError when the
+        command cannot run as the agent user."""
+        path = self.home / CODEX_CONFIG
+        argv = self.command([BASH, '-c', _CODEX_CONFIG_PROBE, 'codex-config', str(path),
+                             str(CODEX_CONFIG_LIMIT + 1)])
+        env = self.environment({'PATH': os.environ.get('PATH', '/usr/bin:/bin'),
+                                'LC_ALL': 'C'})
+        try:
+            done = self._run(argv, capture_output=True, timeout=60, env=env)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise AgentUserError(f'cannot run commands as {self.name}: {exc}') from exc
+        if done.returncode != 0:
+            detail = os.fsdecode(done.stderr or b'').strip()[:500]
+            return [f'{self.name} cannot read {path} (exit {done.returncode}): '
+                    f'{detail or "no output"}; {CODEX_MEMORIES_FIX}']
+        stdout = done.stdout or b''
+        if isinstance(stdout, str):
+            stdout = os.fsencode(stdout)
+        return codex_config_problems(path, stdout)
 
     def check_environment(self):
         """Raise AgentUserError when the environment devloop passes with ``sudo -E`` does not
@@ -733,6 +767,46 @@ def cleared_for(kind):
     return tuple(p for p in CLI_CLEARED if CLI_OF[p.rpartition('/')[0]] == kind)
 
 
+# Run as the agent user (#517): at most ``$2`` bytes of ``$1``, the configuration of codex,
+# with the system's tools only. A file that cannot be read is an exit status other than 0.
+_CODEX_CONFIG_PROBE = r'''PATH=/usr/bin:/bin
+head -c "$2" -- "$1"
+'''
+CODEX_MEMORIES_FIX = ('ops/host/setup-agent-user.sh writes [features] memories = false in it '
+                      '(ops/host/migrate.md)')
+
+
+def codex_config_problems(path, data):
+    """The problems of ``data``, the bytes of ``path``, the configuration of codex of the agent
+    user (#517): it must be TOML and set ``[features] memories = false``, and no profile of it
+    (``[profiles.<name>.features]``) may set ``memories`` to anything else. Otherwise codex could
+    read again, in a later turn, the memories a turn leaves in ``memories_1.sqlite``, also while
+    another turn runs."""
+    def refused(why):
+        return [f'{path} {why}: codex would read again, in a later turn, the memories a turn '
+                f'leaves in {CODEX_CONFIG.rpartition("/")[0]}/memories_1.sqlite; '
+                f'{CODEX_MEMORIES_FIX}']
+    if len(data) > CODEX_CONFIG_LIMIT:
+        return refused(f'is larger than {CODEX_CONFIG_LIMIT} bytes')
+    try:
+        parsed = tomllib.loads(data.decode('utf-8'))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        return refused(f'is not valid TOML ({exc})')
+    features = parsed.get('features')
+    if not isinstance(features, dict) or 'memories' not in features:
+        return refused('does not set [features] memories = false')
+    if features['memories'] is not False:
+        return refused(f'sets [features] memories = {features["memories"]!r}')
+    profiles = parsed.get('profiles')
+    problems = []
+    for name, profile in (profiles.items() if isinstance(profiles, dict) else ()):
+        on = profile.get('features') if isinstance(profile, dict) else None
+        if isinstance(on, dict) and 'memories' in on and on['memories'] is not False:
+            problems += refused(f'sets [profiles.{name}.features] memories = '
+                                f'{on["memories"]!r}')
+    return problems
+
+
 # Run as the agent user (#517): ``$1`` the home, then ``x:<dir>/<pattern>``, the entries of
 # ``<dir>`` whose name matches the pattern to remove first (``CLI_CLEARED``), and ``l:<dir>``,
 # the directories to list. NUL-terminated records: ``L:<dir>`` a link, ``M:<dir>`` missing,
@@ -919,7 +993,9 @@ def check(agent_user, key_dir, state_dir, local_config=None, me=None, git_dir=No
     it must enter; it must write the directories the dispatcher makes for its turns and test
     runs, and read the schemas. It must not write, own, create, rename nor remove the files of
     the CLIs in its home that later turns use (``cli_items``, #438), and must write the entries
-    its CLIs create on their first use (``CLI_WRITABLE``, #494). Git, run as the agent user
+    its CLIs create on their first use (``CLI_WRITABLE``, #494). The configuration of codex,
+    read as the agent user, must turn its memories off (``codex_config_problems``, #517). Git,
+    run as the agent user
     with ``env`` (the environment of the turns, default a minimal one) and the ``safe.directory``
     a turn gets, must work in a linked worktree of the dispatcher's user, made for the check in
     a directory of its own in the shared one (``probe_worktree``, #500); only when the probe
@@ -957,6 +1033,7 @@ def check(agent_user, key_dir, state_dir, local_config=None, me=None, git_dir=No
             raise AgentUserError(f'the shared directory {shared.path}: {exc}') from exc
         found = agent_user.probe(items)
         unknown = agent_user.cli_state()  # only the entries of the list (#517)
+        unknown += agent_user.codex_config()  # the memories of codex off (#517)
         refused = None
         # The git probe only where the agent user cannot write the shared directory: the
         # repository is made there by the dispatcher's user, in a directory of its own (#500).

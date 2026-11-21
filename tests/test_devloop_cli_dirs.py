@@ -6,8 +6,9 @@ of the agent user are root's, of its group, mode 1770: the agent user creates an
 entry that does not exist is a placeholder of root it cannot create. The directories may hold
 only the entries of the list of the code (``agentuser.CLI_ALLOWED``): an unknown one refuses the
 turn with an escalation ``configuration`` that names it. What a CLI would read again as context
-in a later session is removed before its turns (``CLI_CLEARED``), turned off (the auto memory of
-Claude Code) or sealed (``~/.codex/memories``). ``[claude_token]`` of #507 is gone.
+in a later session is removed before its turns (agy, ``CLI_CLEARED``), turned off (the auto
+memory of Claude Code; the memories of codex, ``[features] memories = false`` in its sealed
+configuration) or sealed (``~/.codex/memories``). ``[claude_token]`` of #507 is gone.
 
 sudo is never run here: the launch mechanism is a fake, or runs the commands as the current
 user (``LocalUser``), which stands for the agent user; root's entries are those of another
@@ -310,7 +311,7 @@ class RealProbeTests(unittest.TestCase):
         self.assertIn(f"{self.home}/.claude holds 'odd\\nname' (type 'f')", problems[0])
         self.assertIn(f"{self.home}/.codex holds 'hooks.json' (type 'f')", problems[1])
 
-    def test_the_memories_of_codex_and_agy_are_cleared_and_nothing_else(self):
+    def test_the_memories_of_agy_are_cleared_and_nothing_else(self):
         outside = self.tmp / 'outside'
         outside.mkdir()
         (outside / 'keep.md').write_text('not the CLI\'s\n')
@@ -322,14 +323,14 @@ class RealProbeTests(unittest.TestCase):
         self.make('.gemini/antigravity-cli/brain', '.gemini/antigravity-cli/builtin',
                   '.gemini/antigravity-cli/conversations', directory=True)
         (self.home / '.gemini/antigravity-cli/implicit').symlink_to(outside)
-        # A codex turn: the memories of codex go, those of agy stay, and the link left there
-        # is refused in the listing.
+        # A codex turn clears nothing: the memories of codex are off in its configuration
+        # (request of the operator on PR #523), and the link left by agy is refused.
+        self.assertEqual(agentuser.cleared_for('codex'), ())
         problems = self.user.cli_state(agentuser.cleared_for('codex'))
         self.assertEqual(len(problems), 1)
         self.assertIn("holds 'implicit' of type 'l'", problems[0])
-        self.assertFalse((self.home / '.codex/memories_1.sqlite').exists())
-        self.assertFalse((self.home / '.codex/memories_1.sqlite-wal').exists())
-        for kept in ('.codex/auth.json', '.codex/state_5.sqlite',
+        for kept in ('.codex/memories_1.sqlite', '.codex/memories_1.sqlite-wal',
+                     '.codex/auth.json', '.codex/state_5.sqlite',
                      '.gemini/antigravity-cli/brain/inside.md', '.gemini/config/.migrated'):
             self.assertTrue((self.home / kept).exists(), kept)
         # An agy turn: clearing removes the link, never what it leads to.
@@ -343,6 +344,7 @@ class RealProbeTests(unittest.TestCase):
         self.assertTrue((self.home / '.gemini/config/.migrated').exists())
         for kept in ('conversations/inside.md', 'antigravity-oauth-token'):
             self.assertTrue((self.home / '.gemini/antigravity-cli' / kept).exists(), kept)
+        self.assertTrue((self.home / '.codex/memories_1.sqlite').exists())
         self.assertEqual(agentuser.cleared_for('claude'), ())
 
     def test_the_configuration_of_agy_written_by_the_agent_user_is_refused(self):
@@ -389,12 +391,12 @@ class RealProbeTests(unittest.TestCase):
             calls.append((argv, kw))
             return SimpleNamespace(returncode=0, stdout=cli_listing(), stderr=b'')
         user = AgentUser('devloop-agent', home=str(HOME), run=run)
-        self.assertEqual(user.cli_state(('.codex/memories_1.sqlite*',)), [])
+        self.assertEqual(user.cli_state(('.gemini/antigravity-cli/brain',)), [])
         argv, kw = calls[0]
         self.assertEqual(argv[:8], ['sudo', '-n', '-E', '-u', 'devloop-agent', '--',
                                     '/usr/bin/bash', '-c'])
         self.assertTrue(argv[8].startswith('PATH=/usr/bin:/bin\n'))
-        self.assertEqual(argv[9:], ['cli-state', str(HOME), 'x:.codex/memories_1.sqlite*',
+        self.assertEqual(argv[9:], ['cli-state', str(HOME), 'x:.gemini/antigravity-cli/brain',
                                     *(f'l:{d}' for d in agentuser.CLI_DIRS)])
         self.assertEqual(kw['env']['HOME'], str(HOME))
 
@@ -470,9 +472,7 @@ class RunnerTests(unittest.TestCase):
         runner = self.runner()
         for kind in ('codex', 'agy', 'claude'):
             self.turn(runner, kind)
-        self.assertEqual(self.states, [list(agentuser.cleared_for('codex')),
-                                       list(agentuser.cleared_for('agy')), []])
-        self.assertIn('.codex/memories_1.sqlite*', self.states[0])
+        self.assertEqual(self.states, [[], list(agentuser.cleared_for('agy')), []])
         self.assertIn('.gemini/antigravity-cli/brain', self.states[1])
 
     def blocked_turn(self, runner, kind):
@@ -491,29 +491,42 @@ class RunnerTests(unittest.TestCase):
         return thread, release
 
     def test_the_turns_of_a_cli_with_memories_run_one_at_a_time(self):
-        # 1/codex-reviewer/R1-2: a second codex turn would read what the first one writes in
-        # the memories of codex while both run: it waits for the first, then clears them.
+        # 1/codex-reviewer/R1-2: a second agy turn would read what the first one writes in
+        # the memories of agy while both run: it waits for the first, then clears them.
         runner = self.runner()
-        first, release = self.blocked_turn(runner, 'codex')
-        second = threading.Thread(target=self.turn, args=(runner, 'codex', 'pr-2'))
+        first, release = self.blocked_turn(runner, 'agy')
+        second = threading.Thread(target=self.turn, args=(runner, 'agy', 'pr-2'))
         second.start()
         self.addCleanup(second.join, 30)
-        # Meanwhile claude, which keeps no memory to clear, and agy, another CLI, run.
+        # Meanwhile claude and codex, which keep no memory to clear, run.
         self.turn(runner, 'claude', label='pr-3')
-        self.turn(runner, 'agy', label='pr-4')
+        self.turn(runner, 'codex', label='pr-4')
         second.join(0.5)
         self.assertTrue(second.is_alive())  # still waiting
         self.assertEqual(len(self.launched), 3)
-        self.assertEqual(self.states, [list(agentuser.cleared_for('codex')), [],
-                                       list(agentuser.cleared_for('agy'))])
+        self.assertEqual(self.states, [list(agentuser.cleared_for('agy')), [], []])
         release.set()
         first.join(30)
         second.join(30)
         self.assertFalse(second.is_alive())
         self.assertEqual(len(self.launched), 4)
-        # The second codex turn cleared the memories the first one may have left.
-        self.assertEqual(self.states[-1], list(agentuser.cleared_for('codex')))
+        # The second agy turn cleared the memories the first one may have left.
+        self.assertEqual(self.states[-1], list(agentuser.cleared_for('agy')))
         self.assertEqual(runner._running, {'codex': 0, 'claude': 0, 'agy': 0})
+
+    def test_the_turns_of_codex_run_together(self):
+        # Request of the operator on PR #523: the memories of codex are off in its
+        # configuration (checked at the start), so its turns are neither cleared nor
+        # serialized: a second codex turn starts while the first one runs.
+        runner = self.runner()
+        first, release = self.blocked_turn(runner, 'codex')
+        self.assertEqual(self.turn(runner, 'codex', label='pr-2')['verdict'], 'approve')
+        self.assertTrue(first.is_alive())  # the first one still runs
+        self.assertEqual(len(self.launched), 2)
+        self.assertEqual(self.states, [[], []])
+        release.set()
+        first.join(30)
+        self.assertEqual(runner._running, {'codex': 0})
 
     def test_a_turn_cancelled_while_it_waits_never_starts(self):
         runner = self.runner()
@@ -588,6 +601,111 @@ class EscalationTests(unittest.TestCase):
         d._escalate_failure(Action('implement', 7), None, wrapped)
         self.assertEqual(markdown.read_marker(gh.comments[-1][1], 'notice')['class'],
                          'configuration')
+
+
+class CodexMemoriesTests(unittest.TestCase):
+    """Request of the operator on PR #523: the memories of codex (``memories_1.sqlite``) are
+    off in so many words in its sealed configuration, ``[features] memories = false``, and its
+    turns run together. The startup check and ``check-host.sh`` (``codex_memories`` of
+    ``ops/lib.sh``) refuse a configuration without that line, or that turns them on."""
+
+    CASES = [
+        (b'[features]\nmemories = false\n', None),
+        (b'model = "gpt-5"\n\n[features]\nshell_tool = true\nmemories = false\n', None),
+        (b'features.memories = false\n', None),
+        (b'[features]\nmemories = false\n[profiles.fast.features]\nmemories = false\n', None),
+        (b'', 'does not set [features] memories = false'),
+        (b'model = "gpt-5"\n', 'does not set [features] memories = false'),
+        (b'[features]\nshell_tool = true\n', 'does not set [features] memories = false'),
+        (b'[features]\nmemories = true\n', 'sets [features] memories = True'),
+        (b'[features]\nmemories = "false"\n', "sets [features] memories = 'false'"),
+        (b'[features]\nmemories = false\n[profiles.fast.features]\nmemories = true\n',
+         'sets [profiles.fast.features] memories = True'),
+        (b'[features\nmemories = false\n', 'is not valid TOML'),
+        (b'\xff[features]\nmemories = false\n', 'is not valid TOML'),
+    ]
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+
+    def test_the_configuration_must_turn_the_memories_off(self):
+        path = HOME / agentuser.CODEX_CONFIG
+        for data, expected in self.CASES:
+            with self.subTest(data=data):
+                problems = agentuser.codex_config_problems(path, data)
+                if expected is None:
+                    self.assertEqual(problems, [])
+                else:
+                    self.assertEqual(len(problems), 1, problems)
+                    self.assertTrue(problems[0].startswith(f'{path} {expected}'), problems[0])
+                    self.assertIn('memories_1.sqlite', problems[0])
+                    self.assertIn('setup-agent-user.sh', problems[0])
+        too_large = b'[features]\nmemories = false\n' + b'#' * agentuser.CODEX_CONFIG_LIMIT
+        self.assertIn('is larger than', agentuser.codex_config_problems(path, too_large)[0])
+
+    def test_the_shell_refuses_what_devloop_refuses(self):
+        # check-host.sh and setup-agent-user.sh use codex_memories of ops/lib.sh.
+        lib = Path(__file__).resolve().parents[1] / 'ops/lib.sh'
+        path = self.tmp / 'config.toml'
+        for data, expected in self.CASES:
+            with self.subTest(data=data):
+                path.write_bytes(data)
+                done = subprocess.run(['/usr/bin/bash', '-c', f'. {lib}; codex_memories "$1"',
+                                       '_', str(path)], capture_output=True, text=True)
+                self.assertEqual(done.returncode, 0 if expected is None else 1, done.stdout)
+                if expected is not None:
+                    self.assertTrue(done.stdout.startswith(f'{path} '), done.stdout)
+        path.unlink()
+        done = subprocess.run(['/usr/bin/bash', '-c', f'. {lib}; codex_memories "$1"', '_',
+                               str(path)], capture_output=True, text=True)
+        self.assertEqual((done.returncode, done.stdout), (1, f'{path} non esiste\n'))
+
+    def test_it_is_read_as_the_agent_user(self):
+        home = self.tmp / 'home'
+        cli_dirs(home)
+        user = LocalUser(home)
+        self.assertIn('cannot read', user.codex_config()[0])  # missing
+        (home / agentuser.CODEX_CONFIG).write_bytes(b'[features]\nmemories = false\n')
+        self.assertEqual(user.codex_config(), [])
+        (home / agentuser.CODEX_CONFIG).write_bytes(b'[features]\nmemories = true\n')
+        self.assertIn('sets [features] memories = True', user.codex_config()[0])
+        calls = []
+
+        def run(argv, **kw):
+            calls.append((argv, kw))
+            return SimpleNamespace(returncode=0, stdout=b'[features]\nmemories = false\n',
+                                   stderr=b'')
+        self.assertEqual(AgentUser('devloop-agent', home=str(HOME), run=run).codex_config(), [])
+        argv, kw = calls[0]
+        self.assertEqual(argv[:8], ['sudo', '-n', '-E', '-u', 'devloop-agent', '--',
+                                    '/usr/bin/bash', '-c'])
+        self.assertTrue(argv[8].startswith('PATH=/usr/bin:/bin\n'))
+        self.assertEqual(argv[9:], ['codex-config', str(HOME / '.codex/config.toml'),
+                                    str(agentuser.CODEX_CONFIG_LIMIT + 1)])
+
+    def test_the_startup_check_refuses_a_configuration_without_it(self):
+        state = self.tmp / 'state'
+        for name in ('worktrees', 'agent-shared'):
+            (state / name).mkdir(parents=True)
+        for data, expected in ((b'model = "gpt-5"\n', 'does not set'),
+                               (b'[features]\nmemories = true\n', 'sets [features] memories')):
+            def run(argv, **kw):
+                if 'cli-state' in argv:
+                    return SimpleNamespace(returncode=0, stdout=cli_listing(), stderr=b'')
+                if 'codex-config' in argv:
+                    return SimpleNamespace(returncode=0, stdout=data, stderr=b'')
+                return SimpleNamespace(returncode=0, stdout='', stderr='')
+            user = AgentUser('devloop-agent', home=str(HOME), run=run)
+            with self.subTest(data=data), self.assertRaises(AgentUserError) as ctx:
+                agentuser.check(user, self.tmp / 'keys', state, me='devloop')
+            self.assertIn(f'{HOME}/.codex/config.toml {expected}', str(ctx.exception))
+
+    def test_the_memories_of_codex_are_kept_sealed_and_allowed(self):
+        self.assertIn('.codex/memories', agentuser.CLI_SEALED)
+        self.assertIn('.codex/memories_1.sqlite*', dict(agentuser.CLI_ALLOWED))
+        self.assertNotIn('.codex/memories_1.sqlite*', agentuser.CLI_CLEARED)
 
 
 class StartupTests(unittest.TestCase):

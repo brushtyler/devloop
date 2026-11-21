@@ -336,6 +336,14 @@ for dir in "${AGENT_CLI_DIRS[@]}"; do
     done < <(find "$AGENT_HOME/$dir" -mindepth 1 -maxdepth 1 -printf '%y/%f\0' 2>/dev/null)
     [ "$bad" = 1 ] || ok "$AGENT_HOME/$dir contiene solo voci della lista"
 done
+# Le memorie di codex spente in modo esplicito (#517), come controlla devloop all'avvio: i turni
+# di codex girano in parallelo, e nessuno deve rileggere ciò che un altro lascia in
+# memories_1.sqlite.
+if codex_why=$(codex_memories "$AGENT_HOME/.codex/config.toml"); then
+    ok "$AGENT_HOME/.codex/config.toml imposta [features] memories = false"
+else
+    fail "${codex_why:-$AGENT_HOME/.codex/config.toml non si legge}: devloop non parte (setup-agent-user.sh aggiunge [features] memories = false)"
+fi
 # Le voci che le CLI creano al primo uso (#494): restano dell'utente degli agent, che le scrive.
 for entry in "${AGENT_CLI_WRITABLE[@]}"; do
     check_as "$AGENT_USER" "$AGENT_USER scrive in $AGENT_HOME/$entry (setup-agent-user.sh)" \

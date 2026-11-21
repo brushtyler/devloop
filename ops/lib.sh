@@ -109,6 +109,88 @@ agent_cli_entry_known() {
 # directory sigillata vuole una voce in più qui (ops/host/migrate.md).
 AGENT_CLI_WRITABLE=(.gemini/antigravity-cli/bin)
 
+# codex_memories FILE [DEST]: la configurazione di codex FILE spegne in modo esplicito le sue
+# memorie (#517), con [features] memories = false, e nessun profilo ([profiles.<nome>.features])
+# le riaccende, come codex_config_problems di devloop/agentuser.py: altrimenti codex
+# rileggerebbe in un turno le memorie (memories_1.sqlite) che un altro vi ha lasciato. Torna 0
+# se è così, 1 se non lo è (con il motivo su stdout). Con DEST, se manca solo la riga (anche
+# FILE che non esiste), scrive in DEST FILE con la riga aggiunta (nella tabella [features], o in
+# una nuova in fondo) e torna 3; una riga con un altro valore non la cambia: torna 1.
+codex_memories() {
+    python3 - "$@" <<'EOF'
+import re, sys, tomllib
+path, dest = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else None)
+LIMIT = 1 << 20
+
+
+def no(why):
+    print(f'{path} {why}')
+    sys.exit(1)
+
+
+def shown(value):
+    return str(value).lower() if isinstance(value, bool) else repr(value)
+
+
+def profiles(data):
+    found = data.get('profiles')
+    for name, profile in (found.items() if isinstance(found, dict) else ()):
+        on = profile.get('features') if isinstance(profile, dict) else None
+        if isinstance(on, dict) and 'memories' in on and on['memories'] is not False:
+            no(f'imposta [profiles.{name}.features] memories = {shown(on["memories"])}')
+
+
+try:
+    with open(path, 'rb') as fh:
+        raw = fh.read(LIMIT + 1)
+except FileNotFoundError:
+    if dest is None:
+        no('non esiste')
+    raw = b''
+except OSError as exc:
+    no(f'non si legge ({exc.strerror})')
+if len(raw) > LIMIT:
+    no(f'supera {LIMIT} byte')
+try:
+    text = raw.decode('utf-8')
+    data = tomllib.loads(text)
+except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+    no(f'non è un TOML valido ({exc})')
+features = data.get('features')
+if isinstance(features, dict) and 'memories' in features:
+    if features['memories'] is not False:
+        no(f'imposta [features] memories = {shown(features["memories"])}')
+    profiles(data)
+    sys.exit(0)
+profiles(data)
+if dest is None:
+    no('non imposta [features] memories = false')
+lines = text.splitlines(keepends=True)
+header = re.compile(r'[ \t]*\[[ \t]*features[ \t]*\][ \t]*(#.*)?\r?\n?')
+for i, line in enumerate(lines):
+    if header.fullmatch(line):
+        lines[i] = line if line.endswith('\n') else line + '\n'
+        lines.insert(i + 1, 'memories = false\n')
+        break
+else:
+    if lines:
+        lines[-1] = lines[-1] if lines[-1].endswith('\n') else lines[-1] + '\n'
+        lines.append('\n')
+    lines += ['[features]\n', 'memories = false\n']
+new = ''.join(lines)
+try:
+    written = tomllib.loads(new).get('features')
+except tomllib.TOMLDecodeError:
+    written = None
+if not (isinstance(written, dict) and written.get('memories') is False):
+    no('non imposta [features] memories = false, e la riga non si aggiunge da sola: '
+       'aggiungerla a mano')
+with open(dest, 'w', encoding='utf-8') as fh:
+    fh.write(new)
+sys.exit(3)
+EOF
+}
+
 say() { printf '%s\n' "$*"; }
 step() { printf '\n==> %s\n' "$*"; }
 ok() { printf '  ok: %s\n' "$*"; }

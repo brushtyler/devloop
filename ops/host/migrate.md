@@ -584,10 +584,16 @@ salvava il token rinnovato (turni falliti con `401`, #507), codex non potrebbe s
   `devloop-agent`: una voce sconosciuta rifiuta il turno con un'escalation `configuration` che la
   nomina ([qui sopra](#una-voce-sconosciuta-in-una-directory-delle-cli)). L'overlay può solo
   togliere voci dalla lista (`[agent_user] cli_denied`);
-- le memorie che una CLI rilegge fra un turno e l'altro (`memories_1.sqlite*` di codex; `brain`,
-  `implicit`, `builtin`, `conversation_summaries.db*` e `jetbox_summaries_proto.pb*` di agy)
-  devloop le rimuove prima di ogni turno di quella CLI, e i turni di codex, come quelli di agy, girano uno alla volta anche con le
-  azioni in parallelo; la memoria automatica di Claude Code resta spenta (#438);
+- le memorie che agy rilegge fra un turno e l'altro (`brain`, `implicit`, `builtin`,
+  `conversation_summaries.db*` e `jetbox_summaries_proto.pb*`) devloop le rimuove prima di ogni
+  turno di agy, che non ha un interruttore noto, e i turni di agy girano uno alla volta anche
+  con le azioni in parallelo. Le memorie di codex (`memories_1.sqlite*`) sono spente: il
+  `~/.codex/config.toml` sigillato imposta `[features] memories = false` in modo esplicito
+  (codex 0.169.0 le ha già spente per default, `codex features list`: `memories  stable  false`,
+  ma un cambio del default non deve riaccenderle). `setup-agent-user.sh` scrive la riga;
+  devloop all'avvio e `check-host.sh` rifiutano un `config.toml` senza di essa, con
+  `memories = true` o con un profilo che le riaccende. I turni di codex non svuotano nulla e
+  restano in parallelo; la memoria automatica di Claude Code resta spenta (#438);
 - il token di lunga durata di claude di #507 (`[claude_token]`) è tolto: una configurazione che
   nomina ancora la tabella ferma devloop all'avvio.
 
@@ -630,15 +636,20 @@ agent](#file-delle-cli-di-root-sullutente-degli-agent-438):
    `~/.codex`, che hanno l'ACL di `devloop` di una versione precedente, imposta anche
    `group::rwx`: con un'ACL `chmod` cambia solo la maschera), crea i segnaposto
    di root delle voci sigillate che mancano, rende di root `~/.codex/plugins` e `config.json`,
-   `mcp_config.json` e `projects` di `~/.gemini/config` (oggi di `devloop-agent`), e segnala come
-   `da fare a mano` ogni voce che non è nella lista. Una voce
+   `mcp_config.json` e `projects` di `~/.gemini/config` (oggi di `devloop-agent`), aggiunge
+   `[features] memories = false` a `~/.codex/config.toml` (nella tabella `[features]` se c'è,
+   altrimenti in una nuova in fondo; la prova la mostra con `scriverebbe`), e segnala come
+   `da fare a mano` ogni voce che non è nella lista. Se segnala da fare a mano anche
+   `config.toml` (un valore diverso di `memories`, un `[features]` che non si estende, un link),
+   la riga va messa a mano, come root, prima del passo 5. Una voce
    segnalata si rimuove come `devloop-agent` (per esempio
    `sudo -u devloop-agent rm -r /home/devloop-agent/.codex/<voce>`), o si aggiunge alla lista
    con una PR, come [qui sopra](#una-voce-sconosciuta-in-una-directory-delle-cli);
 5. verificare, come root: `sudo bash /root/repos/ssdlc/ops/host/check-host.sh --no-apps`,
    nessun errore nel passo `File delle CLI di devloop-agent` (le directory `1770 root`, scrivibili
-   e con lo sticky bit; le voci sigillate di root; le directory con le sole voci della lista) né
-   nel passo `CLI degli agent`;
+   e con lo sticky bit; le voci sigillate di root; le directory con le sole voci della lista;
+   `ok: …/.codex/config.toml imposta [features] memories = false`) né nel passo `CLI degli
+   agent`. `codex features list`, come `devloop-agent`, deve dare `memories  stable  false`;
 6. il pin a mano (`sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned pin
    origin/main`) e `sudo systemctl start devloop`. All'avvio devloop rifà le stesse verifiche.
    Al primo turno di agy, controllare che non fallisca scrivendo in `~/.gemini/config`
