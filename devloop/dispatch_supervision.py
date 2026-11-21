@@ -411,7 +411,7 @@ class SupervisionMixin:
         self.gh.edit_labels(number, add=[lb.needs_operator],
                             remove=[lb.needs_supervisor, *remove])
 
-    def _do_supervise(self, target):
+    def _do_supervise(self, target, merge=False):
         """Apply the supervisor command waiting on an issue or PR in ``agent:needs-supervisor``
         (#182), read again now. Each command leaves a dispatcher ``supervision`` record with the
         command, its author and the outcome, written before the labels change: a record whose
@@ -445,7 +445,13 @@ class SupervisionMixin:
         Before any command, an extension of the budget envelope that the journal recorded and a
         stopped or failed run did not trace (``_pending_extension``, #411) is completed with its
         own command (``_finish_extension``), whatever command is the latest now, also on an item
-        in ``agent:needs-operator``, where only its records are written."""
+        in ``agent:needs-operator``, where only its records are written.
+
+        ``merge``: the action is a ``delegated_merge``, planned in the merge lane (#486). A
+        ``/devloop merge`` to apply on a PR, read now by an action the plan did not put in that
+        lane (``merge`` false: the command was written after the plan), is not applied: it
+        stays pending, unspent, and a later tick plans it as a ``delegated_merge``, so that it
+        never merges alongside another merge."""
         lb = self.cfg.labels
         is_pr = isinstance(target, PullRequest)
         number = target.number if is_pr else target
@@ -493,6 +499,11 @@ class SupervisionMixin:
         command = self._supervisor_view(number, comments, operator)
         if command is None:
             self.log('  no command to apply')
+            return
+        if not merge and is_pr and command['command'] == MERGE and not command.get('refusal'):
+            # The plan's own test (``planning.plan``): this command runs only in the merge lane.
+            self.log('  `/devloop merge` written after the plan: it waits, unspent, for the '
+                     'merge lane of a later tick')
             return
         escalation = command['anchor']['record']
         cls = escalation.get('class')
@@ -636,7 +647,7 @@ class SupervisionMixin:
     def _do_delegated_merge(self, target):
         """A ``/devloop merge`` of the supervisor on a PR (#486), planned in the merge lane
         since it writes to the base branch: applied as any command (``_do_supervise``)."""
-        return self._do_supervise(target)
+        return self._do_supervise(target, merge=True)
 
     def _fresh_pr(self, pr, labels, fresh, comments):
         """``pr`` with its ``labels`` and head (``fresh``, its state) read now and with what its

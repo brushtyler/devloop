@@ -1636,8 +1636,12 @@ the operator gets the opinion `dubbi` or `contrario` and a first residual risk t
   writes its summary for the operator ("Review consultiva per l'operatore"), with the agent and
   the opinion only. A failed turn gets only the summary, which says so.
 - **No effect.** It opens no round and does not count against `max_review_rounds`, creates no
-  finding, changes no label and no promotion; devloop reads it only to know whether a head
-  already has one and to show its opinion, never to decide. A failed action is never escalated:
+  finding, changes no label and no promotion; devloop reads it to know whether a head already
+  has one and to show its opinion, and for one decision only: with the
+  [delegated merge](#delegated-merge) on (`[delegations] merge`), a `/devloop merge` of the
+  supervisor on a head is refused unless the advisory review of that head has the opinion `ok`
+  or `dubbi`; with `contrario`, or none, the merge stays the operator's. It still stays out of
+  the quorum. The prompt and the texts devloop publishes say so. A failed action is never escalated:
   the PR is already the operator's. The exception is a turn refused by the
   block on [uncertain turns](protocol.md#turn-journal) (`block_uncertain_turns`): it
   escalates as `uncertain_turn`, with the turns to reconcile, once for those turns (taking

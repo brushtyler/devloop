@@ -241,6 +241,27 @@ class MergeTests(Case):
         actions = [Action('review', 101), Action('delegated_merge', 100), Action('fix', 102)]
         self.assertEqual(len(schedule(actions, {})), 3)
 
+    def test_a_merge_written_after_the_plan_waits_for_the_merge_lane(self):
+        # A command planned as ``supervise`` and admitted while another merge runs: a
+        # ``/devloop merge`` written after the plan is not applied by it, nor spent; the next
+        # plan puts it in the merge lane.
+        from devloop.planning import admit, plan
+        d = self.make(dataclasses.replace(ON, max_parallel_actions=2))
+        self.command('/devloop retry', login='brushtyler')
+        actions = plan(d.snapshot(), d.cfg)
+        self.assertEqual(actions, [Action('supervise', 100, 'retry by brushtyler')])
+        self.assertEqual(admit(actions, {}, [(Action('merge', 999), None)], 2), actions)
+        self.merge()
+        (pr,) = [p for p in d.snapshot().prs if p.number == 100]
+        d._run_action(actions[0], {100: pr})
+        self.assertEqual(self.gh.merged, [])
+        self.assertEqual(self.decisions(), [])
+        self.assertEqual(self.gh.labels[100], {READY, OPERATOR})
+        self.assertTrue(any('`/devloop merge` written after the plan' in line
+                            for line in self.logs))
+        self.assertEqual(d.tick(), [Action('delegated_merge', 100, f'merge by {SUPERVISOR_LOGIN}')])
+        self.assertEqual(self.gh.merged, [(100, SHA1)])
+
 
 class RefusalTests(Case):
     """Each condition that does not hold refuses the command with why (fails closed)."""
@@ -659,6 +680,32 @@ class DocsTests(unittest.TestCase):
         self.assertIn('merge delegato', adr)
         toml = (root / 'devloop' / 'config.toml').read_text(encoding='utf-8')
         self.assertIn('merge = false\n', toml)
+
+    def test_the_advisory_review_says_what_it_decides(self):
+        # Its opinion admits or refuses a delegated merge: neither the docs, nor the prompt of
+        # the agent, nor the texts devloop publishes say any more that it decides nothing.
+        from devloop.context import PROMPT_DIR
+        from devloop.dispatch_advisory import render_advisory_review, render_advisory_summary
+        root = PROMPT_DIR.parents[1]
+        guide = ' '.join((root / 'docs' / 'devloop' / 'guide.md').read_text(
+            encoding='utf-8').split())
+        self.assertNotIn('never to decide', guide)
+        self.assertIn('a `/devloop merge` of the supervisor on a head is refused unless the '
+                      'advisory review of that head has the opinion `ok` or `dubbi`', guide)
+        prompt = ' '.join((PROMPT_DIR / 'advisory.md').read_text(encoding='utf-8').split())
+        self.assertNotIn('never reads it to decide', prompt)
+        self.assertIn('`[delegations] merge`', prompt)
+        summary = ' '.join(render_advisory_summary(advisory_record(SHA1, 'claude', 'contrario'))
+                           .split())
+        advisory = {'summary': 's', 'residual_risks': [], 'operator_checks': [],
+                    'overlooked': [], 'unfounded': [], 'opinion': 'contrario',
+                    'opinion_reason': ''}
+        review = ' '.join(render_advisory_review(advisory, 'claude', SHA1, 'h')['body'].split())
+        for text in (summary, review):
+            self.assertNotIn('non la legge per decidere', text)
+            self.assertIn('Il parere conta solo per il merge delegato al supervisore', text)
+            self.assertIn('con `contrario`, o senza review consultiva, devloop rifiuta il '
+                          '`/devloop merge` di questo head', text)
 
 
 if __name__ == '__main__':

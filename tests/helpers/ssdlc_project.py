@@ -464,6 +464,17 @@ SINCE_R4 = {
         # #481: the findings of the quorum without evidence, or fixed without need.
         ('- `overlooked`: points the reviews below may have missed; `[]` when you see none.\n',
          _UNFOUNDED_ADVISORY),
+        # #486: the opinion decides whether the supervisor may merge the head.
+        Replaced(
+            'the round limit, it opens no finding, it changes no label, and devloop never reads '
+            'it to decide.\n',
+            'the round limit, it opens no finding and it changes no label. Its opinion decides '
+            'one thing only:\n'
+            'when the operator has delegated the merge to the supervisor (`[delegations] '
+            'merge`), devloop\n'
+            'refuses a merge the supervisor asks for on this head unless your opinion is `ok` or '
+            '`dubbi`; with\n'
+            '`contrario`, or without a review, the merge stays the operator\'s.\n'),
     ),
     'preflight': (
         ('external tool, access or resource can close.\n\n', _TRUST_POLICY_PREFLIGHT),
