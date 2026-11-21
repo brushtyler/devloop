@@ -360,6 +360,24 @@ outside `trusted_users`, when the command is not the first line, and in text dev
 that text starts with the attribution header, also when an actor without a GitHub App publishes
 with the operator's login.
 
+**The supervisor's rereview** (#491). The supervisor's identity may also write `/devloop
+rereview <reason>`, but only as a command of a `tool_failure` escalation of a PR's review, and
+only while a reviewer of the quorum of the latest round has no verdict because its review failed
+(a tool failure, a timeout, no model available). A `/devloop retry` resumes that same round, with
+the profiles it recorded when it opened, so it tries again models that may still be exhausted;
+the rereview opens a new round instead, whose reviewers are chosen with the current
+configuration, with a new receipt, and which counts against `max_review_rounds` as every round
+does. When every reviewer of the quorum of the latest round has a verdict (`approve`,
+`request_changes`, `needs_operator`), or one of them asked for the operator, the command is
+refused with the reason, so that the supervisor cannot repeat a review to override a verdict. It
+is refused as well when a new review was already asked after the latest review record and its
+round wrote no record: such a round does not count against `max_review_rounds`, so a second
+rereview would repeat it without limit; the supervisor uses `/devloop retry`, within its limit, or
+hands the PR to the operator. The details are in [Escalations to the supervisor](#escalations-to-the-supervisor). The command does
+not touch the merge: on a PR whose merge is the operator's (`operator_only_paths`) it stays the
+operator's. For the users in `trusted_users` nothing changes: their `/devloop rereview` is the
+request described above, and is never a command of an escalation.
+
 A PR whose marker is missing stays in the flow
 (it still counts as an open PR and its issue does not restart) and goes to
 `agent:needs-operator`. A PR left without a state label, for example after a crash right after it
@@ -1069,6 +1087,7 @@ any, is one of:
 /devloop escalate <reason>
 /devloop grant-round <reason>
 /devloop grant-budget <reason>
+/devloop rereview <reason>
 ```
 
 They count only in `"auto"`, from the identity of `[roles].supervisor` (the GitHub App of that
@@ -1144,6 +1163,35 @@ one wins; without one, the latest that does not apply is answered.
   PR in a `budget_grantable` escalation, as described in
   [Extending the budget envelope](#extending-the-budget-envelope). It needs a reason, which may
   go on in the lines below the command.
+- `/devloop rereview <reason>` opens a **new review round** of a PR whose review failed (#491,
+  a decision of the operator recorded in
+  [ADR 0005](../adr/0005-deleghe-e-ruoli-degli-agent.md)). It counts only from the supervisor's
+  identity: the `/devloop rereview` of a user in `trusted_users` stays the request described in
+  [Resuming after a `needs_operator` verdict](#resuming-after-a-needs_operator-verdict-without-code-changes),
+  and is never a command of an escalation; from anyone else it is ignored and logged. It applies
+  only to a `tool_failure` escalation of a PR's **review**, on the head of its key, and only while
+  a reviewer of the quorum of the latest round of that head has no verdict, because its review
+  failed (a tool failure, a timeout, no model available). Unlike `/devloop retry`, which resumes
+  that same round with the profiles it recorded when it opened, the new round chooses its
+  reviewers with the current configuration, has a new receipt, and **counts against
+  `max_review_rounds`** as every round does; the retries are not touched. The command is refused
+  with the reason, and the escalation stays where it is, when every reviewer of the quorum of the
+  latest round has a verdict (`approve`, `request_changes`, `needs_operator`) or one of them asked
+  for the operator, so that a new review never overrides a verdict; when no round of the head
+  waits for a reviewer (then a `retry` already opens a round with the current configuration);
+  when a new review was already asked after the latest review record, by a trusted user or by a
+  rereview of the supervisor applied, and its round wrote no record (a round without records does
+  not count against `max_review_rounds`, so a second rereview would have no limit); on any other
+  escalation or step. Its input and what made the escalation non-critical are checked
+  again as for a retry; on a PR the supervisor's agent implemented it is refused and goes to the
+  operator, since `[delegations] retry_own_prs` admits only a retry. Applied, the dispatcher's
+  `supervision` record voids the round as a trusted user's request does, and the PR goes back to
+  `agent:review`. It needs a reason, which may go on in the lines below the command. The command
+  does not touch the merge, so it also applies to a PR whose merge is the operator's (a level
+  override or `operator_only_paths`), whose tool failure goes to `agent:needs-operator`: there
+  the supervisor's rereview is accepted on the `tool_failure` escalation of the review when every
+  other condition of **Routing** still holds, a command of a trusted user waiting on the same item
+  wins over it, and after the new round the merge stays the operator's.
 - `/devloop capacity` is not a command of an escalation: on one it is answered as not applicable
   and the escalation stays where it is. It applies only on `[report] issue`, as described in
   [Temporary capacity limits](#temporary-capacity-limits).
@@ -1152,7 +1200,7 @@ An escalation whose class is critical or unknown, or that was not routed to the 
 accepts no command: the command is refused and the item goes to `agent:needs-operator`. A command
 the class does not admit (`accept-defaults` or `decide` on a tool failure, `retry` on defaults,
 `grant-round` on anything but `round_grantable`, `grant-budget` on anything but
-`budget_grantable`) is refused
+`budget_grantable`, `rereview` on anything but the `tool_failure` of a PR's review) is refused
 and the escalation stays with the supervisor. The answer lists the commands that apply to the
 escalation (`retry` for `tool_failure` and `sync_failed`, `accept-defaults` and `decide` for
 `preflight_default`, `grant-round` for `round_grantable`, `grant-budget` for `budget_grantable`,
@@ -1403,7 +1451,10 @@ no command applies, and the answer gives the manual steps. The commands valid th
   commands leave the block to the check.
 
 `/devloop escalate` never applies: the escalation is already the operator's. A command of the
-supervisor's identity on an escalation to the operator does not apply either. Every command that
+supervisor's identity on an escalation to the operator does not apply either, except its
+`/devloop rereview <reason>` on the `tool_failure` of the review of a PR whose merge is the
+operator's (#491, see the supervisor's commands above); a trusted user's command waiting on the
+same item wins over it, and a trusted user's `/devloop rereview` is no command here. Every command that
 does not apply gets a dispatcher comment with the reason and how to resume (the manual steps
 above, `/devloop recheck` for a readiness check, the manual merge for an operator merge), and the
 item stays in `agent:needs-operator`. A command from outside `trusted_users` and the supervisor's

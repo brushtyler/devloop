@@ -1213,7 +1213,10 @@ A round at level 2 works as follows:
   a reviewer works, its verdict is discarded without being published, and the new head is
   reviewed in a new round by both reviewers. A round whose head moved, whose receipt changed,
   that a fix answered or that a `/devloop rereview` request voided is closed: the next review
-  opens a new round. A receipt that changed only in the commit of base is the exception below.
+  opens a new round. The request is a trusted user's, or the supervisor's on a round where a
+  reviewer of the quorum failed (#491,
+  [Escalations to the supervisor](guide.md#escalations-to-the-supervisor)): a retry instead
+  resumes the same round, with the profiles it recorded. A receipt that changed only in the commit of base is the exception below.
 
 ### When `main` advances during a round
 
