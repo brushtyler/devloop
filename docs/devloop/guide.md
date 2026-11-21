@@ -168,8 +168,9 @@ of every PR:
   change of the title or the body of the issue and before devloop took it on (the first
   `labeled` event of `agent:working` after that change). Any other comment, an approval written
   without the command too, is context for the implementer and authorizes nothing. devloop lists
-  the commands that count, with author and time, under "Decisions of the operator on the issue"
-  in the prompts of the readiness check, of the reviewers and of the advisory review; each covers
+  the commands that count, with author, time and permalink of the comment (#506), under
+  "Decisions of the operator on the issue" in the prompts of the readiness check, of the
+  reviewers and of the advisory review; each covers
   only what its text approves, on the conditions it sets, and that is the agents' to judge. A
   change of the text after the command drops it; so does a change of the comment itself after
   the takeover (its `updated_at`), since the agents read it as it is now. The reviewers of a PR

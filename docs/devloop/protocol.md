@@ -746,7 +746,10 @@ body (`lastEditedAt` and the `renamed` events) and before the first `labeled` ev
 times excluded too; a reviewer gets none when no such takeover follows the latest change. The
 history of the issue is read in full, 100 events a page (`GitHub.issue_history`, whose
 `complete` is True only when its last page says there is no other): a read that stops before
-then admits no command. Those commands, by author, `created_at` and text, enter the hash of the
+then admits no command. The prompts give each of them, as every comment of a trusted user, with
+its permalink (`html_url`, read as `url`, #506), only when GitHub's read gives one of the form
+`https://…#issuecomment-<id>`; the permalink enters neither the hash nor any record. Those
+commands, by author, `created_at` and text, enter the hash of the
 request, so a readiness check that relied on one is not reused once a change of the text, even
 undone, drops it, nor once the command is rewritten. A `/devloop approve` of an app, one after
 the attribution header, one not on the first line and one without a text are refused and

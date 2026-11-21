@@ -423,6 +423,22 @@ _UNFOUNDED_ADVISORY = """\
   evidence", those devloop recorded as non-blocking because they had none: include them. Name
   the finding (`round/reviewer/ID`) and say what you observed; `[]` when you see none.
 """
+# #506: the permalink of the comments, cited by the implementer and the fixer. The prompts of
+# review and advisory review do not change.
+_PERMALINK_IMPLEMENT = """\
+- When an ADR or another document must cite a comment below, for example a decision of the
+  operator, cite it with the link of its `Permalink:` line: the link GitHub gives that comment.
+"""
+_PERMALINK_FIX = """\
+- When an ADR or another document must cite a request below, a decision of the operator for
+  example, cite it with the link of its `Permalink:` line: the link GitHub gives its comment.
+"""
+_PERMALINK_PREFLIGHT = """\
+
+A comment below with a `Permalink:` line carries the link GitHub gives it. When the issue asks to
+cite that comment, a decision of the operator in an ADR for example, the implementer gets the
+same line and cites that link: the missing link is not a gap.
+"""
 # The changes of the templates since R4, each as ``(anchor, text)``, where ``text`` follows the
 # only occurrence of ``anchor`` in the reference, or as ``Replaced(old, new)``. The frozen files
 # stay as they were; the prompts of now are the reference with these changes, and nothing else.
@@ -431,6 +447,7 @@ SINCE_R4 = {
     'implement': (
         ('  list (`[]`) when the issue has no recognisable acceptance criteria.\n',
          _HOST_STEP_IMPLEMENT),
+        ('  the issue explicitly asks for it.\n', _PERMALINK_IMPLEMENT),
     ),
     'fix': (
         # #481
@@ -440,6 +457,8 @@ SINCE_R4 = {
         ('Current acceptance map of the pull request:\n\n$acceptance_map\n\n',
          '## Step on the host\n\nCurrent declaration of the pull request (`host_step`):\n\n'
          '$host_step\n\n'),
+        ('- Do not commit, push or comment on GitHub. The dispatcher publishes your changes after '
+         'you finish.\n', _PERMALINK_FIX),
     ),
     'review': (
         ('   the next section.\n', _HOST_STEP_REVIEW),
@@ -476,6 +495,8 @@ SINCE_R4 = {
                  '$language.\n'),
         ('$issue_comments\n', '\n$operator_decisions\n'),
         *_TRUST_POLICY_PREFLIGHT_483,
+        ('that show the gap, or none. Use `proposed_default: ""` when there is no default to '
+         'propose.\n', _PERMALINK_PREFLIGHT),
     ),
 }
 

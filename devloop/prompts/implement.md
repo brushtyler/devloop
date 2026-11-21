@@ -22,6 +22,8 @@ The working directory is a git worktree on a fresh branch from `$base_branch`.
   working-tree changes and publishes them, with the attribution header, after you finish.
 - Never weaken explicit operator authority, approvals, limits, evidence or integrity checks unless
   the issue explicitly asks for it.
+- When an ADR or another document must cite a comment below, for example a decision of the
+  operator, cite it with the link of its `Permalink:` line: the link GitHub gives that comment.
 - If the issue is ambiguous, needs a product decision, depends on unfinished work, or cannot be done
   safely, stop and return `status: "blocked"` with the reason. Do not guess.
 

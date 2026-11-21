@@ -1125,7 +1125,13 @@ and before the takeover (its latest edit too); an approval without the command d
 and the history of the issue is read in full, or no command counts. devloop lists those commands
 under "Decisions of the operator on the issue" in the prompts of the readiness check, of the
 reviewers and of the advisory review, and answers once the ones it refuses: in the comment of the
-next readiness check or, when none is due, in a dispatcher comment (`approve_refused`). The
+next readiness check or, when none is due, in a dispatcher comment (`approve_refused`). Since
+#506 every comment of a trusted user in a prompt (the decisions, the issue comments of the
+readiness check and of the implementer, the comments of the operator to the reviewers, the
+requests of `/devloop fix`) comes with a `Permalink:` line, the `html_url` GitHub gives it: the
+prompts of the readiness check, of the implementer and of the fixer say to cite that link when
+an ADR records the decision, so no second comment has to repeat it; the prompts of review and
+advisory review are unchanged and show it only with the text of the comment. The
 quorum and the choice of the reviewers, the checks of `operator_only_paths` and
 `protected_paths`, the names of the labels of hold, of escalation and of merge, `trusted_users`
 and the "Trust policy" section stay with the operator even when a decision prescribes their
