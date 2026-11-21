@@ -1456,8 +1456,11 @@ long-lived token the operator generates with `claude setup-token` (`devloop/clau
   (`CredentialRefused`) with an escalation `configuration` to the operator, which names the
   file and why; the log warns once per process and problem.
 - **Secret.** The token is never in the dispatcher's own environment, a log, a record, a prompt
-  or a comment: the turn's log, the tail and the command of its output, the message of a failed
-  turn and its structured output have it replaced with `[REDACTED]`.
+  or a comment: devloop replaces it with `[REDACTED]` in the CLI's stdout and stderr before
+  reading them, so the turn's log, its telemetry, the tail and the command of its output, the
+  message of a failed turn (also when cut) and the reason of an unavailable model never hold
+  it, nor a part of it; the message and every text attribute of a failed turn's error, and of
+  the errors it was raised from, are cleaned again before they leave the runner.
 
 Off, Claude Code uses its own login, as before. Creation, rotation and revocation are in
 [ops/host/migrate.md](../../ops/host/migrate.md#token-di-claude-per-lutente-degli-agent-507);

@@ -715,6 +715,42 @@ class CredentialRefused(AgentError):
     ``configuration``, to the operator, who rotates the token."""
 
 
+def _redact_text(value, token):
+    """``value`` with ``token`` replaced in it: a string, bytes, or a tuple or list of them."""
+    if isinstance(value, str):
+        return claudetoken.redact(value, token)
+    if isinstance(value, bytes):
+        return value.replace(token.encode('utf-8'), b'[REDACTED]')
+    if isinstance(value, (tuple, list)):
+        return type(value)(_redact_text(v, token) for v in value)
+    return value
+
+
+def _redact_error(exc, token):
+    """Remove ``token`` from the message of ``exc`` and from every attribute it carries
+    (``tail``, ``reason``, ``permission``, ``command``, a partial output…, #507)."""
+    try:
+        exc.args = _redact_text(exc.args, token)
+        for name, value in list(vars(exc).items()):
+            setattr(exc, name, _redact_text(value, token))
+    except (AttributeError, TypeError):
+        pass
+
+
+def _without_token(done, token):
+    """The completed run ``done`` with ``token`` removed from its stdout and stderr (#507):
+    every diagnostic, excerpt and telemetry of the turn is read from there."""
+    if not token:
+        return done
+    return _Completed(done.returncode, _redact_text(done.stdout, token),
+                      _redact_text(done.stderr, token))
+
+
+class _Completed:
+    def __init__(self, returncode, stdout, stderr):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+
 class ToolChanged(StartFailure):
     """An agy turn refused before it started (#494): the agent user's ``bin`` of agy's shell
     tool holds something other than the wrapper agy writes there, which a turn may have left
@@ -924,15 +960,20 @@ class AgentRunner:
 
     def _turn(self, agent, mode, prompt, schema_name, workdir, stem, out_file, schema_file,
               collect=None, token=None):
-        """``_cli_turn``; with ``token`` (#507), a failure is raised without it: its message
-        and its tail end in the escalation and in the ledger."""
+        """``_cli_turn``; with ``token`` (#507), a failure is raised without it: its message,
+        its tail, its ``reason`` and every other text it carries end in the escalation, in the
+        dispatcher's log and in the ledger. ``_cli_turn`` already removes the token from the
+        output of the CLI before reading it; this is the last guard."""
         try:
             return self._cli_turn(agent, mode, prompt, schema_name, workdir, stem, out_file,
                                   schema_file, collect, token)
         except AgentError as exc:
             if token:
-                exc.args = tuple(claudetoken.redact(a, token) for a in exc.args)
-                exc.tail = claudetoken.redact(exc.tail, token)
+                error, seen = exc, set()
+                while error is not None and id(error) not in seen:  # and those it came from
+                    seen.add(id(error))
+                    _redact_error(error, token)
+                    error = error.__cause__ or error.__context__
             raise
 
     def _cli_turn(self, agent, mode, prompt, schema_name, workdir, stem, out_file, schema_file,
@@ -1002,14 +1043,14 @@ class AgentRunner:
                 retried = ' (again, after one retry)'
                 done = launch()
         except AgentError as exc:  # the stall check stopped the turn
-            out, err = (partial_text(p) for p in (getattr(exc, 'partial_output', None)
-                                                  or ('', '')))
+            out, err = (_redact_text(partial_text(p), token)
+                        for p in (getattr(exc, 'partial_output', None) or ('', '')))
             stopped_log(f'stopped: {exc}', out, err)
             self.last_command = public_command(agent.kind, out, workdir, shown)
             exc.log = log
             raise
         except subprocess.TimeoutExpired as exc:
-            out, err = partial_text(exc.output), partial_text(exc.stderr)
+            out, err = (_redact_text(partial_text(p), token) for p in (exc.output, exc.stderr))
             message = f'{agent.key} timed out after {self.timeout}s'
             stopped_log(message, out, err)
             self.last_command = public_command(agent.kind, out, workdir, shown)
@@ -1020,6 +1061,9 @@ class AgentRunner:
         except OSError as exc:
             stopped_log(f'could not start{retried}: {exc}')
             raise StartFailure(f'{agent.key} could not start{retried}: {exc}', log) from exc
+        # The token out of the output before anything reads it (#507): a match, an excerpt or
+        # a cut message never holds it, nor a part of it.
+        done = _without_token(done, token)
         self.last_report = telemetry(agent.kind, done.stdout)
         self.last_command = public_command(agent.kind, done.stdout, workdir, shown)
         write_log(f'exit {done.returncode}', done.stdout, done.stderr)

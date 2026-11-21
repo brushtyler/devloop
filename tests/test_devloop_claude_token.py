@@ -19,8 +19,9 @@ from types import SimpleNamespace
 from unittest import mock
 
 from devloop import __main__ as cli
-from devloop import agents, claudetoken, config, markdown
+from devloop import agents, claudetoken, config, context, markdown
 from devloop.config import ClaudeTokenPolicy, ConfigError, RunPolicy, parse_claude_token
+from devloop.dispatch_actions import Models
 from devloop.dispatcher import Dispatcher
 from devloop.ledger import Ledger
 from devloop.planning import Action
@@ -159,6 +160,59 @@ class TurnTests(Case):
             self.runner(fails).run(CFG.agent('claude'), 'review', 'p', 'review', self.work,
                                    'pr-1')
         self.assertNotIn(TOKEN, str(ctx.exception) + self.logged())
+
+    def test_a_cut_failure_message_shows_no_part_of_the_token(self):
+        # The envelope's result is cut at 500 characters: the token across the cut must not
+        # leave its first part in the message (R1-1).
+        token_file(self.keys)
+
+        def fails(argv, **kw):
+            token = kw['env'][claudetoken.ENV]
+            result = 'x' * (500 - len(token) + 1) + token
+            out = json.dumps({'type': 'result', 'is_error': True, 'subtype': 'error',
+                              'result': result})
+            return SimpleNamespace(returncode=1, stdout=out, stderr='')
+        with self.assertRaises(agents.AgentError) as ctx:
+            self.runner(fails).run(CFG.agent('claude'), 'review', 'p', 'review', self.work,
+                                   'pr-1')
+        message = context._failure_text(ctx.exception)
+        self.assertNotIn(TOKEN[:-1], message)
+        self.assertNotIn(TOKEN[:12], message + self.logged())
+
+    def test_an_unavailable_model_shows_no_token_in_its_reason_nor_in_the_log(self):
+        # The reason of ``ModelUnavailable`` is read from the output: the dispatcher writes it
+        # in its log and in the memory of the unavailable models (R1-1).
+        token_file(self.keys)
+
+        def quota(argv, **kw):
+            if argv[-1] == '--version':
+                return SimpleNamespace(returncode=0, stdout='2.1.0 (Claude Code)', stderr='')
+            return SimpleNamespace(returncode=1, stdout='',
+                                   stderr='quota exhausted for ' + kw['env'][claudetoken.ENV])
+        with self.assertRaises(agents.ModelUnavailable) as ctx:
+            self.runner(quota).run(CFG.agent('claude'), 'review', 'p', 'review', self.work,
+                                   'pr-1')
+        self.assertIn('[REDACTED]', ctx.exception.reason)
+        self.assertNotIn(TOKEN, ctx.exception.reason + str(ctx.exception))
+        lines = []
+        d = Dispatcher(CFG, FakeGH(), FakeWS(), self.runner(quota), log=lines.append)
+        with self.assertRaises(agents.AgentError) as ctx:
+            d._turn(Models(CFG.agent('claude')), 'review', 'p', 'review', self.work, 'pr-2')
+        self.assertTrue(any('unavailable' in line for line in lines), lines)
+        error = ctx.exception
+        shown = '\n'.join(lines) + str(error) + repr(vars(error))
+        while error.__cause__ or error.__context__:
+            error = error.__cause__ or error.__context__
+            shown += str(error) + repr(vars(error))
+        self.assertNotIn(TOKEN, shown + self.logged())
+
+    def test_every_text_of_an_error_loses_the_token(self):
+        error = agents.PermissionDenied(f'stopped {TOKEN}', None, 'p', f'[{TOKEN}]',
+                                        f'echo {TOKEN}')
+        error.partial_output = (f'out {TOKEN}'.encode(), f'err {TOKEN}')
+        agents._redact_error(error, TOKEN)
+        self.assertNotIn(TOKEN, repr(error.args) + repr(vars(error)))
+        self.assertEqual(error.partial_output, (b'out [REDACTED]', 'err [REDACTED]'))
 
 
 class AgeTests(Case):
