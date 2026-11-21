@@ -8,9 +8,12 @@ the example, and the agy commands derived from its tests in the overlay
 Since R6 ssdlc's identities and trust (``repo``, ``trusted_users``, ``[apps]``) are in the
 overlay too, beside the agy commands: ``IDENTITY_KEYS`` of ``ops/host/ssdlc/overlay.toml``.
 
-The tests describe devloop on ssdlc as before R3: ``data()`` is the single file the
+The tests describe devloop on ssdlc as before R3: ``by_role()`` is the single file the
 configuration was, the installation's ``config.toml`` with the project file's keys and the
-overlay's identity keys set in it; ``load()`` parses it, with an overlay when given.
+overlay's identity keys set in it; ``load_by_role()`` parses it, with an overlay when given.
+Since #499 ``config.toml`` names the agents by role: ``data()`` and ``load()`` give the same
+configuration with the keys of before (``before_499``), which the tests written before #499
+describe.
 ``tests/test_devloop_ssdlc_project.py`` proves that it is the configuration devloop composes
 from the installation, the project file and the overlay, apart from the project file's hash in
 the policy version.
@@ -43,15 +46,58 @@ def identity():
     return {key: overlay[key] for key in IDENTITY_KEYS}
 
 
-def data():
+def by_role():
     """ssdlc's raw configuration as one file: ``config.toml`` with the project file's keys and
-    the overlay's identity keys."""
+    the overlay's identity keys. Since #499 its agents have keys by role (ADR 0005, P5-3)."""
     return config._merge(config.read_toml(config.DEFAULT_CONFIG), {**identity(), **project()})
+
+
+# The keys by role of config.toml since #499, each with the key it had before; the third
+# reviewer had none. The code still reads keys without a role as before (a key that names no
+# role serves the roles it is given), and the tests written before #499 describe devloop with
+# them: ``data`` gives them back. The tests of the keys by role use ``by_role``.
+KEYS_BEFORE_499 = {'claude-implementer': 'claude', 'codex-reviewer': 'codex',
+                   'agy-reviewer': 'agy'}
+THIRD_REVIEWER = 'claude-reviewer'
+
+
+def before_499(raw):
+    """The raw configuration ``raw`` (``by_role``) with the agents as config.toml had them
+    before #499: the keys without a role, no declared app nor provider, no third reviewer, the
+    pool of codex and agy."""
+    agents = {}
+    for key, table in raw['agents'].items():
+        if key == THIRD_REVIEWER:
+            continue
+        table = {k: v for k, v in table.items() if k not in ('app', 'provider')}
+        if 'fallback_models' in table:
+            table['fallback_models'] = [{k: v for k, v in f.items() if k != 'provider'}
+                                        for f in table['fallback_models']]
+        agents[KEYS_BEFORE_499.get(key, key)] = table
+    roles = dict(raw['roles'], implementer=KEYS_BEFORE_499[raw['roles']['implementer']],
+                 reviewers=[KEYS_BEFORE_499[k] for k in raw['roles']['reviewers']
+                            if k != THIRD_REVIEWER])
+    return dict(raw, agents=agents, roles=roles)
+
+
+def data():
+    """ssdlc's raw configuration as one file, with the agents as before #499
+    (``before_499``)."""
+    return before_499(by_role())
 
 
 def load(local=None, root=config.INSTALL_ROOT):
     """ssdlc's configuration (``data``), with the overlay ``local`` when given."""
     raw = data()
+    if local:
+        raw = config.apply_overlay(raw, config.read_toml(local, 'local config'))
+    return config.parse_config(raw, root)
+
+
+def load_by_role(local=None, root=config.INSTALL_ROOT):
+    """ssdlc's configuration as config.toml sets it since #499 (``by_role``), with the overlay
+    ``local`` when given."""
+    raw = by_role()
     if local:
         raw = config.apply_overlay(raw, config.read_toml(local, 'local config'))
     return config.parse_config(raw, root)

@@ -16,7 +16,7 @@ overlay nor project file (its ``source`` says how). A value migrated wrongly, in
 or in the overlay, is a difference from it. A later change to the installation's defaults is not
 R3's: it updates the frozen ``config.toml`` and ``effective.json`` with it, saying so (``source``
 ``updated`` lists those made so far: the implementer app of #407 and the capacity delegation of
-#412, merged beside R3).
+#412, merged beside R3; the keys by role of #499, which change the policy version too).
 
 ``repo``, ``trusted_users`` and ``[apps]`` left ``devloop/config.toml`` with R6 (#425) for the
 overlay, beside the agy commands (``ops/host/ssdlc/overlay.toml``): ``devloop token``, which
@@ -210,14 +210,29 @@ class EquivalenceTests(unittest.TestCase):
     def test_the_helper_of_the_other_tests_is_the_reference(self):
         # tests/helpers/ssdlc_project.py rebuilds the configuration of before for the other
         # modules: it is the frozen one, with the overlay keys or without.
-        values = as_json(ssdlc_project.load())
+        values = as_json(ssdlc_project.load_by_role())
         values.pop('prompts')  # R4: compared through the rendered prompts
         self.assertEqual(values, self.frozen['config'])
-        self.assertEqual(without_hash(as_json(ssdlc_project.load(ssdlc_project.OVERLAY))),
-                         without_hash(self.frozen['config']))
+        self.assertEqual(
+            without_hash(as_json(ssdlc_project.load_by_role(ssdlc_project.OVERLAY))),
+            without_hash(self.frozen['config']))
+        # The tests written before #499 read it with the keys of before: only the agents and
+        # the roles differ, and only by the keys by role.
+        legacy = as_json(ssdlc_project.load())
+        legacy.pop('prompts')
+        self.assertEqual(legacy['implementer'], 'claude')
+        self.assertEqual(legacy['reviewers'], ['codex', 'agy'])
+        self.assertEqual(sorted(legacy['agents']), ['agy', 'claude', 'codex'])
+        for key, before in ssdlc_project.KEYS_BEFORE_499.items():
+            self.assertEqual(dict(legacy['agents'][before], key=key),
+                             dict(values['agents'][key], app='', provider='',
+                                  fallback_models=[dict(f, provider='') for f in
+                                                   values['agents'][key]['fallback_models']]))
+        self.assertEqual(differing(legacy, values),
+                         {'implementer', 'reviewer', 'reviewers', 'agents', 'review_policy'})
 
     def test_the_one_file_form_is_the_installation_with_the_project_keys(self):
-        self.assertEqual(tomllib.loads(ssdlc_project.text()), ssdlc_project.data())
+        self.assertEqual(tomllib.loads(ssdlc_project.text()), ssdlc_project.by_role())
         installation = config.read_toml(config.DEFAULT_CONFIG)
         for key, value in ssdlc_project.project().items():
             if isinstance(value, dict):
@@ -294,7 +309,8 @@ class EquivalenceTests(unittest.TestCase):
         # The agents' commands derived from the project's tests are the overlay's alone (D2):
         # without its keys the configuration is not equivalent, and the check says so.
         bare = composed(overlay=ssdlc_project.identity_overlay(self))
-        self.assertNotIn('python3 scripts/run-tests.py', bare.agents['agy'].review_commands)
+        self.assertNotIn('python3 scripts/run-tests.py',
+                         bare.agents['agy-reviewer'].review_commands)
         self.assertNotEqual(dataclasses.replace(bare.review_policy, project='').version(),
                             self.frozen['policy_version'])
 
@@ -399,9 +415,10 @@ class ExampleFilesTests(unittest.TestCase):
 
     def test_the_overlay_keys_are_the_agy_commands_and_the_identities(self):
         table = config.read_toml(ssdlc_project.OVERLAY, 'local config')
-        self.assertEqual(table, {**ssdlc_project.identity(), 'agents': {'agy': {
-            'write_commands': table['agents']['agy']['write_commands'],
-            'review_commands': table['agents']['agy']['review_commands']}}})
+        # The table of agy's key by role since #499.
+        self.assertEqual(table, {**ssdlc_project.identity(), 'agents': {'agy-reviewer': {
+            'write_commands': table['agents']['agy-reviewer']['write_commands'],
+            'review_commands': table['agents']['agy-reviewer']['review_commands']}}})
         # R6: the values config.toml had before, frozen with the reference of before R3.
         frozen_raw = config.read_toml(FROZEN / 'config.toml')
         self.assertEqual(ssdlc_project.identity(),
@@ -409,8 +426,8 @@ class ExampleFilesTests(unittest.TestCase):
         # The commands agy had by default from the test_cmd of config.toml.
         expected = ('python3 scripts/run-tests.py',) + config.AGY_DEFAULT_COMMANDS
         after = composed()
-        self.assertEqual(after.agents['agy'].write_commands, expected)
-        self.assertEqual(after.agents['agy'].review_commands, expected)
+        self.assertEqual(after.agents['agy-reviewer'].write_commands, expected)
+        self.assertEqual(after.agents['agy-reviewer'].review_commands, expected)
 
     def test_the_supervisor_token_reads_repo_and_apps_from_the_overlay(self):
         # R6: from the overlay of the project's state_dir, without a project file.
@@ -596,7 +613,7 @@ class CheckScriptTests(unittest.TestCase):
     def test_without_the_overlay_keys_agy_differs(self):
         code, out = self.check(overlay=ssdlc_project.identity_overlay(self))
         self.assertEqual(code, 1, out)
-        self.assertIn('config agents.agy.review_commands:', out)
+        self.assertIn('config agents.agy-reviewer.review_commands:', out)
 
     def test_without_the_identities_in_the_overlay_the_after_side_does_not_load(self):
         # R6: repo and trusted_users are the overlay's; without them the copy does not start.

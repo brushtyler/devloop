@@ -482,15 +482,17 @@ class ResetCommandTests(unittest.TestCase):
             state = root / CFG.state_dir
             memory = unavailability.Memory(state)
             far = memory.now() + 86400
-            memory.record('agy', ARGON, 'quota', far)
-            memory.record('agy', HYDROGEN, 'quota', far)
-            memory.record('codex', ARGON, 'quota', far)
-            out = self.run_main(root, 'fallback', 'reset', 'agy')
-            self.assertIn(f'agy: forgot the unavailability of {ARGON}, {HYDROGEN}', out)
+            # The keys of the installation's config.toml: by role since #499.
+            memory.record('agy-reviewer', ARGON, 'quota', far)
+            memory.record('agy-reviewer', HYDROGEN, 'quota', far)
+            memory.record('codex-reviewer', ARGON, 'quota', far)
+            out = self.run_main(root, 'fallback', 'reset', 'agy-reviewer')
+            self.assertIn(f'agy-reviewer: forgot the unavailability of {ARGON}, {HYDROGEN}', out)
             memory = unavailability.Memory(state)
-            self.assertEqual([(k, m) for k, m, _ in memory.entries()], [('codex', ARGON)])
-            out = self.run_main(root, 'fallback', 'reset', 'agy')
-            self.assertIn('agy: no model remembered unavailable', out)
+            self.assertEqual([(k, m) for k, m, _ in memory.entries()],
+                             [('codex-reviewer', ARGON)])
+            out = self.run_main(root, 'fallback', 'reset', 'agy-reviewer')
+            self.assertIn('agy-reviewer: no model remembered unavailable', out)
             with self.assertRaises(SystemExit) as ctx:
                 self.run_main(root, 'fallback', 'reset', 'nobody')
             self.assertIn('unknown agent', str(ctx.exception.code))

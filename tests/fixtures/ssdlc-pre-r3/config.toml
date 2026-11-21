@@ -459,16 +459,21 @@ ci_log_format = "run-tests"
 # kind = "claude"
 # provider = "anthropic"
 # model = "claude-opus-5-5"
-implementer = "claude"
+# Updated with issue #499, not R3's: the keys by role of the agents (claude-implementer,
+# codex-reviewer, agy-reviewer) with their app and provider, and claude-reviewer, the third
+# reviewer, last in the pool.
+implementer = "claude-implementer"
 # The reviewer pool, in order; none may be the implementer. Level 1 uses the PR's recorded
 # reviewer (the first of the pool when the PR was opened). Level 2 takes the first pair that
 # differs both in GitHub identity (app) and in (kind, model, effort, review_args), and neither of
 # which shares the identity or (kind, model, effort) of the implementer or of a fixer of the PR;
 # without such a pair the PR goes to agent:needs-operator. `reviewer = "codex"` is a pool of one.
-reviewers = ["codex", "agy"]
+reviewers = ["codex-reviewer", "agy-reviewer", "claude-reviewer"]
 
-[agents.claude]
+[agents.claude-implementer]
 kind = "claude"
+app = "implementer"
+provider = "anthropic"
 display_name = "Claude Code"
 model = "claude-opus-5-5"
 model_label = "Claude Opus 5.5"
@@ -487,8 +492,10 @@ review_args = ["--allowedTools", "Bash(git diff *)", "Bash(git log *)", "Bash(gi
                "--disallowedTools", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch"]
 commit_trailer = "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
-[agents.codex]
+[agents.codex-reviewer]
 kind = "codex"
+app = "codex"
+provider = "openai"
 display_name = "Codex"
 model = "gpt-6.1-sol"
 model_label = "gpt-6.1-sol"
@@ -496,8 +503,10 @@ model_label = "gpt-6.1-sol"
 # reproduced five remaining defects (issue #123). The operator asked for high, never less.
 effort = "high"
 
-[agents.agy]
+[agents.agy-reviewer]
 kind = "agy"
+app = "agy"
+provider = "google"
 display_name = "Antigravity"
 model = "gemini-4-argon-high"
 model_label = "Gemini 4 Argon"
@@ -511,7 +520,7 @@ effort = "high"
 # `unavailable_exit_codes` (default none). An output with only `(code 400)` never counts, not
 # even with a listed exit code.
 fallback_models = [
-    { model = "gemini-4-hydrogen-high", model_label = "Gemini 4 Hydrogen" },
+    { model = "gemini-4-hydrogen-high", model_label = "Gemini 4 Hydrogen", provider = "google" },
 ]
 # A model found unavailable is remembered in <state_dir>/model-unavailability.json, and the
 # next turns start from the first model of the chain not remembered (issue #151): until the
@@ -530,6 +539,19 @@ fallback_models = [
 # Changing review_commands voids agy's earlier approvals, as a change of model would.
 # review_commands = ["python3 scripts/run-tests.py", "python3 -m unittest", "git diff"]
 # write_commands = [...]
+
+[agents.claude-reviewer]
+kind = "claude"
+app = "claude"
+provider = "anthropic"
+display_name = "Claude Code"
+model = "claude-sonnet-5-5"
+model_label = "Claude Sonnet 5.5"
+effort = "high"
+review_args = ["--allowedTools", "Bash(git diff *)", "Bash(git log *)", "Bash(git show *)",
+               "Bash(python3 -m unittest tests.*)",
+               "Bash(PYTHONPATH=tests python3 -m unittest tests.*)",
+               "--disallowedTools", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch"]
 
 # GitHub Apps (issue #65): one per agent, one for the dispatcher, one for merges (#201) and one
 # for the supervisor (#408). App

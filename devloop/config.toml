@@ -62,16 +62,18 @@ journal_max_mib = 64
 # Readiness check before implement (issue #114): a read-only agent, other than the implementer,
 # checks on a checkout of main that the issue can be implemented in one run, and an issue that
 # is not ready goes to agent:needs-operator without starting the implementer. Each check takes a
-# slot of max_actions_per_tick. Disabled here: enabling it is the operator's decision.
-# preflight = "codex"
+# slot of max_actions_per_tick. Read-only as a review, it takes a reviewer key, never an
+# implementer key (#499). Disabled here: enabling it is the operator's decision.
+# preflight = "codex-reviewer"
 
 # Conclave on a block (issue #141): when the implementer or a fixer stops as blocked, or a
 # reviewer asks for the operator, these three agents (distinct by GitHub identity and by
 # kind, model and effort, the one that stopped among them) vote on one written resolution. The
 # outcome (UNANIMOUS, BLOCKED or RESERVED) is recorded on the issue or PR, which stays in
-# agent:needs-operator. Each call takes a slot of max_actions_per_tick. Disabled here: enabling
-# it is the operator's decision.
-# conclave = ["claude", "codex", "agy"]
+# agent:needs-operator. Each call takes a slot of max_actions_per_tick. Read-only as a review, it
+# takes reviewer keys, never an implementer key (#499): a block of an implementer convenes none.
+# Disabled here: enabling it is the operator's decision.
+# conclave = ["claude-reviewer", "codex-reviewer", "agy-reviewer"]
 
 max_open_prs = 2            # devloop PRs in progress at once; new issues wait
 # PRs waiting for a person (issue #199): agent:needs-operator, and agent:ready-to-merge when
@@ -116,8 +118,8 @@ label = "reviews:2"
 # review with its own identity, of each head of a PR in agent:needs-operator. It may be the
 # implementer: it never counts for the quorum nor for the round limit, opens no finding and
 # changes no label; devloop never reads it to decide. Empty (the default) turns it off; the
-# local overlay turns it on, e.g. advisory_reviewer = "claude". It is not part of the policy
-# version.
+# local overlay turns it on, e.g. advisory_reviewer = "claude-reviewer". It is not part of the
+# policy version.
 advisory_reviewer = ""
 # The findings-only reviewer of ADR 0005, D8, integration of 2026-11-19 (issue #416), off by
 # default (D10): turning it on is the operator's decision. At level 2, on a PR whose implementer
@@ -282,13 +284,16 @@ enabled = false
 # sync = <turns>
 # [budget.phase_turns]
 # implementation = <turns>
-# [budget.usage.codex]
+# [budget.usage.codex-reviewer]
 # model = "unmetered_quota"
 # reason = "codex reports no cost: the turn caps bound it"
-# [budget.usage.agy]
+# [budget.usage.agy-reviewer]
 # model = "unmetered_quota"
 # reason = "agy reports no cost: the turn caps bound it"
-# [budget.usage.claude]
+# [budget.usage.claude-implementer]
+# model = "unmetered_quota"
+# reason = "claude reports its estimate only when a turn completes"
+# [budget.usage.claude-reviewer]
 # model = "unmetered_quota"
 # reason = "claude reports its estimate only when a turn completes"
 
@@ -345,8 +350,8 @@ merge = false
 # opened by a trusted user or by a devloop app (issue #178). In "auto" it also decides the
 # non-critical escalations in agent:needs-supervisor with /devloop retry, accept-defaults,
 # decide (issue #258) and escalate (issue #182). In any merge mode it may ask for a fix of a PR in agent:review or
-# agent:changes with /devloop fix, as a trusted user may (issue #195).
-# supervisor = "claude"
+# agent:changes with /devloop fix, as a trusted user may (issue #195). As an agent key it takes
+# no key with a role: with the keys by role below, roles.supervisor is the table.
 # The supervisor's role app (ADR 0005, P5-4, issue #408), off by default: turning it on is the
 # operator's decision (D10), best with an empty queue. As a table, roles.supervisor is the
 # supervisor actor, not a key of [agents] (devloop does not run it): its name is
@@ -361,24 +366,19 @@ merge = false
 # provider = "anthropic"
 # model = "claude-opus-5-5"
 #
-# Agent keys by role and the implementer app (ADR 0005, P5-3, issue #407), off by default:
-# turning them on is the operator's decision (D10), with an empty queue, since at startup
-# devloop stops while an open PR's marker names a key not configured or of another role. A key
-# then names agent and role in full and serves that role only: "claude-implementer",
-# "codex-reviewer", "agy-reviewer" (a key such as "claude-reviewer" given as implementer stops
-# devloop at startup). The implementers declare app = "implementer" and sign with
-# [apps.implementer]; the reviewers declare the app of their agent (app = "codex", ...). The
-# keys claude, codex and agy disappear: the records that name them are read as they are, and the
-# models remembered unavailable move to the new keys. Then also
-# review_policy.advisory_reviewer = "claude-reviewer". The keys are renamed here, not in the
-# local overlay: the overlay merges tables and cannot remove the old keys, and an old key
-# beside its new one (codex and codex-reviewer, both with [apps.codex]) stops devloop at
-# startup. For example:
-#   implementer = "claude-implementer"
-#   reviewers = ["codex-reviewer", "agy-reviewer"]
-#   [agents.claude-implementer]   (the table of [agents.claude], with app = "implementer")
-#   [agents.codex-reviewer]       (the table of [agents.codex], with app = "codex")
-#   [agents.agy-reviewer]         (the table of [agents.agy], with app = "agy")
+# Agent keys by role and the implementer app (ADR 0005, P5-3, issue #407), on since issue #499:
+# a key names agent and role in full and serves that role only: "claude-implementer",
+# "codex-reviewer", "agy-reviewer", "claude-reviewer" (a key such as "claude-reviewer" given as
+# implementer stops devloop at startup). preflight and conclave, read-only as a review, take a
+# reviewer key too, never an implementer key (#499). The implementers declare app = "implementer"
+# and sign with [apps.implementer]; the reviewers declare the app of their agent (app = "codex",
+# ...). The keys claude, codex and agy are gone: the records that name them are read as they are,
+# and the models remembered unavailable move to the new keys. The keys are renamed here, not in
+# the local overlay: the overlay merges tables and cannot remove the old keys. An overlay that
+# still has [agents.claude], [agents.codex] or [agents.agy] stops devloop at startup, saying
+# which table to rename (ops/host/migrate.md, "Chiavi per ruolo su un host attivo"). The
+# advisory reviewer, when the overlay turns it on, is review_policy.advisory_reviewer =
+# "claude-reviewer".
 # The implementer of an issue is chosen at its takeover (D7) and recorded in its request record
 # and in its PR's marker: an impl:<kind> label chooses <kind>-implementer and prevails, then the
 # area labels of [roles.implementers], then `implementer`. A label counts only when its latest
@@ -388,25 +388,28 @@ merge = false
 # as `configuration`, and so does an implementer that is the same agent as `preflight`.
 # [roles.implementers]
 # "area:docs" = "claude-implementer"
-implementer = "claude"
+implementer = "claude-implementer"
 # The reviewer pool, in order; none may be a key that implements. Level 1 uses the PR's
 # recorded reviewer (the first of the pool, when the PR was opened, that is not the
-# implementer's agent). At both levels a reviewer that is the same agent in effect (same kind or
-# same model) as the implementer, or at level 2 as a fixer of the PR, is skipped (issue #407).
-# Level 2 takes the first pair that differs both in GitHub identity (app) and in (kind, model,
-# effort, review_args), and neither of which shares the identity or (kind, model, effort) of the
-# implementer or of a fixer of the PR; without such a pair the PR goes to agent:needs-operator.
-# `reviewer = "codex"` is a pool of one. With review_policy.provider_quorum (issue #409) the
-# quorum rule on the provider replaces the check of the same agent, and once the keys are renamed
-# claude joins the pool as the third reviewer, last, with another model than the implementer's
-# and the app of claude (D8):
-#   reviewers = ["codex-reviewer", "agy-reviewer", "claude-reviewer"]
-#   [agents.claude-reviewer]      (the table of [agents.claude], with app = "claude",
-#                                  provider = "anthropic", model = "claude-sonnet-5-5")
-reviewers = ["codex", "agy"]
+# implementer's agent). At both levels a reviewer that is the same agent in effect (same kind,
+# model or provider) as the implementer, or at level 2 as a fixer of the PR, is skipped (issue
+# #407). Level 2 takes the first pair that differs both in GitHub identity (app) and in (kind,
+# model, effort, review_args), and neither of which shares the identity or (kind, model, effort)
+# of the implementer or of a fixer of the PR; without such a pair the PR goes to
+# agent:needs-operator. `reviewer = "codex-reviewer"` is a pool of one. claude-reviewer, with
+# Sonnet and the app of claude, is the third reviewer, last, as a reserve (ADR 0005, D8, issue
+# #499): with the check of the same agent (provider_quorum off) it never reviews the code of
+# claude-implementer. With review_policy.provider_quorum (issue #409) the quorum rule on the
+# provider replaces that check: claude-reviewer then reviews a PR of claude only beside a
+# reviewer of another provider, when codex-reviewer or agy-reviewer is missing, remembered
+# unavailable at a new round, or not independent.
+reviewers = ["codex-reviewer", "agy-reviewer", "claude-reviewer"]
 
-[agents.claude]
+[agents.claude-implementer]
 kind = "claude"
+# The implementer's role app (issue #407): commits, pushes, PRs and the records of the fixes.
+app = "implementer"
+provider = "anthropic"
 display_name = "Claude Code"
 model = "claude-opus-5-5"
 model_label = "Claude Opus 5.5"
@@ -425,8 +428,10 @@ review_args = ["--allowedTools", "Bash(git diff *)", "Bash(git log *)", "Bash(gi
                "--disallowedTools", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch"]
 commit_trailer = "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
-[agents.codex]
+[agents.codex-reviewer]
 kind = "codex"
+app = "codex"
+provider = "openai"
 display_name = "Codex"
 model = "gpt-6.1-sol"
 model_label = "gpt-6.1-sol"
@@ -434,8 +439,10 @@ model_label = "gpt-6.1-sol"
 # reproduced five remaining defects (issue #123). The operator asked for high, never less.
 effort = "high"
 
-[agents.agy]
+[agents.agy-reviewer]
 kind = "agy"
+app = "agy"
+provider = "google"
 display_name = "Antigravity"
 model = "gemini-4-argon-high"
 model_label = "Gemini 4 Argon"
@@ -451,12 +458,13 @@ effort = "high"
 # `unavailable_exit_codes` (default none). An output with only `(code 400)` never counts, not
 # even with a listed exit code.
 fallback_models = [
-    { model = "gemini-4-hydrogen-high", model_label = "Gemini 4 Hydrogen" },
+    { model = "gemini-4-hydrogen-high", model_label = "Gemini 4 Hydrogen", provider = "google" },
 ]
 # A model found unavailable is remembered in <state_dir>/model-unavailability.json, and the
 # next turns start from the first model of the chain not remembered (issue #151): until the
 # reset the error announces ("Resets in 152h4m35s"), else for fallback_memory_seconds (default
-# 3600). `devloop fallback reset agy` forgets it. Without fallback_models nothing is remembered.
+# 3600). `devloop fallback reset agy-reviewer` forgets it. Without fallback_models nothing is
+# remembered.
 # fallback_memory_seconds = 3600
 # A model that a turn's denied permission stops twice (the retry included) is left for the next
 # model of the chain, and remembered the same way for denied_cooldown_hours (default 6, issue
@@ -471,6 +479,22 @@ fallback_models = [
 # Changing review_commands voids agy's earlier approvals, as a change of model would.
 # review_commands = ["python3 scripts/run-tests.py", "python3 -m unittest", "git diff"]
 # write_commands = [...]
+
+# The third reviewer (ADR 0005, D8, issue #499): claude with another model than the
+# implementer's, signing with the app of claude. Last in the pool, it reviews only when one of the
+# first two is missing, unavailable or not independent.
+[agents.claude-reviewer]
+kind = "claude"
+app = "claude"
+provider = "anthropic"
+display_name = "Claude Code"
+model = "claude-sonnet-5-5"
+model_label = "Claude Sonnet 5.5"
+effort = "high"
+review_args = ["--allowedTools", "Bash(git diff *)", "Bash(git log *)", "Bash(git show *)",
+               "Bash(python3 -m unittest tests.*)",
+               "Bash(PYTHONPATH=tests python3 -m unittest tests.*)",
+               "--disallowedTools", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch"]
 
 # GitHub Apps (issue #65): one per agent, one for the dispatcher, one for merges (#201), one
 # for the supervisor (#408) and one for the implementers (#407). An agent signs with the table

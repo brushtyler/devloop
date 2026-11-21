@@ -30,8 +30,9 @@
 # max_parked_prs = 3
 # max_review_rounds = 3
 
-# Chi fa il controllo di prontezza prima dell'implementazione.
-# preflight = "codex"
+# Chi fa il controllo di prontezza prima dell'implementazione: una chiave di reviewer, in sola
+# lettura come una review (#499), mai una chiave di implementer.
+# preflight = "codex-reviewer"
 
 # Modalità di merge: "off" (merge dell'operatore), "strict" o "auto". Decisione dell'operatore.
 # [merge]
@@ -55,26 +56,47 @@
 # [agent_user]
 # name = "devloop-agent"
 
-# Il supervisore che decide le escalation non critiche (identità della sua app).
-# [roles]
-# supervisor = "claude"
-# Oppure, con l'app di ruolo del supervisore (ADR 0005, P5-4; decisione dell'operatore, con la
-# coda vuota): l'attore claude-supervisor, che firma con [apps.supervisor]. Al posto delle due
-# righe sopra, non insieme (docs/devloop/reference.md, "The supervisor app"):
-#     [roles.supervisor]
-#     name = "claude-supervisor"
-#     kind = "claude"
-#     provider = "anthropic"
-#     model = "claude-opus-5-5"
+# Le revisioni consultive delle PR che arrivano all'operatore (#369), con il terzo reviewer.
+# [review_policy]
+# advisory_reviewer = "claude-reviewer"
+# Le regole dei reviewer sul fornitore (ADR 0005, P5-5): claude-reviewer sostituisce agy quando
+# agy non è disponibile, accanto a un reviewer di un altro fornitore.
+# provider_quorum = true
+
+# Il supervisore che decide le escalation non critiche: l'attore claude-supervisor, che firma
+# con [apps.supervisor] (ADR 0005, P5-4; docs/devloop/reference.md, "The supervisor app"). Con
+# le chiavi per ruolo (#499) roles.supervisor non può essere una chiave di [agents].
+# [roles.supervisor]
+# name = "claude-supervisor"
+# kind = "claude"
+# provider = "anthropic"
+# model = "claude-opus-5-5"
 
 # L'insieme di GitHub App del progetto (ADR 0006, R6 e D3): uno per repository, mai condiviso,
 # installato solo su REPO, con la sua key_dir (DEVLOOP_KEY_DIR di params.env). Una tabella per
 # app (dispatcher, claude, codex, agy, merger, supervisor, implementer) con app_id e slug
 # (<APP_PREFIX><ruolo>, ops/github/create-apps.sh). merger solo se devloop fa i merge ([merge]
-# mode "strict" o "auto"). Senza [apps], ogni attore usa il login gh dell'utente devloop.
+# mode "strict" o "auto"). Gli agent di devloop/config.toml dichiarano le app implementer,
+# claude, codex e agy (#499): senza le loro tabelle devloop non parte. Un attore senza app (il
+# dispatcher, il merger) usa il login gh dell'utente devloop.
 # Verifica: devloop-pinned apps (docs/devloop/reference.md, "GitHub identities").
 # [apps]
 # key_dir = "~/.ghapps"
 # [apps.dispatcher]
 # app_id = 5747835
 # slug = "brushtyler-devloop-dispatcher"
+# [apps.claude]
+# app_id = 5735240
+# slug = "brushtyler-devloop-claude-agent"
+# [apps.codex]
+# app_id = 5735296
+# slug = "brushtyler-devloop-codex-agent"
+# [apps.agy]
+# app_id = 5735349
+# slug = "brushtyler-devloop-agy-agent"
+# [apps.supervisor]
+# app_id = 5824243
+# slug = "brushtyler-devloop-supervisor"
+# [apps.implementer]
+# app_id = 5824194
+# slug = "brushtyler-devloop-implementer"

@@ -131,8 +131,10 @@ class ConfigTests(unittest.TestCase):
                 (dict(migrated(), review_policy=dict(DATA['review_policy'],
                                                      advisory_reviewer='claude-implementer')),
                  'advisory_reviewer: .* implementer key'),
-                (dict(migrated(), preflight='codex-reviewer'),
-                 "preflight: 'codex-reviewer' is a reviewer key"),
+                # #499: preflight and conclave, read-only, take a reviewer key, never an
+                # implementer key (tests/test_devloop_keys_by_role.py).
+                (dict(migrated(), preflight='claude-implementer'),
+                 "preflight: 'claude-implementer' is a implementer key"),
                 (dict(migrated(), conclave=['claude-implementer', 'codex-reviewer',
                                             'agy-reviewer']), 'conclave: .* key'),
                 (migrated({'codex-implementer': dict(DATA['agents']['claude'],

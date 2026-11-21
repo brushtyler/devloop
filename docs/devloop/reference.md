@@ -15,10 +15,12 @@ and, for each agent, the app it signs with (`app`,
 model, reasoning effort and extra CLI arguments for writing and reviewing turns. Pass another file
 with `--config`. `preflight` (absent by default) names the agent of the
 [readiness check](guide.md#readiness-check-before-implementation); it must be a configured agent other
-than every key that implements, and the implementer chosen for an issue must not be the same agent
+than every key that implements, a reviewer key (`codex-reviewer`) or a key without a role, never
+an implementer key (#499), and the implementer chosen for an issue must not be the same agent
 (same `kind` or `model`), or the issue goes to the operator (#407). `conclave` (absent by default) lists the three agents of the
 [conclave on a block](guide.md#conclave-on-a-block) (#141): exactly three configured agents,
-different from each other and with different `(kind, model, effort)`; anything else stops devloop
+different from each other and with different `(kind, model, effort)`, reviewer keys or keys
+without a role, never an implementer key (#499); anything else stops devloop
 at startup. Their fallback models are checked when each call runs: one whose tuple coincides with
 another member's is not used. The prompts of `implement`, `fix` and `review`
 (`devloop/prompts/`) end with `$conclave`: the verified resolution of the latest `UNANIMOUS`
@@ -961,12 +963,12 @@ each agy turn its minimal permissions, and treats a stop without output as a fai
   denied.
 
 ```toml
-[agents.agy]
+[agents.agy-reviewer]
 denied_cooldown_hours = 6  # how long a model denied twice is skipped
 ```
 
 ```toml
-[agents.agy]
+[agents.agy-reviewer]
 review_commands = ["python3 scripts/run-tests.py", "python3 -m unittest", "git diff", "git log"]
 ```
 
@@ -977,12 +979,12 @@ on `gemini-4-argon-high`, which has a budget of its own, and falls back to
 `gemini-4-hydrogen-high`:
 
 ```toml
-[agents.agy]
+[agents.agy-reviewer]
 model = "gemini-4-argon-high"
 model_label = "Gemini 4 Argon"
 effort = "high"
 fallback_models = [
-    { model = "gemini-4-hydrogen-high", model_label = "Gemini 4 Hydrogen" },
+    { model = "gemini-4-hydrogen-high", model_label = "Gemini 4 Hydrogen", provider = "google" },
 ]
 ```
 
@@ -1083,7 +1085,7 @@ sometimes days later. So that each turn does not try it again first, devloop rem
   before.
 
 ```toml
-[agents.agy]
+[agents.agy-reviewer]
 fallback_memory_seconds = 3600  # when the error does not say when the model is back
 ```
 
@@ -1692,40 +1694,52 @@ slug = "brushtyler-devloop-implementer"
 It signs the commits, the pushes, the PRs and the records of the fixes and of the syncs of every
 agent that declares it, whichever agent does the work; the agent and its model stay in the
 attribution header, in the `implementer` key and the profile of the PR marker (whose `identity`
-is the app's login), and in the commit trailer. Off by default (D10): `config.toml` keeps the
-keys `claude`, `codex` and `agy`, nothing declares the app, devloop does not read its key and
-`python3 -m devloop apps` does not list it. The operator turns it on with an **empty queue**, by
-renaming the keys in `config.toml`. Not in the
-local overlay: the overlay merges the tables key by key and cannot remove one, so the keys
-`claude`, `codex` and `agy` of `config.toml` would stay beside the new ones, and two keys that
-sign with the same app (`codex` and `codex-reviewer` with `[apps.codex]`) stop devloop at
-startup (`apps.codex: each app belongs to one actor`):
+is the app's login), and in the commit trailer. **On since #499**: the operator decided it for
+ssdlc (D10), and `config.toml` names its agents by role. The keys are renamed in `config.toml`,
+not in the local overlay: the overlay merges the tables key by key and cannot remove one, so the
+keys `claude`, `codex` and `agy` would stay beside the new ones. Before #499 nothing declared the
+app, devloop did not read its key and `python3 -m devloop apps` did not list it; a copy of
+`config.toml` with the keys `claude`, `codex` and `agy` still behaves so. `config.toml` now has:
 
 ```toml
 [roles]
 implementer = "claude-implementer"
-reviewers = ["codex-reviewer", "agy-reviewer"]
+reviewers = ["codex-reviewer", "agy-reviewer", "claude-reviewer"]
 
-[agents.claude-implementer]   # the table of [agents.claude]
+[agents.claude-implementer]   # the table of [agents.claude] of before
 app = "implementer"
+provider = "anthropic"
 # ...
-[agents.codex-reviewer]       # the table of [agents.codex]
+[agents.codex-reviewer]       # the table of [agents.codex] of before
 app = "codex"
+provider = "openai"
 # ...
-[agents.agy-reviewer]         # the table of [agents.agy]
+[agents.agy-reviewer]         # the table of [agents.agy] of before
 app = "agy"
+provider = "google"
 # ...
-
-[review_policy]
-advisory_reviewer = "claude-reviewer"   # once claude-reviewer exists (P5-5, #409); "" until then
+[agents.claude-reviewer]      # the third reviewer, with Sonnet 5.5
+app = "claude"
+provider = "anthropic"
+# ...
 ```
+
+Its agents declare the apps `implementer`, `claude`, `codex` and `agy`: the overlay of every
+project that uses the installation has their `[apps.*]` tables, or devloop stops at startup
+(`agents.claude-implementer.app: no [apps.implementer] table`). The advisory reviewer stays off
+in `config.toml`; ssdlc's overlay turns it on with `review_policy.advisory_reviewer =
+"claude-reviewer"`.
 
 - **One key, one role.** A key may name agent and role in full, `<kind>-implementer` or
   `<kind>-reviewer`, where `<kind>` is the agent's `kind`. Such a key serves that role only:
   `roles.implementer`, the values of `[roles.implementers]` and the `impl:` labels take
-  implementer keys; `roles.reviewers` and `review_policy.advisory_reviewer` reviewer keys;
-  `preflight`, `conclave` and `roles.supervisor` as an agent key take no key with a role, until
-  they get one. A key used in a role it does not name stops devloop at startup. A key without a
+  implementer keys; `roles.reviewers` and `review_policy.advisory_reviewer` reviewer keys.
+  `preflight` and `conclave`, read-only as a review, take a reviewer key too, never an
+  implementer key (ADR 0005, D6, precisation of 2026-11-21, #499): `preflight =
+  "codex-reviewer"` runs the readiness check with the app and the model of `codex` before.
+  `roles.supervisor` as an agent key takes no key with a role: with the keys by role the
+  supervisor is the table of [the supervisor app](#the-supervisor-app). A key used in a role it
+  does not name stops devloop at startup. A key without a
   role (`claude`, the keys before the migration) serves the roles it is given, as before; it may
   not be both a reviewer and a key that implements.
 - **Declared app.** An agent signs with `[apps.<app>]` of its `app`, or without `app` with the
@@ -1781,6 +1795,15 @@ advisory_reviewer = "claude-reviewer"   # once claude-reviewer exists (P5-5, #40
   an open devloop PR (of this repository, by a trusted user or one of devloop's apps, on a devloop
   branch) has a marker whose implementer or reviewer is not a configured key, or a key of the
   other role, and when the open PRs cannot be read. Nobody else's PR can stop devloop.
+- **An overlay written before** (#499). A local overlay that still has a table of a key of before
+  (`[agents.agy]`, `[agents.codex]`, `[agents.claude]`) beside its key by role stops devloop at
+  startup with `agents.agy: the agents have keys by role: rename [agents.agy] of the local
+  overlay to [agents.agy-reviewer] …`; a value that names a key of before no longer configured
+  (`preflight = "codex"`, `conclave`, `roles.implementer`, `roles.reviewers`,
+  `roles.supervisor`, `review_policy.advisory_reviewer`) with `preflight: unknown agent 'codex':
+  the agents have keys by role, use 'codex-reviewer' …`. Both name the step of
+  `ops/host/migrate.md`, "Chiavi per ruolo su un host attivo". The pin of a copy checks its
+  configuration with the overlay, so the same error stops the pin, and the copy in use stays.
 
 ### Reviewers by provider and the third reviewer
 
@@ -1841,11 +1864,17 @@ claude becomes the third reviewer of the pool, as a reserve. **Off by default** 
   in the same action, and is promoted with its own pair. The log names the skipped reviewer.
 - **The third reviewer** (D8). `claude-reviewer`, kind `claude`, with a model other than the
   implementer's (Sonnet 5.5 against Opus 5.5), last in the pool, signing with `claude-agent`
-  (`app = "claude"`). It needs the keys by role and the supervisor's role app first: before the
-  migration `claude-agent` also signs the implementer's work, and two keys that sign with the
-  same app stop devloop at startup (`apps.claude: each app belongs to one actor`). It reviews
+  (`app = "claude"`). It needs the keys by role and, for a supervisor run by claude, the
+  supervisor's role app: before the migration `claude-agent` also signs the implementer's work,
+  and a key of before beside it stops devloop at startup. It reviews
   only when one of the first two is missing, unavailable or not independent, and at level 2 a
-  PR of claude only beside a reviewer of another provider:
+  PR of claude only beside a reviewer of another provider. `config.toml` has it since #499, with
+  every provider declared; the rules stay off there, and ssdlc's overlay turns them on with
+  `provider_quorum = true`. With them, a level 2 PR of `claude-implementer` whose new round finds
+  every model of `agy-reviewer` remembered unavailable is reviewed by `codex-reviewer` and
+  `claude-reviewer`; with agy available, by `codex-reviewer` and `agy-reviewer`. Without them
+  `claude-reviewer` is the same agent as `claude-implementer` and never reviews its code. The
+  configuration of `config.toml`, with the rules on:
 
 ```toml
 [review_policy]

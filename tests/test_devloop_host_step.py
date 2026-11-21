@@ -906,8 +906,10 @@ class ProjectTablesTests(unittest.TestCase):
         project.write_text('test_cmd = "python3 -m unittest"\n', encoding='utf-8')
         # R6: repo and trusted_users are the overlay's.
         local = self.tmp / 'config.local.toml'
-        local.write_text('repo = "acme/widget"\ntrusted_users = ["acme-operator"]\n',
-                         encoding='utf-8')
+        # #499: the agents of the installation declare their apps, which the overlay gives.
+        local.write_text('repo = "acme/widget"\ntrusted_users = ["acme-operator"]\n'
+                         + ssdlc_project.toml_text({'apps': ssdlc_project.identity()['apps']})
+                         + '\n', encoding='utf-8')
         cfg = config.load_config(None, local, project)
         seen = []
         reloader = config.Reloader(cfg, None, local, project, log=self.logs.append,
