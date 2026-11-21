@@ -1963,9 +1963,20 @@ round besides the quorum, **for its findings only**. **Off by default** (D10):
   not even in the place of a missing one: a pool without enough independent reviewers still
   sends the PR to the operator ([review level](#review-level-and-policy-receipt)), and the
   findings-only reviewer does not run.
+- **Which key, with the pool of #499.** `claude-reviewer` is in the pool since #499, so it cannot
+  be the findings-only reviewer. The function takes one more key, outside `roles.reviewers`:
+  a key without a role in its name, since a key with a role names agent and role in full
+  (`<kind>-reviewer`) and `claude-reviewer` is taken. The example below is `claude-findings`,
+  claude with Sonnet beside `claude-implementer` with Opus: the same agent in effect as the
+  implementer, with another model. Each app belongs to one actor and `[apps.claude]` is
+  `claude-reviewer`'s, so the key signs with a GitHub App of its own, `[apps.claude-findings]`,
+  with the permissions of the agents' apps and its key in `key_dir`
+  ([GitHub identities](#github-identities)). `devloop/config.toml` has the agent's table
+  commented, after `[agents.claude-reviewer]`; the three tables and the line of
+  `findings_reviewer` go in the local overlay.
 - **When it reviews.** Only at level 2, on a PR whose implementer, as its marker records it, signs
   with the implementer app ([the keys by role](#the-implementer-app-and-the-keys-by-role)) and is
-  the same agent in effect as the key (the same kind, model or provider): claude-reviewer with
+  the same agent in effect as the key (the same kind, model or provider): claude-findings with
   Sonnet on the code of claude-implementer with Opus. Every model its turn runs, fallbacks
   included, must differ from every author of the PR by GitHub identity and by model: the same
   model with another effort does not count as another model. Otherwise it does not review, or
@@ -1992,5 +2003,22 @@ round besides the quorum, **for its findings only**. **Off by default** (D10):
 
 ```toml
 [review_policy]
-findings_reviewer = "claude-reviewer"   # outside roles.reviewers, with another model
+findings_reviewer = "claude-findings"   # outside roles.reviewers, with another model
+
+[agents.claude-findings]
+kind = "claude"
+app = "claude-findings"
+provider = "anthropic"
+display_name = "Claude Code"
+model = "claude-sonnet-5-5"
+model_label = "Claude Sonnet 5.5"
+effort = "high"
+review_args = ["--allowedTools", "Bash(git diff *)", "Bash(git log *)", "Bash(git show *)",
+               "Bash(python3 -m unittest tests.*)",
+               "Bash(PYTHONPATH=tests python3 -m unittest tests.*)",
+               "--disallowedTools", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch"]
+
+[apps.claude-findings]   # its own app: [apps.claude] is claude-reviewer's
+app_id = 1234567         # the id of the app
+slug = "<prefix>claude-findings"
 ```

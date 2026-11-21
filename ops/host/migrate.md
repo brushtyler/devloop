@@ -882,7 +882,9 @@ Come root, con i percorsi dell'installazione attuale: `state_dir`
    - in `[review_policy]`: `advisory_reviewer = "claude-reviewer"` (la revisione consultiva di
      #369) e `provider_quorum = true`, senza il quale `claude-reviewer` non rivede mai il codice
      di `claude-implementer`. Un `findings_reviewer = "claude-reviewer"` va tolto: ora
-     `claude-reviewer` è nel pool, e un reviewer di soli finding fuori dal pool non lo è.
+     `claude-reviewer` è nel pool, e un reviewer di soli finding fuori dal pool non lo è. Per
+     tenerlo serve una chiave in più fuori dal pool, come `claude-findings` con Sonnet, con una
+     GitHub App sua (`docs/devloop/reference.md`, "Findings-only reviewer").
 
    Poi nessuna riga deve nominare le chiavi di prima; il comando non stampa nulla:
 
