@@ -2,9 +2,9 @@
  "source": {
   "commit": "28eaf9455bad6ff52dcbdbc29ecc07d7dde83e2a",
   "how": "dataclasses.asdict(devloop.config.load_config()) and review_policy.version(), computed by the code and the devloop/config.toml of that commit (origin/main before ADR 0006, R3), without overlay nor project file; tuples written as lists",
-  "updated": "later changes of the installation, not R3's, added to config.toml and here with only the values they add (the policy version does not change): [apps.implementer], implementers and agents.*.app (issue #407, PR #442); delegations.capacity and capacity_max_* (issue #412, PR #450); [tests], the selection of the test modules and the format of the CI logs that the code of that commit had built in (devloop/localtests.py), declared since ADR 0006, R5 (issue #424); agents.*.provider, provider of the fallbacks and review_policy.provider_quorum (issue #409); review_policy.fallback_provider_ban (issue #410); delegations.budget (issue #411, PR #449); review_policy.findings_reviewer (issue #416)"
+  "updated": "later changes of the installation, not R3's, added to config.toml and here with only the values they add (the policy version does not change): [apps.implementer], implementers and agents.*.app (issue #407, PR #442); delegations.capacity and capacity_max_* (issue #412, PR #450); [tests], the selection of the test modules and the format of the CI logs that the code of that commit had built in (devloop/localtests.py), declared since ADR 0006, R5 (issue #424); agents.*.provider, provider of the fallbacks and review_policy.provider_quorum (issue #409); review_policy.fallback_provider_ban (issue #410); delegations.budget (issue #411, PR #449); review_policy.findings_reviewer (issue #416); the keys by role of the agents, claude-implementer, codex-reviewer and agy-reviewer with their app and provider, and claude-reviewer, the third reviewer, last in the pool (issue #499): unlike the others, these change the policy version, which is updated with them"
  },
- "policy_version": "619dd4fda8b8e7870f12564883f49a790c9db939796fe17c90fba43b64e326d3",
+ "policy_version": "fb6348ad097d27c50d7c8524d993752854699260ba896c1e54ca709ca5625d39",
  "config": {
   "repo": "brushtyler/ssdlc",
   "base_branch": "main",
@@ -12,11 +12,11 @@
   "state_dir": ".ssdlc/devloop",
   "test_cmd": "python3 scripts/run-tests.py",
   "language": "Italian",
-  "implementer": "claude",
-  "reviewer": "codex",
+  "implementer": "claude-implementer",
+  "reviewer": "codex-reviewer",
   "agents": {
-   "claude": {
-    "key": "claude",
+   "claude-implementer": {
+    "key": "claude-implementer",
     "kind": "claude",
     "display_name": "Claude Code",
     "model": "claude-opus-5-5",
@@ -68,11 +68,11 @@
     "skipped": [],
     "write_commands": [],
     "review_commands": [],
-    "app": "",
-    "provider": ""
+    "app": "implementer",
+    "provider": "anthropic"
    },
-   "codex": {
-    "key": "codex",
+   "codex-reviewer": {
+    "key": "codex-reviewer",
     "kind": "codex",
     "display_name": "Codex",
     "model": "gpt-6.1-sol",
@@ -99,11 +99,11 @@
     "skipped": [],
     "write_commands": [],
     "review_commands": [],
-    "app": "",
-    "provider": ""
+    "app": "codex",
+    "provider": "openai"
    },
-   "agy": {
-    "key": "agy",
+   "agy-reviewer": {
+    "key": "agy-reviewer",
     "kind": "agy",
     "display_name": "Antigravity",
     "model": "gemini-4-argon-high",
@@ -121,7 +121,7 @@
       "model": "gemini-4-hydrogen-high",
       "model_label": "Gemini 4 Hydrogen",
       "effort": "high",
-      "provider": ""
+      "provider": "google"
      }
     ],
     "unavailable_patterns": [
@@ -151,8 +151,52 @@
      "git log",
      "git show"
     ],
-    "app": "",
-    "provider": ""
+    "app": "agy",
+    "provider": "google"
+   },
+   "claude-reviewer": {
+    "key": "claude-reviewer",
+    "kind": "claude",
+    "display_name": "Claude Code",
+    "model": "claude-sonnet-5-5",
+    "model_label": "Claude Sonnet 5.5",
+    "effort": "high",
+    "version_cmd": [
+     "claude",
+     "--version"
+    ],
+    "write_args": [],
+    "review_args": [
+     "--allowedTools",
+     "Bash(git diff *)",
+     "Bash(git log *)",
+     "Bash(git show *)",
+     "Bash(python3 -m unittest tests.*)",
+     "Bash(PYTHONPATH=tests python3 -m unittest tests.*)",
+     "--disallowedTools",
+     "Edit",
+     "Write",
+     "NotebookEdit",
+     "WebFetch",
+     "WebSearch"
+    ],
+    "commit_trailer": "",
+    "fallback_models": [],
+    "unavailable_patterns": [
+     "RESOURCE_EXHAUSTED",
+     "quota",
+     "429",
+     "model .* not available"
+    ],
+    "unavailable_exit_codes": [],
+    "fallback_memory_seconds": 3600,
+    "denied_cooldown_hours": 6,
+    "fallback_for": "",
+    "skipped": [],
+    "write_commands": [],
+    "review_commands": [],
+    "app": "claude",
+    "provider": "anthropic"
    }
   },
   "trusted_users": [
@@ -161,8 +205,9 @@
   "source": "",
   "repo_lock_dir": "",
   "reviewers": [
-   "codex",
-   "agy"
+   "codex-reviewer",
+   "agy-reviewer",
+   "claude-reviewer"
   ],
   "implementers": [],
   "preflight": "",
@@ -299,17 +344,20 @@
    ],
    "reviewers": [
     [
-     "codex",
+     "codex-reviewer",
      "brushtyler-devloop-codex-agent",
      "codex",
      "gpt-6.1-sol",
      "high",
      [],
      [],
-     []
+     [],
+     [
+      "openai"
+     ]
     ],
     [
-     "agy",
+     "agy-reviewer",
      "brushtyler-devloop-agy-agent",
      "agy",
      "gemini-4-argon-high",
@@ -328,6 +376,36 @@
       "git diff",
       "git log",
       "git show"
+     ],
+     [
+      "google",
+      "google"
+     ]
+    ],
+    [
+     "claude-reviewer",
+     "brushtyler-devloop-claude-agent",
+     "claude",
+     "claude-sonnet-5-5",
+     "high",
+     [
+      "--allowedTools",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git show *)",
+      "Bash(python3 -m unittest tests.*)",
+      "Bash(PYTHONPATH=tests python3 -m unittest tests.*)",
+      "--disallowedTools",
+      "Edit",
+      "Write",
+      "NotebookEdit",
+      "WebFetch",
+      "WebSearch"
+     ],
+     [],
+     [],
+     [
+      "anthropic"
      ]
     ]
    ],

@@ -701,9 +701,10 @@ class DisabledTests(Base):
         self.assertEqual(self.gh.conclaves(7), [])
 
     def test_the_distributed_configuration_leaves_it_disabled_with_an_example(self):
-        self.assertEqual(ssdlc_project.load().conclave, ())
+        self.assertEqual(ssdlc_project.load_by_role().conclave, ())
         text = (Path(config.__file__).parent / 'config.toml').read_text(encoding='utf-8')
-        self.assertIn('# conclave = ["claude", "codex", "agy"]', text)
+        # #499: reviewer keys, read-only as a review.
+        self.assertIn('# conclave = ["claude-reviewer", "codex-reviewer", "agy-reviewer"]', text)
 
     def test_without_distinct_identities_there_is_no_conclave(self):
         # Without GitHub Apps every agent acts with the operator's login.

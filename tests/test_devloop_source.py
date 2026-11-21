@@ -316,13 +316,16 @@ class LauncherTests(TwoRepositoriesCase):
         copy_package(self.copy)
         os.symlink(self.copy.name, self.state / 'current')
         self.overlay.write_text(f'source = "{self.source}"\n')  # state_dir left to the default
-        proc = self.launch('--state-dir', str(self.state), 'fallback', 'reset', CFG.implementer)
+        # The implementer of the real package's config.toml: a key by role since #499.
+        copied = config.read_toml(self.copy / 'devloop' / 'config.toml')
+        implementer = copied['roles']['implementer']
+        proc = self.launch('--state-dir', str(self.state), 'fallback', 'reset', implementer)
         self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
         self.assertIn('devloop: invalid config: state_dir: '
                       f'{self.managed / ".ssdlc/devloop"} is not the directory given to the '
                       f'launcher, {self.state}', proc.stderr)
         self.overlay.write_text(f'source = "{self.source}"\nstate_dir = "{self.state}"\n')
-        proc = self.launch('--state-dir', str(self.state), 'fallback', 'reset', CFG.implementer)
+        proc = self.launch('--state-dir', str(self.state), 'fallback', 'reset', implementer)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn('no model remembered unavailable', proc.stdout)
         self.assertFalse((self.managed / '.ssdlc').exists())

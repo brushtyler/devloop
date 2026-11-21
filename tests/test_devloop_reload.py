@@ -103,7 +103,9 @@ class ReloaderTests(FilesCase):
         self.overlay('max_open_prs = 3\nstate_dir = "elsewhere"\n'
                      'trusted_users = ["someone"]\nmax_parallel_actions = 1\n'
                      '[merge]\nmode = "strict"\n[pin]\nauto = true\n'
-                     '[roles]\nsupervisor = "claude"\n')
+                     # The supervisor actor: since #499 no agent key without a role.
+                     '[roles.supervisor]\nname = "claude-supervisor"\nkind = "claude"\n'
+                     'provider = "anthropic"\nmodel = "claude-opus-5-5"\n')
         new = self.reloader.refresh()
         self.assertEqual(new.max_open_prs, 3)
         self.assertEqual(

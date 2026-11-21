@@ -16,7 +16,9 @@ repo = "brushtyler/ssdlc"
 # Only these logins may start work (`agent:ready`) or write markers that devloop reads.
 trusted_users = ["brushtyler"]
 
-[agents.agy]
+# The table of agy's key by role since #499 (ops/host/migrate.md, "Chiavi per ruolo su un host
+# attivo"): before, [agents.agy].
+[agents.agy-reviewer]
 write_commands = ["python3 scripts/run-tests.py", "python3 -m unittest", "git status",
                   "git diff", "git log", "git show"]
 review_commands = ["python3 scripts/run-tests.py", "python3 -m unittest", "git status",

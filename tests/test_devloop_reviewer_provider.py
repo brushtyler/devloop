@@ -202,10 +202,20 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(QUORUM.app_of('claude-reviewer'), 'claude')
         self.assertFalse(QUORUM.signs_for_role('claude-reviewer'))
         # Before the migration, claude-agent signs the implementer's work: claude-reviewer
-        # cannot sign with it beside the key claude.
+        # cannot sign with it beside the key claude, nor sit beside it at all (#499).
         data = quorum_data({'claude': declared('claude')}, implementer='claude')
         with self.assertRaises(ConfigError) as ctx:
             config.parse_config(data)
+        self.assertIn('agents.claude: the agents have keys by role', str(ctx.exception))
+        # A reviewer with another key that signs with claude-agent beside claude: one app, two
+        # actors.
+        agents_ = {('sonnet' if k == 'claude-reviewer' else k): v
+                   for k, v in data['agents'].items() if k != 'claude-implementer'}
+        renamed = dict(data, agents=agents_,
+                       roles=dict(data['roles'],
+                                  reviewers=['codex-reviewer', 'agy-reviewer', 'sonnet']))
+        with self.assertRaises(ConfigError) as ctx:
+            config.parse_config(renamed)
         self.assertIn('apps.claude: each app belongs to one actor', str(ctx.exception))
 
 

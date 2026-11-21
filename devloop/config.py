@@ -902,7 +902,7 @@ def parse_review_policy(table, root, reviewers=(), agents=None):
     if not isinstance(advisory, str):
         raise ConfigError(f'{where}.advisory_reviewer: expected a string')
     if advisory and agents is not None and advisory not in agents:
-        raise ConfigError(f'{where}.advisory_reviewer: unknown agent {advisory!r}')
+        raise _unknown_agent(f'{where}.advisory_reviewer', advisory, agents, ('reviewer',))
     if advisory:
         _check_role(advisory, 'reviewer', f'{where}.advisory_reviewer')
     findings = _findings_reviewer(table, default, [r[0] for r in reviewers], agents)
@@ -1466,16 +1466,43 @@ def parse_prompts(table, merge):
     return PromptFacts(**values)
 
 
+# The roles without keys of their own that run read-only, as a review, and so take a reviewer
+# key too (ADR 0005, precisazione del 2026-11-21 di D6, #499): never an implementer key.
+READ_ONLY_ROLES = ('preflight', 'conclave')
+
+
 def _check_role(key, role, where):
     """Refuse the key ``key`` given the role ``role`` when it names another one (ADR 0005,
     P5-3, #407): ``claude-reviewer`` as ``roles.implementer`` stops devloop at startup. A key
-    that names no role (``key_role``) serves the roles it is given, as before the migration;
-    the roles without keys of their own (preflight, conclave, the supervisor as an agent key)
-    take only such keys until the operator gives them one."""
+    that names no role (``key_role``) serves the roles it is given, as before the migration.
+    The read-only roles without keys of their own (``READ_ONLY_ROLES``: preflight, conclave)
+    take a reviewer key too (#499); the supervisor as an agent key takes only a key without a
+    role."""
     named = key_role(key)
+    if named == 'reviewer' and role in READ_ONLY_ROLES:
+        return
     if named is not None and named != role:
         raise ConfigError(f'{where}: {key!r} is a {named} key and serves only that role, not '
                           f'the {role}')
+
+
+_MIGRATION_STEP = '(ops/host/migrate.md, "Chiavi per ruolo su un host attivo")'
+
+
+def _unknown_agent(where, key, agents, roles=KEY_ROLES, instead=''):
+    """The error of ``where`` naming the agent ``key`` that is not configured. For a key before
+    the migration (``claude``, ``codex``, ``agy``) once the agents have keys by role (#499), it
+    says which of its keys of ``roles``, the roles ``where`` takes, to use instead (or
+    ``instead``), and where the migration is described."""
+    message = f'{where}: unknown agent {key!r}'
+    if key in AGENT_KINDS and any(key_role(k) for k in agents):
+        renamed = [f'{key}-{role}' for role in roles if f'{key}-{role}' in agents]
+        if renamed:
+            instead = f'use {" or ".join(map(repr, renamed))}'
+        elif not instead:
+            instead = f'and no key of {key} serves here'
+        message += f': the agents have keys by role, {instead} {_MIGRATION_STEP}'
+    return ConfigError(message)
 
 
 def parse_implementers(roles, agents):
@@ -1552,7 +1579,7 @@ def _reviewer_pool(roles, agents, implementers):
         pool = (_require(roles, 'reviewer', str, 'roles'),)
     for key in pool:
         if key not in agents:
-            raise ConfigError(f'roles.reviewers: unknown agent {key!r}')
+            raise _unknown_agent('roles.reviewers', key, agents, ('reviewer',))
         _check_role(key, 'reviewer', 'roles.reviewers')
         if key in implementers:
             raise ConfigError('roles: the reviewer must be a different agent from the implementer')
@@ -1573,7 +1600,7 @@ def parse_conclave(data, agents):
         raise ConfigError(f'conclave: exactly {CONCLAVE_SIZE} different agents are required')
     unknown = [key for key in keys if key not in agents]
     if unknown:
-        raise ConfigError(f'conclave: unknown agent {unknown[0]!r}')
+        raise _unknown_agent('conclave', unknown[0], agents, ('reviewer',))
     for key in keys:
         _check_role(key, 'conclave', 'conclave')
     tuples = {(agents[k].kind, agents[k].model, agents[k].effort) for k in keys}
@@ -1593,7 +1620,10 @@ def parse_supervisor(roles, agents):
     value = roles['supervisor']
     if isinstance(value, str):
         if value not in agents:
-            raise ConfigError(f'roles.supervisor: unknown agent {value!r}')
+            # A key with a role is never the supervisor: with the keys by role it is the table.
+            raise _unknown_agent('roles.supervisor', value, agents, (),
+                                 'and a key with a role is never the supervisor: use the table '
+                                 f'[roles.supervisor], name = "{value}-supervisor"')
         _check_role(value, 'supervisor', 'roles.supervisor')
         return value, None
     if not isinstance(value, dict):
@@ -1630,10 +1660,20 @@ def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
     test_cmd = _require(data, 'test_cmd', str, 'config')
     agent_cmd = test_cmd if agent_test_cmd is None else agent_test_cmd
     agents, declared = {}, set()
-    for key, table in (data.get('agents') or {}).items():
+    tables = data.get('agents') or {}
+    for key, table in tables.items():
         where = f'agents.{key}'
         if key in APP_ONLY_ACTORS:
             raise ConfigError(f'{where}: {key!r} is reserved to devloop\'s own app')
+        renamed = [f'{key}-{role}' for role in KEY_ROLES if f'{key}-{role}' in tables]
+        if key in AGENT_KINDS and renamed:
+            # #499: config.toml names the agents by role, and a local overlay written before
+            # still has the table of the key of before, which the overlay cannot remove.
+            raise ConfigError(f'{where}: the agents have keys by role: rename [{where}] of the '
+                              'local overlay to '
+                              + ' or '.join(f'[agents.{name}]' for name in renamed)
+                              + ', and the keys that name it (preflight, conclave, roles, '
+                              f'review_policy) to the new keys {_MIGRATION_STEP}')
         kind = _require(table, 'kind', str, where)
         if kind not in AGENT_KINDS:
             raise ConfigError(f'{where}.kind: must be one of {AGENT_KINDS}')
@@ -1670,7 +1710,7 @@ def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
     roles = data.get('roles') or {}
     implementer = _require(roles, 'implementer', str, 'roles')
     if implementer not in agents:
-        raise ConfigError(f'roles.implementer: unknown agent {implementer!r}')
+        raise _unknown_agent('roles.implementer', implementer, agents, ('implementer',))
     _check_role(implementer, 'implementer', 'roles.implementer')
     implementers = parse_implementers(roles, agents)
     # The keys that may implement an issue: the default, those of the area map and every
@@ -1683,7 +1723,8 @@ def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
     if 'preflight' in data:
         preflight = _require(data, 'preflight', str, 'config')
         if preflight not in agents:
-            raise ConfigError(f'preflight: unknown agent {preflight!r}')
+            raise _unknown_agent('preflight', preflight, agents, ('reviewer',))
+        # A reviewer key, read-only as a review, or a key without a role (#499).
         _check_role(preflight, 'preflight', 'preflight')
         # The implementer chosen for an issue is checked against it at the takeover (#407).
         if preflight in selectable:
@@ -1696,6 +1737,11 @@ def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
                           'local overlay on the host, <state_dir>/config.local.toml')
     if any(login.endswith('[bot]') for login in trusted):
         raise ConfigError('trusted_users: bots and apps cannot approve work')
+    if 'repo' not in data:
+        # The installation has none since ADR 0006, R6: the managed repository is the project's.
+        # Checked before the apps, which the agents of the installation declare (#499).
+        raise ConfigError("config: missing 'repo': set it in the local overlay on the host, "
+                          '<state_dir>/config.local.toml (--local-config; the launcher passes it)')
     apps_table = dict(data.get('apps') or {})
     key_dir = apps_table.pop('key_dir', '~/.ghapps')
     if not isinstance(key_dir, str):
@@ -1779,10 +1825,6 @@ def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
         raise ConfigError('delegations.capacity: needs [report] issue, where the supervisor '
                           'writes `/devloop capacity`')
     merge = parse_merge(data.get('merge', {}), supervisor)
-    if 'repo' not in data:
-        # The installation has none since ADR 0006, R6: the managed repository is the project's.
-        raise ConfigError("config: missing 'repo': set it in the local overlay on the host, "
-                          '<state_dir>/config.local.toml (--local-config; the launcher passes it)')
     return Config(
         repo=_require(data, 'repo', str, 'config'),
         base_branch=data.get('base_branch', 'main'),

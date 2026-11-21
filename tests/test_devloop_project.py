@@ -93,26 +93,26 @@ class PrecedenceTests(FilesCase):
         # agy without commands of its own (the installation's): its defaults derive from the
         # test command of the installation or of the overlay, never of the project file (D2).
         floor = self.load()
-        self.assertNotIn('write_commands', config.read_toml(self.base)['agents']['agy'])
+        self.assertNotIn('write_commands', config.read_toml(self.base)['agents']['agy-reviewer'])
         cfg = self.load('test_cmd = "python3 project_runner.py"\n')
         self.assertEqual(cfg.test_cmd, 'python3 project_runner.py')
-        agy = cfg.agents['agy']
+        agy = cfg.agents['agy-reviewer']
         for commands in (agy.write_commands, agy.review_commands):
             self.assertNotIn('python3 project_runner.py', commands)
         self.assertEqual((agy.write_commands, agy.review_commands),
-                         (floor.agents['agy'].write_commands, floor.agents['agy'].review_commands))
+                         (floor.agents['agy-reviewer'].write_commands, floor.agents['agy-reviewer'].review_commands))
         # The overlay admits it.
         cfg = self.load('test_cmd = "python3 project_runner.py"\n',
                         overlay='max_open_prs = 4\ntest_cmd = "python3 project_runner.py"\n')
-        self.assertIn('python3 project_runner.py', cfg.agents['agy'].write_commands)
-        self.assertIn('python3 project_runner.py', cfg.agents['agy'].review_commands)
+        self.assertIn('python3 project_runner.py', cfg.agents['agy-reviewer'].write_commands)
+        self.assertIn('python3 project_runner.py', cfg.agents['agy-reviewer'].review_commands)
         # The reloader composes them the same way.
         self.write('max_open_prs = 4\n', self.local)
         self.write('test_cmd = "python3 project_runner.py"\n')
         reloaded, _ = Reloader(floor, self.base, self.local, self.project,
                                log=lambda _: None)._load(config.read_sources(
                                    self.base, self.local, self.project))
-        self.assertNotIn('python3 project_runner.py', reloaded.agents['agy'].review_commands)
+        self.assertNotIn('python3 project_runner.py', reloaded.agents['agy-reviewer'].review_commands)
 
     def test_restrictions_only_add_to_the_installation_and_the_overlay(self):
         floor = self.load()

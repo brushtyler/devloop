@@ -54,16 +54,23 @@ def load_launcher():
     return module
 
 
+# The apps every project needs since #499: the agents of the installation declare them. The agy
+# reviewer of this project signs with an app of another name, so that it has no app ``agy``.
+WIDGET_APPS = {'implementer': {'app_id': 104, 'slug': 'acme-devloop-implementer'},
+               'gemini': {'app_id': 105, 'slug': 'acme-devloop-gemini-agent'}}
+
+
 def widget_overlay(apps_table=None):
     """The overlay of another project: its repo, its trusted users and its own set of apps,
     over ssdlc's agy commands."""
-    agy = config.read_toml(ssdlc_project.OVERLAY, 'local config')['agents']
-    table = {'repo': 'acme/widget', 'trusted_users': ['acme-operator'], 'agents': agy}
-    table['apps'] = apps_table if apps_table is not None else {
+    agents = config.read_toml(ssdlc_project.OVERLAY, 'local config')['agents']
+    agents = dict(agents, **{'agy-reviewer': dict(agents['agy-reviewer'], app='gemini')})
+    table = {'repo': 'acme/widget', 'trusted_users': ['acme-operator'], 'agents': agents}
+    table['apps'] = dict(apps_table if apps_table is not None else {
         'key_dir': '~/.ghapps-widget',
         'dispatcher': {'app_id': 101, 'slug': 'acme-devloop-dispatcher'},
         'claude': {'app_id': 102, 'slug': 'acme-devloop-claude-agent'},
-        'codex': {'app_id': 103, 'slug': 'acme-devloop-codex-agent'}}
+        'codex': {'app_id': 103, 'slug': 'acme-devloop-codex-agent'}}, **WIDGET_APPS)
     return ssdlc_project.toml_text(table) + '\n'
 
 
@@ -194,7 +201,8 @@ class IdentitiesTests(ProjectCase):
             identities = apps.Identities.from_config(cfg)
         self.assertEqual(identities.repo, 'acme/widget')
         self.assertEqual({actor: app.repo for actor, app in identities.apps.items()},
-                         dict.fromkeys(('dispatcher', 'claude', 'codex'), 'acme/widget'))
+                         dict.fromkeys(('dispatcher', 'claude', 'codex', 'implementer',
+                                        'gemini'), 'acme/widget'))
         self.assertEqual(identities.login('dispatcher'), 'acme-devloop-dispatcher[bot]')
         self.assertEqual(identities.apps['claude'].key_path,
                          Path('~/.ghapps-widget/acme-devloop-claude-agent'))
@@ -222,7 +230,7 @@ class IdentitiesTests(ProjectCase):
     def test_devloop_apps_notes_a_merger_without_merges(self):
         # D3: the merger only where devloop merges. ssdlc's [merge] mode is off in the
         # installation: a note, nothing else changes.
-        cfg = ssdlc_project.load(ssdlc_project.OVERLAY)
+        cfg = ssdlc_project.load_by_role(ssdlc_project.OVERLAY)
         self.assertFalse(cfg.merge.enabled())
         out = self.apps_lines(cfg)
         self.assertIn('merger: [merge] mode is off: the merger app is only for a repository '
@@ -332,7 +340,8 @@ class EndToEndTests(unittest.TestCase):
         self.keys.mkdir(mode=0o700)
         (self.state / 'config.local.toml').write_text(widget_overlay(
             {'key_dir': str(self.keys),
-             'claude': {'app_id': 102, 'slug': 'acme-devloop-claude-agent'}}), encoding='utf-8')
+             'claude': {'app_id': 102, 'slug': 'acme-devloop-claude-agent'},
+             'codex': {'app_id': 103, 'slug': 'acme-devloop-codex-agent'}}), encoding='utf-8')
 
     def run_wrapper(self, *argv):
         env = {k: v for k, v in os.environ.items()
@@ -348,9 +357,10 @@ class EndToEndTests(unittest.TestCase):
                       done.stderr)
 
     def test_an_app_the_project_does_not_have_is_refused(self):
-        done = self.run_wrapper('codex', '--', 'true')
+        # Its agy reviewer signs with another app (``widget_overlay``).
+        done = self.run_wrapper('agy', '--', 'true')
         self.assertNotEqual(done.returncode, 0)
-        self.assertIn("no GitHub App configured for 'codex'", done.stderr)
+        self.assertIn("no GitHub App configured for 'agy'", done.stderr)
         self.assertIn('acme/widget', done.stderr)
 
     def test_from_a_linked_worktree_without_state_dir(self):

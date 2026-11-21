@@ -531,7 +531,8 @@ starts on it (#114). The distributed `devloop/config.toml` leaves it **disabled*
 commented example: enabling it is the operator's decision. Without `preflight`, issues start as
 described above.
 
-The checker is a configured agent other than the implementer. It runs in review mode (the
+The checker is a configured agent other than the implementer: a key without a role or, since
+#499, a reviewer key such as `codex-reviewer`, never an implementer key. It runs in review mode (the
 read-only arguments and sandbox of a reviewer, see [Configuration](reference.md#configuration)) in a
 disposable detached worktree at `origin/main`, `issue-<n>-preflight`, removed afterwards, and
 gets the implementer's context: title, body and the comments of `trusted_users`. Its answer
@@ -641,8 +642,10 @@ model is denied twice moves to the next fallback model, and the denied model is 
 
 ### Conclave on a block
 
-With `conclave = ["claude", "codex", "agy"]` in the configuration (#141, part 2 of #114), a
-block gets a conclave of three agents that votes on one written resolution. The distributed
+With `conclave = ["claude-reviewer", "codex-reviewer", "agy-reviewer"]` in the configuration
+(#141, part 2 of #114), a block gets a conclave of three agents that votes on one written
+resolution. Its members are reviewer keys or keys without a role, never an implementer key
+(#499): a block of an implementer key, whose agent is not a member, convenes none. The distributed
 `devloop/config.toml` leaves it **disabled**, with a commented example: enabling it is the
 operator's decision. Without `conclave` the escalation is the one described above, and nothing
 else happens. A `UNANIMOUS` decision restarts the work once (#142, [After a unanimous
@@ -974,13 +977,18 @@ publishes (a comment that ends with a devloop marker). As for
 `agent:changes` or `agent:ready-to-merge`.
 
 `"auto"`, also as the override of a level, without `[roles].supervisor` stops devloop at
-startup. The supervisor names a configured agent, or is the supervisor actor of
+startup. The supervisor names a configured agent without a role, or is the supervisor actor of
 `[roles.supervisor]` as a table, with its role app ([The supervisor app](reference.md#the-supervisor-app),
-off by default); the escalations it decides are described below.
+off by default); the escalations it decides are described below. Since #499 `config.toml` names
+its agents by role, and a key with a role is never the supervisor: with it, the supervisor is
+the table.
 
 ```toml
-[roles]
-supervisor = "claude"
+[roles.supervisor]
+name = "claude-supervisor"
+kind = "claude"
+provider = "anthropic"
+model = "claude-opus-5-5"
 
 [merge]
 mode = "auto"
@@ -1583,7 +1591,7 @@ $devloop follow issue-52  # follow live the implementer of issue #52 (pr-<N>: re
 $devloop watch --timeout 3600  # wait for the next change on GitHub, for the supervising agent
 $devloop pin origin/main  # pin a commit of origin, after its smoke test (see Run from a pinned installation)
 $devloop report --day 2026-11-16  # print the summary of a UTC day from devloop's records (default: today; --publish: on [report] issue, see Daily summary)
-$devloop fallback reset agy  # forget the models agy remembers unavailable (see Memory of unavailable models)
+$devloop fallback reset agy-reviewer  # forget the models agy-reviewer remembers unavailable (see Memory of unavailable models)
 $devloop token claude -- gh pr comment 70 --body-file reply.md  # run a command as an agent's app of the project (see GitHub identities; scripts/agent-token.py calls it)
 ```
 
@@ -2584,7 +2592,7 @@ operator overrides**, for example:
 ```toml
 repo = "brushtyler/ssdlc"
 trusted_users = ["brushtyler"]
-preflight = "codex"
+preflight = "codex-reviewer"
 max_open_prs = 3
 max_review_rounds = 4
 
@@ -2642,6 +2650,23 @@ another, and its own `key_dir`; the merger app only where devloop merges (D3,
 `trusted_users` in the overlay devloop stops at startup, naming the overlay, and so does the pin
 of a copy. The overlay of a host gains them before devloop takes a copy of R6
 ([ops/host/migrate.md](../../ops/host/migrate.md#identità-di-ssdlc-nelloverlay)).
+
+Since #499 the installation's `config.toml` names its agents by role (ADR 0005, P5-3):
+`claude-implementer`, which signs with the implementer app, `codex-reviewer`, `agy-reviewer` and,
+last in the pool, `claude-reviewer` with Sonnet 5.5, the reserve of agy
+([The implementer app and the keys by role](reference.md#the-implementer-app-and-the-keys-by-role),
+[Reviewers by provider and the third reviewer](reference.md#reviewers-by-provider-and-the-third-reviewer)).
+Its agents declare the apps `implementer`, `claude`, `codex` and `agy`: the overlay of every
+project has their `[apps.*]` tables, or devloop stops at startup. An overlay written before,
+whose tables or values name the keys `claude`, `codex` or `agy` (`[agents.agy]`, `preflight =
+"codex"`, `roles.supervisor = "claude"`), stops devloop at startup with an error that names the
+key by role to use and the step of [ops/host/migrate.md](../../ops/host/migrate.md#chiavi-per-ruolo-su-un-host-attivo),
+which renames them with the queue empty. `preflight` and `conclave` take a reviewer key, such as
+`codex-reviewer`: the same app and model as `codex` before. With
+`review_policy.provider_quorum`, which ssdlc's overlay turns on, a new round of a level 2 PR whose
+reviewer agy has every model remembered unavailable is reviewed by `codex-reviewer` and
+`claude-reviewer`; with agy available the pair stays `codex-reviewer` and `agy-reviewer`, and
+`claude-reviewer` never reviews a PR of claude without a reviewer of another provider beside it.
 
 #### Changes while the loop runs
 
