@@ -1734,7 +1734,8 @@ class RereviewTests(unittest.TestCase):
         snap = d.snapshot()
         self.assertTrue(snap.prs[0].rereview)
         self.assertEqual(plan(snap, CFG),
-                         [Action('review', 100, 'new review requested by a trusted user')])
+                         [Action('review', 100, 'new review requested by a trusted user or '
+                                                     'the supervisor')])
         d.tick()
         prompt = self.runner.calls[0][3]
         self.assertIn('round 2 of at most 3', prompt)

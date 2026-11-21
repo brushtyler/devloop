@@ -24,13 +24,13 @@ from .ledger import entries as ledger_entries
 from .markdown import (PREFLIGHT_RESUME, RESUME, carries_record, operator_retry_text,
                        read_marker, render_escalation, render_supervision)
 from .planning import (FIX_COMMAND, Action, PullRequest, findings_decreasing, label_names,
-                       last_counted_ci, operator_blocked)
+                       last_counted_ci, missing_verdicts, operator_blocked)
 from .policy import ZERO_LEVEL, profile_of
-from .review import finding_state
+from .review import current_round, current_verdict, finding_state, owner_of
 from .supervision import (ACCEPT_DEFAULTS, BUDGET_GRANTABLE, CAPACITY, CAPACITY_REFUSED, DECIDE,
                           DESIGN_LABEL, ESCALATE, GRANT_BUDGET, GRANT_ROUND, ISSUE_STEPS,
-                          MAX_CAPACITY, MAX_RETRIES, MERGED_ISSUE, PREFLIGHT_DEFAULT, RETRY,
-                          RETRY_STEPS, ROUND_GRANTABLE, SYNC_FAILED, TOOL_FAILURE,
+                          MAX_CAPACITY, MAX_RETRIES, MERGED_ISSUE, PREFLIGHT_DEFAULT, REREVIEW,
+                          RETRY, RETRY_STEPS, ROUND_GRANTABLE, SYNC_FAILED, TOOL_FAILURE,
                           capacity_arguments, changed_input, critical, preflight_class,
                           retries_done, supervisor_command)
 from .workspace import WorkspaceError
@@ -132,7 +132,7 @@ class SupervisionMixin:
             return True
         return same_agent(profile, actor)
 
-    def _supervised(self, number, cls, step, pr=None, reviewer=None, key=None):
+    def _supervised(self, number, cls, step, pr=None, reviewer=None, key=None, any_merge=False):
         """``(route, why)`` of an escalation of class ``cls`` raised by ``step`` on issue or PR
         ``number`` (``pr``: the PR, None for an issue). ``route`` is None when it goes to the
         operator; otherwise the payload of an escalation the supervisor decides: the step, the
@@ -147,7 +147,8 @@ class SupervisionMixin:
         ``tool_failure`` with ``[delegations] retry_own_prs`` on, #406), an issue
         opened by someone else than a trusted user or a devloop app, an issue text no longer
         approved by ``agent:ready``, the ``phase:design`` label, or anything that cannot be
-        verified."""
+        verified. With ``any_merge`` the PR's own merge mode is not checked: the supervisor's
+        rereview (#491) does not touch the merge, which stays where that mode puts it."""
         cfg, lb = self.cfg, self.cfg.labels
         if critical(cls) or cfg.merge.mode != 'auto' or not cfg.supervisor:
             return None, ''
@@ -167,7 +168,7 @@ class SupervisionMixin:
                     return None, 'il supervisore ha implementato questa PR' + (
                         ' (la delega `[delegations] retry_own_prs` è spenta)'
                         if cls == TOOL_FAILURE else '')
-                mode = self._merge_mode(pr)
+                mode = 'auto' if any_merge else self._merge_mode(pr)
                 if mode != 'auto':
                     return None, (f'la modalità di merge di questa PR è `{mode or "non calcolabile"}`'
                                   ', non `auto` (override del livello o `operator_only_paths`)')
@@ -319,7 +320,9 @@ class SupervisionMixin:
         still waiting the latest applicable one wins; without one, the latest not applicable
         (outside ``auto``, a decide or an escalate without a text, the supervisor on an
         operator's escalation) gets an answer. A command from anyone else is ignored and only
-        logged. devloop's own records are never commands."""
+        logged. devloop's own records are never commands. A ``/devloop rereview`` counts only
+        from the supervisor's identity (#491): a trusted user's is the request of a new review
+        it always was (``requests_rereview``), and is skipped here."""
         if operator:
             start, anchor = self._operator_anchor(comments)
             latest = anchor['record']
@@ -336,7 +339,7 @@ class SupervisionMixin:
                 spent = applied if spent is None else max(spent, applied)
             else:
                 start = max(start, position)  # a record without the id spends what precedes it
-        found = refused = None
+        found = refused = supervised = None
         for comment in comments[start + 1:]:
             body = comment.get('body') or ''
             parsed = None if carries_record(body) else supervisor_command(body)
@@ -347,10 +350,20 @@ class SupervisionMixin:
                 continue
             command, reason = parsed
             login = (comment.get('author') or {}).get('login')
+            if (command == REREVIEW and login in self.cfg.trusted_users
+                    and login != self._supervisor_login()):
+                # A trusted user's rereview is the request of a new review it always was
+                # (``requests_rereview``), never a command of an escalation (#491).
+                continue
             item = {'command': command, 'reason': reason, 'by': login, 'comment': ident,
                     'step': latest.get('step'), 'anchor': anchor}
+            # The supervisor's rereview also counts on an escalation to the operator (#491), of
+            # a PR whose merge is the operator's: ``_operator_rereview`` decides whether it
+            # applies. A trusted user's command waiting there wins over it.
+            rereview = (operator and command == REREVIEW and login is not None
+                        and login == self._supervisor_login())
             if operator:
-                allowed = login in self.cfg.trusted_users
+                allowed = login in self.cfg.trusted_users or rereview
                 why, refusal = (
                     ('the author is not a trusted user', None) if not allowed
                     and not self._may_hold(login)
@@ -378,8 +391,11 @@ class SupervisionMixin:
                 if refusal:
                     refused = dict(item, reason=reason or '', refusal=refusal)
                 continue
+            if rereview:
+                supervised = item
+                continue
             found = item
-        return found or refused
+        return found or supervised or refused
 
     def _to_operator(self, number, reason, cls, remove=(), retry=None):
         """Hand an item in ``agent:needs-supervisor`` to the operator: a critical escalation of
@@ -405,6 +421,10 @@ class SupervisionMixin:
           #405).
         - ``grant-budget``: only for a ``budget_grantable`` escalation of an issue or a PR
           (``_grant_budget``, #411).
+        - ``rereview``: only from the supervisor's identity, for a ``tool_failure`` escalation
+          of a PR's review whose latest round lacks the verdict of a reviewer of the quorum: a
+          new round with the current configuration (``_rereview``, #491). Its input is checked
+          again as for a retry.
         - ``retry``: only for ``tool_failure`` and ``sync_failed``, and only while the input of
           the step is the one that failed (the key of the escalation; for ``implement`` its
           request, not its base, #475: ``retry_input``). A PR goes back to the
@@ -508,6 +528,10 @@ class SupervisionMixin:
             return trace('refused', f'non applicabile: `/devloop {CAPACITY}` vale solo sulla '
                          'issue del riepilogo (`[report] issue`), non su un\'escalation. Il '
                          f'comando è speso; {where} resta in `{label}`.\n\n{resume}')
+        if operator and name == REREVIEW:
+            # Only the supervisor's reaches here: a trusted user's is no command (#491).
+            return self._operator_rereview(target, number, labels, fresh if is_pr else None,
+                                           comments, command, trace)
         if operator:
             return self._operator_command(target, number, labels, comments, command, trace)
         if critical(cls) or escalation.get('to') != 'supervisor':
@@ -547,6 +571,11 @@ class SupervisionMixin:
         if cls not in (TOOL_FAILURE, SYNC_FAILED):
             return trace('refused', 'rifiutato: vale solo per le escalation `tool_failure` e '
                          f'`sync_failed`. {stays}\n\n' + self._supervisor_resume(escalation, is_pr))
+        if name == REREVIEW and not (is_pr and cls == TOOL_FAILURE
+                                     and escalation.get('step') == 'review'):
+            return trace('refused', 'rifiutato: vale solo per un\'escalation `tool_failure` della '
+                         f'review di una PR. {stays}\n\n'
+                         + self._supervisor_resume(escalation, is_pr))
         # An issue a merged devloop PR already resolved is never checked nor implemented again
         # (#228), whatever escalation it waits in: the retry becomes a merged_issue escalation.
         merged = [] if is_pr else self._merged_prs(number)
@@ -594,6 +623,8 @@ class SupervisionMixin:
                                      'rifiutato.', 'supervisor_refused', carried_remove, carry)
         if changed:
             return superseded()
+        if name == REREVIEW:
+            return self._rereview(number, target, command, escalation, trace)
 
         def limit(done):
             trace('limit', f'non eseguito: il passo `{step}` è già stato ripetuto {done} volte '
@@ -605,6 +636,115 @@ class SupervisionMixin:
 
         self._apply_retry(number, is_pr, comments, escalation, [lb.needs_supervisor], trace,
                           limit)
+
+    def _rereview(self, number, pr, command, escalation, trace, operator=False, resume=''):
+        """Apply the supervisor's ``/devloop rereview <reason>`` on PR ``number`` in a
+        ``tool_failure`` escalation of its review (#491, the operator's decision recorded in ADR
+        0005), with ``pr`` and its thread read now (``_fresh_pr``) and the conditions of the
+        escalation verified again (``_supervised``, the head of its key).
+
+        A retry repeats the same round, with the profiles it recorded when it opened: a reviewer
+        whose models were exhausted would fail again. This command opens a new round instead:
+        its reviewers are chosen with the current configuration, it has a new receipt and it
+        counts against ``max_review_rounds``, as the rereview of a trusted user does. It
+        applies only while a reviewer of the quorum of the latest round of this head has no
+        verdict (``missing_verdicts``): when every one has a verdict, or one of them asked for
+        the operator, it is refused and the escalation stays with the supervisor, so that a new
+        review never overrides a verdict. On a PR the supervisor's agent implemented it is
+        refused and goes to the operator: ``[delegations] retry_own_prs`` admits only a retry
+        there (ADR 0005, P5-2). With ``operator`` the PR is in ``agent:needs-operator``
+        (``_operator_rereview``): a refusal leaves it there, with ``resume``, how the operator
+        resumes it.
+
+        Applied, the ``supervision`` record is written first: written after the latest review
+        record, it voids the open round as a trusted user's request would (``_read_thread``),
+        and spends the command. Then the PR goes back to ``agent:review``, where the next tick
+        opens the new round; the merge is untouched and stays where the merge mode puts it."""
+        lb = self.cfg.labels
+        by = command['by']
+        label = lb.needs_operator if operator else lb.needs_supervisor
+        stays = (f'Il comando è speso; la PR resta in `{label}`.\n\n{resume}' if operator
+                 else 'Il comando è speso; l\'escalation resta al supervisore.\n\n'
+                      + self._supervisor_resume(escalation, True))
+        if self._supervisor_implemented(pr):
+            why = ('la PR è implementata dall\'agent del supervisore, su cui la delega ammette '
+                   'solo `/devloop retry`')
+            if operator:
+                return trace('refused', f'rifiutato: {why}. {stays}')
+            trace('refused', f'rifiutato: {why}.')
+            return self._to_operator(number, 'Il supervisore non può chiedere una nuova review '
+                                     'di una PR implementata dal suo agent: '
+                                     f'`/devloop {REREVIEW}` di `{by}` è stato rifiutato.',
+                                     'supervisor_refused')
+        latest = current_round(pr.reviews)
+        missing = missing_verdicts(pr)
+        asked = [owner_of(r) for r in latest
+                 if current_verdict(r.get('verdict')) == 'needs_operator']
+        verdicts = ', '.join(f'`{owner_of(r)}`: `{current_verdict(r.get("verdict"))}`'
+                             for r in latest)
+        why = ('nell\'ultimo round un reviewer ha chiesto una decisione dell\'operatore ('
+               + ', '.join(f'`{a}`' for a in asked) + '), e una nuova review la scavalcherebbe'
+               if asked
+               else 'nessun round di review di questo head aspetta il verdetto di un reviewer '
+                    f'del quorum: `/devloop {RETRY}` apre già un round con la configurazione '
+                    'attuale' if not latest or latest[0]['head_sha'] != pr.head_sha
+               else 'ogni reviewer del quorum dell\'ultimo round ha già un verdetto ('
+                    + verdicts + '), e una nuova review lo scavalcherebbe' if not missing
+               else '')
+        if why:
+            return trace('refused', f'rifiutato: {why}. {stays}')
+        reviewers = ', '.join(f'`{key}`' for key in missing)
+        trace('applied', f'si apre un round di review nuovo al posto del round '
+              f'{latest[0]["round"]}, in cui manca il verdetto di {reviewers}. Il round nuovo '
+              'sceglie i reviewer con la configurazione attuale, ha una ricevuta nuova e conta '
+              'per `max_review_rounds`; il merge resta dove lo mette la sua modalità.\n\n'
+              '**Motivo:**\n\n'
+              + '\n'.join(f'> {line}'.rstrip() for line in command['reason'].splitlines()),
+              round=latest[0]['round'], reviewers=missing)
+        self.gh.edit_labels(number, add=[lb.review], remove=[label])
+
+    def _operator_rereview(self, target, number, labels, fresh, comments, command, trace):
+        """The supervisor's ``/devloop rereview <reason>`` on an item in ``agent:needs-operator``
+        (#491). The command does not touch the merge, so it also applies to a PR whose merge is
+        the operator's: only to the ``tool_failure`` escalation of a PR's review, in merge mode
+        ``auto`` with a supervisor, on the head of its key, and when every condition of
+        ``_supervised`` but the PR's own merge mode (the override of its level, an
+        ``operator_only_paths`` path) still holds on the PR read now. Then ``_rereview``
+        decides, as on an escalation to the supervisor. Any other case is refused with the
+        reason, and the item stays with the operator."""
+        lb = self.cfg.labels
+        anchor = command['anchor']
+        escalation = anchor['record']
+        is_pr = isinstance(target, PullRequest)
+        resume = self._operator_resume(anchor, is_pr)
+        where = 'la PR' if is_pr else 'l\'issue'
+
+        def refuse(why):
+            return trace('refused', f'rifiutato: {why}. Il comando è speso; {where} resta in '
+                         f'`{lb.needs_operator}`.\n\n{resume}')
+
+        if self.cfg.merge.mode != 'auto' or not self.cfg.supervisor:
+            return refuse(f'la modalità di merge è `{self.cfg.merge.mode}`, non `auto`, quindi '
+                          'i comandi del supervisore non valgono')
+        if not (is_pr and anchor['kind'] == 'notice' and escalation.get('event') == 'escalation'
+                and escalation.get('class') == TOOL_FAILURE
+                and escalation.get('step') == 'review' and self._retryable(escalation, True)):
+            return refuse('l\'escalation è affidata all\'operatore: il supervisore vi può chiedere '
+                          'una nuova review solo dopo un `tool_failure` della review di una PR')
+        key = escalation['key']
+        changed = changed_input(self._current_key(number, key, target), key)
+        if changed:
+            return refuse('l\'input del passo è cambiato dopo l\'escalation ('
+                          + ', '.join(f'`{k}`' for k in changed)
+                          + '), quindi il comando si riferisce a un input superato')
+        pr = self._fresh_pr(target, labels, fresh, comments)
+        route, why = self._supervised(number, TOOL_FAILURE, 'review', pr, key.get('reviewer'),
+                                      key=key, any_merge=True)
+        if route is None:
+            return refuse('l\'escalation non è del supervisore ('
+                          + (why or 'nessun supervisore configurato') + ')')
+        return self._rereview(number, pr, command, escalation, trace, operator=True,
+                              resume=resume)
 
     def _fresh_pr(self, pr, labels, fresh, comments):
         """``pr`` with its ``labels`` and head (``fresh``, its state) read now and with what its
@@ -1639,8 +1779,11 @@ class SupervisionMixin:
             # Only what trusted users wrote after the latest verdict can void it.
             since = comments[last + 1:]
             pr.operator_comments = operator_comments(since, self.cfg.trusted_users)
-            pr.rereview = any(requests_rereview(c.get('body'))
-                              for c in pr.operator_comments)
+            # So does the supervisor's rereview the dispatcher applied (#491): its record.
+            pr.rereview = (any(requests_rereview(c.get('body')) for c in pr.operator_comments)
+                           or any(position > last and r.get('command') == REREVIEW
+                                  and r.get('outcome') == 'applied' for position, r
+                                  in self._dispatcher_records(comments, 'supervision')))
             latest = entries[-1][1]['round']
             before = max((position for position, record in entries
                           if record['round'] < latest), default=-1)

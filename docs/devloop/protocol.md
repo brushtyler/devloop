@@ -515,7 +515,11 @@ and of the [escalations to the operator](guide.md#commands-on-escalations-to-the
 command, its author, its reason, the id of the comment that carried it, the class and the outcome
 (`applied`, `accepted`, `decided`, `escalated`, `refused`, `limit` or `granted`), with the key
 and the attempt for a retry, the defaults for an acceptance and, for a decision, its text (in
-`reason`) and the gaps it answers. A round granted with `/devloop grant-round` (#405) carries the
+`reason`) and the gaps it answers. A new round asked by the supervisor with `/devloop rereview
+<reason>` (#491) records the round without a verdict it replaces (`round`) and the reviewers of
+its quorum that gave none (`reviewers`); `applied` and written after the latest review record of
+the PR, it voids that round as the `/devloop rereview` of a trusted user does: the next review
+opens a new round, which counts against `max_review_rounds`. A round granted with `/devloop grant-round` (#405) carries the
 analysis of the causes in `reason`, the `head` it was granted on, the rounds granted to the PR
 with this one (`granted`), the cap of the PR (`cap`) and what remains (`left`), the grants of the
 UTC day with this one (`daily`), the daily cap (`daily_cap`) and what remains (`daily_left`):

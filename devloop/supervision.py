@@ -30,7 +30,15 @@ the attribution header:
   escalation: ``max_open_prs`` or ``max_parked_prs`` set to ``value`` for ``duration`` (``<N>h``
   or ``<N>m``), within the caps below, then the configured value again. The reason carries the
   analysis of the causes, as for ``grant-round``. A delegation of the operator, off by default
-  (``[delegations] capacity``).
+  (``[delegations] capacity``);
+- ``/devloop rereview <reason>``: a new review round of a PR whose review failed (#491, a
+  decision of the operator recorded in ADR 0005): only on a ``tool_failure`` escalation of a
+  review, and only while a reviewer of the quorum of the latest round has no verdict. The new
+  round chooses its reviewers with the current configuration, has a new receipt and counts
+  against ``max_review_rounds``. When every reviewer of the quorum of that round has a verdict
+  the command is refused, so that it never overrides one. Only the supervisor's identity uses
+  it so: a trusted user's ``/devloop rereview`` stays the request of a new review it always was
+  (``context.requests_rereview``), and is never a command of an escalation.
 
 A trusted user may use the same commands on an escalation to the operator (#321), in any merge
 mode: ``retry`` of a step it records, critical classes included, and ``accept-defaults`` or
@@ -117,11 +125,13 @@ RETRY, ACCEPT_DEFAULTS, DECIDE, ESCALATE = 'retry', 'accept-defaults', 'decide',
 GRANT_ROUND = 'grant-round'
 GRANT_BUDGET = 'grant-budget'
 CAPACITY = 'capacity'
-COMMANDS = (RETRY, ACCEPT_DEFAULTS, DECIDE, ESCALATE, GRANT_ROUND, GRANT_BUDGET, CAPACITY)
+REREVIEW = 'rereview'  # the supervisor's, on a review that failed (#491)
+COMMANDS = (RETRY, ACCEPT_DEFAULTS, DECIDE, ESCALATE, GRANT_ROUND, GRANT_BUDGET, CAPACITY,
+            REREVIEW)
 # The commands that need a text: without one they are malformed.
-NEEDS_TEXT = (DECIDE, ESCALATE, GRANT_ROUND, GRANT_BUDGET, CAPACITY)
+NEEDS_TEXT = (DECIDE, ESCALATE, GRANT_ROUND, GRANT_BUDGET, CAPACITY, REREVIEW)
 # The commands whose text is the rest of the comment, not only the rest of its first line.
-LONG_TEXT = (DECIDE, GRANT_ROUND, GRANT_BUDGET, CAPACITY)
+LONG_TEXT = (DECIDE, GRANT_ROUND, GRANT_BUDGET, CAPACITY, REREVIEW)
 # What a supervision record says happened to a command.
 OUTCOMES = ('applied', 'accepted', 'decided', 'escalated', 'refused', 'limit', 'granted')
 
@@ -196,13 +206,14 @@ def preflight_class(outcome):
 def supervisor_command(body):
     """The supervisor command of a comment: ``(command, text)`` when the first line after the
     attribution header is ``/devloop retry``, ``/devloop accept-defaults``, ``/devloop decide
-    <text>``, ``/devloop escalate <reason>``, ``/devloop grant-round <reason>`` or ``/devloop
-    grant-budget <reason>`` or ``/devloop capacity <arguments>``; None when the comment is no
-    such command. The reason of an escalate is the rest of its line; the text of a decide, the
-    reason of a grant-round or a grant-budget and the arguments of a capacity are the rest of the
-    comment, from the rest of its first line on (#258; #405, #411 and #412, whose analysis of the
-    causes may take several lines; ``capacity_arguments`` reads those of a capacity). A decide,
-    an escalate, a grant or a capacity without a text has None as text, and is malformed."""
+    <text>``, ``/devloop escalate <reason>``, ``/devloop grant-round <reason>``, ``/devloop
+    grant-budget <reason>``, ``/devloop capacity <arguments>`` or ``/devloop rereview
+    <reason>``; None when the comment is no such command. The reason of an escalate is the rest
+    of its line; the text of a decide, the reason of a grant-round, a grant-budget or a rereview
+    and the arguments of a capacity are the rest of the comment, from the rest of its first line
+    on (#258; #405, #411, #412 and #491, whose analysis of the causes may take several lines;
+    ``capacity_arguments`` reads those of a capacity). A decide, an escalate, a grant, a
+    capacity or a rereview without a text has None as text, and is malformed."""
     lines = (body or '').strip().splitlines()
     while lines and (not lines[0].strip() or lines[0].strip().startswith('>')):
         lines.pop(0)
