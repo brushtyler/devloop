@@ -187,7 +187,10 @@ or a value that is not a string, stops devloop at startup. It counts for no quor
 not part of the policy version: turning it on or off voids no approval. The local overlay
 turns it on. `findings_reviewer` (empty by default: off) names the
 [findings-only reviewer](#findings-only-reviewer) of level 2 (#416), outside the pool and out of
-the policy version too. The [project file](#project-file) (ADR 0006, R2) sits between the installation's
+the policy version too. `second_reviewer` (`parallel` by default, `sequential` or
+`parallel_cancel`) decides [when the second reviewer starts](#when-the-second-reviewer-starts)
+(#521); any other value stops devloop at startup, and a value other than `parallel` enters the
+policy version. The [project file](#project-file) (ADR 0006, R2) sits between the installation's
 file and the overlay.
 
 Each PR records its implementer and the first reviewer of the pool when it is opened, so
@@ -1241,6 +1244,45 @@ A round at level 2 works as follows:
   reviewer of the quorum failed (#491,
   [Escalations to the supervisor](guide.md#escalations-to-the-supervisor)): a retry instead
   resumes the same round, with the profiles it recorded. A receipt that changed only in the commit of base is the exception below.
+
+### When the second reviewer starts
+
+`[review_policy] second_reviewer` (#521) decides when the second reviewer of a round with two
+reviewers (level 2) starts. The local overlay sets it; a value other than the three below stops
+devloop at startup (`review_policy.second_reviewer: unknown mode`).
+
+| Mode | First reviewer of the pair | Second reviewer |
+|---|---|---|
+| `parallel` (default) | Runs | Runs with it, as before #521: in the same action with [parallel actions](#parallel-actions), in the next one otherwise |
+| `sequential` | Runs alone, even with parallel actions | Runs on the same head only once the first approved |
+| `parallel_cancel` | Runs | Runs with it; its turn is stopped as soon as the first does not approve |
+
+- **The first reviewer** is the first of the receipt's `reviewers`, the first independent one in
+  the order of `roles.reviewers`. **Approved** is the verdict devloop acts on: an `approve`, or a
+  `needs_operator` for the trust policy without blocking findings of its own (#434), which still
+  takes the merge to the operator and needs the quorum. A `request_changes`, a `needs_operator`
+  for a decision, or an `unproven` verdict does not approve.
+- **A round the first reviewer closes.** With `sequential` or `parallel_cancel`, a round whose
+  first reviewer did not approve is closed with its verdict alone: its findings go to the fix (a
+  decision to the operator), and it counts against `max_review_rounds` as any round. It waits for
+  no other reviewer, the [findings-only reviewer](#findings-only-reviewer) included, and lacks
+  no verdict: the supervisor's `/devloop rereview` (#491) is refused on it, and the failure of
+  another reviewer of the same action does not escalate.
+- **The cancelled turn.** With `parallel_cancel` the dispatcher kills the whole process group of
+  the second's turn (checked every second) and closes its record in the round's register with
+  the outcome `cancelled`: not a `tool_failure`, not uncertain, not a review. No fallback model
+  runs in its place, and nothing escalates. A second that ended before the first keeps its
+  verdict, recorded as usual.
+- **What does not change.** Quorum, receipt, closing of the findings and merge conditions: a
+  merge still needs the approvals of every reviewer of the quorum on the final head. A mode
+  other than `parallel` enters the policy version and the receipt of each round with two
+  reviewers (`second_reviewer`), where the round reads it: changing it voids pending approvals,
+  as any change of the policy.
+
+```toml
+[review_policy]
+second_reviewer = "sequential"
+```
 
 ### When `main` advances during a round
 

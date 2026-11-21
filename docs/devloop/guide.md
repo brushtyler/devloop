@@ -370,7 +370,9 @@ the rereview opens a new round instead, whose reviewers are chosen with the curr
 configuration, with a new receipt, and which counts against `max_review_rounds` as every round
 does. When every reviewer of the quorum of the latest round has a verdict (`approve`,
 `request_changes`, `needs_operator`), or one of them asked for the operator, the command is
-refused with the reason, so that the supervisor cannot repeat a review to override a verdict. It
+refused with the reason, so that the supervisor cannot repeat a review to override a verdict;
+so is a round the first reviewer closed without approving, with `second_reviewer` other than
+`parallel` (#521): the second reviewer was not asked, and no verdict is missing. It
 is refused as well when a new review was already asked after the latest review record and its
 round wrote no record: such a round does not count against `max_review_rounds`, so a second
 rereview would repeat it without limit; the supervisor uses `/devloop retry`, within its limit, or
@@ -543,6 +545,25 @@ round of a PR signed with the implementer app for its findings only: they go to 
 quorum closes them, while its approval never counts nor takes the place of a missing reviewer.
 Since `claude-reviewer` is in the pool (#499), it takes a key and a GitHub App of its own, such
 as `claude-findings`. See [Findings-only reviewer](reference.md#findings-only-reviewer).
+
+### When the second reviewer starts
+
+`[review_policy] second_reviewer` (#521), in the local overlay, decides when the second reviewer
+of a level 2 round starts, to spare the quota of the scarcest agent:
+
+- `parallel` (the default): both reviewers of the pair run together, as before.
+- `sequential`: only the first of the pair runs (the first in the order of `roles.reviewers`).
+  The second runs on the same head only once the first approved; a `needs_operator` for the trust
+  policy without findings of its own counts as an approval, and starts it. A request for
+  changes, or for a decision of the operator, closes the round with the first verdict alone.
+- `parallel_cancel`: both run together, and a request for changes (or for a decision) of the
+  first stops the second's turn, recorded as cancelled: no `tool_failure`, no escalation.
+
+A round closed by the first reviewer goes to the fix, or to the operator, and counts against
+`max_review_rounds` as any round; it lacks no verdict, so the supervisor's `/devloop rereview`
+does not apply to it. Quorum, receipt and merge conditions do not change, and a value other than
+the three stops devloop at startup. See
+[When the second reviewer starts](reference.md#when-the-second-reviewer-starts).
 
 ### Readiness check before implementation
 
@@ -1184,7 +1205,9 @@ one wins; without one, the latest that does not apply is answered.
   `max_review_rounds`** as every round does; the retries are not touched. The command is refused
   with the reason, and the escalation stays where it is, when every reviewer of the quorum of the
   latest round has a verdict (`approve`, `request_changes`, `needs_operator`) or one of them asked
-  for the operator, so that a new review never overrides a verdict; when no round of the head
+  for the operator, so that a new review never overrides a verdict; when the first reviewer
+  closed the latest round without approving, with
+  [`second_reviewer`](#when-the-second-reviewer-starts) other than `parallel` (#521); when no round of the head
   waits for a reviewer (then a `retry` already opens a round with the current configuration);
   when a new review was already asked after the latest review record, by a trusted user or by a
   rereview of the supervisor applied, and its round wrote no record (a round without records does

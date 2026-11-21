@@ -23,8 +23,8 @@ from .journal import JournalError
 from .ledger import entries as ledger_entries
 from .markdown import (PREFLIGHT_RESUME, RESUME, carries_record, operator_retry_text,
                        read_marker, render_escalation, render_supervision)
-from .planning import (FIX_COMMAND, Action, PullRequest, findings_decreasing, label_names,
-                       last_counted_ci, missing_verdicts, operator_blocked)
+from .planning import (FIX_COMMAND, Action, PullRequest, closed_by_first, findings_decreasing,
+                       label_names, last_counted_ci, missing_verdicts, operator_blocked)
 from .policy import ZERO_LEVEL, profile_of
 from .review import current_round, current_verdict, finding_state, owner_of
 from .supervision import (ACCEPT_DEFAULTS, BUDGET_GRANTABLE, CAPACITY, CAPACITY_REFUSED, DECIDE,
@@ -738,6 +738,13 @@ class SupervisionMixin:
                     'da un utente fidato o dal supervisore, e il suo round non ha scritto alcun '
                     'verdetto: un\'altra lo ripeterebbe senza contare per `max_review_rounds`'
                if pr.rereview
+               # The first reviewer closed the round without approving (#521): the second was
+               # not asked, and no verdict is missing.
+               else 'l\'ultimo round è stato chiuso dal primo reviewer del quorum, che non ha '
+                    'approvato (' + verdicts + '): con `second_reviewer = "'
+                    + latest[0]['receipt']['second_reviewer'] + '"` il secondo reviewer non era '
+                    'richiesto e non manca alcun verdetto, e una nuova review scavalcherebbe il '
+                    'suo' if closed_by_first(latest)
                else 'ogni reviewer del quorum dell\'ultimo round ha già un verdetto ('
                     + verdicts + '), e una nuova review lo scavalcherebbe' if not missing
                else '')

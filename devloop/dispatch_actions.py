@@ -14,9 +14,10 @@ imported from here, not re-exported by ``devloop/dispatcher.py``.
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 
 from .acceptance import acceptance_criteria, format_criteria, format_map, latest_map, render_map
-from .agents import AgentError
+from .agents import AgentError, TurnCancelled
 from .apps import DISPATCHER, IMPLEMENT, PR_COMMENT, RERUN, REVIEW
 from .budget import BudgetRefused
 from .dispatch_base import BaseBroken, HostTests
@@ -34,13 +35,15 @@ from .markdown import (dispatcher_header, publishable, render_fix, render_native
                        render_review, without_attribution)
 from .config import foreign, provider_quorum, same_agent
 from .planning import (BASE_CHANGED, FIX_COMMAND, RESYNC_AFTER_APPROVAL, RESYNC_CONFLICTS,
-                       carried_resync, ci_joins_round, counted_rounds, findings_reviewers,
-                       implementer_choice, pending_reviewers, preflight_state, voided_approval,
-                       waived_rounds, waiting_reviewers)
-from .policy import ZERO_LEVEL, another_model, distinct, independent, profile_of
+                       carried_resync, ci_joins_round, closed_by_first, counted_rounds,
+                       findings_reviewers, implementer_choice, pending_reviewers, preflight_state,
+                       voided_approval, waived_rounds, waiting_reviewers)
+from .policy import (PARALLEL_CANCEL, SEQUENTIAL, ZERO_LEVEL, another_model, distinct,
+                     independent, profile_of)
 from .ports import summarize_checks
 from .review import (FINDINGS_ONLY, ci_failure_review, current_round, findings_only,
-                     last_round, normalize_review, open_findings, owner_of, round_verdict)
+                     flow_verdict, last_round, normalize_review, open_findings, owner_of,
+                     round_verdict)
 from .supervision import SYNC_FAILED, TOOL_FAILURE
 from .workspace import WorkspaceError
 
@@ -482,6 +485,14 @@ class ActionsMixin:
         fallback model must also be distinct from the profiles the other reviewers of the
         action have reserved.
 
+        With ``review_policy.second_reviewer`` other than ``parallel`` (#521), as the receipt of a
+        round with two reviewers records it: ``sequential`` runs the first reviewer of the
+        receipt alone, and the others only once it approved; ``parallel_cancel`` runs them
+        together, and a verdict of the first that does not approve stops the turns of the others
+        (``TurnCancelled``: closed ``cancelled``, never a failure). Either way a round whose first
+        reviewer does not approve is closed with its verdict (``closed_by_first``), and the
+        failure of a reviewer it no longer waits for does not escalate.
+
         When only the base changed since the round's reviews (#160), the round continues if no
         commit of the base branch in between reached the PR's files, and the review records the
         check (``bases``). Otherwise the round restarts, and the new one records which round it
@@ -563,9 +574,21 @@ class ActionsMixin:
             receipt = dict(receipt, findings=findings)
         reviewed = {owner_of(r) for r in done}
         waited = [key for key in receipt['reviewers'] + findings if key not in reviewed]
-        # One reviewer per action, or with parallel actions (#176) every one the round waits
-        # for, each in a thread of its own.
-        keys = waited if cfg.max_parallel_actions > 1 else waited[:1]
+        # The mode of the second reviewer of a round with two (#521), as its receipt records
+        # it: none in ``parallel``, the default.
+        mode = receipt.get('second_reviewer')
+        first = receipt['reviewers'][0] if mode else None
+        if mode == SEQUENTIAL and first in waited:
+            # Only the first of the pair: the others start on the same head once it approved.
+            keys = [first]
+        else:
+            # One reviewer per action, or with parallel actions (#176) every one the round
+            # waits for, each in a thread of its own.
+            keys = waited if cfg.max_parallel_actions > 1 else waited[:1]
+        # With ``parallel_cancel`` (#521) the first reviewer's verdict that does not approve
+        # stops the turns of the others running alongside it.
+        stop = (threading.Event() if mode == PARALLEL_CANCEL and first in keys and len(keys) > 1
+                else None)
         issue, _ = self._issue_context(pr.issue)
         name = f'pr-{pr.number}'
         path = self.ws.existing_branch(name, pr.head_ref)
@@ -702,6 +725,22 @@ class ActionsMixin:
                 return rules(candidate)
             return allowed
 
+        def normalized(key, raw):
+            return normalize_review(raw, previous_open=previous_open, round_no=round_no,
+                                    max_rounds=max_rounds, head_sha=pr.head_sha,
+                                    ci=ci, reviewer=key, criteria=criteria,
+                                    acceptance_map=acceptance_map,
+                                    role=FINDINGS_ONLY if key in findings else None)
+
+        def approves(key, raw):
+            # Whether the verdict of the first reviewer leaves the round open (#521), as the
+            # round reads it once recorded (``closed_by_first``); an output that cannot be
+            # read cancels nothing.
+            try:
+                return flow_verdict(normalized(key, raw)) == 'approve'
+            except Exception:  # read again, and reported, with the round's records
+                return True
+
         def review_turn(key):
             # The reviewer works in a disposable copy, where its tests may write; the PR
             # worktree must come out of the review untouched, or the verdict is discarded.
@@ -712,10 +751,18 @@ class ActionsMixin:
             extra = {'role': FINDINGS_ONLY} if key in findings else {}
             try:
                 # Every turn of the round goes to the round's register (#325).
-                return self._turn(Models(cfg.agent(key)), 'review',
-                                  prompt + FINDINGS_ONLY_NOTE if extra else prompt, 'review',
-                                  copy, f'pr-{pr.number}-review', admitted(key),
-                                  where=(pr.number, 'review', round_no), **extra)
+                with (self._cancellable(stop) if stop is not None and key != first
+                      else nullcontext()):
+                    result = self._turn(Models(cfg.agent(key)), 'review',
+                                        prompt + FINDINGS_ONLY_NOTE if extra else prompt,
+                                        'review', copy, f'pr-{pr.number}-review',
+                                        admitted(key), where=(pr.number, 'review', round_no),
+                                        **extra)
+                if stop is not None and key == first and not approves(key, result[0]):
+                    self.log(f'  {key} did not approve: the other reviewers of the round are '
+                             'cancelled (second_reviewer = "parallel_cancel")')
+                    stop.set()
+                return result
             except BaseException as exc:
                 with reserving:
                     reserved.pop(key, None)
@@ -729,7 +776,13 @@ class ActionsMixin:
             turns = [(keys[0], review_turn(keys[0]), None)]
         else:
             turns = self._together(keys, review_turn)
-        failures = [(key, exc) for key, _, exc in turns if exc is not None]
+        # A turn cancelled because the first reviewer did not approve (#521) is no failure: the
+        # round it belonged to is closed, and nothing escalates.
+        for key, _, exc in turns:
+            if isinstance(exc, TurnCancelled):
+                self.log(f'  review by {key} cancelled: the first reviewer did not approve')
+        failures = [(key, exc) for key, _, exc in turns
+                    if exc is not None and not isinstance(exc, TurnCancelled)]
         for key, exc in failures:
             self.log(f'  review by {key} failed: {exc}')
         if not self.ws.pristine(path, pr.head_sha):
@@ -753,11 +806,7 @@ class ActionsMixin:
                                       'la review data con quella risoluzione non è pubblicata.')
         records = list(done)
         for key, (raw, used), _ in (turn for turn in turns if turn[2] is None):
-            review = normalize_review(raw, previous_open=previous_open, round_no=round_no,
-                                      max_rounds=max_rounds, head_sha=pr.head_sha,
-                                      ci=ci, reviewer=key, criteria=criteria,
-                                      acceptance_map=acceptance_map,
-                                      role=FINDINGS_ONLY if key in findings else None)
+            review = normalized(key, raw)
             review['receipt'] = receipt
             if joins and bases:
                 review['bases'] = bases  # the round's earlier bases, checked up to this one
@@ -796,6 +845,12 @@ class ActionsMixin:
             self.log(f'  verdict of {review["reviewer"]}: {review["verdict"]}'
                      + (f'; the round waits for {", ".join(waiting)}' if waiting and last
                         else ''))
+        if failures and closed_by_first(records):
+            # The first reviewer closed the round without approving (#521): it waits for no
+            # other reviewer, and the failure of one it no longer waits for escalates nothing.
+            self.log('  the round is closed by its first reviewer: the failures above do not '
+                     'escalate')
+            return
         if failures:
             # The verdicts above stay recorded: the round waits only for these reviewers.
             raise _review_failure(failures)
@@ -845,6 +900,12 @@ class ActionsMixin:
                                       f'uncertain, left to the outbox ({exc})') from exc
         raise GitHubError(f'the review of {key} was not published: its native review, the '
                           f'record devloop reads, failed {REVIEW_ATTEMPTS} times ({error})')
+
+    def _cancellable(self, event):
+        """The block in which the turns of this thread stop once ``event`` is set (#521): the
+        runner's ``cancellable``; nothing with a runner without it."""
+        hook = getattr(self.runner, 'cancellable', None)
+        return hook(event) if hook is not None else nullcontext()
 
     def _together(self, keys, turn):
         """``(key, result, exception)`` of ``turn(key)`` for each of ``keys``, in order, run
