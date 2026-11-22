@@ -52,6 +52,10 @@ before it (``previous``) and its own (``sha256``), like the journal of the local
   its author (``by``) and the ``head`` it merges. It is written before the merge, once every
   condition holds, and the delegated merges of a UTC day count against their own daily cap,
   never against the one of the ``grant`` events.
+- ``coordinator_merge``: a reserved merge of the coordinator (#529, ADR 0002, precision of
+  2026-11-22), written with ``/devloop merge`` from the coordinator's identity, with the data
+  of a ``delegated_merge``. The merges of the coordinator of a UTC day count against a daily cap
+  of their own, never against the one of the delegated merges nor of the ``grant`` events.
 - ``config``: the configuration the dispatcher read (ADR 0006, R2, trace T1 of K1), at its start
   (``when: start``) and at each reload of ``devloop run`` that found the files changed
   (``when: reload``): the SHA-256 of the local overlay and of the project file (null without the
@@ -144,6 +148,7 @@ GRANT = 'grant'  # a grant of a delegation to the supervisor (#405), for the dai
 BUDGET = 'budget'  # the delegation of the extension of a budget envelope (#411)
 LAPSED = 'grant_lapsed'  # an extension no turn used, its first turn refused all the same (#466)
 DELEGATED_MERGE = 'delegated_merge'  # a merge delegated to the supervisor (#486), for its cap
+COORDINATOR_MERGE = 'coordinator_merge'  # a reserved merge of the coordinator (#529), for its cap
 CONFIG = 'config'  # the configuration read at a start or a reload (ADR 0006, T1)
 CONFIG_HASHES = ('overlay', 'project', 'effective')
 # A turn's id: its sequence (or, for a legacy one, its number) and 8 hex digits that differ
@@ -907,42 +912,47 @@ class TurnJournal:
                                      'comment': comment, 'by': by})
             return others + 1
 
-    def delegated_merges(self, day=None):
+    def delegated_merges(self, day=None, event=DELEGATED_MERGE):
         """The merges delegated to the supervisor recorded on the UTC ``day`` (``YYYY-MM-DD``,
-        today by default), one per command comment, oldest first (#486)."""
+        today by default), one per command comment, oldest first (#486); with ``event``
+        ``COORDINATOR_MERGE``, the reserved merges of the coordinator (#529)."""
         with self._lock:
             self._load()
-            return list(self._delegated_merges(day or self._now()[:10]).values())
+            return list(self._delegated_merges(day or self._now()[:10], event).values())
 
-    def _delegated_merges(self, day):
+    def _delegated_merges(self, day, event=DELEGATED_MERGE):
         found = {}
         for e in self._events:
-            if e['event'] == DELEGATED_MERGE and str(e['data'].get('at', ''))[:10] == day:
+            if e['event'] == event and str(e['data'].get('at', ''))[:10] == day:
                 found.setdefault(e['data'].get('comment'), e['data'])
         return found
 
-    def delegated_merge(self, number, comment, by, head, cap):
+    def delegated_merge(self, number, comment, by, head, cap, event=DELEGATED_MERGE):
         """Record the merge of PR ``number`` at ``head``, delegated to the supervisor by the
         command of comment ``comment`` of ``by`` (#486), before it runs, within the daily cap
         ``cap`` of the delegated merges: a cap of its own, apart from the grants of ``grant``.
+        With ``event`` ``COORDINATOR_MERGE``, a reserved merge of the coordinator (#529),
+        within the cap of those, apart from the delegated merges.
 
         As ``grant``: the cap is checked and the merge recorded in one step under the
-        journal's lock, so that two commands never pass it. Returns the delegated merges of the
-        UTC day with this one, or None when the others of the day already reached ``cap``:
+        journal's lock, so that two commands never pass it. Returns the merges of ``event`` of
+        the UTC day with this one, or None when the others of the day already reached ``cap``:
         nothing is recorded, and the merge does not run. The same command recorded already
         today is neither recorded nor counted twice. Raises ``JournalError`` if it cannot be
         written, and then the merge does not run."""
+        if event not in (DELEGATED_MERGE, COORDINATOR_MERGE):
+            raise ValueError(f'not a merge event of the journal: {event!r}')
         if self.read_only:
             raise JournalError(f'{self.path}: read-only journal: no merge is recorded in it')
         with self._lock:
             self._load()
-            today = self._delegated_merges(self._now()[:10])
+            today = self._delegated_merges(self._now()[:10], event)
             others = sum(1 for c in today if c != comment)
             if others >= cap:
                 return None
             if comment not in today:
-                self._append(DELEGATED_MERGE, {'number': number, 'comment': comment, 'by': by,
-                                               'head': head})
+                self._append(event, {'number': number, 'comment': comment, 'by': by,
+                                     'head': head})
             return others + 1
 
     def _lapsed(self, story):

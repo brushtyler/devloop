@@ -946,7 +946,8 @@ def main(argv=None):
         # The project's set of apps (ADR 0006, D3): those of its repo, with its key_dir.
         log(f'apps of {cfg.repo}, keys in '
             f'{os.environ.get("DEVLOOP_APP_KEY_DIR") or cfg.app_key_dir}')
-        if MERGER in cfg.apps and not cfg.merge.enabled():
+        # The coordinator's reserved merge (#529) needs the merger app in mode off too.
+        if MERGER in cfg.apps and not cfg.merge.enabled() and not cfg.coordinator:
             log(f'{MERGER}: [merge] mode is off: the merger app is only for a repository where '
                 'devloop merges (ADR 0006, D3)')
         # Each app once, by the actor of its table: the agents' declared apps, the implementer's

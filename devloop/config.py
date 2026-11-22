@@ -15,8 +15,8 @@ from .agentuser import allowed_entries
 from .localtests import CI_LOG_FORMATS, SELECTIONS, Tests
 from .localtests import MODES as LOCAL_TESTS_MODES
 from .policy import MAX_LEVEL, MIN_LEVEL, SECOND_REVIEWER_MODES, ZERO_LEVEL, ReviewPolicy
-from .supervision import (MAX_CAPACITY, MAX_CAPACITY_HOURS, MAX_DAILY_GRANTS,
-                          MAX_DELEGATED_MERGES, MAX_GRANTED_ROUNDS)
+from .supervision import (MAX_CAPACITY, MAX_CAPACITY_HOURS, MAX_COORDINATOR_MERGES,
+                          MAX_DAILY_GRANTS, MAX_DELEGATED_MERGES, MAX_GRANTED_ROUNDS)
 from .unavailability import delimited
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / 'config.toml'
@@ -249,15 +249,20 @@ class CoordinatorActor:
     such as ``claude-coordinator``. devloop does not run it, so it is not in ``[agents]``; it
     signs with the role app ``[apps.coordinator]``, which no agent declares, and its commands
     count only within the closed perimeter of ``supervision.COORDINATOR_DELEGATED``. ``kind``,
-    ``provider`` and ``model`` say which agent runs it."""
+    ``provider`` and ``model`` say which agent runs it. ``max_merges_per_day``: the daily cap of
+    its reserved merges (#529), optional, from 0 to the cap of the code
+    (``supervision.MAX_COORDINATOR_MERGES``), which it may only lower."""
     name: str
     kind: str
     provider: str
     model: str
+    max_merges_per_day: int = MAX_COORDINATOR_MERGES
 
 
-# The keys of the ``[roles.coordinator]`` table, those of the supervisor actor.
+# The keys of the ``[roles.coordinator]`` table: those of the supervisor actor, all required,
+# and the optional cap of its reserved merges (#529).
 COORDINATOR_KEYS = SUPERVISOR_KEYS
+COORDINATOR_OPTIONAL = ('max_merges_per_day',)
 
 
 # The roles of a turn in the budget envelope (#365): the kinds of the turns charged to a story.
@@ -1716,17 +1721,23 @@ def parse_coordinator(roles, agents):
     """The coordinator actor of ``[roles.coordinator]`` (#528), or None without it (off by
     default, D10). Only a table, with the keys of ``COORDINATOR_KEYS``: ``name`` names agent and
     role in full (``<kind>-coordinator``) and is not a key of ``[agents]``, since devloop does
-    not run it."""
+    not run it. ``max_merges_per_day`` (#529), optional, may only lower
+    ``MAX_COORDINATOR_MERGES``."""
     if 'coordinator' not in roles:
         return None
     value = roles['coordinator']
     where = 'roles.coordinator'
     if not isinstance(value, dict):
         raise ConfigError(f'{where}: expected a table')
-    unknown = sorted(set(value) - set(COORDINATOR_KEYS))
+    unknown = sorted(set(value) - set(COORDINATOR_KEYS) - set(COORDINATOR_OPTIONAL))
     if unknown:
         raise ConfigError(f'{where}: unknown key {unknown[0]!r}')
     name, kind, provider, model = (_require(value, key, str, where) for key in COORDINATOR_KEYS)
+    cap = value.get('max_merges_per_day', MAX_COORDINATOR_MERGES)
+    if not isinstance(cap, int) or isinstance(cap, bool) or not 0 <= cap <= MAX_COORDINATOR_MERGES:
+        raise ConfigError(f'{where}.max_merges_per_day: expected a whole number from 0 to '
+                          f'{MAX_COORDINATOR_MERGES}, the cap of the code, which the '
+                          'configuration may only lower')
     if kind not in AGENT_KINDS:
         raise ConfigError(f'{where}.kind: must be one of {AGENT_KINDS}')
     if name != f'{kind}-coordinator':
@@ -1738,7 +1749,8 @@ def parse_coordinator(roles, agents):
     for key, text in (('provider', provider), ('model', model)):
         if not text.strip():
             raise ConfigError(f'{where}.{key}: must not be empty')
-    return CoordinatorActor(name=name, kind=kind, provider=provider, model=model)
+    return CoordinatorActor(name=name, kind=kind, provider=provider, model=model,
+                            max_merges_per_day=cap)
 
 
 def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):

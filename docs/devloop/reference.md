@@ -73,7 +73,8 @@ a missing or empty value, a `kind` that is not an agent kind, a `name` other tha
 `<kind>-supervisor` or equal to a key of `[agents]`, or no `[apps.supervisor]` stops devloop at
 startup.
 `[roles.coordinator]` (#528, off by default) is the table of the coordinator actor (`name`,
-`kind`, `provider`, `model`), which signs with the role app `[apps.coordinator]`
+`kind`, `provider`, `model`, and the optional `max_merges_per_day` of its reserved merges, #529),
+which signs with the role app `[apps.coordinator]`
 ([The coordinator app](#the-coordinator-app)); the same invalid values, or no
 `[apps.coordinator]`, stop devloop at startup.
 The keys of `[agents]` may name agent and role in full, `<kind>-implementer` or
@@ -1431,7 +1432,7 @@ Each agent and the dispatcher can act on GitHub with its own GitHub App (#65), c
 | implementer | commits (author and committer are its bot), push, opens the PR, fix and blocked comments |
 | reviewer | one native GitHub review (`APPROVE` or `REQUEST_CHANGES`; for `needs_operator`, `REQUEST_CHANGES` while blocking findings of its own stay open, else `APPROVE`, #418) on the reviewed commit, whose body is the review and its record (#325, see [Where a review is published](protocol.md#where-a-review-is-published)); an agent without an app publishes the review comment instead |
 | advisory reviewer (`advisory_reviewer`) | the [advisory review](guide.md#advisory-review-for-the-operator) of a head of a PR in `agent:needs-operator`: always a native review of type `COMMENT`, also from an agent without an app (with the ambient login) and also when it is the PR's implementer; the dispatcher writes its summary and edits the receipt |
-| merger | only the merges of the `strict` and `auto` [merge modes](guide.md#merge-modes) (see [The merger app](#the-merger-app)) |
+| merger | only the merges of the `strict` and `auto` [merge modes](guide.md#merge-modes) and the [reserved merges of the coordinator](guide.md#the-reserved-merge-of-the-coordinator) (see [The merger app](#the-merger-app)) |
 | supervisor | not devloop: the supervisor's commands, labels, issues, diary and fix or hold requests, with `[roles.supervisor]` as a table (see [The supervisor app](#the-supervisor-app)) |
 | coordinator | not devloop: the coordinator's commands inside its closed perimeter, and its `agent:ready`, with `[roles.coordinator]` (see [The coordinator app](#the-coordinator-app)) |
 
@@ -1508,7 +1509,8 @@ operator creates the set from the manifests of `ops/github/apps/` with an `APP_P
 own, installs it on that repository only (*Only select repositories*), and puts its keys in a
 `key_dir` of that project, readable only by that project's system user. The merger app is
 created and installed only for a repository where devloop merges (`[merge] mode` `"strict"` or
-`"auto"`): with it configured and the mode `"off"`, `devloop apps` says so. Creating and
+`"auto"`, or `[roles.coordinator]` on, whose reserved merge needs it in mode `"off"` too, #529):
+with it configured, the mode `"off"` and no coordinator, `devloop apps` says so. Creating and
 installing the apps stay operator actions, since they are credentials.
 
 **`devloop token`.** An interactive session publishes with an agent's app of the project:
@@ -1649,14 +1651,17 @@ is in the [guide](guide.md#agent-user) and in the [ops guide](../../ops/README.m
 
 ### The merger app
 
-The `strict` and `auto` [merge modes](guide.md#merge-modes) merge with an app of their own, `merger`
-(#201), so that devloop needs neither a `gh` login nor the operator's broader permissions. It is
+The `strict` and `auto` [merge modes](guide.md#merge-modes), and the
+[reserved merge of the coordinator](guide.md#the-reserved-merge-of-the-coordinator) in any mode
+(#529), merge with an app of their own, `merger` (#201), so that devloop needs neither a `gh` login nor the operator's broader permissions. It is
 the only app with `contents=write`, and it does nothing else: comments, labels and pushes stay
 with the dispatcher's and the agents' apps, its comments and labels count for no role (the
 dispatcher accepts reviews only from configured agents, so a review naming `merger` as
 reviewer is ignored even when its app wrote it), and
 `scripts/agent-token.py` refuses it, as it refuses the dispatcher's app. Without `[apps.merger]`
-the merges use the local `gh` login, as before.
+the merges use the local `gh` login, as before; the
+[reserved merge of the coordinator](guide.md#the-reserved-merge-of-the-coordinator) (#529),
+which also runs in mode `off`, is refused instead.
 
 Creating it (once, by the operator, in the account that owns the repository: *Settings →
 Developer settings → GitHub Apps → New GitHub App*):
@@ -1794,11 +1799,15 @@ model = "gpt-6.1-sol"
 ```
 
 - `[roles.coordinator]` is only a table, with the keys of the supervisor actor (`name`, `kind`,
-  `provider`, `model`). `name` names agent and role in full (`<kind>-coordinator`) and is not a
+  `provider`, `model`), all required, and the optional `max_merges_per_day` (#529): the daily cap
+  of the coordinator's reserved merges, a whole number from 0 to 10, the cap of the code
+  (`supervision.MAX_COORDINATOR_MERGES`), which it may only lower; 10 without it, and 0 turns
+  the reserved merge off. `name` names agent and role in full (`<kind>-coordinator`) and is not a
   key of `[agents]`: devloop does not run the coordinator, and no agent may be called
   `coordinator`. A table with another key, a missing or empty value, a `kind` that is not an
-  agent kind, a `name` other than `<kind>-coordinator` or equal to a key of `[agents]`, a value
-  that is not a table, or no `[apps.coordinator]` stops devloop at startup. The table needs a
+  agent kind, a `name` other than `<kind>-coordinator` or equal to a key of `[agents]`, a
+  `max_merges_per_day` outside 0 to 10, a value that is not a table, or no `[apps.coordinator]`
+  stops devloop at startup. The table needs a
   restart, as every key of `[roles]`. The roles have no constraint between them; a model of the
   coordinator other than the supervisor's is recommended.
 - The coordinator's identity is the login of `[apps.coordinator]` (`<slug>[bot]`). It is never a
@@ -1807,8 +1816,9 @@ model = "gpt-6.1-sol"
   perimeter**, a constant of the code (`supervision.COORDINATOR_DELEGATED` and
   `COORDINATOR_RESERVED`) that no key widens; the guide lists it
   ([The coordinator](guide.md#the-coordinator)). A delegated command counts as a trusted user's,
-  under the same conditions and caps; a command reserved to the operator, or not listed
-  (`merge` included, until its own part of the plan of #524), never counts.
+  under the same conditions and caps; a command reserved to the operator, or not listed, never
+  counts. `merge` is the coordinator's reserved merge (#529), under conditions and a daily cap of
+  its own ([The reserved merge of the coordinator](guide.md#the-reserved-merge-of-the-coordinator)).
 - devloop never reads the app's key and never writes with it: `python3 -m devloop apps` does not
   list it, the watcher does not count it among the writers of devloop's records, and
   `devloop token` and `scripts/agent-token.py` refuse it (`unknown actor`). How the coordinator
