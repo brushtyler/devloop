@@ -13,7 +13,7 @@ from datetime import datetime
 
 from .activity import iso
 from .agents import AgentError
-from .apps import DISPATCHER
+from .apps import COORDINATOR, DISPATCHER
 from .budget import BUDGET, extension_text
 from .budget import grantable as budget_grantable
 from .config import same_agent
@@ -58,6 +58,7 @@ CAPACITY_USAGE = (f'Il comando si scrive come `/devloop {CAPACITY} <chiave> <val
 # The titles of the dispatcher's trace of a delegated merge and of an extension of its daily cap
 # (#486), and how the extension is written.
 MERGE_TITLE = 'Merge delegato al supervisore'
+COORDINATOR_MERGE_TITLE = 'Merge riservato del coordinatore'  # #529
 MERGE_BUDGET_TITLE = 'Merge delegati: estensione del tetto giornaliero'
 MERGE_BUDGET_USAGE = (f'Il comando si scrive come `/devloop {MERGE_BUDGET} <N> <motivo>`, come '
                       'prima riga di un commento di un utente fidato su questa issue: `N` da 1 a '
@@ -409,10 +410,12 @@ class SupervisionMixin:
             elif operator and command == MERGE:
                 # A delegation of the operator to the supervisor (#486): the supervisor's
                 # identity writes it on an operator merge, and ``_operator_command`` answers a
-                # trusted user's; anyone else's is ignored.
+                # trusted user's; the coordinator's is its reserved merge (#529); anyone else's
+                # is ignored.
                 why, refusal = (
-                    ('the author is neither the supervisor nor a trusted user', None)
-                    if not self._may_hold(login)
+                    ('the author is neither the supervisor, the coordinator nor a trusted user',
+                     None)
+                    if not (self._may_hold(login) or delegated)
                     else (f'malformed, expected `/devloop {command} <sha> <reason>`',
                           f'manca il testo, il comando va scritto come `/devloop {command} <sha> '
                           '<motivo>`') if reason is None
@@ -531,9 +534,14 @@ class SupervisionMixin:
                 record = dict(command=name, by=by, reason=command['reason'] or '',
                               comment=command['comment'], outcome=outcome, **extra)
                 record['class'] = cls if isinstance(cls, str) else None
+                coordinator = name == MERGE and self._is_coordinator(by)
+                if coordinator:
+                    # The coordinator's reserved merge (#529): the summary lists it apart.
+                    record['role'] = COORDINATOR
                 self.gh.comment(number, render_supervision(
                     record, f'`/devloop {name}` di `{by}`: {text.strip()}',
-                    MERGE_TITLE if name == MERGE and operator
+                    COORDINATOR_MERGE_TITLE if coordinator and operator
+                    else MERGE_TITLE if name == MERGE and operator
                     else OPERATOR_TITLE if operator else SUPERVISOR_TITLE))
                 self.log(f'  {name} by {by}: {outcome}')
             return trace
@@ -1653,8 +1661,9 @@ class SupervisionMixin:
         - ``escalate``: never, the escalation is already the operator's.
         - ``grant-round`` and ``grant-budget``: never, they are delegations to the supervisor
           (#405, #411).
-        - ``merge``: only from the supervisor's identity, on a PR (``_delegated_merge``, #486);
-          a trusted user's is answered: the operator merges by hand."""
+        - ``merge``: only from the supervisor's identity, on a PR (``_delegated_merge``, #486),
+          or from the coordinator's, its reserved merge (#529); a trusted user's is answered:
+          the operator merges by hand."""
         lb = self.cfg.labels
         is_pr = isinstance(target, PullRequest)
         name, anchor = command['command'], command['anchor']
@@ -1668,7 +1677,8 @@ class SupervisionMixin:
 
         if name == MERGE:
             supervisor = self._supervisor_login()
-            if not supervisor or command['by'] != supervisor:
+            coordinator = self._is_coordinator(command['by'])
+            if not coordinator and (not supervisor or command['by'] != supervisor):
                 # A delegation of the operator to the supervisor (#486): the operator merges a
                 # PR by hand, as before.
                 return refuse(f'`/devloop {MERGE}` è una delega del supervisore; l\'operatore '

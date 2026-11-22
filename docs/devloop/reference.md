@@ -73,7 +73,8 @@ a missing or empty value, a `kind` that is not an agent kind, a `name` other tha
 `<kind>-supervisor` or equal to a key of `[agents]`, or no `[apps.supervisor]` stops devloop at
 startup.
 `[roles.coordinator]` (#528, off by default) is the table of the coordinator actor (`name`,
-`kind`, `provider`, `model`), which signs with the role app `[apps.coordinator]`
+`kind`, `provider`, `model`, and the optional `max_merges_per_day` of its reserved merges, #529),
+which signs with the role app `[apps.coordinator]`
 ([The coordinator app](#the-coordinator-app)); the same invalid values, or no
 `[apps.coordinator]`, stop devloop at startup.
 The keys of `[agents]` may name agent and role in full, `<kind>-implementer` or
@@ -1798,11 +1799,15 @@ model = "gpt-6.1-sol"
 ```
 
 - `[roles.coordinator]` is only a table, with the keys of the supervisor actor (`name`, `kind`,
-  `provider`, `model`). `name` names agent and role in full (`<kind>-coordinator`) and is not a
+  `provider`, `model`), all required, and the optional `max_merges_per_day` (#529): the daily cap
+  of the coordinator's reserved merges, a whole number from 0 to 10, the cap of the code
+  (`supervision.MAX_COORDINATOR_MERGES`), which it may only lower; 10 without it, and 0 turns
+  the reserved merge off. `name` names agent and role in full (`<kind>-coordinator`) and is not a
   key of `[agents]`: devloop does not run the coordinator, and no agent may be called
   `coordinator`. A table with another key, a missing or empty value, a `kind` that is not an
-  agent kind, a `name` other than `<kind>-coordinator` or equal to a key of `[agents]`, a value
-  that is not a table, or no `[apps.coordinator]` stops devloop at startup. The table needs a
+  agent kind, a `name` other than `<kind>-coordinator` or equal to a key of `[agents]`, a
+  `max_merges_per_day` outside 0 to 10, a value that is not a table, or no `[apps.coordinator]`
+  stops devloop at startup. The table needs a
   restart, as every key of `[roles]`. The roles have no constraint between them; a model of the
   coordinator other than the supervisor's is recommended.
 - The coordinator's identity is the login of `[apps.coordinator]` (`<slug>[bot]`). It is never a
@@ -1811,8 +1816,9 @@ model = "gpt-6.1-sol"
   perimeter**, a constant of the code (`supervision.COORDINATOR_DELEGATED` and
   `COORDINATOR_RESERVED`) that no key widens; the guide lists it
   ([The coordinator](guide.md#the-coordinator)). A delegated command counts as a trusted user's,
-  under the same conditions and caps; a command reserved to the operator, or not listed
-  (`merge` included, until its own part of the plan of #524), never counts.
+  under the same conditions and caps; a command reserved to the operator, or not listed, never
+  counts. `merge` is the coordinator's reserved merge (#529), under conditions and a daily cap of
+  its own ([The reserved merge of the coordinator](guide.md#the-reserved-merge-of-the-coordinator)).
 - devloop never reads the app's key and never writes with it: `python3 -m devloop apps` does not
   list it, the watcher does not count it among the writers of devloop's records, and
   `devloop token` and `scripts/agent-token.py` refuse it (`unknown actor`). How the coordinator

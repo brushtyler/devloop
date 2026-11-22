@@ -20,14 +20,14 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 from .acceptance import acceptance_criteria, acceptance_findings, latest_map
-from .apps import MERGER
-from .context import _describe_bases, _open_findings_reason
+from .apps import COORDINATOR, MERGER
+from .context import _describe_bases, _open_findings_reason, comment_link
 from .dispatch_supervision import RELEASE_COMMAND, merge_command
 from . import receipt as pr_receipt
 from .github import GitHubError
 from .hoststep import UNREADABLE as UNREADABLE_STEP
 from .hoststep import latest as latest_host_step
-from .journal import JournalError
+from .journal import COORDINATOR_MERGE, DELEGATED_MERGE, JournalError
 from .ledger import collect as ledger_collect
 from .ledger import timestamp as ledger_timestamp
 from .markdown import (MAX_BODY, carries_record, dispatcher_header, publishable, read_marker,
@@ -41,9 +41,10 @@ from .policy import (MAX_LISTED_PATHS, ZERO_LEVEL, another_model, changes_reques
 from .config import LEGACY_NEEDS_OPERATOR, provider_quorum, same_agent
 from .receipt import CONFLICT as RECEIPT_CONFLICT
 from .review import (DECISION, FINDING_COMMAND, current_round, open_findings, owner_of,
-                     round_verdict, trust_policy_parts)
-from .supervision import (ADR_DIR, MAX_MERGE_BUDGET, MERGE, MERGE_BUDGET, MERGE_OPINIONS,
-                          MERGED_ISSUE, adr_paths, adr_problems, merge_arguments, rule_paths)
+                     round_verdict, trust_policy, trust_policy_parts)
+from .supervision import (ADR_DIR, MAX_COORDINATOR_MERGES, MAX_MERGE_BUDGET, MERGE,
+                          MERGE_BUDGET, MERGE_OPINIONS, MERGED_ISSUE, adr_paths, adr_problems,
+                          merge_arguments, rule_paths)
 from .workspace import WorkspaceError
 
 
@@ -841,7 +842,8 @@ class MergeMixin:
         ``_delegated_merge``, #486), with the merger's app, then record it: the ``merged``
         record in the comment of the promotion, the issue closed, the auto-pin requested or
         held. ``delegation``: the command of a delegated merge, ``{command, by, comment,
-        reason}``, recorded in the ``merged`` record and in its text. Returns whether it
+        reason}``, with ``role`` ``coordinator`` for the coordinator's reserved merge (#529),
+        recorded in the ``merged`` record and in its text. Returns whether it
         merged: False when the hold of the auto-pin of a step on the host cannot be recorded.
 
         Just before the merge call, before the hold of the auto-pin too, the labels of the PR
@@ -912,6 +914,20 @@ class MergeMixin:
                 f'`{lb.needs_operator}` o `{lb.merge_hold}`, e le condizioni della promozione con '
                 'la ricevuta di policy ricalcolata. Le label della PR le ha rilette subito prima '
                 f'della chiamata di merge, alle {labels_at} (UTC). Il branch resta.')
+        elif delegation.get('role') == COORDINATOR:
+            section = (
+                '## Mergiata da devloop su comando del coordinatore\n\n'
+                f'Il merge spettava all\'operatore. Il coordinatore `{delegation["by"]}` l\'ha '
+                f'chiesto con `/devloop {delegation["command"]}` (commento '
+                f'{delegation["comment"]}, merge riservato del coordinatore, ADR 0002, #529); '
+                'devloop ha verificato subito prima tutte le condizioni del merge riservato e '
+                f'l\'ha eseguito {executor}: commit `{head[:12]}` con un merge commit, legato a '
+                f'quel head (`--match-head-commit`), al livello {current["level"]}. Le label '
+                'della PR le ha rilette subito prima della chiamata di merge, alle '
+                f'{labels_at} (UTC), senza `{lb.merge_hold}`. Il branch resta.\n\n'
+                '**Motivo del coordinatore:**\n\n'
+                + '\n'.join(f'> {line}'.rstrip()
+                            for line in delegation['reason'].splitlines()))
         else:
             section = (
                 '## Mergiata da devloop su delega del supervisore\n\n'
@@ -1314,18 +1330,41 @@ class MergeMixin:
 
         Then the merge, as an automatic one (``_execute_merge``), whose ``merged`` record
         carries the command and its reason, and last the ``supervision`` record ``merged``,
-        which spends the command."""
+        which spends the command.
+
+        From the coordinator's identity (``[roles.coordinator]``) the command is the
+        coordinator's reserved merge (#529, ADR 0002, precision of 2026-11-22), under the same
+        conditions but these:
+
+        - neither ``[delegations] merge`` nor the merge mode, of the configuration or of the
+          PR, counts: the PR waits for the operator's merge for whatever reason;
+        - the paths of the trust rule and of the delegations, ``docs/adr/`` (with any change,
+          not only added lines) and a ``host_step`` refuse nothing: those are the coordinator's
+          cases. A step on the host holds the auto-pin, as for every merge;
+        - a ``trust_policy`` of the reviewers refuses nothing by itself; but when a reviewer of
+          the PR declared the trust policy touched (``trust_policy``, in any round) or the diff
+          touches ``docs/adr/``, the issue the PR closes needs a valid ``/devloop approve`` of
+          the operator (``_operator_approval``), and each reviewer of the quorum keeps
+          ``operator_reason`` ``none`` or ``decision`` on ``sha``, as above;
+        - the daily cap is its own, ``[roles.coordinator] max_merges_per_day`` (at most
+          ``MAX_COORDINATOR_MERGES``), with no extension, recorded in the turn journal as a
+          ``coordinator_merge`` (``TurnJournal.delegated_merge``)."""
         cfg, lb, rules = self.cfg, self.cfg.labels, self.cfg.delegations
         by = command['by']
+        coordinator = self._is_coordinator(by)
         stays = (f'Il comando è speso; la PR resta in `{lb.needs_operator}`, e il merge spetta '
                  'all\'operatore.')
 
         def refuse(why):
             return trace('refused', f'rifiutato: {why}. {stays}')
 
-        if not rules.merge:
+        if coordinator:
+            if cfg.coordinator.max_merges_per_day < 1:
+                return refuse('il merge del coordinatore è spento (`[roles.coordinator] '
+                              'max_merges_per_day` = 0)')
+        elif not rules.merge:
             return refuse('la delega del merge è spenta (`[delegations] merge`)')
-        if cfg.merge.mode != 'auto' or not cfg.supervisor:
+        elif cfg.merge.mode != 'auto' or not cfg.supervisor:
             return refuse(f'la modalità di merge è `{cfg.merge.mode}`, non `auto` con un '
                           'supervisore')
         args = merge_arguments(command['reason'])
@@ -1391,7 +1430,7 @@ class MergeMixin:
             return refuse(f'la ricevuta di policy non è ricalcolabile ({exc})')
         if current['head'] != head:
             return refuse(f'l\'head pubblicato è `{current["head"][:12]}`')
-        touched = rule_paths(paths, rules.merge_trust_paths)
+        touched = [] if coordinator else rule_paths(paths, rules.merge_trust_paths)
         if touched:
             return refuse('la PR tocca la regola di fiducia o le deleghe: '
                           + ', '.join(f'`{p}`' for p in touched[:MAX_LISTED_PATHS]))
@@ -1401,10 +1440,10 @@ class MergeMixin:
                           f'{unblocked}: il merge resta umano')
         adr = adr_paths(paths)
         mode = cfg.merge.mode_for(current['level'], [p for p in paths if p not in adr])
-        if mode != 'auto':
+        if mode != 'auto' and not coordinator:
             return refuse(f'la modalità di merge della PR, fuori da `{ADR_DIR}`, è `{mode}`, non '
                           '`auto` (percorsi riservati all\'operatore o un override del livello)')
-        if latest_host_step(pr.meta, pr.fixes):
+        if latest_host_step(pr.meta, pr.fixes) and not coordinator:
             return refuse('la PR dichiara un passo sull\'host (`host_step`), che resta '
                           'all\'operatore')
         if current['level'] == ZERO_LEVEL or len(current['reviewers']) < current['level']:
@@ -1413,7 +1452,7 @@ class MergeMixin:
         missing = [k for k in current['reviewers'] if k not in quorum]
         uncovered = [k for k, r in quorum.items()
                      if r.get('operator_reason') not in (None, 'none', DECISION)]
-        if missing or uncovered or trust_policy_parts(pr.reviews):
+        if missing or uncovered or (trust_policy_parts(pr.reviews) and not coordinator):
             return refuse('la modifica non risulta coperta da una decisione dell\'operatore: '
                           + ('manca la review di ' + ', '.join(f'`{k}`' for k in missing)
                              + f' su `{sha[:12]}`' if missing else
@@ -1425,7 +1464,15 @@ class MergeMixin:
             return refuse(f'la review consultiva di `{sha[:12]}` ' + (
                 'manca' if advisory is None else f'ha parere `{opinion}`'
                 if opinion else 'non ha un parere') + ': serve `ok` o `dubbi`')
-        if adr:
+        approval = None
+        if coordinator:
+            # The operator's decision, for the trust policy and the ADRs (#529).
+            trust = any(trust_policy(r) for r in pr.reviews)
+            if trust or adr:
+                problem, approval = self._operator_approval(pr, trust, adr)
+                if problem:
+                    return refuse(problem)
+        elif adr:
             problem = self._adr_problem(current, adr)
             if problem:
                 return refuse(problem)
@@ -1435,23 +1482,34 @@ class MergeMixin:
                          'ricevuta di policy ricalcolata, e la PR torna in review.')
         journal = getattr(self.ledger, 'journal', None)
         day = ledger_timestamp(self.clock)[:10]
-        extensions = self._merge_budget_extensions(day)
-        cap = rules.max_merges_per_day + sum(e['n'] for e in extensions)
+        if coordinator:
+            # A cap of its own, with no extension (#529).
+            cap, event, what = (cfg.coordinator.max_merges_per_day, COORDINATOR_MERGE,
+                                'i merge del coordinatore')
+            limit = (f'`[roles.coordinator] max_merges_per_day` = {cap}, al massimo '
+                     f'{MAX_COORDINATOR_MERGES}')
+        else:
+            extensions = self._merge_budget_extensions(day)
+            cap = rules.max_merges_per_day + sum(e['n'] for e in extensions)
+            event, what = DELEGATED_MERGE, 'i merge delegati'
+            limit = (f'`[delegations] max_merges_per_day` = {rules.max_merges_per_day}, più le '
+                     'estensioni di oggi')
         try:
             daily = (None if journal is None else
-                     journal.delegated_merge(number, command['comment'], by, head, cap))
+                     journal.delegated_merge(number, command['comment'], by, head, cap, event))
         except JournalError as exc:
-            self.log(f'  the delegated merge cannot be recorded: {exc}')
+            self.log(f'  the {event.replace("_", " ")} cannot be recorded: {exc}')
             journal = None
         if journal is None:
-            return refuse('i merge delegati di oggi non sono verificabili: il journal dei turni '
+            return refuse(f'{what} di oggi non sono verificabili: il journal dei turni '
                           'non è disponibile o non è leggibile')
         if daily is None:
-            return refuse(f'oggi i merge delegati hanno già raggiunto il massimo giornaliero '
-                          f'({cap}: `[delegations] max_merges_per_day` = '
-                          f'{rules.max_merges_per_day}, più le estensioni di oggi)')
+            return refuse(f'oggi {what} hanno già raggiunto il massimo giornaliero '
+                          f'({cap}: {limit})')
         delegation = {'command': MERGE, 'by': by, 'comment': command['comment'],
                       'reason': reason}
+        if coordinator:
+            delegation['role'] = COORDINATOR
         try:
             merged = self._execute_merge(pr, comments, head, current, 'auto', paths, bases,
                                          delegation)
@@ -1466,11 +1524,50 @@ class MergeMixin:
             return refuse('il merge non è stato eseguito')
         figures = {'head': head, 'daily': daily, 'daily_cap': cap,
                    'daily_left': cap - daily, 'opinion': opinion}
+        quoted = '\n'.join(f'> {line}'.rstrip() for line in reason.splitlines())
+        if coordinator:
+            if approval is not None:
+                figures['approval'] = approval.get('id')
+            trace('merged', f'PR mergiata dal coordinatore, commit `{head[:12]}`, con le '
+                  'condizioni del merge riservato verificate su quello sha; parere della review '
+                  f'consultiva: `{opinion}`' + (
+                      '; decisione dell\'operatore: il `/devloop approve` '
+                      + (comment_link(approval) or f'(commento {approval.get("id")})')
+                      + f' sulla issue #{pr.meta["issue"]}'
+                      if approval is not None else '')
+                  + f'. Merge del coordinatore di oggi: {daily} di {cap}.\n\n**Motivo:**\n\n'
+                  + quoted, **figures)
+            return None
         trace('merged', f'PR mergiata su delega, commit `{head[:12]}`, con le condizioni della '
               f'delega verificate su quello sha; parere della review consultiva: `{opinion}`. '
-              f'Merge delegati di oggi: {daily} di {cap}.\n\n**Motivo:**\n\n'
-              + '\n'.join(f'> {line}'.rstrip() for line in reason.splitlines()), **figures)
+              f'Merge delegati di oggi: {daily} di {cap}.\n\n**Motivo:**\n\n' + quoted,
+              **figures)
         return None
+
+    def _operator_approval(self, pr, trust, adr):
+        """``(problem, approval)`` of the coordinator's reserved merge of ``pr`` (#529), whose
+        reviewers declared the trust policy touched (``trust``) or whose diff touches the paths
+        ``adr`` under ``docs/adr/``: the latest valid ``/devloop approve`` of the operator on
+        the issue the PR closes (``_issue_decisions``, read now with the API, as a review reads
+        it), and '' for ``problem``; or why there is none, and None. What cannot be read
+        refuses it."""
+        what = ' e '.join(part for part in (
+            'un reviewer ha dichiarato toccata la policy di fiducia' if trust else '',
+            f'il diff tocca `{ADR_DIR}`' if adr else '') if part)
+        issue = pr.meta.get('issue') if pr.meta else None
+        if not isinstance(issue, int) or isinstance(issue, bool):
+            return f'{what}, e la PR non nomina la issue che chiude', None
+        try:
+            history = self.gh.issue_history(issue)
+            comments = self.gh.issue_comments(issue)
+        except GitHubError as exc:
+            return f'{what}, e la issue #{issue} non è leggibile ({exc})', None
+        decisions = self._issue_decisions(comments, history, taken=True)
+        if not decisions:
+            return (f'{what}, e la issue #{issue} che la PR chiude non ha un `/devloop approve` '
+                    'valido dell\'operatore, scritto di persona dopo l\'ultima modifica del '
+                    'testo e prima che devloop la prendesse in carico'), None
+        return '', decisions[-1]
 
     def _adr_problem(self, current, adr):
         """Why the changes of ``adr``, the paths of the PR under ``docs/adr/``, do not only

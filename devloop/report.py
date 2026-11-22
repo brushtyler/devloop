@@ -21,6 +21,9 @@ Days are UTC days:
 - the delegated merges (#486): every ``merge`` and ``merge-budget`` the dispatcher answered
   that day, from its ``supervision`` records, with the time, the PR or the summary issue, the
   author, the first line of the reason, the outcome and the cap of the day;
+- the reserved merges of the coordinator (#529): every ``merge`` of the coordinator's identity
+  the dispatcher answered that day (its ``supervision`` record with ``role: coordinator``),
+  apart from the delegated merges, with the same columns and the coordinator's own cap;
 - the auto-pins that did not move ``current`` (#453): the ``pin`` record of the dispatcher's alert
   on ``[run].alert_issue``, one per commit, with the time, the commit of ``origin/<base_branch>``
   left behind and the reason the alert shows (the step of the smoke test, or the first line of
@@ -46,7 +49,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .apps import DISPATCHER
+from .apps import COORDINATOR, DISPATCHER
 from .markdown import dispatcher_header, publishable, read_marker
 from .supervision import CAPACITY, GRANT_BUDGET, GRANT_ROUND, MERGE, MERGE_BUDGET
 from .watch import failure_class
@@ -123,6 +126,8 @@ class Summary:
     # (time, number, command, author, reason, outcome, cap): the delegated merges and the
     # extensions of their daily cap (#486)
     delegated: list = field(default_factory=list)
+    # The same rows for the reserved merges of the coordinator (#529)
+    coordinator: list = field(default_factory=list)
     # (time, number, ref, commit, reason): the auto-pins that did not move ``current`` (#453)
     pins: list = field(default_factory=list)
     opened: list = field(default_factory=list)       # PR numbers
@@ -135,7 +140,8 @@ class Summary:
 
     def empty(self):
         return not (self.actions or self.merges or self.escalations or self.ci or self.grants
-                    or self.delegated or self.pins or self.opened or self.merged or self.rounds)
+                    or self.delegated or self.coordinator or self.pins or self.opened
+                    or self.merged or self.rounds)
 
 
 class Records:
@@ -264,7 +270,9 @@ class Records:
                 if supervision['command'] in GRANT_COMMANDS and _day_of(created) == day:
                     out.grants.append(_grant_row(_hour(created), number, supervision))
                 elif supervision['command'] in MERGE_COMMANDS and _day_of(created) == day:
-                    out.delegated.append(_delegated_row(_hour(created), number, supervision))
+                    rows = (out.coordinator if supervision.get('role') == COORDINATOR
+                            else out.delegated)
+                    rows.append(_delegated_row(_hour(created), number, supervision))
                 continue
             notice = read_marker(body, 'notice')
             if (notice is not None and notice.get('event') == 'escalation'
@@ -281,7 +289,7 @@ class Records:
                 out.merges.append((_hour(merged), number, None, None))
         out.merged = sorted(merged_numbers | by_devloop)
         for rows in (out.actions, out.merges, out.escalations, out.ci, out.grants, out.delegated,
-                     out.pins):
+                     out.coordinator, out.pins):
             rows.sort(key=lambda row: (row[0], row[1]))
         return out
 
@@ -425,11 +433,14 @@ def render(summary):
             parts.append(f'| {at} | #{number} | `{command}` | {_cell(reason)} '
                          f'| {_cell(outcome)} | {_cell(left)} |')
         parts.append('')
-    if summary.delegated:
-        parts += ['### Merge delegati al supervisore', '',
+    for title, rows in (('Merge delegati al supervisore', summary.delegated),
+                        ('Merge riservati del coordinatore', summary.coordinator)):
+        if not rows:
+            continue
+        parts += [f'### {title}', '',
                   '| Ora (UTC) | Numero | Comando | Autore | Motivo | Esito | Tetto |',
                   '|---|---|---|---|---|---|---|']
-        for at, number, command, by, reason, outcome, cap in summary.delegated:
+        for at, number, command, by, reason, outcome, cap in rows:
             parts.append(f'| {at} | #{number} | `{command}` | `{_code(by)}` | {_cell(reason)} '
                          f'| {_cell(outcome)} | {_cell(cap)} |')
         parts.append('')

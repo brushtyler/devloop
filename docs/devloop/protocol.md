@@ -526,6 +526,9 @@ How devloop merges in the `"strict"` and `"auto"` [merge modes](guide.md#merge-m
   of its comment. A [delegated merge](guide.md#delegated-merge) (#486) has the same record, with
   `delegation`: the command (`merge`), its author (`by`), the id of its comment (`comment`) and
   its `reason`; its section, "Mergiata da devloop su delega del supervisore", quotes the reason.
+  A [reserved merge of the coordinator](guide.md#the-reserved-merge-of-the-coordinator) (#529)
+  has the same record, whose `delegation` also carries `role: coordinator`; its section is
+  "Mergiata da devloop su comando del coordinatore".
 
 ## Supervision trace
 
@@ -591,7 +594,12 @@ remains (`daily_left`), after a `delegated_merge` event in the turn journal; a r
 record on `[report] issue`: `granted` with `N` in `value`, the UTC `day` it is for and the `cap`
 of that day with it, or `refused`; the `granted` records of a day are what raises its cap, and
 the same figures go in a ledger `event` `delegation_grant` with the `delegation`
-`merge_budget`. The record is
+`merge_budget`. A `/devloop merge` of the coordinator's identity (#529,
+[The reserved merge of the coordinator](guide.md#the-reserved-merge-of-the-coordinator)) has
+the same records, with `role: coordinator`, under the title "Merge riservato del coordinatore":
+`merged` carries the coordinator's own daily figures (`daily`, `daily_cap`, `daily_left`), after
+a `coordinator_merge` event in the turn journal, and, when the trust policy or `docs/adr/` asked
+for one, the id of the operator's `/devloop approve` that covered it (`approval`). The record is
 written before the labels change, so a
 lost label change never runs a retry twice. A command that does not apply (#321) gets the same
 record, `refused`, with the reason and how to resume in the comment: it spends the command, which
@@ -1333,7 +1341,12 @@ their format does not change. The journal is append-only, one JSON event per lin
   Written once every condition holds and before the merge, under the journal's lock in the same
   step as the check of the daily cap of the delegated merges, a cap of its own: past it nothing
   is written and the merge does not run ([Delegated merge](guide.md#delegated-merge)). It never
-  counts against the cap of the `grant` events. The events of the
+  counts against the cap of the `grant` events.
+- `coordinator_merge` (#529): a reserved merge of the coordinator, `/devloop merge` from the
+  coordinator's identity, with the data of a `delegated_merge`, written in the same way within
+  the coordinator's own daily cap
+  ([The reserved merge of the coordinator](guide.md#the-reserved-merge-of-the-coordinator)). It
+  never counts against the cap of the delegated merges nor of the `grant` events. The events of the
   [publication outbox](#publication-outbox) start with `publication`.
 - `config` (ADR 0006, R2, trace T1 of K1): the configuration the dispatcher read, at each start
   of `tick` and `run` (`when: start`, before any tick: a start whose record cannot be written

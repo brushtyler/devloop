@@ -1699,12 +1699,70 @@ the code:
 | `grant-round` | Delegated: as a trusted user's, so only on a `round_grantable` escalation to the supervisor and within the caps of the delegation ([Granting a review round](#granting-a-review-round)); on an escalation to the operator it is refused, as a trusted user's |
 | resume with the labels | Delegated: its `agent:ready` added again counts, as the supervisor's, only on issues opened by a trusted user or by a devloop app; its priority, dependency and implementer labels never count |
 | `approve`, `merge-budget`, `grant-budget`, `capacity`, `reconcile`, `trusted_users` and the keys of trust | Reserved to the operator in person: never the coordinator's. On an escalation they are answered as not applicable and spent; elsewhere they are ignored and logged, as anyone else's; `trusted_users` and the overlay are the operator's |
-| any other (`merge`, `escalate`, `finding`, `veto`, ...) | Refused: on an escalation answered as not applicable and spent, elsewhere ignored and logged. `merge` stays refused until its own part of the plan of #524 |
+| `merge` | The coordinator's reserved merge (#529): [The reserved merge of the coordinator](#the-reserved-merge-of-the-coordinator) |
+| any other (`escalate`, `finding`, `veto`, ...) | Refused: on an escalation answered as not applicable and spent, elsewhere ignored and logged |
 
 The coordinator writes as an agent, with the attribution header of AGENTS.md: its commands are
 read on the first line after the header. Like the supervisor's, its comments never reach a
 prompt as the operator's: only the dispatcher's records of what it applied do, and the request of
 a `/devloop fix`, as the supervisor's.
+
+#### The reserved merge of the coordinator
+
+The coordinator merges the ready PRs whose merge is the operator's that the
+[delegated merge](#delegated-merge) of the supervisor does not cover, after the quorum and with
+the operator's decision ([ADR 0002](../adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-22-modello-a-quattro-ruoli-524-527),
+"Merge riservato del coordinatore", #529). With `[roles.coordinator]`, its identity writes, as
+the first line after the attribution header of a comment on a PR in `agent:ready-to-merge` with
+the dispatcher's own `agent:needs-operator` and its comment "Il merge spetta all'operatore"
+([an operator merge](#ready-prs-whose-merge-is-the-operators)):
+
+```text
+/devloop merge <sha> <reason>
+```
+
+The dispatcher plans it in the [merge lane](#the-merge-lane), as the supervisor's, and verifies on
+`<sha>`, just before merging, the conditions of the delegated merge with these differences:
+
+- neither `[delegations] merge` nor the merge mode counts, of `[merge]` or of the PR: the PR waits
+  for the operator's merge for whatever reason (`[merge] mode = "off"`, a level `"off"`, a path
+  reserved to the operator, a `trust_policy` of the reviewers);
+- the files of the trust rule and of the delegations, `docs/adr/` (with any change, not only
+  added lines with a link) and a [step on the host](#step-on-the-host) refuse nothing: those are
+  the coordinator's cases. A PR with a step on the host is merged, and the step holds the
+  auto-pin until the agent of the host does it, as for every merge;
+- when a reviewer of the PR declared the trust policy touched (`operator_reason`
+  `trust_policy`, in any round), or the diff touches `docs/adr/`, the issue the PR closes must
+  have a valid `/devloop approve` of the operator: written in person by a trusted user after the
+  latest change of the issue's text and before devloop took it on, with the text of the decision
+  ("Approval with `/devloop approve`" in
+  [Changes to the trust policy](#changes-to-the-trust-policy)), read now
+  with the API. A decision recorded only in an ADR does not count;
+- each reviewer of the quorum, on its latest review of `<sha>`, has `operator_reason` `none` or
+  `decision`, never `trust_policy`, as for the delegated merge.
+
+What stays as for the delegated merge: `<sha>` the PR's head and the approved one, the quorum, no
+open finding, the acceptance map, `MERGEABLE` and `CLEAN`, the CI `pass`, the advisory review of
+`<sha>` with the opinion `ok` or `dubbi` (without `review_policy.advisory_reviewer` every
+coordinator's merge is refused), no work restarted after a conclave, no `/devloop hold` written
+after the command, and the labels read again just before the merge call. When a condition does
+not hold, or cannot be verified, the command is refused with why, spent, and the PR stays with the
+operator.
+
+With every condition true devloop merges the PR with the merger's app: the `merged` record
+carries the command, its author, its comment, its reason and `role: coordinator` in
+`delegation`, and its text says that the coordinator asked for it; the `supervision` record
+`merged`, with `role: coordinator`, names the `/devloop approve` that covered it (`approval`)
+when one was needed.
+
+**Daily cap.** At most **10** reserved merges of the coordinator per UTC day
+(`MAX_COORDINATOR_MERGES` in `devloop/supervision.py`), a cap of their own, apart from the
+delegated merges of the supervisor and from the grants. `[roles.coordinator] max_merges_per_day`
+may only lower it (0 turns the merge off); no command extends it. The cap is checked and the
+merge recorded in the [turn journal](protocol.md#turn-journal) (`coordinator_merge`) in one step,
+before the merge: without a journal that can be read no reserved merge runs. The
+[daily summary](#daily-summary) lists them, merged or refused, under "Merge riservati del
+coordinatore".
 
 ### Advisory review for the operator
 
@@ -1762,7 +1820,9 @@ the operator gets the opinion `dubbi` or `contrario` and a first residual risk t
   has one and to show its opinion, and for one decision only: with the
   [delegated merge](#delegated-merge) on (`[delegations] merge`), a `/devloop merge` of the
   supervisor on a head is refused unless the advisory review of that head has the opinion `ok`
-  or `dubbi`; with `contrario`, or none, the merge stays the operator's. It still stays out of
+  or `dubbi`, and so is the coordinator's
+  ([The reserved merge of the coordinator](#the-reserved-merge-of-the-coordinator), #529); with
+  `contrario`, or none, the merge stays the operator's. It still stays out of
   the quorum. The prompt and the texts devloop publishes say so. A failed action is never escalated:
   the PR is already the operator's. The exception is a turn refused by the
   block on [uncertain turns](protocol.md#turn-journal) (`block_uncertain_turns`): it
@@ -2240,6 +2300,11 @@ and writes nothing without `--publish`. The summary lists:
   the first line of its reason (which starts with the sha) and, once merged, how many of the
   day's cap it took; and every `/devloop merge-budget`, with its author, its reason and, once
   granted, the delegated merges it adds and the cap of its day;
+- the reserved merges of the coordinator (#529,
+  [The reserved merge of the coordinator](#the-reserved-merge-of-the-coordinator)), in a table
+  of their own with the same columns: every `/devloop merge` of the coordinator's identity the
+  dispatcher answered that day, merged or refused, and, once merged, how many of the
+  coordinator's daily cap it took;
 - the auto-pins that did not move `current` (#453): from the `pin` record of the alert on
   `[run].alert_issue`, one per commit, the UTC time, the commit of `origin/main` the running copy
   stays behind and the reason (the step of the smoke test, or the first line of the failed check;
