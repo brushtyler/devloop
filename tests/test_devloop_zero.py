@@ -144,10 +144,10 @@ class ZeroLevelTests(unittest.TestCase):
     def test_excluded_paths_stay_excluded_even_when_listed(self):
         listed = dataclasses.replace(ZPOLICY, zero_allowlist=(
             'docs/', 'devloop/prompts/', 'standards/', '.github/', 'schemas/', 'AGENTS.md',
-            'docs/AGENTS.md', 'ssdlc_grader.py', 'devloop/', '.GitHub/'))
+            'docs/AGENTS.md', 'scripts/agent-token.py', 'devloop/', '.GitHub/'))
         for path in ('devloop/prompts/review.md', 'standards/x.txt', '.github/workflows/t.yml',
-                     'schemas/recovery-grader-baseline.json', 'AGENTS.md', 'docs/AGENTS.md',
-                     'ssdlc_grader.py', 'devloop/policy.py', '.GitHub/x.yml'):
+                     'schemas/x.json', 'AGENTS.md', 'docs/AGENTS.md',
+                     'scripts/agent-token.py', 'devloop/policy.py', '.GitHub/x.yml'):
             with self.subTest(path=path):
                 result = self.level((path,), pol=listed)
                 self.assertGreaterEqual(result['level'], 1)

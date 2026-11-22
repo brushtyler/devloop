@@ -165,7 +165,7 @@ class ImplementTests(unittest.TestCase):
         """``_do_implement`` of issue 7 whose local tests fail with ``branch`` (the cases of the
         worktree), and with ``base`` on the base commit."""
         runner = FakeRunner(implemented(), implemented())
-        ws = FakeWS(files=['ssdlc_impact.py'], modules=['test_impact.py'], tests=tests)
+        ws = FakeWS(files=['impact.py'], modules=['test_impact.py'], tests=tests)
         ws.cases = {'issue-7': branch, 'issue-7-base': base}
         self.make(runner, ws, cfg)._do_implement(7)
         return runner
@@ -230,7 +230,7 @@ class ImplementTests(unittest.TestCase):
     def test_a_base_reproduced_failure_after_a_retry_stops_the_retries(self):
         # The first attempt also broke a test of its own; the second fixed it.
         runner = FakeRunner(implemented(), implemented())
-        ws = FakeWS(files=['ssdlc_impact.py'], modules=['test_impact.py'], tests=(False,))
+        ws = FakeWS(files=['impact.py'], modules=['test_impact.py'], tests=(False,))
         calls = []
 
         def cases(path):
@@ -283,7 +283,7 @@ class WaitTests(unittest.TestCase):
 
     def broken_comment(self):
         """The comment of an implementation of issue 7 whose failures the base reproduced."""
-        gh, ws = FakeGH(), FakeWS(files=['ssdlc_impact.py'], modules=['test_impact.py'],
+        gh, ws = FakeGH(), FakeWS(files=['impact.py'], modules=['test_impact.py'],
                                   tests=(False,))
         ws.cases = {'issue-7': BRANCH, 'issue-7-base': BRANCH}
         Dispatcher(CFG, gh, ws, FakeRunner(implemented()), log=lambda m: None)._do_implement(7)
@@ -319,7 +319,7 @@ class WaitTests(unittest.TestCase):
                 gh = WorkingGH(labels)
                 gh.comments = [self.broken_comment()]
                 gh.labels[7] = set(labels)
-                ws = FakeWS(files=['ssdlc_impact.py'], modules=['test_impact.py'])
+                ws = FakeWS(files=['impact.py'], modules=['test_impact.py'])
                 ws.base_head = lambda: 'e' * 40
                 runner = FakeRunner(implemented())
                 Dispatcher(CFG, gh, ws, runner, log=lambda m: None).tick()
@@ -339,7 +339,7 @@ class WaitTests(unittest.TestCase):
 
     def test_the_restart_implements_again(self):
         runner = FakeRunner(implemented())
-        gh, ws = FakeGH(), FakeWS(files=['ssdlc_impact.py'], modules=['test_impact.py'])
+        gh, ws = FakeGH(), FakeWS(files=['impact.py'], modules=['test_impact.py'])
         gh.comments = [self.broken_comment()]
         gh.labels[7] = {'agent:working'}
         Dispatcher(CFG, gh, ws, runner, log=lambda m: None)._do_implement(7)
@@ -391,7 +391,7 @@ class PreflightRestartTests(unittest.TestCase):
 
     def test_a_request_added_during_the_wait_is_checked_before_the_restart(self):
         gh = IssueGH()
-        ws = FakeWS(files=['ssdlc_impact.py'], modules=['test_impact.py'], tests=(False,))
+        ws = FakeWS(files=['impact.py'], modules=['test_impact.py'], tests=(False,))
         ws.cases = {'issue-7': BRANCH, 'issue-7-base': BRANCH}
         current = [BASE]
         ws.base_head = lambda: current[0]
@@ -685,7 +685,7 @@ class HostTestsTests(unittest.TestCase):
         on the base commit ``BASE``, whose CI has ``checks``."""
         self.gh = gh or MainGH({BASE: checks})
         self.runner = FakeRunner(implemented(), implemented())
-        self.ws = FakeWS(files=['ssdlc_impact.py'], modules=['test_impact.py'], tests=(False,))
+        self.ws = FakeWS(files=['impact.py'], modules=['test_impact.py'], tests=(False,))
         self.ws.cases = {'issue-7': BRANCH, 'issue-7-base': BRANCH}
         Dispatcher(cfg, self.gh, self.ws, self.runner, log=lambda m: None)._do_implement(7)
 
@@ -848,7 +848,7 @@ class HostTestsDuringTheWaitTests(unittest.TestCase):
 
     def test_an_implementation_escalates_once_the_ci_of_the_base_passes(self):
         gh = WaitingGH({BASE: PENDING})
-        ws = self.ws(files=['ssdlc_impact.py'], modules=['test_impact.py'], tests=(False,))
+        ws = self.ws(files=['impact.py'], modules=['test_impact.py'], tests=(False,))
         ws.cases = {'issue-7': BRANCH, 'issue-7-base': BRANCH}
         runner = FakeRunner(implemented())
         d = Dispatcher(CFG, gh, ws, runner, log=lambda m: None)

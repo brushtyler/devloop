@@ -17,7 +17,9 @@ or in the overlay, is a difference from it. A later change to the installation's
 R3's: it updates the frozen ``config.toml`` and ``effective.json`` with it, saying so (``source``
 ``updated`` lists those made so far: the implementer app of #407 and the capacity delegation of
 #412, merged beside R3; the keys by role of #499, which change the policy version too; the
-``second_reviewer`` of #521, ``parallel`` by default).
+``second_reviewer`` of #521, ``parallel`` by default). A change of ssdlc's own values updates it
+the same way, saying so: the restrictions, the test prefix and the documentation map of the SSDLC
+engine, removed with it (ADR 0007, R1, #538), which change the policy version too.
 
 ``repo``, ``trusted_users`` and ``[apps]`` left ``devloop/config.toml`` with R6 (#425) for the
 overlay, beside the agy commands (``ops/host/ssdlc/overlay.toml``): ``devloop token``, which
@@ -51,7 +53,6 @@ from helpers import ssdlc_project
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / 'ops' / 'host' / 'ssdlc' / 'check-equivalence.py'
-LIST = 'schemas/recovery-grader-baseline.json'
 # The reference of before R3, frozen at its last commit (see the module).
 FROZEN = REPO / 'tests' / 'fixtures' / 'ssdlc-pre-r3'
 FROZEN_COMMIT = '28eaf9455bad6ff52dcbdbc29ecc07d7dde83e2a'
@@ -200,7 +201,7 @@ class EquivalenceTests(unittest.TestCase):
         start, end = old.index('[tests]\n'), old.index('[review_policy]\n')
         for name, text, keys in (
                 ('none', old[:start] + old[end:], {'tests', 'local_tests', 'ci_rerun_unrelated'}),
-                ('prefixes', old.replace('source_prefixes = ["ssdlc_"]\n', ''), {'tests'})):
+                ('dir_modules', old.replace('"devloop/" = "test_devloop"\n', ''), {'tests'})):
             with self.subTest(name=name):
                 self.assertNotEqual(text, old)
                 project = tmp / f'{name}.toml'
@@ -297,14 +298,16 @@ class EquivalenceTests(unittest.TestCase):
             self.assertEqual(localtests.suite_summary(text), old.suite_summary(text))
 
     def test_the_restrictions_ssdlc_wants_guaranteed_are_on_the_host(self):
-        # ADR 0006, section 3.2, requirement 5: devloop/ and schemas/ sensitive, from the
-        # project file. core/ is not among them today, and R3 does not add it.
+        # ADR 0006, section 3.2, requirement 5: devloop/ sensitive, from the project file.
+        # core/ is not among them today, and R3 does not add it. schemas/, the engine's, and the
+        # list of the replay gate's baseline left with the engine (ADR 0007, R1).
         paths = self.after.review_policy.sensitive_paths
         self.assertIn('devloop/', paths)
-        self.assertIn('schemas/', paths)
+        self.assertNotIn('schemas/', paths)
         self.assertNotIn('core/', paths)
         self.assertEqual(ssdlc_project.project()['review_policy']['sensitive_paths'], list(paths))
-        self.assertEqual(self.after.pin.paths, ('devloop/', 'core/', LIST))
+        self.assertEqual(self.after.review_policy.sensitive_files, ())
+        self.assertEqual(self.after.pin.paths, ('devloop/', 'core/'))
 
     def test_without_the_overlay_keys_agy_loses_the_test_command(self):
         # The agents' commands derived from the project's tests are the overlay's alone (D2):
@@ -402,7 +405,7 @@ class InstallationTests(unittest.TestCase):
         self.assertFalse(hasattr(localtests, 'DEVLOOP_TESTS'))
         source = inspect.getsource(localtests)
         rules = ssdlc_project.project()['tests']
-        for rule in (*rules['source_prefixes'], *rules['dir_modules'].items()):
+        for rule in (*rules.get('source_prefixes', ()), *rules['dir_modules'].items()):
             for text in ([rule] if isinstance(rule, str) else rule):
                 self.assertNotIn(repr(text), source)
                 self.assertNotIn(f'"{text}"', source)
@@ -522,8 +525,6 @@ class CheckScriptTests(unittest.TestCase):
             for package in ('devloop', 'core'):
                 shutil.copytree(REPO / package, cls.tmp / side / package,
                                 ignore=shutil.ignore_patterns('__pycache__'))
-            (cls.tmp / side / LIST).parent.mkdir(parents=True)
-            shutil.copy(REPO / LIST, cls.tmp / side / LIST)
         shutil.copy(FROZEN / 'config.toml', cls.tmp / 'before' / 'devloop' / 'config.toml')
         # The installation of before R3 had the prompts of before R4, with the text of ssdlc;
         # the changes of the templates made since R4 are in both (``ssdlc_project.SINCE_R4``).
@@ -602,7 +603,7 @@ class CheckScriptTests(unittest.TestCase):
 
     def test_a_restriction_left_behind_is_a_difference(self):
         old = ssdlc_project.PROJECT.read_text(encoding='utf-8')
-        text = old.replace('"ssdlc_grader.py",', '')
+        text = old.replace('"scripts/agent-token.py", ', '')
         self.assertNotEqual(text, old)
         project = self.tmp / 'short.toml'
         project.write_text(text, encoding='utf-8')

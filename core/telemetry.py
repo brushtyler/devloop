@@ -1,9 +1,7 @@
 """Pure classification of the cost telemetry of one invocation (ADR 0004, P2-1).
 
-The rules of the engine's ``ssdlc.cost-telemetry`` schema v1 (``ssdlc_telemetry.py``, #164,
-and route admission, #165), without I/O, clock or identifiers: building a record stays in the
-engine, which does not use this module yet (step 6 of ADR 0001).
-``tests/test_core_equivalence.py`` checks that both give the same results.
+The rules of the engine's ``ssdlc.cost-telemetry`` schema v1 (#164, and route admission, #165;
+the engine is in the tag ``ssdlc-engine-final``, ADR 0007), without I/O, clock or identifiers.
 
 Three measures stay separate and are never added to one another: ``spend`` (a charge the
 provider measured or reported), ``estimate`` (an API-equivalent value estimated by a CLI, not a
@@ -20,7 +18,7 @@ TOKEN_FIELDS = ('input', 'cached_input', 'cache_creation', 'output', 'reasoning'
 TOKEN_SCOPES = ('per_turn', 'cumulative')
 ADAPTERS = {'claude': 'claude_cli', 'codex': 'codex_cli', 'agy': 'agy_cli', 'openrouter': 'openrouter_http'}
 QUOTA_SNAPSHOTS_VERSION = 1
-# The public form of a collected quota container (``ssdlc_quota``, #166).
+# The public form of a collected quota container (the engine's quota snapshots, #166).
 QUOTA_ROUTES = ('agy_cli', 'codex_cli', 'claude_cli')
 QUOTA_CONTAINER_FIELDS = ('availability', 'schema_version', 'status', 'route', 'snapshots', 'deltas', 'controls')
 PUBLIC_SNAPSHOT_FIELDS = ('schema', 'schema_version', 'provider', 'status', 'reason', 'source', 'observed_at',

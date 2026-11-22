@@ -1,2 +1,0 @@
-# Required for task-plan and quality-contract schema validation.
-jsonschema>=4.19,<5

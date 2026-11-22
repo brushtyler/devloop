@@ -23,7 +23,6 @@ The conclave never decides on:
 - budget and costs, extensions of budget and of rounds included;
 - credentials and permissions;
 - trust rules;
-- revisions of the replay gate baseline;
 - merge.
 
 If the block falls in this perimeter, do not write a resolution: set `reserved: true`, explain

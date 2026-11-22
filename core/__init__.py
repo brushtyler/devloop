@@ -1,4 +1,5 @@
-"""Pure validators and calculations shared by the local engine and devloop (ADR 0001, ADR 0004).
+"""Pure validators and calculations of devloop, written on the rules of the SSDLC engine (ADR
+0001, ADR 0004).
 
 ``core`` is the only package devloop may import besides the standard library and itself
 (``tests/test_devloop_boundary.py``). Its rules:
@@ -6,10 +7,10 @@
 - **pure functions only**: no I/O, no clock, no randomness, no state kept between calls; a
   caller passes in everything a function reads (the profile, the state, the current time, a
   schema read as data);
-- **standard library only**, and never an import of ``ssdlc_*``, ``orchestrator`` or ``devloop``;
-- **the engine is unchanged**: these functions are written next to it, not extracted from it,
-  and ``tests/test_core_equivalence.py`` checks that they give the engine's results on the same
-  cases. The engine will converge on ``core`` only in step 6 of ADR 0001.
+- **standard library only**, and never an import of the engine or of ``devloop``;
+- **written next to the engine**, not extracted from it: until the engine left ``main`` (ADR
+  0007, R1; it stays in the tag ``ssdlc-engine-final``) a test checked that these functions give
+  the engine's results on the same cases.
 
 Modules:
 

@@ -227,7 +227,8 @@ class LayoutTests(unittest.TestCase):
         guide = ' '.join((OPS / 'README.md').read_text().split())
         for phrase in ('## Un altro progetto', '**devloop nel repository gestito**',
                        "**Sorgente dell'installazione a parte** (ADR 0006, R1)", '`SOURCE_REF`',
-                       '`scripts/devloop-pinned`', '`core/`', '`schemas/`', 'devloop/prompts/',
+                       '`scripts/devloop-pinned`', '`core/`', '`review_policy.sensitive_path_lists`',
+                       'devloop/prompts/',
                        '## Migrazione su un\'altra macchina', 'host/migrate.md',
                        'Ubuntu 26.04 LTS su aarch64', 'shellcheck', 'tokens.md'):
             self.assertIn(phrase, guide)
@@ -714,8 +715,8 @@ class ManifestTests(unittest.TestCase):
         for check in checks:
             self.assertEqual(check['integration_id'], 15368)
             self.assertIn(f'name: {check["context"]}\n', workflow)
-        self.assertEqual({c['context'] for c in checks},
-                         {'Unit Tests (Python 3.12)', 'Isolated A5 Recovery Benchmark'})
+        # The isolated recovery gate of the SSDLC engine left with it (ADR 0007, R1, #538).
+        self.assertEqual({c['context'] for c in checks}, {'Unit Tests (Python 3.12)'})
         self.assertEqual(ruleset['bypass_actors'],
                          [{'actor_id': 5, 'actor_type': 'RepositoryRole', 'bypass_mode': 'always'}])
         guide = (OPS / 'README.md').read_text()

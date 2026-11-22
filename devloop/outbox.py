@@ -39,7 +39,7 @@ drops or threshold, also after a restart; once it is published, ``record_alerted
 ``publication_signalled`` its drops are still missing. Failed for certain or dropped, it covers
 nothing: what it named is reported again, the dropped alert among the drops.
 
-The rules, on the model of ``ProjectionOutbox`` (ssdlc_feedback_delivery.py):
+The rules, on the model of ``ProjectionOutbox`` of the SSDLC engine (tag ``ssdlc-engine-final``):
 
 - **No POST repeated on an uncertain outcome.** A write that raises ``GitHubUncertain`` is
   reconciled (``_reconcile``): a comment with ``ports.reconcile_comment``, on the exact body and

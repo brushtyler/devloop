@@ -440,7 +440,7 @@ keys, and the installation sets none. Every key is optional:
 | Key | Value | Without it |
 |---|---|---|
 | `selection` | The installation's strategy, by name. The only one is `"python-unittest-modules"` | `local_tests = "changed"` is `"full"`: the project loses no test, only time. `ci_rerun_unrelated` is off |
-| `source_prefixes` | Parameter of the selection: name prefixes, letters, digits and `_` (ssdlc: `["ssdlc_"]`) | No such rule |
+| `source_prefixes` | Parameter of the selection: name prefixes, letters, digits and `_` (ssdlc: none since ADR 0007, R1) | No such rule |
 | `[tests.dir_modules]` | Parameter of the selection: `"<directory>/" = "test_<prefix>"`, a relative directory and the prefix of test module names (ssdlc: `"devloop/" = "test_devloop"`) | No such rule |
 | `ci_log_format` | The format of the CI logs, by name. The only one is `"run-tests"`, what `scripts/run-tests.py` prints | `ci_rerun_unrelated` is off, and the [summary of the CI](#summary-of-the-ci-in-the-prompts) has no suite lines: no job log is read |
 
@@ -453,8 +453,8 @@ worktree, are:
 - every changed or added `tests/test_*.py`;
 - for every other changed `<module>.py` (or `<package>/<module>.py`), the modules
   `test_<module>*.py`; for `<prefix><name>.py`, with `<prefix>` one of `source_prefixes`, also
-  `test_<name>*.py` (with ssdlc's, `ssdlc_impact.py` selects `test_ssdlc_impact*.py` and
-  `test_impact*.py`);
+  `test_<name>*.py` (with the prefix `lib_`, `pkg/lib_impact.py` selects `test_lib_impact*.py`
+  and `test_impact*.py`);
 - for any file under a directory of `[tests.dir_modules]`, the modules whose name starts with its
   prefix (with ssdlc's, any file under `devloop/` selects `tests/test_devloop*.py`).
 
@@ -637,19 +637,19 @@ other incomplete answer.
 ### Documentation map
 
 `[docs] map` (#203) maps code paths to the documents that describe them, so that the documents
-follow the code. It is the documentation phase of devloop, the `07-docs` of an SSDLC run:
+follow the code. It is the documentation phase of devloop:
 
 ```toml
 [docs.map]
 "devloop/" = ["docs/devloop/guide.md"]
-"orchestrator.py" = ["docs/getting-started.md", "docs/architecture.md"]
-"schemas/quality-contract.schema.json" = ["docs/configuration.md"]
+"devloop/ports.py" = ["docs/architecture.md"]
+"scripts/run-tests.py" = ["docs/development.md"]
 ```
 
 A key is a directory prefix ending in `/` (it covers every file under it) or a file, matched
 exactly; both are relative to the root. A value is a non-empty list of documents. devloop stops at
 startup on an absolute path, an empty key, list or document, a `.`, `..` or empty segment, a
-backslash or a pattern character (`*`, `?`, `[`, `]`: `ssdlc_feedback*.py` is written as one key
+backslash or a pattern character (`*`, `?`, `[`, `]`: `dispatch_*.py` is written as one key
 per file), and a directory given as a document (a value ending in `/`). Loading the configuration
 checks its shape only, not whether the documents exist (#210): they belong to the repository
 devloop works on, not to the installation, and a [pin](guide.md#pin) does not extract them into the copy.
@@ -1128,8 +1128,9 @@ Sensitive paths are configurable under `[review_policy]`: `sensitive_paths` (an 
 directory or a file at the root) plus the files listed in the `files` object of each JSON file in
 `sensitive_path_lists`. Neither has a default since ADR 0006, R3: they are restrictions of the
 managed repository, which its [project file](#project-file) adds and the overlay may extend.
-ssdlc's project file lists `devloop/`, `AGENTS.md`, `CLAUDE.md`, `.github/`, `schemas/` and the
-modules below, and the list `schemas/recovery-grader-baseline.json`. The policy comes from the running dispatcher and its
+ssdlc's project file lists `devloop/`, `AGENTS.md`, `CLAUDE.md`, `.github/` and the scripts
+below, and no list: the paths of the SSDLC engine and the list of its replay gate's baseline left
+with the engine (ADR 0007, R1). The policy comes from the running dispatcher and its
 configuration: the lists are read at startup from the root of the running installation (the
 pinned checkout, see [Run from a pinned installation](guide.md#run-from-a-pinned-installation)), never
 from a PR branch, so a PR that changes `devloop/config.toml`, the prompts or the lists cannot
@@ -1167,15 +1168,11 @@ implementation](guide.md#readiness-check-before-implementation)).
 
 The criterion for a sensitive path: **the code that decides permissions, fencing and
 authorizations goes to level 2**, besides devloop itself and the agents' instructions. So
-ssdlc's project file adds the ssdlc security modules (#171): writer
-fencing and locks (`ssdlc_writer_gate.py`, `ssdlc_role_fencing.py`,
-`ssdlc_container_holder.py`, `ssdlc_locks.py`, `ssdlc_fencing_proof.py`), authorized transitions and gates
-(`ssdlc_transitions.py`, `ssdlc_replay_gate.py`, `ssdlc_grader.py`), delegations and
-admissions (`ssdlc_feedback_delegation.py`, `ssdlc_feedback_admission.py`,
-`ssdlc_usage_admission.py`) and the app tokens (`scripts/agent-token.py`,
-`scripts/supervisor-token.py`). A PR that changes
-only other modules, such as `ssdlc_impact.py`, stays at level 1. An entry is only a path: a
-listed file that does not exist yet is no error, and a PR that adds it gets level 2.
+ssdlc's project file adds the scripts of the app tokens (`scripts/agent-token.py`,
+`scripts/supervisor-token.py`); until ADR 0007, R1 it added the security modules of the SSDLC
+engine too (#171), which left `main` with it. A PR that changes only other files stays at
+level 1. An entry is only a path: a listed file that does not exist yet is no error, and a PR
+that adds it gets level 2.
 
 **Level 1** works as before: one reviewer, the PR's recorded reviewer or else the first of the
 pool, never the PR's implementer. **Level 2** needs two independent reviewers (#111, below).
@@ -1363,8 +1360,7 @@ A head gets level 0 only when all of these hold:
   sides of a rename, deletions) is in `allowlist`: under a listed directory (`docs/`) or a
   listed file. A Markdown file (`.md`, `.markdown`, `.mdx`) counts only when listed by its exact
   path, so `docs/` covers none of the Markdown files under it. A symlink never counts. These are
-  excluded even when listed: `AGENTS.md` and `CLAUDE.md` at any depth and in any case, `devloop/prompts/`, `standards/`, `.github/`, `schemas/` (with the replay gate
-  baseline) and every sensitive path. Paths are compared exactly as Git names them, spaces
+  excluded even when listed: `AGENTS.md` and `CLAUDE.md` at any depth and in any case, `devloop/prompts/`, `standards/`, `.github/`, `schemas/` and every sensitive path. Paths are compared exactly as Git names them, spaces
   included: only the configured entries are trimmed. One path outside the allowlist keeps the
   level computed above.
 - **Not refused before.** The level is computed again on every head. When a receipt recorded on

@@ -149,8 +149,10 @@ class PrecedenceTests(FilesCase):
                       overlay='[review_policy.zero]\nallowlist = ["docs/"]\n')
 
     def test_sensitive_path_lists_add_too(self):
-        data = config.compose(config.read_toml(self.base),
-                              {'review_policy': {'sensitive_path_lists': ['extra.json']}})
+        # ssdlc lists none since the engine left (ADR 0007, R1): the base here lists one.
+        base = config.read_toml(self.base)
+        base['review_policy']['sensitive_path_lists'] = [LIST]
+        data = config.compose(base, {'review_policy': {'sensitive_path_lists': ['extra.json']}})
         self.assertEqual(data['review_policy']['sensitive_path_lists'], [LIST, 'extra.json'])
 
 

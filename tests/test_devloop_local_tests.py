@@ -28,9 +28,14 @@ def cmd(*modules):
     return module_command(list(modules))
 
 
+# ssdlc's ``[tests]`` (ADR 0006, R5) with the prefix of the SSDLC engine's modules it had until
+# the engine left (ADR 0007, R1): the rules these tests exercise, a source prefix among them.
+PREFIXED = dataclasses.replace(CFG.tests, source_prefixes=('ssdlc_',))
+
+
 def select(changed, modules=MODULES):
-    """The selection with ssdlc's ``[tests]`` (ADR 0006, R5)."""
-    return select_modules(changed, modules, CFG.tests)
+    """The selection with ``PREFIXED``."""
+    return select_modules(changed, modules, PREFIXED)
 
 
 class SelectionTests(unittest.TestCase):
@@ -105,8 +110,8 @@ class ProjectTestsConfigTests(unittest.TestCase):
         return dict(data, **keys)
 
     def test_ssdlc_declares_the_strategy_of_before_with_its_rules_and_format(self):
+        # Without the prefix of the engine's modules since the engine left (ADR 0007, R1).
         self.assertEqual(CFG.tests, Tests(selection='python-unittest-modules',
-                                          source_prefixes=('ssdlc_',),
                                           dir_modules=(('devloop/', 'test_devloop'),),
                                           ci_log_format='run-tests'))
 
@@ -211,7 +216,7 @@ class DispatcherTests(unittest.TestCase):
     def make(self, runner, ws, mode='changed', ci='pass'):
         self.gh, self.ws = FakeGH(ci=ci), ws
         self.logs = []
-        cfg = dataclasses.replace(CFG, local_tests=mode)
+        cfg = dataclasses.replace(CFG, local_tests=mode, tests=PREFIXED)
         return Dispatcher(cfg, self.gh, ws, runner, log=self.logs.append)
 
     def implement(self, files, mode='changed', tests=(True,)):
