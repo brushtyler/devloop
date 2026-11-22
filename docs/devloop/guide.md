@@ -2,9 +2,9 @@
 
 devloop moves issues through implementation, independent review and fixes, so that a human only
 decides what starts and, unless a [merge mode](#merge-modes) lets devloop merge, what gets
-merged. It is the SSDLC component that works on GitHub issues and PRs, next to the local engine
-(see the [README](../../README.md#components)); today it is configured for this repository only,
-and it never touches local-engine runs or the main checkout's working tree.
+merged (see the [README](../../README.md#components)). The local SSDLC engine that it worked
+next to left `main` with R1 of [ADR 0007](../adr/0007-da-ssdlc-a-devloop.md). Today devloop is
+configured for this repository only, and it never touches the main checkout's working tree.
 
 This page is for the operator and the supervisor. Configuration keys, review levels and
 identities are in the [reference](reference.md), markers and records in the
@@ -739,7 +739,8 @@ of 200 characters each: an answer beyond these limits is a failed contribution.
 
 **Reserved perimeter.** The conclave never decides on rollout and activation on real runs, budget
 and costs (extensions of budget and of rounds included), credentials and permissions, trust
-rules, revisions of the replay gate baseline, or merge. A member that flags it writes the
+rules, or merge (the revisions of the replay gate baseline left the list with the SSDLC engine,
+ADR 0007, R1). A member that flags it writes the
 question for the operator and the options. When the proposer flags it, the conclave ends at once:
 no proposal and no votes.
 
@@ -1173,8 +1174,9 @@ one wins; without one, the latest that does not apply is answered.
   implementer starts. An issue with an `operator_decision` gap is refused and goes to
   `agent:needs-operator`. The readiness prompt tells the checker that a gap touching a decision ADR
   0001 reserves to the operator (rollout, budget and rounds, credentials and permissions, trust
-  rules, the replay gate baseline, the merge mode, the continuous loop and automatic pinning, ADR
-  approval), or a change to `operator_only_paths`, is always `operator_decision`.
+  rules, the merge mode, the continuous loop and automatic pinning, ADR approval; the replay gate
+  baseline left the list with the SSDLC engine, ADR 0007, R1), or a change to
+  `operator_only_paths`, is always `operator_decision`.
 - `/devloop decide <decisions>` decides the gaps of a `preflight_default` escalation otherwise
   than `accept-defaults` does: the supervisor may accept some defaults and replace others. The
   decisions are the rest of the comment, from the text after the command on its first line to

@@ -28,9 +28,7 @@ class MapConfigTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)
-        # The list file the policy reads, and two documents.
-        (self.root / 'schemas').mkdir()
-        (self.root / 'schemas/recovery-grader-baseline.json').write_text('{"files": {}}')
+        # Two documents.
         (self.root / 'docs').mkdir()
         (self.root / 'docs/a.md').write_text('a')
         (self.root / 'README.md').write_text('r')
@@ -61,72 +59,22 @@ class MapConfigTests(unittest.TestCase):
         # #246: the development guide (ADR 0003, I9) describes the test runner.
         self.assertEqual(CFG.docs.documents(['scripts/run-tests.py']),
                          {'docs/development.md': ['scripts/run-tests.py']})
-        # #242: the README is an index (ADR 0003, I6); the engine maps to the getting-started guide.
-        for path in ('orchestrator.py', 'ssdlc_tasks.py', 'ssdlc_controller.py'):
-            self.assertEqual(CFG.docs.documents([path]),
-                             {'docs/getting-started.md': [path], 'docs/architecture.md': [path]})
-        self.assertEqual(CFG.docs.documents(['setup-ssdlc.sh']),
-                         {'docs/getting-started.md': ['setup-ssdlc.sh'],
-                          'docs/configuration.md': ['setup-ssdlc.sh']})
+        # #242: the README is an index (ADR 0003, I6).
         self.assertNotIn('README.md', {d for _, docs in CFG.docs.entries for d in docs})
-        # #245: the recovery transitions also map to the recovery index (ADR 0003, I8).
-        self.assertEqual(CFG.docs.documents(['ssdlc_scope_amendments.py']),
-                         {'docs/scope-amendments.md': ['ssdlc_scope_amendments.py'],
-                          'docs/recovery.md': ['ssdlc_scope_amendments.py']})
-        for path in ('ssdlc_continuations.py', 'ssdlc_historical.py'):
-            self.assertEqual(CFG.docs.documents([path]),
-                             {'docs/continuations.md': [path],
-                              'docs/historical-reconciliation.md': [path],
-                              'docs/recovery.md': [path]})
         self.assertNotIn('docs/devloop.md', {d for _, docs in CFG.docs.entries for d in docs})
-        for _, documents in CFG.docs.entries:
+        # Every key and every document of the map is a path of the repository: the entries of
+        # the SSDLC engine (its modules, setup-ssdlc.sh, schemas/) left with it (ADR 0007, R1).
+        for key, documents in CFG.docs.entries:
+            self.assertTrue((REPO / key).exists(), key)
             for document in documents:
                 self.assertTrue((REPO / document).is_file(), document)
-        # No glob in the keys: the feedback modules are listed one by one.
-        self.assertEqual(sorted(k for k, _ in CFG.docs.entries if k.startswith('ssdlc_feedback')),
-                         sorted(p.name for p in REPO.glob('ssdlc_feedback*.py')))
 
-    def test_the_remaining_modules_and_each_schema_map_to_their_documents(self):
-        # #247 (ADR 0003, I10): each entry checked against the module or schema it covers.
+    def test_the_scripts_map_to_their_documents(self):
+        # #247 (ADR 0003, I10): each entry checked against the script it covers. The modules
+        # and the schemas of the SSDLC engine left with it (ADR 0007, R1).
         expected = {
             'scripts/agent-token.py': ('AGENTS.md', 'docs/devloop/reference.md'),
-            'ssdlc_reconciliation.py': ('docs/historical-reconciliation.md', 'docs/recovery.md'),
-            'ssdlc_transitions.py': ('docs/recovery.md',),
-            'ssdlc_preparations.py': ('docs/continuations.md',
-                                      'docs/historical-reconciliation.md',
-                                      'docs/scope-amendments.md'),
-            'ssdlc_supervisor.py': ('docs/supervision.md', 'docs/writer-fencing.md'),
-            'ssdlc_bounce.py': ('docs/bounce-preview.md',),
-            'ssdlc_corrective.py': ('docs/bounce-preview.md', 'docs/native-gate-convergence.md'),
-            'ssdlc_corrective_owners.py': ('docs/bounce-preview.md', 'docs/developer-feedback.md'),
-            'ssdlc_candidates.py': ('docs/candidate-capture.md',),
-            'ssdlc_bootstrap.py': ('docs/task-mode.md', 'docs/native-gate-convergence.md'),
-            'ssdlc_design.py': ('docs/task-mode.md', 'docs/bounded-recovery.md'),
-            'ssdlc_planning.py': ('docs/task-mode.md',),
-            'ssdlc_requirements.py': ('docs/task-mode.md',),
-            'ssdlc_gate_reports.py': ('docs/native-gate-convergence.md', 'docs/task-mode.md'),
-            'ssdlc_findings.py': ('docs/native-gate-convergence.md', 'docs/task-mode.md'),
-            'ssdlc_usage_admission.py': ('docs/bounded-recovery.md', 'docs/cost-telemetry.md',
-                                         'docs/recovery.md'),
-            'ssdlc_replay_gate.py': ('docs/bounded-recovery.md', 'docs/development.md'),
-            'ssdlc_grader.py': ('docs/bounded-recovery.md',),
-            'ssdlc_owner_revalidation.py': ('docs/developer-feedback.md', 'docs/task-mode.md'),
-            'ssdlc_impact.py': ('docs/developer-feedback.md', 'docs/task-mode.md'),
-            'ssdlc_operator_recovery.py': ('docs/developer-feedback.md',),
-            'ssdlc_amendments.py': ('docs/scope-amendments.md',),
-            'ssdlc_verification_repair.py': ('docs/scope-amendments.md', 'docs/recovery.md'),
-            'ssdlc_deadline_extensions.py': ('docs/scope-amendments.md',),
-            'ssdlc_limit_extensions.py': ('docs/limit-extensions.md', 'docs/recovery.md'),
-            'schemas/limit-extension-proposal.schema.json': ('docs/limit-extensions.md',),
-            'schemas/limit-extension-authorization.schema.json': ('docs/limit-extensions.md',),
-            'ssdlc_locks.py': ('docs/writer-fencing.md',),
-            'schemas/quality-contract.schema.json': ('docs/configuration.md',),
-            'schemas/recovery-grader-baseline.json': ('docs/bounded-recovery.md',
-                                                      'docs/devloop/reference.md'),
-            'schemas/recovery-limits.schema.json': ('docs/bounded-recovery.md',
-                                                    'docs/historical-reconciliation.md'),
-            'schemas/corrective-transaction.schema.json': ('docs/bounce-preview.md',
-                                                           'docs/native-gate-convergence.md'),
+            'scripts/supervisor-token.py': ('AGENTS.md', 'docs/devloop/reference.md'),
         }
         entries = dict(CFG.docs.entries)
         for path, documents in expected.items():
@@ -135,21 +83,7 @@ class MapConfigTests(unittest.TestCase):
                 self.assertEqual(entries[path], documents)
                 # No prefix adds a document: the entry alone gives the documents of the file.
                 self.assertEqual(sorted(CFG.docs.documents([path])), sorted(documents))
-        # One key per schema, towards the document that uses it; no "schemas/" prefix, which
-        # would add its document to every schema.
-        self.assertNotIn('schemas/', entries)
-        self.assertEqual(sorted(k for k in entries if k.startswith('schemas/')),
-                         sorted(f'schemas/{p.name}' for p in (REPO / 'schemas').iterdir()
-                                if p.is_file()))
-        # The documents of the map name the schemas they describe by file.
-        for key in ('plan', 'task-plan-review', 'design-review', 'candidate-capture',
-                    'continuation-snapshot', 'reconciliation-request',
-                    'reconciliation-authorization', 'recovery-limits', 'quality-contract',
-                    'limit-extension-proposal', 'limit-extension-authorization'):
-            schema = f'schemas/{key}.schema.json'
-            with self.subTest(schema=schema):
-                self.assertTrue(any(schema in (REPO / document).read_text()
-                                    for document in entries[schema]), schema)
+        self.assertEqual([k for k in entries if k.startswith(('ssdlc_', 'schemas/'))], [])
 
     def test_a_valid_map_loads_in_order(self):
         docs = self.parse({'devloop/': ['docs/a.md'], 'x.py': ['README.md', 'docs/a.md']})
@@ -198,8 +132,6 @@ class MapConfigTests(unittest.TestCase):
         empty = tempfile.TemporaryDirectory()
         self.addCleanup(empty.cleanup)
         root = Path(empty.name)
-        (root / 'schemas').mkdir()
-        (root / 'schemas/recovery-grader-baseline.json').write_text('{"files": {}}')
         self.assertEqual(config.parse_config(config_data(), root).docs, CFG.docs)
 
     def test_the_overlay_may_set_the_map(self):
@@ -273,8 +205,7 @@ class PromptTests(unittest.TestCase):
         self.assertIn('- `devloop/` → `docs/devloop/guide.md`', prompt)
         self.assertIn('- `devloop/dispatcher.py` → `docs/devloop/reference.md`, '
                       '`docs/devloop/protocol.md`', prompt)
-        self.assertIn('- `orchestrator.py` → `docs/getting-started.md`, `docs/architecture.md`',
-                      prompt)
+        self.assertIn('- `scripts/run-tests.py` → `docs/development.md`', prompt)
         self.assertLess(prompt.index('## Documentation map'), prompt.index('## Issue #7'))
 
     def test_a_later_implement_attempt_gets_the_documents_of_its_diff(self):
@@ -324,12 +255,12 @@ class PromptTests(unittest.TestCase):
     def test_a_document_missing_from_the_worktree_is_omitted_with_a_log_line(self):
         # #210: the review lists only the mapped documents the worktree holds.
         # devloop/watch.py is covered only by the generic devloop/ entry, the guide.
-        files = ['devloop/watch.py', 'orchestrator.py']
+        files = ['devloop/watch.py', 'scripts/run-tests.py']
         guide = 'docs/devloop/guide.md'
         line = f'  docs.map: {guide} is not a file of the worktree; omitted from the prompt'
         prompt = self.review(files, absent=(guide,))
         self.assertNotIn(guide, prompt)
-        self.assertIn('- `docs/getting-started.md`, mapped from `orchestrator.py`', prompt)
+        self.assertIn('- `docs/development.md`, mapped from `scripts/run-tests.py`', prompt)
         self.assertIn(BLOCKING, prompt)
         self.assertIn(line, self.logs)
         # Every mapped document missing: no section at all.
@@ -345,16 +276,17 @@ class PromptTests(unittest.TestCase):
 
     def test_the_whole_map_omits_the_documents_missing_from_the_worktree(self):
         guide = 'docs/devloop/guide.md'
+        protocol = 'docs/devloop/protocol.md'
         first, second = self.implement(['devloop/watch.py'], tests=(False, True),
-                                       absent=(guide, 'docs/architecture.md'))
+                                       absent=(guide, protocol))
         self.assertIn('## Documentation map', first)
         self.assertNotIn(guide, first)
         self.assertNotIn('`devloop/` →', first)  # a key left with no document
-        self.assertNotIn('`devloop/ports.py` →', first)
-        self.assertIn('- `orchestrator.py` → `docs/getting-started.md`\n', first)
+        self.assertNotIn('`devloop/conclave.py` →', first)
+        self.assertIn('- `devloop/dispatcher.py` → `docs/devloop/reference.md`\n', first)
         self.assertNotIn(guide, second)
         self.assertNotIn('## Documents mapped to the diff', second)
-        for document in ('docs/architecture.md', guide):
+        for document in (protocol, guide):
             self.assertIn(f'  docs.map: {document} is not a file of the worktree; omitted from '
                           'the prompt', self.logs)
 
