@@ -10,7 +10,10 @@ from pathlib import Path
 from core import budget, schema, telemetry
 
 ROOT = Path(__file__).resolve().parents[1]
-PROFILE_SCHEMA = json.loads((ROOT / 'schemas' / 'recovery-limits.schema.json').read_text(encoding='utf-8'))
+# The engine's schema of the limits profile, kept as a fixture of core's tests when the engine's
+# schemas/ left main (ADR 0007, R1).
+PROFILE_SCHEMA = json.loads((ROOT / 'tests' / 'fixtures' / 'core' / 'recovery-limits.schema.json')
+                            .read_text(encoding='utf-8'))
 REASON = 'Subscription CLI bounded by the invocation caps'
 
 

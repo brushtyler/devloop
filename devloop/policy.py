@@ -50,8 +50,8 @@ MIN_LEVEL, MAX_LEVEL = 1, 2
 SENSITIVE_LEVEL = 2
 ZERO_LEVEL = 0
 # Never in the level-0 allowlist, even when listed (#107): devloop's prompts, the standards, CI
-# workflows and schemas (the replay gate baseline among them), besides the sensitive paths; and
-# agent instructions at any depth, compared without case.
+# workflows and schemas, besides the sensitive paths; and agent instructions at any depth,
+# compared without case.
 ZERO_EXCLUDED = ('devloop/prompts/', 'standards/', '.github/', 'schemas/')
 ZERO_EXCLUDED_NAMES = ('agents.md', 'claude.md')
 # Markdown files are in the allowlist only when listed by their exact path.

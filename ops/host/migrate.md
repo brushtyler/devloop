@@ -1132,6 +1132,78 @@ che contiene #499: gli agent di `config.toml` dichiarano le app `implementer`, `
 `agy`, e il suo overlay deve avere le loro tabelle `[apps.*]`, con le chiavi nella sua
 `key_dir`.
 
+## Il motore SSDLC esce da `main` (ADR 0007, R1, #538)
+
+Con R1 dell'[ADR 0007](../../docs/adr/0007-da-ssdlc-a-devloop.md) il motore SSDLC (l'orchestratore
+e i suoi moduli, gli schemi e gli standard, lo script di setup, i suoi test e documenti) esce da
+`main`. Resta nella storia e nel tag `ssdlc-engine-final`. Con il motore escono i vincoli che
+portava nel file di progetto di ssdlc: i suoi percorsi sensibili, la lista della baseline del
+replay gate (`sensitive_path_lists`), il prefisso dei suoi moduli in `[tests]`
+(`source_prefixes`) e le sue voci di `[docs.map]`. Il codice di devloop non cambia: le chiavi
+tolte sono facoltative, e la copia in uso accetta già il file di progetto nuovo.
+
+I passi sono dell'operatore, nell'ordine. I primi due si fanno **prima del merge** della PR di R1.
+
+1. **Il tag**, dal checkout dell'operatore, con le sue credenziali (devloop non crea tag). Va
+   sull'ultimo commit di `main` che contiene il motore, il base della PR di R1: finché la PR non
+   è mergiata è `origin/main`, se nel frattempo non è avanzato con altri merge.
+
+   ```bash
+   cd /root/repos/ssdlc && git fetch origin
+   base=$(git rev-parse origin/main)
+   git cat-file -e "$base:orchestrator.py" && echo "contiene il motore: $base"
+   git tag -a ssdlc-engine-final "$base" -m "SSDLC engine, frozen (ADR 0007)"
+   git push origin ssdlc-engine-final
+   ```
+
+   Se la PR è già mergiata, il base è il primo genitore del suo commit di merge
+   (`git rev-parse <merge>^1`); `git cat-file -e` deve trovare `orchestrator.py` anche lì.
+2. **La CI e il ruleset**, con una PR dell'operatore su `.github/` (devloop non tocca
+   `.github/`, `protected_paths`): da `.github/workflows/test.yml` si toglie il job
+   `recovery-benchmark` (`Isolated A5 Recovery Benchmark`), che esegue il replay gate del motore,
+   e il ruleset di `main` non lo richiede più: lo si applica da
+   [`ops/github/ruleset-main.json`](../github/ruleset-main.json) come in
+   [ops/README.md](../README.md#3-ruleset-del-branch-principale). Senza questo passo il check
+   obbligatorio della PR di R1 fallisce, e dopo il merge resterebbe atteso su ogni PR.
+3. **Il file di progetto sull'host**, a loop fermo, dopo il merge e prima del pin del commit di
+   R1: la copia di R1 non ha più `schemas/recovery-grader-baseline.json`, e il suo pin fallisce
+   (`… is not a file`) finché il file di progetto lo elenca in `sensitive_path_lists`. Come root:
+
+   ```bash
+   sudo systemctl stop devloop
+   install -o devloop -m 600 /home/devloop/ssdlc/.ssdlc/devloop/project.toml \
+       /home/devloop/ssdlc/.ssdlc/devloop/project.toml.prima-r1
+   sudo -u devloop -H "${EDITOR:-vi}" /home/devloop/ssdlc/.ssdlc/devloop/project.toml
+   ```
+
+   Nel file di progetto, come nell'esempio [`ops/host/ssdlc/project.toml`](ssdlc/project.toml):
+   `sensitive_paths` perde `schemas/` e i moduli `ssdlc_*.py`; `sensitive_path_lists` si toglie;
+   in `[tests]` si toglie `source_prefixes`; in `[docs.map]` si tolgono le voci dei moduli del
+   motore, del suo script di setup e di `schemas/`. Se il file sull'host è l'esempio senza
+   modifiche locali, si può copiare l'esempio intero come al passo 3 della [migrazione di
+   R3](#migrazione-di-r3-su-un-host-attivo).
+4. **Il pin a mano** del commit di R1 e il riavvio. Come utente `devloop`
+   (`sudo -u devloop -i`): `cd /home/devloop/ssdlc && python3 scripts/devloop-pinned pin
+   origin/main`; poi, come root, `sudo systemctl start devloop`. La PR di R1 dichiara il passo
+   (`host_step`): con `[pin] auto = true` devloop non fa il pin automatico finché non lo fa
+   l'operatore.
+
+L'hash del file di progetto cambia ed entra nella versione della policy: le approvazioni delle PR
+aperte decadono. Meglio con la coda vuota.
+
+**Rollback.** Prima il pin della copia di prima, poi il file di progetto di prima, nell'ordine: la
+copia di prima accetta il file nuovo, mentre la copia di R1 non parte con il file di prima (la
+lista manca). A loop fermo, come utente `devloop`:
+
+```bash
+cd /home/devloop/ssdlc
+python3 scripts/devloop-pinned pin <sha12>
+cp -p .ssdlc/devloop/project.toml.prima-r1 .ssdlc/devloop/project.toml
+```
+
+Poi, come root, `sudo systemctl start devloop`. `<sha12>` è la copia di prima (`pinned-<sha12>`
+nello `state_dir`). Il tag resta: è solo un nome per un commit della storia.
+
 ## Utente del coordinatore (#530)
 
 Il coordinatore ha sull'host **solo lettura**: l'utente `coordinator`, con un sudoers di soli

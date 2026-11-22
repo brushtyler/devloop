@@ -20,12 +20,12 @@ from test_devloop import (BASE, CFG, SHA1, FakeRunner, FakeWS, finding, fixed, n
 
 POLICY = CFG.review_policy
 DATA = ssdlc_project.data()
-# The ssdlc modules that decide permissions, fencing and authorizations (#171).
-SECURITY_MODULES = {
-    'ssdlc_writer_gate.py', 'ssdlc_role_fencing.py', 'ssdlc_container_holder.py',
-    'ssdlc_locks.py', 'ssdlc_fencing_proof.py', 'ssdlc_transitions.py', 'ssdlc_replay_gate.py', 'ssdlc_grader.py',
-    'ssdlc_feedback_delegation.py', 'ssdlc_feedback_admission.py', 'ssdlc_usage_admission.py',
-    'scripts/agent-token.py', 'scripts/supervisor-token.py'}
+# The files of ssdlc that decide permissions and authorizations (#171): the modules of the SSDLC
+# engine left with it (ADR 0007, R1), the scripts of the app tokens stay.
+SECURITY_MODULES = {'scripts/agent-token.py', 'scripts/supervisor-token.py'}
+# Paths of the SSDLC engine that were sensitive until ADR 0007, R1.
+ENGINE_PATHS = ('schemas/plan.schema.json', 'ssdlc_grader.py', 'ssdlc_writer_gate.py',
+                'tests/replay/benchmark.py')
 
 
 def changes(*paths, links=None):
@@ -46,12 +46,11 @@ class PolicyConfigTests(unittest.TestCase):
         self.assertEqual(POLICY.default_level, 1)
         self.assertEqual(POLICY.label, 'reviews:2')
         self.assertEqual(set(POLICY.sensitive_paths),
-                         {'devloop/', 'AGENTS.md', 'CLAUDE.md', '.github/', 'schemas/'}
+                         {'devloop/', 'AGENTS.md', 'CLAUDE.md', '.github/'}
                          | SECURITY_MODULES)
-        baseline = json.loads((config.INSTALL_ROOT / 'schemas/recovery-grader-baseline.json')
-                              .read_text())
-        self.assertEqual(set(POLICY.sensitive_files), set(baseline['files']))
-        self.assertIn('ssdlc_grader.py', POLICY.sensitive_files)
+        # No list of sensitive paths: the replay gate's baseline left with the engine.
+        self.assertEqual(POLICY.sensitive_files, ())
+        self.assertNotIn('sensitive_path_lists', DATA['review_policy'])
         # Without the table the code defaults apply: no sensitive path and no list, since they
         # are restrictions of the managed repository that its project file adds (ADR 0006, R3).
         self.assertEqual(policy.ReviewPolicy.sensitive_paths, ())
@@ -81,13 +80,15 @@ class PolicyConfigTests(unittest.TestCase):
         # The list is read from the dispatcher's root, not from a PR branch. That root holds no
         # documents here: [docs] map (#203, which needs them) has its own tests.
         data = {k: v for k, v in DATA.items() if k != 'docs'}
+        data['review_policy'] = dict(data['review_policy'],
+                                     sensitive_path_lists=['lists/sensitive.json'])
         with tempfile.TemporaryDirectory() as tmp:
-            (Path(tmp) / 'schemas').mkdir()
-            (Path(tmp) / 'schemas/recovery-grader-baseline.json').write_text(
+            (Path(tmp) / 'lists').mkdir()
+            (Path(tmp) / 'lists/sensitive.json').write_text(
                 json.dumps({'files': {'core.py': 'x'}}))
             self.assertEqual(config.parse_config(data, root=tmp).review_policy.sensitive_files,
                              ('core.py',))
-            (Path(tmp) / 'schemas/recovery-grader-baseline.json').write_text('{"files": []}')
+            (Path(tmp) / 'lists/sensitive.json').write_text('{"files": []}')
             with self.assertRaises(config.ConfigError):
                 config.parse_config(data, root=tmp)
 
@@ -101,11 +102,11 @@ class LevelTests(unittest.TestCase):
 
     def test_sensitive_paths(self):
         for path in ('devloop/dispatcher.py', 'AGENTS.md', 'CLAUDE.md', '.github/workflows/t.yml',
-                     'schemas/plan.schema.json', 'ssdlc_grader.py', 'tests/replay/benchmark.py'):
+                     'scripts/agent-token.py'):
             with self.subTest(path=path):
                 self.assertTrue(POLICY.covers(path))
         for path in ('devloopx/a.py', 'docs/AGENTS.md', 'README.md', 'tests/test_devloop.py',
-                     'ssdlc_grader.py.orig'):
+                     'scripts/agent-token.py.orig', *ENGINE_PATHS):
             with self.subTest(path=path):
                 self.assertFalse(POLICY.covers(path))
 
@@ -123,20 +124,20 @@ class LevelTests(unittest.TestCase):
                 self.assertEqual(result['level'], 2)
                 self.assertEqual(result['reasons'][-1]['kind'], 'paths')
         # A listed file that does not exist in the tree is just a path, never an error.
-        missing = 'ssdlc_not_yet_merged.py'
+        missing = 'scripts/not_yet_merged.py'
         self.assertFalse((config.INSTALL_ROOT / missing).exists())
         table = dict(DATA['review_policy'],
                      sensitive_paths=DATA['review_policy']['sensitive_paths'] + [missing])
         loaded = config.parse_config(dict(DATA, review_policy=table)).review_policy
         self.assertEqual(self.level((missing,), pol=loaded)['level'], 2)
-        # Other ssdlc modules stay at level 1.
-        result = self.level(('ssdlc_impact.py',))
+        # Other files stay at level 1.
+        result = self.level(('lib/impact.py',))
         self.assertEqual((result['level'], result['reviewers']), (1, ['codex']))
         self.assertEqual(result['reasons'], [{'kind': 'default', 'level': 1}])
 
     def test_deletions_renames_and_symlinks_count(self):
         # A deletion and both sides of a rename are paths of the diff (renames are not detected).
-        for paths in (('AGENTS.md',), ('schemas/plan.schema.json', 'docs/plan.schema.json'),
+        for paths in (('AGENTS.md',), ('.github/workflows/t.yml', 'docs/t.yml'),
                       ('docs/old.md', 'devloop/new.md')):
             with self.subTest(paths=paths):
                 result = self.level(paths)
@@ -207,7 +208,7 @@ class PolicyDispatcherTests(unittest.TestCase):
 
     def test_sensitive_diff_goes_to_a_human_without_review(self):
         for diff, why in ((changes('x.py', 'AGENTS.md'), '`AGENTS.md`'),           # deletion
-                          (changes('schemas/a.json', 'docs/a.json'), '`schemas/a.json`'),  # rename
+                          (changes('.github/a.yml', 'docs/a.yml'), '`.github/a.yml`'),  # rename
                           (changes('link', links={'link': ['devloop/config.toml']}), '`link`')):
             with self.subTest(diff=diff):
                 ws = FakeWS()
@@ -379,7 +380,7 @@ class ReviewDiffTests(unittest.TestCase):
             origin, repo = Path(tmp) / 'origin.git', Path(tmp) / 'repo'
             self.git('init', '-q', '--bare', str(origin), cwd=tmp)
             self.git('init', '-q', '-b', 'main', str(repo), cwd=tmp)
-            for name, text in (('AGENTS.md', 'a\n'), ('schemas/s.json', '{}\n'),
+            for name, text in (('AGENTS.md', 'a\n'), ('.github/s.yml', 'x\n'),
                                ('keep.py', 'k\n'), ('old_link', None)):
                 path = repo / name
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -393,7 +394,7 @@ class ReviewDiffTests(unittest.TestCase):
             self.git('push', '-q', 'origin', 'main', cwd=repo)
             self.git('checkout', '-q', '-b', 'agent/issue-7', cwd=repo)
             (repo / 'AGENTS.md').unlink()                                     # deletion
-            self.git('mv', 'schemas/s.json', 'docs.json', cwd=repo)          # rename
+            self.git('mv', '.github/s.yml', 'docs.yml', cwd=repo)           # rename
             (repo / 'new_link').symlink_to('devloop/config.toml')            # symlink
             (repo / 'old_link').unlink()
             (repo / 'old_link').symlink_to('README.md')                      # retargeted
@@ -411,11 +412,11 @@ class ReviewDiffTests(unittest.TestCase):
             self.assertEqual(base, self.git('rev-parse', 'main', cwd=repo))
             self.assertEqual(head, self.git('rev-parse', 'agent/issue-7', cwd=repo))
             by_path = {c['path']: c['links'] for c in diff}
-            self.assertEqual(by_path, {'AGENTS.md': [], 'schemas/s.json': [], 'docs.json': [],
+            self.assertEqual(by_path, {'AGENTS.md': [], '.github/s.yml': [], 'docs.yml': [],
                                        'new_link': ['devloop/config.toml'],
                                        'old_link': ['keep.py', 'README.md']})
             self.assertEqual(policy.sensitive_changes(POLICY, diff),
-                             ['AGENTS.md', 'new_link', 'schemas/s.json'])
+                             ['.github/s.yml', 'AGENTS.md', 'new_link'])
 
 
 if __name__ == '__main__':

@@ -485,6 +485,10 @@ A comment below with a `Permalink:` line carries the link GitHub gives it. When 
 cite that comment, a decision of the operator in an ADR for example, the implementer gets the
 same line and cites that link: the missing link is not a gap.
 """
+# ADR 0007, R1 (#538): the replay gate left with the SSDLC engine, and its baseline is no longer
+# among the decisions reserved to the operator.
+_NO_REPLAY_GATE_CONCLAVE = Replaced('- trust rules;\n- revisions of the replay gate baseline;\n',
+                                    '- trust rules;\n')
 # The changes of the templates since R4, each as ``(anchor, text)``, where ``text`` follows the
 # only occurrence of ``anchor`` in the reference, or as ``Replaced(old, new)``. The frozen files
 # stay as they were; the prompts of now are the reference with these changes, and nothing else.
@@ -554,7 +558,12 @@ SINCE_R4 = {
         *_TRUST_POLICY_PREFLIGHT_483,
         ('that show the gap, or none. Use `proposed_default: ""` when there is no default to '
          'propose.\n', _PERMALINK_PREFLIGHT),
+        # ADR 0007, R1 (#538)
+        Replaced('permissions, trust rules, the replay gate baseline, the merge mode, ',
+                 'permissions, trust rules, the merge mode, '),
     ),
+    'conclave_proposal': (_NO_REPLAY_GATE_CONCLAVE,),
+    'conclave_vote': (_NO_REPLAY_GATE_CONCLAVE,),
 }
 
 
