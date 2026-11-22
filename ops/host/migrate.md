@@ -56,6 +56,10 @@ sudo -u devloop -H rsync -a --chmod=F600 \
 
 Un file che sulla macchina vecchia non c'è non va creato.
 
+L'overlay copiato è un file nuovo, senza ACL: se c'è il coordinatore, dopo la copia si riesegue
+`setup-coordinator.sh`, che gli rimette `u:coordinator:r--`, e un'eventuale ACL del supervisore
+sull'overlay va ridata a mano ([Utente del coordinatore](#utente-del-coordinatore-530), #554).
+
 Dal supervisore, come utente `supervisor`:
 
 - la directory degli strumenti e dei file del diario, `~/supervisor`: sono strumenti locali del
@@ -1237,7 +1241,8 @@ Come root, **dal checkout dell'operatore** (`/root/repos/ssdlc`), mai dal clone 
    `/usr/local/lib/devloop-coordinator-<progetto>`), il sudoers in
    `/etc/sudoers.d/devloop-coordinator` (con `PROJECT`, `-<progetto>`), dopo `visudo -c`; l'ACL
    di solo attraversamento `u:coordinator:--x` sulla home di devloop, per leggere l'overlay dello
-   `state_dir`; la `key_dir` della sua app in `/home/coordinator/.ghapps` (con `PROJECT`,
+   `state_dir`, e l'ACL di sola lettura `u:coordinator:r--` sull'overlay
+   (`/home/devloop/ssdlc/.ssdlc/devloop/config.local.toml`), se manca (#554); la `key_dir` della sua app in `/home/coordinator/.ghapps` (con `PROJECT`,
    `~/.ghapps-<progetto>`), 700. Poi la chiave dell'app del coordinatore va lì, 600, proprietario
    `coordinator`, e il coordinatore conia i token con `DEVLOOP_APP_KEY_DIR` impostata a quella
    `key_dir` ([ops/README.md](../README.md#10-coordinatore-facoltativo), "App del coordinatore",
@@ -1245,7 +1250,8 @@ Come root, **dal checkout dell'operatore** (`/root/repos/ssdlc`), mai dal clone 
 3. verificare, come root: `sudo bash /root/repos/ssdlc/ops/host/check-host.sh --no-apps`, nessun
    errore nel passo `Coordinatore coordinator`: la `key_dir` (700) con la sola chiave dell'app
    del coordinatore (600), l'ACL `user:coordinator:--x` sulla home di devloop e nessuna sulle sue
-   directory private, l'overlay leggibile dal coordinatore, il sudoers (440, root, uguale a
+   directory private, l'ACL `user:coordinator:r--` sull'overlay e l'overlay leggibile dal
+   coordinatore, il sudoers (440, root, uguale a
    quello generato), la copia e le directory sopra di root, ogni file della copia che `coincide`
    con il checkout;
 4. verificare **come `coordinator`**, con il suo sudoers: `sudo -n -l` elenca solo i comandi di
@@ -1264,16 +1270,32 @@ Come root, **dal checkout dell'operatore** (`/root/repos/ssdlc`), mai dal clone 
 non segue il checkout, e `check-host.sh` lo segnala (`ATTENZIONE: … è diverso da …: rieseguire
 setup-coordinator.sh`).
 
+**Dopo ogni sostituzione dell'overlay** (#554) si rifà il passo 2, poi il passo 3. Un
+`install -m 600`, un `cp` o un `rsync` che scrive un file nuovo al posto di
+`/home/devloop/ssdlc/.ssdlc/devloop/config.local.toml`, come la copia dalla macchina vecchia di
+[Da copiare](#da-copiare), ne toglie le ACL: quella del coordinatore, che lo script rimette solo
+se manca, e quella del supervisore, se l'operatore gliel'ha data, che lo script non tocca.
+Senza, `scripts/coordinator-token.py` si ferma con `Permission denied` e `check-host.sh` dà
+`ERRORE: manca l'ACL u:coordinator:r-- su …`. Le copie di sicurezza dell'overlay delle altre
+sezioni (`install … config.local.toml.prima-…`) sono file nuovi e non toccano l'overlay.
+
+Su un host dove il coordinatore c'è già, il passo 2 dal checkout aggiornato aggiunge l'ACL
+sull'overlay se manca, e il passo 3 la verifica. Fino al #554 `check-host.sh` provava le letture
+come un altro utente con `/usr/bin/test -r`, che su Ubuntu 26.04 (uutils) ignora le ACL: un
+`ERRORE: … legge …: non riuscito` di prima, su un file leggibile con un'ACL, era falso.
+
 Dal #530 anche `check-host.sh` completo, che l'operatore o l'agent dell'host esegue come root,
 riporta delle prove delle CLI solo l'esito e il codice di uscita, mai il testo del modello: per
 vederlo si ripete la prova a mano, come al passo 5 di [File delle CLI di root sull'utente degli
 agent](#file-delle-cli-di-root-sullutente-degli-agent-438).
 
-**Rollback.** Come root, prima il sudoers, poi la copia, l'ACL sulla home di devloop e l'utente:
+**Rollback.** Come root, prima il sudoers, poi la copia, le ACL sull'overlay e sulla home di
+devloop e l'utente:
 
 ```bash
 rm /etc/sudoers.d/devloop-coordinator
 rm -r /usr/local/lib/devloop-coordinator
+setfacl -x u:coordinator /home/devloop/ssdlc/.ssdlc/devloop/config.local.toml
 setfacl -x u:coordinator /home/devloop
 userdel -r coordinator
 ```

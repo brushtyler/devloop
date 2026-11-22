@@ -81,8 +81,8 @@ ops/
     setup-supervisor.sh      utente supervisor, ACL di attraversamento su /home/<devloop>,
                              sudoers, clone, key_dir 700, impostazioni di Claude Code
     setup-coordinator.sh     utente coordinator (facoltativo), ACL di attraversamento su
-                             /home/<devloop>, key_dir 700, copia di root di check-host.sh,
-                             sudoers in sola lettura
+                             /home/<devloop> e di lettura sull'overlay, key_dir 700, copia di
+                             root di check-host.sh, sudoers in sola lettura
     devloop.service          unità systemd (con segnaposto @NOME@)
     devloop@.service         unità template, per più progetti sullo stesso host (PROJECT)
     devloop-project.conf     drop-in di un progetto per devloop@<progetto> (con segnaposto)
@@ -624,7 +624,10 @@ Lo script crea l'utente e la sua `key_dir` (`COORDINATOR_KEY_DIR`, `/home/coordi
 della home di devloop (`setfacl -m u:coordinator:--x /home/devloop`, come al supervisore: raggiunge
 per percorso l'overlay dello `state_dir`, da cui `scripts/coordinator-token.py` legge `repo` e
 `[apps.coordinator]`, ma non elenca la home, e `~/.ghapps`, `~/.claude` e `~/.codex` di devloop
-restano 700), installa la **copia di root** di `check-host.sh`, dei file che legge
+restano 700), e la **lettura dell'overlay** con un'ACL, se manca (`setfacl -m u:coordinator:r--
+<state_dir>/config.local.toml`, #554: l'overlay dell'operatore è di solito 600; il file di
+progetto no, `coordinator-token.py` non lo legge), installa la **copia di root** di
+`check-host.sh`, dei file che legge
 (`lib.sh`, i sudoers, le unità e il file di `tmpfiles.d` di `ops/host/`) e dei parametri
 (`params.env`) in `COORDINATOR_OPS_DIR` (`/usr/local/lib/devloop-coordinator`, 755 e 644, di
 root), e il sudoers (`ops/host/sudoers-coordinator`, in `COORDINATOR_SUDOERS_FILE`,
@@ -703,8 +706,16 @@ contenuti**.
 
 `check-host.sh` verifica la `key_dir` (700, del coordinatore) e che contenga solo la chiave
 dell'app del coordinatore (600, del coordinatore), l'ACL `user:coordinator:--x` sulla home di
-devloop, nessuna ACL per il coordinatore sulle directory private di devloop, e che il
-coordinatore legga l'overlay.
+devloop, nessuna ACL per il coordinatore sulle directory private di devloop, l'ACL
+`user:coordinator:r--` sull'overlay, e che il coordinatore legga l'overlay. Le prove di lettura
+come un altro utente usano il `[ -r ]` di bash, che rispetta le ACL, mai `/usr/bin/test`: quello
+di uutils, il default di Ubuntu 26.04, guarda solo i bit del modo (#554).
+
+**Overlay sostituito.** Un `install -m 600`, un `cp` o un `rsync` che mette un file nuovo al posto
+dell'overlay ne toglie le ACL, quella del coordinatore e quella del supervisore, se l'operatore
+gliel'ha data. Dopo ogni sostituzione si riesegue `setup-coordinator.sh`, che rimette solo l'ACL
+del coordinatore, e si verifica con `check-host.sh`
+([host/migrate.md](host/migrate.md#utente-del-coordinatore-530)).
 
 Poi, a mano: la CLI dell'agent del coordinatore e il suo login, come utente `coordinator`, e un
 token di sola lettura per `gh` ([github/tokens.md](github/tokens.md)). Su un host già attivo i

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Prepara l'host per il coordinatore di devloop (ADR 0002, precisazione del 2026-11-22; #530):
-# l'utente, l'ACL di solo attraversamento sulla home di devloop (per leggere l'overlay), la key_dir
+# l'utente, l'ACL di solo attraversamento sulla home di devloop e quella di sola lettura
+# sull'overlay (#554), per leggere l'overlay, la key_dir
 # della sua GitHub App (700, #549), una copia di root di check-host.sh con i file che legge e i
 # parametri, e un sudoers con soli comandi di lettura (ops/host/sudoers-coordinator).
 # Idempotente: si può rieseguire, fa solo ciò che manca; va rieseguito dopo ogni aggiornamento di
@@ -113,6 +114,27 @@ for private in "$DEVLOOP_KEY_DIR" "$DEVLOOP_HOME/.claude" "$DEVLOOP_HOME/.codex"
         warn "$private non è 700: rieseguire setup-devloop.sh"
     fi
 done
+
+# L'overlay stesso (#554): l'operatore lo tiene 600, quindi il coordinatore lo legge solo con
+# un'ACL di sola lettura, che si aggiunge se manca. Il file di progetto (project.toml) no:
+# coordinator-token.py non lo legge. Un overlay sostituito (install, cp, rsync) perde l'ACL: si
+# riesegue questo script.
+OVERLAY="$STATE_PATH/config.local.toml"
+step "Lettura dell'overlay: ACL u:$COORDINATOR_USER:r-- su $OVERLAY"
+if [ -f "$OVERLAY" ] && ! [ -L "$OVERLAY" ]; then
+    # getfacl può aggiungere alla riga un commento #effective.
+    acl_entry=$(getfacl -p --omit-header "$OVERLAY" 2>/dev/null \
+        | grep "^user:$COORDINATOR_USER:" | head -n 1 || true)
+    acl_entry=${acl_entry%%[[:space:]]*}
+    if [ "$acl_entry" = "user:$COORDINATOR_USER:r--" ]; then
+        ok "ACL presente: $acl_entry"
+    else
+        [ -z "$acl_entry" ] || warn "ACL attuale $acl_entry: la riduco a r--"
+        run setfacl -m "u:$COORDINATOR_USER:r--" "$OVERLAY"
+    fi
+else
+    warn "$OVERLAY non esiste o è un link: crearlo (setup-devloop.sh), poi rieseguire questo script"
+fi
 
 # La key_dir della sua app (#549): solo il coordinatore ne legge la chiave, con
 # scripts/coordinator-token.py; devloop non la legge mai.

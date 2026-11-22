@@ -174,7 +174,10 @@ else
     [ "${other:7:1}" = r ] && warn "$DEVLOOP_HOME è leggibile da tutti ($other)"
 fi
 LOG="$STATE_PATH/run.log"
-check_as "$SUPERVISOR_USER" "$SUPERVISOR_USER legge $LOG" test -r "$LOG"
+# Letture e scritture si provano con [ -r ] / [ -w ] di bash, che usa access(2) e rispetta le ACL,
+# mai con /usr/bin/test: quello di uutils (il default di Ubuntu 26.04) guarda solo i bit del modo
+# e darebbe un falso errore su una lettura concessa con un'ACL (#554).
+check_as "$SUPERVISOR_USER" "$SUPERVISOR_USER legge $LOG" /usr/bin/bash -c '[ -r "$1" ]' _ "$LOG"
 
 # Il sudoers FILE: 440 di root, uguale a ops/host/TEMPLATE con questi parametri, accettato da
 # visudo; SETUP è lo script che lo installa.
@@ -236,12 +239,25 @@ else
     check_dir "$COORDINATOR_KEY_DIR" 700 "$COORDINATOR_USER"
     check_keys "$COORDINATOR_KEY_DIR" "$COORDINATOR_USER" "$COORDINATOR_KEYS" 1
     # L'overlay di devloop, da cui scripts/coordinator-token.py legge repo e [apps.coordinator]
-    # (#549): solo l'attraversamento della home di devloop, e che il coordinatore lo legga.
+    # (#549): solo l'attraversamento della home di devloop, l'ACL di sola lettura sull'overlay
+    # (#554), e che il coordinatore lo legga.
+    OVERLAY_FILE="$STATE_PATH/config.local.toml"
     if command -v getfacl >/dev/null && [ -d "$DEVLOOP_HOME" ]; then
         check_traverse "$COORDINATOR_USER" setup-coordinator.sh
     fi
-    check_as "$COORDINATOR_USER" "$COORDINATOR_USER legge $STATE_PATH/config.local.toml" \
-        test -r "$STATE_PATH/config.local.toml"
+    if command -v getfacl >/dev/null && [ -f "$OVERLAY_FILE" ]; then
+        # getfacl può aggiungere alla riga un commento #effective.
+        entry=$(getfacl -p --omit-header "$OVERLAY_FILE" 2>/dev/null \
+            | grep "^user:$COORDINATOR_USER:" | head -n 1)
+        entry=${entry%%[[:space:]]*}
+        case $entry in
+            "user:$COORDINATOR_USER:r--") ok "ACL $entry su $OVERLAY_FILE" ;;
+            '') fail "manca l'ACL u:$COORDINATOR_USER:r-- su $OVERLAY_FILE (setup-coordinator.sh)" ;;
+            *) fail "ACL $entry su $OVERLAY_FILE: deve essere r--, senza scrittura" ;;
+        esac
+    fi
+    check_as "$COORDINATOR_USER" "$COORDINATOR_USER legge $OVERLAY_FILE" \
+        /usr/bin/bash -c '[ -r "$1" ]' _ "$OVERLAY_FILE"
     check_sudoers "$COORDINATOR_SUDOERS_FILE" sudoers-coordinator setup-coordinator.sh
     check_root_path "$COORDINATOR_OPS_DIR/host"
     for name in $OPS_COORDINATOR_FILES params.env; do

@@ -54,6 +54,9 @@ MODEL_TEXT = 'MODEL-TEXT-4c1d9e'
 # not root's (#530, R1-1): the temporary directories of the tests are the user's. It need not
 # exist: the directories above it that exist (/usr, /usr/local) are root's on any host.
 ROOT_COPY = '/usr/local/lib/devloop-coordinator-opstest'
+# How check-host.sh --dry-run prints a reading check as another user (#554): bash's [ -r ], which
+# honours the ACLs, followed by the path; never /usr/bin/test.
+READS = r'/usr/bin/bash -c \[\ -r\ \"\$1\"\ \] _ '
 # What ``sudo --version`` prints for each sudo the fakes simulate: the host moved from sudo-rs to
 # the classic sudo on 2026-11-20, and the scripts behave the same with either.
 SUDO_FLAVORS = {'sudo-rs': 'sudo-rs 0.2.8', 'classic sudo': 'Sudo version 1.9.17p2'}
@@ -249,6 +252,32 @@ class LayoutTests(unittest.TestCase):
         for script in ('lib.sh', *SCRIPTS):
             done = subprocess.run([BASH, '-n', str(OPS / script)], capture_output=True, text=True)
             self.assertEqual(done.returncode, 0, f'{script}: {done.stderr}')
+
+    # A permission probe run as another user through check_as, as_user or sudo with test or [ as
+    # the command: /usr/bin/test of uutils (Ubuntu 26.04's) ignores the ACLs (#554). What a
+    # quoted `bash -c '…'` holds is bash's builtin, which honours them, so quotes are dropped.
+    PROBE_AS_USER = re.compile(r'(?:\bcheck_as|\bas_user|\bsudo)\b.*(?:^|\s)'
+                               r'(?:/usr/bin/|/bin/)?(?:test|\[)\s+-[rwx]\b')
+
+    @classmethod
+    def probes_as_user(cls, text):
+        lines = text.replace('\\\n', ' ').splitlines()
+        return [line.strip() for line in lines
+                if cls.PROBE_AS_USER.search(re.sub(r"'[^']*'", "''", line))]
+
+    def test_no_permission_probe_as_another_user_runs_usr_bin_test(self):
+        # The pattern catches the probes #554 replaced, and not bash's builtin.
+        self.assertTrue(self.probes_as_user(
+            'check_as "$U" "$U legge $LOG" test -r "$LOG"\n'))
+        self.assertTrue(self.probes_as_user(
+            'check_as "$U" "$U legge $F" \\\n        test -r "$F"\n'))
+        self.assertTrue(self.probes_as_user('sudo -u "$U" -H -- /usr/bin/test -w "$F"\n'))
+        self.assertTrue(self.probes_as_user('as_user "$U" [ -x "$F" ]\n'))
+        self.assertFalse(self.probes_as_user(
+            'check_as "$U" "$U legge $F" /usr/bin/bash -c \'[ -r "$1" ]\' _ "$F"\n'))
+        for path in sorted(OPS.rglob('*.sh')):
+            with self.subTest(path=str(path.relative_to(OPS))):
+                self.assertEqual(self.probes_as_user(path.read_text(encoding='utf-8')), [])
 
     def test_the_guide_explains_another_project_and_the_migration(self):
         guide = ' '.join((OPS / 'README.md').read_text().split())
@@ -747,7 +776,12 @@ class CoordinatorGuideTests(unittest.TestCase):
                        'u:coordinator:--x /home/devloop`',
                        '**`DEVLOOP_APP_KEY_DIR` va sempre impostata** al valore di '
                        '`COORDINATOR_KEY_DIR`',
-                       'l\'ACL `user:coordinator:--x` sulla home di devloop'):
+                       'l\'ACL `user:coordinator:--x` sulla home di devloop',
+                       # #554: and reads the overlay itself through an ACL, read only.
+                       '**lettura dell\'overlay** con un\'ACL, se manca (`setfacl -m '
+                       'u:coordinator:r-- <state_dir>/config.local.toml`',
+                       'l\'ACL `user:coordinator:r--` sull\'overlay',
+                       'mai `/usr/bin/test`', '**Overlay sostituito.**', '`install -m 600`'):
             self.assertIn(phrase, flat)
         self.assertIn('| `coordinator` | issues: write, pull_requests: write, '
                       'actions/checks/statuses: read |', text)
@@ -769,6 +803,8 @@ class CoordinatorGuideTests(unittest.TestCase):
                  '/usr/local/lib/devloop-coordinator/host/check-host.sh --read-only',
                  'rm /etc/sudoers.d/devloop-coordinator',
                  'rm -r /usr/local/lib/devloop-coordinator',
+                 # #554: the reading of the overlay goes with the rest.
+                 'setfacl -x u:coordinator /home/devloop/ssdlc/.ssdlc/devloop/config.local.toml',
                  'setfacl -x u:coordinator /home/devloop', 'userdel -r coordinator']
         self.assertEqual(commands, steps)
         # The check as the coordinator is the one its sudoers allows.
@@ -778,8 +814,15 @@ class CoordinatorGuideTests(unittest.TestCase):
                        f'`sudo bash {self.OPERATOR}/ops/host/check-host.sh --no-apps`',
                        '**come `coordinator`**', '**Dopo ogni aggiornamento di `ops/`**',
                        'nessun pin lo aspetta', '**Rollback.**',
-                       '(../README.md#10-coordinatore-facoltativo)'):
+                       '(../README.md#10-coordinatore-facoltativo)',
+                       # #554: the ACL on the overlay, and what removes it.
+                       "l'ACL di sola lettura `u:coordinator:r--` sull'overlay",
+                       "l'ACL `user:coordinator:r--` sull'overlay",
+                       "**Dopo ogni sostituzione dell'overlay** (#554)", '`install -m 600`',
+                       '/usr/bin/test -r'):
             self.assertIn(phrase, flat)
+        whole = ' '.join((OPS / 'host/migrate.md').read_text(encoding='utf-8').split())
+        self.assertIn("L'overlay copiato è un file nuovo, senza ACL", whole)
         migrate = ' '.join((OPS / 'host/migrate.md').read_text(encoding='utf-8').split())
         self.assertIn('`setup-supervisor.sh` e, se c\'è il coordinatore, `setup-coordinator.sh`',
                       migrate)
@@ -1186,9 +1229,50 @@ class DryRunTests(OpsTestCase):
                 self.assertIn(f'  DEVLOOP_APP_KEY_DIR={self.home}/coordinator/.ghapps python3 '
                               f'scripts/coordinator-token.py --state-dir {state} -- <comando>\n',
                               out)
+                # #554: without the overlay there is no ACL to give it, and the script says so.
+                self.assertIn(f'  ATTENZIONE: {state}/config.local.toml non esiste o è un link: '
+                              'crearlo (setup-devloop.sh), poi rieseguire questo script\n', out)
                 self.assertNotRegex(out, r'@[A-Z_]+@')
         self.assertEqual(self.mutating_calls(), [])
         self.assertEqual(self.tree(), before)
+
+    def test_setup_coordinator_gives_the_coordinator_the_reading_of_the_overlay(self):
+        # #554: the overlay is the operator's, 600: the coordinator reads it through an ACL
+        # u:coordinator:r--, which the script adds only when it is missing, and reduces to r--
+        # when it is more. The project file is not touched: coordinator-token.py does not read it.
+        state = self.home / 'devloop/ssdlc/.ssdlc/devloop'
+        state.mkdir(parents=True)
+        overlay = state / 'config.local.toml'
+        overlay.write_text('repo = "brushtyler/ssdlc"\n')
+        overlay.chmod(0o600)
+        (state / 'project.toml').write_text('')
+        params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=FAKE_SUPERVISOR,
+                             AGENT_USER=FAKE_AGENT, COORDINATOR_OPS_DIR=ROOT_COPY)
+        self.fake_host('classic sudo', users=(FAKE_AGENT, FAKE_SUPERVISOR))
+        give = f'  [dry-run] setfacl -m u:{FAKE_COORDINATOR}:r-- {overlay}\n'
+        for entry, expected in (
+                ('', give),
+                (f'user:{FAKE_COORDINATOR}:r--',
+                 f'  ok: ACL presente: user:{FAKE_COORDINATOR}:r--\n'),
+                (f'user:{FAKE_COORDINATOR}:r--\\t#effective:r--',
+                 f'  ok: ACL presente: user:{FAKE_COORDINATOR}:r--\n'),
+                (f'user:{FAKE_COORDINATOR}:rw-',
+                 f'  ATTENZIONE: ACL attuale user:{FAKE_COORDINATOR}:rw-: la riduco a r--\n'
+                 + give)):
+            with self.subTest(entry=entry):
+                self.shim('getfacl', f'for a in "$@"; do last=$a; done\necho "user::rw-"\n'
+                                     f'if [ "$last" = "{overlay}" ] && [ -n "{entry}" ]; then '
+                                     f'printf "%b\\n" "{entry}"; fi\necho "other::---"')
+                done = self.run_script('host/setup-coordinator.sh', '--dry-run', '--params',
+                                       str(params))
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                out = done.stdout
+                self.assertIn(f"==> Lettura dell'overlay: ACL u:{FAKE_COORDINATOR}:r-- su "
+                              f'{overlay}\n' + expected, out)
+                self.assertEqual(out.count(f'u:{FAKE_COORDINATOR}:r-- {overlay}'),
+                                 1 if give in expected else 0)
+                self.assertNotIn('project.toml', out)
+        self.assertEqual(self.mutating_calls(), [])
 
     def test_the_coordinator_of_a_project_has_its_sudoers_and_its_copy(self):
         params = self.project_params(COORDINATOR_SUDOERS_FILE='', COORDINATOR_OPS_DIR='')
@@ -2485,8 +2569,8 @@ class CheckHostTests(OpsTestCase):
         self.assertIn(f'ok: ACL user:{ME}:--x su {self.devloop}', out)
         self.assertIn('ok: devloop è attivo', out)
         # The checks through sudo or the network are only printed.
-        self.assertIn(f'[dry-run] sudo -u {ME} -H -- test -r {self.devloop}/ssdlc/.ssdlc/devloop/'
-                      'run.log', out)
+        self.assertIn(f'[dry-run] sudo -u {ME} -H -- {READS}{self.devloop}/ssdlc/.ssdlc/devloop/'
+                      'run.log\n', out)
         self.assertIn(f'[dry-run] sudo -u root -H -- {self.agent}/.local/bin/claude --version',
                       out)
         self.assertRegex(out, r'\[dry-run\] sudo .*/scripts/devloop-pinned apps')
@@ -2734,10 +2818,10 @@ exec "$@"''')
         self.assertEqual(self.tree(), before)
         self.assertEqual(self.mutating_calls(), [])
         # The checks as the other users ran, through sudo, and none was a CLI or devloop: only
-        # test and the probes of bash.
+        # the probes of bash, never /usr/bin/test, which may ignore the ACLs (#554).
         calls = sudo_log.read_text().splitlines()
         self.assertTrue(any(f'-u {FAKE_AGENT} ' in call for call in calls), calls)
-        self.assertEqual({call.rsplit(' -- ', 1)[1] for call in calls}, {'test', '/usr/bin/bash'})
+        self.assertEqual({call.rsplit(' -- ', 1)[1] for call in calls}, {'/usr/bin/bash'})
         self.assertIn('Sola lettura (--read-only): nessuna CLI avviata, niente devloop apps.', out)
         self.assertIn('  prove delle CLI saltate (--read-only): nessuna CLI avviata\n', out)
         self.assertIn(f'  ok: {self.agent}/.local/bin/agy presente\n', out)
@@ -2822,13 +2906,17 @@ exec "$@"''')
         params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=FAKE_SUPERVISOR,
                              AGENT_USER=FAKE_AGENT)
         home, keys = self.devloop, self.devloop / '.ghapps'
+        overlay = self.state / 'config.local.toml'
+        overlay_acl = f'user:{FAKE_COORDINATOR}:r--'
 
-        def acl(home_entries, keys_entry=''):
+        def acl(home_entries, keys_entry='', overlay_entry=''):
             lines = '\n'.join(f'echo "{e}"' for e in home_entries)
-            self.shim('getfacl', f'for a in "$@"; do last=$a; done\necho "user::rwx"\n'
+            self.shim('getfacl', f'for a in "$@"; do last=$a; done\necho "user::rw-"\n'
                                  f'if [ "$last" = "{home}" ]; then\n{lines}\nfi\n'
                                  f'if [ "$last" = "{keys}" ] && [ -n "{keys_entry}" ]; then '
-                                 f'echo "{keys_entry}"; fi\necho "other::---"')
+                                 f'echo "{keys_entry}"; fi\n'
+                                 f'if [ "$last" = "{overlay}" ] && [ -n "{overlay_entry}" ]; then '
+                                 f'printf "%b\\n" "{overlay_entry}"; fi\necho "other::---"')
 
         def check():
             done = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params))
@@ -2838,20 +2926,31 @@ exec "$@"''')
         out = check()
         self.assertIn(f"  ERRORE: manca l'ACL u:{FAKE_COORDINATOR}:--x su {home} "
                       '(setup-coordinator.sh)\n', out)
-        self.assertIn(f'  [dry-run] sudo -u {FAKE_COORDINATOR} -H -- test -r '
-                      f'{self.state}/config.local.toml\n', out)
-        acl([f'user:{FAKE_SUPERVISOR}:--x', f'user:{FAKE_COORDINATOR}:--x'])
+        # #554: the overlay is the operator's, 600: the coordinator reads it through an ACL,
+        # which the check reads with getfacl, and its reading is probed with bash's [ -r ].
+        self.assertIn(f"  ERRORE: manca l'ACL u:{FAKE_COORDINATOR}:r-- su {overlay} "
+                      '(setup-coordinator.sh)\n', out)
+        self.assertIn(f'  [dry-run] sudo -u {FAKE_COORDINATOR} -H -- {READS}{overlay}\n', out)
+        acl([f'user:{FAKE_SUPERVISOR}:--x', f'user:{FAKE_COORDINATOR}:--x'],
+            overlay_entry=overlay_acl)
         out = check()
         self.assertIn(f'  ok: ACL user:{FAKE_COORDINATOR}:--x su {home}\n', out)
+        self.assertIn(f'  ok: ACL {overlay_acl} su {overlay}\n', out)
         self.assertNotIn(f'u:{FAKE_COORDINATOR}', out)
-        # Never more than traversal, and never on devloop's keys.
+        # getfacl's #effective comment does not change the entry.
+        acl([f'user:{FAKE_SUPERVISOR}:--x', f'user:{FAKE_COORDINATOR}:--x'],
+            overlay_entry=f'{overlay_acl}\\t#effective:r--')
+        self.assertIn(f'  ok: ACL {overlay_acl} su {overlay}\n', check())
+        # Never more than traversal, never on devloop's keys, never writing the overlay.
         acl([f'user:{FAKE_SUPERVISOR}:--x', f'user:{FAKE_COORDINATOR}:r-x'],
-            f'user:{FAKE_COORDINATOR}:r--')
+            f'user:{FAKE_COORDINATOR}:r--', f'user:{FAKE_COORDINATOR}:rw-')
         out = check()
         self.assertIn(f'  ERRORE: ACL user:{FAKE_COORDINATOR}:r-x su {home}: deve essere --x, '
                       'senza elenco né scrittura\n', out)
         self.assertIn(f"  ERRORE: {keys} ha un'ACL per {FAKE_COORDINATOR}: deve restare 700 "
                       'senza eccezioni\n', out)
+        self.assertIn(f'  ERRORE: ACL user:{FAKE_COORDINATOR}:rw- su {overlay}: deve essere r--, '
+                      'senza scrittura\n', out)
         self.assertEqual(self.mutating_calls(), [])
 
     def test_the_copy_holds_every_file_of_ops_check_host_reads(self):
@@ -3112,7 +3211,7 @@ echo "sudo $*" >> "$OPS_TEST_CALLS"''')
         self.assertIn(f'ERRORE: {lib}/devloop-pinned non esiste (setup-devloop.sh, dal tag '
                       'v1.2.0)', out)
         self.assertIn(f'ok: {self.devloop}/devloop-source è un clone della sorgente', out)
-        self.assertIn(f'[dry-run] sudo -u {ME} -H -- test -r {state}/run.log', out)
+        self.assertIn(f'[dry-run] sudo -u {ME} -H -- {READS}{state}/run.log\n', out)
         self.assertIn(f'[dry-run] sudo -u {ME} -H -- env -C {self.devloop}/ssdlc /usr/bin/python3 '
                       f'{lib}/devloop-pinned --state-dir {state} apps', out)
         self.assertEqual(self.mutating_calls(), [])
