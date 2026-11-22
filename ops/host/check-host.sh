@@ -6,15 +6,21 @@
 # istruzioni, configurazione e binari delle sue CLI; l'ambiente dei turni gli arriva con sudo -E,
 # che sudo-rs ignora), il lock per repository (directory comune, gruppo, overlay; ADR 0006, R8),
 # servizio, CLI degli agent (--version, e un `git --version` con il loro strumento di shell,
-# #494) e `devloop apps`. Con più progetti sullo stesso host si esegue una volta per progetto,
-# con i suoi parametri (--params).
-# Non cambia nulla, se non le sessioni e le cache che le CLI degli agent scrivono da sé.
+# #494) e `devloop apps`, e il coordinatore, se c'è (sudoers e copia di root di questo script,
+# #530). Con più progetti sullo stesso host si esegue una volta per progetto, con i suoi
+# parametri (--params).
+# Non cambia nulla, se non le sessioni e le cache che le CLI degli agent scrivono da sé. Delle
+# prove delle CLI riporta solo l'esito e il codice di uscita, mai il loro output né il testo del
+# modello (#530).
 # Esce con 0 se non trova errori, con 1 altrimenti; gli avvisi non contano come errori.
 # Va eseguito come root (sudo): alcune verifiche leggono file degli altri utenti.
 #
 # --dry-run: fa le verifiche locali in sola lettura e stampa, senza eseguirle, quelle che passano
 # da sudo o dalla rete (--version e strumento di shell delle CLI, lettura del log come
 # supervisore, visudo, sudo -E verso l'utente degli agent, devloop apps).
+# --read-only: la verifica del coordinatore (#530): nessuna CLI avviata (né --version né lo
+# strumento di shell: nessun modello, nessuna quota, nessuna scrittura nelle sessioni o nelle
+# cache), niente `devloop apps`, nessuna scrittura; solo righe di stato.
 
 OPS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # shellcheck source=../lib.sh
@@ -22,11 +28,14 @@ OPS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 set +e  # una verifica fallita si conta, non interrompe le altre
 
 CHECK_APPS=1
+READ_ONLY=0
 
 usage() {
-    say "Uso: sudo bash $0 [--params FILE] [--dry-run] [--no-apps]"
+    say "Uso: sudo bash $0 [--params FILE] [--dry-run] [--no-apps] [--read-only]"
     say
     say '  --no-apps       non esegue `devloop apps` (che interroga GitHub)'
+    say '  --read-only     nessuna CLI avviata, niente `devloop apps`, nessuna scrittura (il'
+    say '                  coordinatore, #530)'
     say "$OPS_COMMON_HELP"
 }
 
@@ -34,13 +43,19 @@ while [ $# -gt 0 ]; do
     case $1 in
         -h | --help) usage; exit 0 ;;
         --no-apps) CHECK_APPS=0; shift ;;
+        --read-only) READ_ONLY=1; CHECK_APPS=0; shift ;;
         *) ops_common_arg "$@" || exit 2; shift "$OPS_SHIFT" ;;
     esac
 done
 
 ops_load_params
+# Come root, anche dal sudoers del coordinatore: nessun file della directory di chi lo lancia
+# (per esempio un modulo che python importerebbe) entra nelle verifiche.
+PARAMS_FILE=$(cd "$(dirname "$PARAMS_FILE")" && pwd)/$(basename "$PARAMS_FILE")
+cd / || exit 1
 ops_check_platform readonly
 [ "$(id -u)" = 0 ] || warn 'non eseguito come root: le verifiche sui file degli altri utenti possono fallire'
+[ "$READ_ONLY" = 0 ] || say "Sola lettura (--read-only): nessuna CLI avviata, niente devloop apps."
 
 # Esegue CMD come USER e conta l'esito; con --dry-run lo stampa soltanto.
 check_as() {
@@ -181,6 +196,54 @@ check_sudoers() {
 step "sudoers del supervisore ($SUDOERS_FILE)"
 check_sudoers "$SUDOERS_FILE" sudoers-supervisor setup-supervisor.sh
 
+# PATH e ogni directory sopra: di root e non scrivibili dal gruppo né dagli altri, così nessun
+# altro utente cambia ciò che il coordinatore esegue come root.
+check_root_path() {
+    local path=$1 q=$1 owner mode bad=0
+    while :; do
+        if ! [ -e "$q" ] || [ -L "$q" ]; then
+            fail "$q non esiste o è un link (setup-coordinator.sh)"
+            return
+        fi
+        read -r owner mode < <(stat -c '%U %a' "$q")
+        if [ "$owner" != root ] || (( 8#$mode & 8#022 )); then
+            fail "$q è $mode $owner: deve essere di root e non scrivibile dal gruppo né dagli altri"
+            bad=1
+        fi
+        [ "$q" = / ] && break
+        q=$(dirname "$q")
+    done
+    [ "$bad" = 1 ] || ok "$path e le directory sopra sono di root, non scrivibili da altri"
+}
+
+# Il coordinatore (#530), facoltativo: il suo sudoers in sola lettura e la copia di root di
+# check-host.sh, dei file che legge e dei parametri, da cui esegue `check-host.sh --read-only`.
+step "Coordinatore $COORDINATOR_USER (facoltativo, #530)"
+if ! user_exists "$COORDINATOR_USER"; then
+    say "  l'utente $COORDINATOR_USER non esiste: coordinatore non installato (setup-coordinator.sh)"
+else
+    ok "l'utente $COORDINATOR_USER esiste"
+    check_sudoers "$COORDINATOR_SUDOERS_FILE" sudoers-coordinator setup-coordinator.sh
+    check_root_path "$COORDINATOR_OPS_DIR/host"
+    for name in $OPS_COORDINATOR_FILES params.env; do
+        copy=$COORDINATOR_OPS_DIR/$name
+        [ "$name" = params.env ] && source_file=$PARAMS_FILE || source_file=$OPS_DIR/$name
+        if ! [ -f "$copy" ] || [ -L "$copy" ]; then
+            fail "$copy non esiste (setup-coordinator.sh)"
+            continue
+        fi
+        actual=$(stat -c '%a %U' "$copy")
+        [ "$actual" = '644 root' ] || fail "$copy è $actual, deve essere 644 root"
+        # Da questa stessa copia (il coordinatore) non c'è altro con cui confrontarla.
+        [ "$copy" -ef "$source_file" ] && continue
+        if cmp -s "$copy" "$source_file"; then
+            ok "$copy coincide con $source_file"
+        else
+            warn "$copy è diverso da $source_file: rieseguire setup-coordinator.sh"
+        fi
+    done
+fi
+
 step "Utente degli agent $AGENT_USER (#415)"
 STATE="$STATE_PATH"
 for private in "$DEVLOOP_KEY_DIR" "$STATE" "$STATE/config.local.toml"; do
@@ -222,7 +285,7 @@ else
     warn "nessun worktree in $STATE/worktrees: git come $AGENT_USER non verificato (lo verifica devloop all'avvio)"
 fi
 OVERLAY="$STATE/config.local.toml"
-if [ -f "$OVERLAY" ] && python3 - "$OVERLAY" "$AGENT_USER" <<'EOF'
+if [ -f "$OVERLAY" ] && python3 -I -B - "$OVERLAY" "$AGENT_USER" <<'EOF'
 import sys, tomllib
 data = tomllib.load(open(sys.argv[1], 'rb'))
 sys.exit(0 if data.get('agent_user', {}).get('name') == sys.argv[2] else 1)
@@ -429,7 +492,7 @@ elif cmp -s "$TMPFILES_FILE" <(render "$OPS_DIR/host/tmpfiles-devloop-repos.conf
 else
     warn "$TMPFILES_FILE è diverso da ops/host/tmpfiles-devloop-repos.conf con questi parametri"
 fi
-if [ -f "$OVERLAY" ] && python3 - "$OVERLAY" "$REPO_LOCK_DIR" <<'EOF'
+if [ -f "$OVERLAY" ] && python3 -I -B - "$OVERLAY" "$REPO_LOCK_DIR" <<'EOF'
 import sys, tomllib
 data = tomllib.load(open(sys.argv[1], 'rb'))
 sys.exit(0 if data.get('repo_lock_dir') == sys.argv[2] else 1)
@@ -480,7 +543,7 @@ fi
 # modello: ci vuole la rete e il login della CLI. Gira in /tmp, con un limite di 300 secondi.
 SHELL_PROMPT='Run the shell command `git --version` with your shell tool, then reply with its output only.'
 shell_tool() {
-    local cli=$1 out status line
+    local cli=$1 out status
     shift
     local -a cmd=(timeout 300 "$AGENT_HOME/.local/bin/$cli" "$@")
     [ "$(id -un)" = "$AGENT_USER" ] || cmd=(sudo -u "$AGENT_USER" -H -- "${cmd[@]}")
@@ -492,39 +555,67 @@ shell_tool() {
     status=$?
     # Riuscita: uscita 0, l'output di git --version (la versione, non le sole parole, che una
     # risposta che descrive il fallimento può contenere) e nessun diniego, anche con uscita 0.
+    # Si riporta solo l'esito, con il codice di uscita: mai l'output, che è testo del modello
+    # (#530); per vederlo si ripete la prova a mano (ops/host/migrate.md).
     if [ "$status" = 0 ] && grep -Eq 'git version [0-9]+\.[0-9]+' <<<"$out" \
         && ! grep -Eiq 'permission denied|operation not permitted' <<<"$out"; then
-        ok "$cli come $AGENT_USER esegue git --version con il suo strumento di shell"
+        ok "$cli come $AGENT_USER esegue git --version con il suo strumento di shell (uscita 0)"
         return
     fi
-    line=$(grep -Ei -m1 'permission denied|operation not permitted' <<<"$out")
-    [ -n "$line" ] || line=$(grep -v '^[[:space:]]*$' <<<"$out" | tail -n 1)
-    fail "$cli come $AGENT_USER non esegue git --version con il suo strumento di shell (uscita $status): ${line:0:300} (ops/host/migrate.md, una CLI che si ferma con permission denied)"
+    fail "$cli come $AGENT_USER non esegue git --version con il suo strumento di shell (uscita $status; l'output non si stampa: ripetere la prova a mano, ops/host/migrate.md, una CLI che si ferma con permission denied)"
 }
 
+# cli_version USER EXE: EXE --version come USER. Come shell_tool, solo l'esito e il codice di
+# uscita, senza l'output della CLI.
+cli_version() {
+    local user=$1 exe=$2 status
+    local -a cmd=("$exe" --version)
+    [ "$(id -un)" = "$user" ] || cmd=(sudo -u "$user" -H -- "${cmd[@]}")
+    if [ "$DRY_RUN" = 1 ]; then
+        run "${cmd[@]}"
+        return 0
+    fi
+    (cd /tmp && "${cmd[@]}" </dev/null >/dev/null 2>&1)
+    status=$?
+    if [ "$status" = 0 ]; then
+        ok "$(basename "$exe") --version come $user (uscita 0)"
+    else
+        fail "$(basename "$exe") --version come $user non riuscito (uscita $status)"
+    fi
+}
+
+# Con --read-only nessuna CLI si avvia: si verifica solo che ci sia.
 step 'CLI degli agent'
 for cli in claude codex agy; do
     exe="$AGENT_HOME/.local/bin/$cli"
-    if [ -x "$exe" ]; then
-        check_as "$AGENT_USER" "$cli --version come $AGENT_USER" "$exe" --version
-    else
+    if ! [ -x "$exe" ]; then
         fail "$exe non trovato (setup-agent-user.sh)"
+    elif [ "$READ_ONLY" = 1 ]; then
+        ok "$exe presente"
+    else
+        cli_version "$AGENT_USER" "$exe"
     fi
 done
-for cli in claude codex agy; do
-    [ -x "$AGENT_HOME/.local/bin/$cli" ] || continue
-    case $cli in
-        claude) shell_tool claude -p "$SHELL_PROMPT" --allowedTools 'Bash(git --version)' ;;
-        codex) shell_tool codex exec --skip-git-repo-check -s read-only "$SHELL_PROMPT" ;;
-        agy) shell_tool agy -p "$SHELL_PROMPT" --output-format json \
-                 --settings '{"permissions": {"allow": ["command(git --version)"]}}' ;;
-    esac
-done
-exe="$SUPERVISOR_HOME/.local/bin/claude"
-if [ -x "$exe" ]; then
-    check_as "$SUPERVISOR_USER" "claude --version come $SUPERVISOR_USER" "$exe" --version
+if [ "$READ_ONLY" = 1 ]; then
+    say '  prove delle CLI saltate (--read-only): nessuna CLI avviata'
 else
+    for cli in claude codex agy; do
+        [ -x "$AGENT_HOME/.local/bin/$cli" ] || continue
+        case $cli in
+            claude) shell_tool claude -p "$SHELL_PROMPT" --allowedTools 'Bash(git --version)' ;;
+            codex) shell_tool codex exec --skip-git-repo-check -s read-only "$SHELL_PROMPT" ;;
+            agy) shell_tool agy -p "$SHELL_PROMPT" --output-format json \
+                     --settings '{"permissions": {"allow": ["command(git --version)"]}}' ;;
+        esac
+    done
+fi
+exe="$SUPERVISOR_HOME/.local/bin/claude"
+if ! [ -x "$exe" ]; then
     fail "$exe non trovato"
+elif [ "$READ_ONLY" = 1 ]; then
+    ok "$exe presente"
+else
+    cli_version "$SUPERVISOR_USER" "$exe"
 fi
 
 if [ -n "$SOURCE_REPO" ]; then
@@ -549,6 +640,8 @@ if [ "$CHECK_APPS" = 1 ]; then
     else
         fail "nessuna copia fissata in $STATE_PATH/current: fare il primo pin"
     fi
+elif [ "$READ_ONLY" = 1 ]; then
+    say '  saltato (--read-only)'
 else
     say '  saltato (--no-apps)'
 fi

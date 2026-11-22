@@ -28,7 +28,7 @@ from helpers import ssdlc_project
 ROOT = Path(__file__).resolve().parents[1]
 OPS = ROOT / 'ops'
 SCRIPTS = ('host/setup-devloop.sh', 'host/setup-supervisor.sh', 'host/setup-agent-user.sh',
-           'host/check-host.sh', 'github/create-apps.sh')
+           'host/setup-coordinator.sh', 'host/check-host.sh', 'github/create-apps.sh')
 BASH = shutil.which('bash')
 ME = getpass.getuser()
 PREFIX = 'brushtyler-devloop-'
@@ -46,6 +46,13 @@ LEVEL = {'read': 1, 'write': 2}
 # runs the tests: a default of params.env (devloop-agent, supervisor) may be that user.
 FAKE_AGENT = 'opsdry-agent'
 FAKE_SUPERVISOR = 'opsdry-supervisor'
+FAKE_COORDINATOR = 'opsdry-coordinator'
+# What the fakes of the CLIs print, as a model would: check-host.sh never shows it (#530).
+MODEL_TEXT = 'MODEL-TEXT-4c1d9e'
+# A COORDINATOR_OPS_DIR for setup-coordinator.sh --dry-run, which refuses one under directories
+# not root's (#530, R1-1): the temporary directories of the tests are the user's. It need not
+# exist: the directories above it that exist (/usr, /usr/local) are root's on any host.
+ROOT_COPY = '/usr/local/lib/devloop-coordinator-opstest'
 # What ``sudo --version`` prints for each sudo the fakes simulate: the host moved from sudo-rs to
 # the classic sudo on 2026-11-20, and the scripts behave the same with either.
 SUDO_FLAVORS = {'sudo-rs': 'sudo-rs 0.2.8', 'classic sudo': 'Sudo version 1.9.17p2'}
@@ -154,6 +161,11 @@ echo "sudo $*" >> "$OPS_TEST_CALLS"''')
             'REPO_LOCK_DIR': str(self.tmp / 'locks' / 'repos'),
             'REPO_LOCK_GROUP': GROUP,
             'TMPFILES_FILE': str(self.tmp / 'tmpfiles.d' / 'devloop-repos.conf'),
+            # The coordinator (#530): a user the host does not have, unless a test fakes it.
+            'COORDINATOR_USER': FAKE_COORDINATOR,
+            'COORDINATOR_HOME': str(self.home / 'coordinator'),
+            'COORDINATOR_SUDOERS_FILE': str(self.tmp / 'sudoers.d' / 'devloop-coordinator'),
+            'COORDINATOR_OPS_DIR': str(self.tmp / 'lib' / 'devloop-coordinator'),
         }
         values.update(overrides)
         path = self.tmp / 'params.env'
@@ -192,6 +204,7 @@ class LayoutTests(unittest.TestCase):
                      'host/setup-devloop.sh', 'host/setup-supervisor.sh', 'host/devloop.service',
                      'host/sudoers-supervisor', 'host/config.local.toml.example',
                      'host/setup-agent-user.sh', 'host/sudoers-agent',
+                     'host/setup-coordinator.sh', 'host/sudoers-coordinator',
                      'host/check-host.sh', 'host/migrate.md',
                      'github/create-apps.sh', 'github/ruleset-main.json', 'github/tokens.md',
                      *(f'github/apps/{role}.json' for role in REQUIRED)):
@@ -648,6 +661,87 @@ class RootStepsGuideTests(unittest.TestCase):
                       (OPS / 'README.md').read_text(encoding='utf-8'))
 
 
+class CoordinatorGuideTests(unittest.TestCase):
+    """ops/README.md and ops/host/migrate.md describe the installation of the coordinator (#530):
+    the script run as root from the operator's checkout, the reading commands of its sudoers with
+    the values of the installation, check-host.sh --read-only and the rollback."""
+
+    OPERATOR = '/root/repos/ssdlc'
+    VALUES = {'DEVLOOP_USER': 'devloop', 'COORDINATOR_USER': 'coordinator',
+              'LAUNCHER_CMD': '/usr/bin/python3 /home/devloop/ssdlc/scripts/devloop-pinned',
+              'STATE_PATH': '/home/devloop/ssdlc/.ssdlc/devloop', 'SERVICE_NAME': 'devloop',
+              'COORDINATOR_OPS_DIR': '/usr/local/lib/devloop-coordinator'}
+
+    def sudoers(self):
+        """The commands of sudoers-coordinator with the values of the installation."""
+        text = render('host/sudoers-coordinator', self.VALUES).replace('\\\n', ' ')
+        return [c.strip() for line in text.splitlines() if 'NOPASSWD:' in line
+                for c in line.split('NOPASSWD:', 1)[1].split(',')]
+
+    def test_the_ops_guide_describes_the_installation(self):
+        text = (OPS / 'README.md').read_text(encoding='utf-8')
+        start = text.index('\n### 10. Coordinatore (facoltativo)\n')
+        section = text[start:text.index('\n## ', start)]
+        commands = RootStepsGuideTests.commands(section, inline=False)
+        self.assertEqual(commands[:2], ['sudo bash ops/host/setup-coordinator.sh --dry-run',
+                                        'sudo bash ops/host/setup-coordinator.sh'])
+        # Each example of the coordinator is a command of its sudoers.
+        allowed = self.sudoers()
+        for command in commands[2:]:
+            with self.subTest(command=command):
+                argv = command.split()
+                self.assertEqual(argv[0], 'sudo')
+                if argv[1] == '-u':
+                    self.assertEqual(argv[2], 'devloop')
+                    argv = argv[3:]
+                else:
+                    argv = argv[1:]
+                self.assertIn(' '.join(argv), allowed)
+        self.assertIn('sudo /usr/bin/bash /usr/local/lib/devloop-coordinator/host/check-host.sh '
+                      '--read-only', commands)
+        flat = ' '.join(section.split())
+        for phrase in ('**solo lettura**', '`ops/host/sudoers-coordinator`', '`visudo -c`',
+                       '**copia di root**', '**Dopo ogni aggiornamento di `ops/`**',
+                       'senza caratteri jolly', 'nessun modello, nessuna quota',
+                       'senza `devloop apps` e senza scrivere nulla',
+                       '(host/migrate.md#utente-del-coordinatore-530)',
+                       '(../docs/adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-22-'
+                       'modello-a-quattro-ruoli-524-527)'):
+            self.assertIn(phrase, flat)
+        self.assertIn('### Precisazione del 2026-11-22: modello a quattro ruoli (#524, #527)',
+                      (ROOT / 'docs/adr/0002-ruoli-e-responsabilita.md').read_text())
+        flat = ' '.join(text.split())
+        self.assertIn('**solo l\'esito, con il codice di uscita**', flat)
+        self.assertNotIn("con la riga del `permission denied` se c'è", flat)
+
+    def test_the_migration_guide_describes_the_installation_and_the_rollback(self):
+        text = RootStepsGuideTests().section('## Utente del coordinatore (#530)')
+        commands = RootStepsGuideTests.commands(text, inline=False)
+        setup = f'sudo bash {self.OPERATOR}/ops/host/setup-coordinator.sh'
+        steps = [f'git -C {self.OPERATOR} fetch origin',
+                 f'git -C {self.OPERATOR} checkout --detach origin/main',
+                 f'test -f {self.OPERATOR}/ops/params.env', f'{setup} --dry-run', setup,
+                 'sudo -u coordinator -H sudo -n -l',
+                 'sudo -u coordinator -H sudo -n /usr/bin/bash '
+                 '/usr/local/lib/devloop-coordinator/host/check-host.sh --read-only',
+                 'rm /etc/sudoers.d/devloop-coordinator',
+                 'rm -r /usr/local/lib/devloop-coordinator', 'userdel -r coordinator']
+        self.assertEqual(commands, steps)
+        # The check as the coordinator is the one its sudoers allows.
+        self.assertIn(steps[6].split(' -n ', 1)[1], self.sudoers())
+        flat = ' '.join(text.split())
+        for phrase in ('**dal checkout dell\'operatore**', 'mai dal clone di devloop',
+                       f'`sudo bash {self.OPERATOR}/ops/host/check-host.sh --no-apps`',
+                       '**come `coordinator`**', '**Dopo ogni aggiornamento di `ops/`**',
+                       'nessun pin lo aspetta', '**Rollback.**',
+                       '(../README.md#10-coordinatore-facoltativo)'):
+            self.assertIn(phrase, flat)
+        migrate = ' '.join((OPS / 'host/migrate.md').read_text(encoding='utf-8').split())
+        self.assertIn('`setup-supervisor.sh` e, se c\'è il coordinatore, `setup-coordinator.sh`',
+                      migrate)
+        self.assertIn('[Utente del coordinatore](#utente-del-coordinatore-530)', migrate)
+
+
 class ManifestTests(unittest.TestCase):
     """The manifests of ops/github/apps cover what devloop/apps.py asks for each role."""
 
@@ -792,6 +886,48 @@ class DeclarativeFileTests(unittest.TestCase):
                                    '/usr/bin/systemctl status @SERVICE_NAME@ *'])
         self.assertEqual(len(body), 3)
         self.assertNotIn('config.local.toml', ' '.join(body))
+
+    def test_the_coordinator_sudoers_allows_only_reading_commands(self):
+        # #530 (ADR 0002, precisazione del 2026-11-22): journalctl and systemctl status of the
+        # unit, run.log, devloop-pinned status and check-host.sh --read-only; nothing else.
+        text = (OPS / 'host/sudoers-coordinator').read_text()
+        body = [line for line in text.replace('\\\n', ' ').splitlines()
+                if line.strip() and not line.startswith('#')]
+        self.assertEqual(len(body), 3, body)
+        self.assertEqual(body[0], 'Defaults>@DEVLOOP_USER@ always_set_home, '
+                                  'secure_path="@DEVLOOP_PATH@"')
+        self.assertTrue(body[1].startswith('@COORDINATOR_USER@ ALL=(@DEVLOOP_USER@) NOPASSWD: '))
+        as_devloop = [c.strip() for c in body[1].split('NOPASSWD:', 1)[1].split(',')]
+        self.assertEqual(as_devloop, ['@LAUNCHER_CMD@ status',
+                                      '/usr/bin/tail -n 200 @STATE_PATH@/run.log',
+                                      '/usr/bin/tail -n 1000 @STATE_PATH@/run.log'])
+        self.assertTrue(body[2].startswith('@COORDINATOR_USER@ ALL=(root) NOPASSWD: '))
+        as_root = [c.strip() for c in body[2].split('NOPASSWD:', 1)[1].split(',')]
+        self.assertEqual(as_root, [
+            '/usr/bin/journalctl --no-pager -n 200 -u @SERVICE_NAME@',
+            '/usr/bin/journalctl --no-pager -n 1000 -u @SERVICE_NAME@',
+            '/usr/bin/systemctl status --no-pager @SERVICE_NAME@',
+            '/usr/bin/bash @COORDINATOR_OPS_DIR@/host/check-host.sh --read-only'])
+        # Each command with its exact arguments: no wildcard, no environment, no other target.
+        rules = ' '.join(body[1:])
+        for forbidden in ('*', '?', '[', 'SETENV', 'ALL=(ALL', 'sudoedit', 'config.local.toml'):
+            self.assertNotIn(forbidden, rules)
+        # Only reading programs and verbs: what the coordinator runs never changes the host,
+        # starts the loop or a CLI, opens a pager or reaches devloop's clone as root.
+        reading = {'@LAUNCHER_CMD@': ['status'], '/usr/bin/tail': ['-n'],
+                   '/usr/bin/journalctl': ['--no-pager'], '/usr/bin/systemctl': ['status'],
+                   '/usr/bin/bash': ['@COORDINATOR_OPS_DIR@/host/check-host.sh']}
+        for command in as_devloop + as_root:
+            with self.subTest(command=command):
+                program, verb = command.split()[:2]
+                self.assertEqual(reading[program], [verb])
+                for word in ('start', 'stop', 'restart', 'pin', 'tick', 'run', 'watch', 'apps',
+                             'token', '--vacuum-size', '--rotate', '--flush', '-f', '-F'):
+                    self.assertNotIn(word, command.split())
+                if program in ('/usr/bin/journalctl', '/usr/bin/systemctl'):
+                    self.assertIn('--no-pager', command.split())
+        self.assertTrue(as_root[-1].endswith(' --read-only'))
+        self.assertNotIn('@DEVLOOP_CLONE@', rules)
 
     def test_the_agent_sudoers_allows_only_the_clis_bash_and_kill(self):
         # #415: devloop starts as the agent user only the CLIs, the test command and the kill of
@@ -944,6 +1080,143 @@ class DryRunTests(OpsTestCase):
         self.assertNotRegex(out, r'@[A-Z_]+@')
         self.assertEqual(self.mutating_calls(), [])
         self.assertEqual(self.tree(), before)
+
+    def test_setup_coordinator_dry_run_prints_the_user_the_copy_and_the_sudoers(self):
+        # #530: the coordinator's user, the root copy of check-host.sh with the files it reads
+        # and the parameters, and the sudoers with reading commands only.
+        (self.home / 'devloop').mkdir(parents=True)
+        params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=FAKE_SUPERVISOR,
+                             AGENT_USER=FAKE_AGENT, COORDINATOR_OPS_DIR=ROOT_COPY)
+        copy = ROOT_COPY
+        before = self.tree()
+        for sudo in SUDO_FLAVORS:
+            with self.subTest(sudo):
+                self.fake_host(sudo, users=(FAKE_AGENT, FAKE_SUPERVISOR))
+                done = self.run_script('host/setup-coordinator.sh', '--dry-run', '--params',
+                                       str(params))
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                out = done.stdout
+                self.assertIn(f'[dry-run] useradd --create-home --home-dir {self.home}/coordinator '
+                              f'--shell /bin/bash {FAKE_COORDINATOR}\n', out)
+                self.assertIn(f'[dry-run] install -d -m 755 -o root -g root {copy}\n', out)
+                self.assertIn(f'[dry-run] install -d -m 755 -o root -g root {copy}/host\n', out)
+                lib = (OPS / 'lib.sh').read_text()
+                files = re.search(r"^OPS_COORDINATOR_FILES='(.*)'$", lib, re.M).group(1).split()
+                for name in files:
+                    self.assertIn(f'[dry-run] install -m 644 -o root -g root {OPS}/{name} '
+                                  f'{copy}/{name}\n', out)
+                self.assertIn(f'[dry-run] install -m 644 -o root -g root {params} '
+                              f'{copy}/params.env\n', out)
+                self.assertIn(f'scriverebbe {self.tmp}/sudoers.d/devloop-coordinator (mode 440, '
+                              'proprietario root)', out)
+                launcher = f'/usr/bin/python3 {self.home}/devloop/ssdlc/scripts/devloop-pinned'
+                state = f'{self.home}/devloop/ssdlc/.ssdlc/devloop'
+                for line in (f'{FAKE_COORDINATOR} ALL=({ME}) NOPASSWD: \\',
+                             f'    {launcher} status, \\',
+                             f'    /usr/bin/tail -n 200 {state}/run.log, \\',
+                             f'{FAKE_COORDINATOR} ALL=(root) NOPASSWD: \\',
+                             '    /usr/bin/systemctl status --no-pager devloop, \\',
+                             f'    /usr/bin/bash {copy}/host/check-host.sh --read-only'):
+                    self.assertIn(f'    | {line}\n', out)
+                self.assertIn('token fine-grained di sola lettura', out)
+                self.assertNotRegex(out, r'@[A-Z_]+@')
+        self.assertEqual(self.mutating_calls(), [])
+        self.assertEqual(self.tree(), before)
+
+    def test_the_coordinator_of_a_project_has_its_sudoers_and_its_copy(self):
+        params = self.project_params(COORDINATOR_SUDOERS_FILE='', COORDINATOR_OPS_DIR='')
+        done = self.run_script('host/setup-coordinator.sh', '--dry-run', '--params', str(params))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        out = done.stdout
+        self.assertIn('scriverebbe /etc/sudoers.d/devloop-coordinator-widget (mode 440', out)
+        self.assertIn('install -d -m 755 -o root -g root /usr/local/lib/devloop-coordinator-widget\n',
+                      out)
+        self.assertIn('    /usr/bin/journalctl --no-pager -n 200 -u devloop@widget, \\\n', out)
+        self.assertIn('    /usr/bin/bash /usr/local/lib/devloop-coordinator-widget/host/check-host.sh'
+                      ' --read-only\n', out)
+        self.assertEqual(self.mutating_calls(), [])
+
+    def test_the_coordinator_has_a_user_of_its_own_and_a_copy_out_of_reach(self):
+        # #530: its user has no other role's privileges, and what it runs as root lies out of
+        # the homes and of state_dir.
+        for overrides, message in (
+                ({'COORDINATOR_USER': 'supervisor'},
+                 'COORDINATOR_USER deve essere diverso da SUPERVISOR_USER'),
+                ({'COORDINATOR_USER': 'devloop'},
+                 'COORDINATOR_USER deve essere diverso da DEVLOOP_USER'),
+                ({'COORDINATOR_USER': 'devloop-agent'},
+                 'COORDINATOR_USER deve essere diverso da AGENT_USER'),
+                ({'COORDINATOR_OPS_DIR': str(self.home / 'devloop/ops')},
+                 'COORDINATOR_OPS_DIR non può stare dentro né contenere'),
+                ({'COORDINATOR_OPS_DIR': str(self.home / 'coordinator/ops')},
+                 'COORDINATOR_OPS_DIR non può stare dentro né contenere'),
+                ({'COORDINATOR_OPS_DIR': '/opt/../tmp/x'}, 'COORDINATOR_OPS_DIR deve essere'),
+                ({'COORDINATOR_SUDOERS_FILE': str(self.tmp / 'sudoers.d/coordinator.conf')},
+                 "il nome di COORDINATOR_SUDOERS_FILE non può contenere '.'")):
+            with self.subTest(overrides=overrides):
+                for script in ('host/setup-coordinator.sh', 'host/check-host.sh'):
+                    done = self.run_script(script, '--dry-run', '--params',
+                                           str(self.params(**overrides)))
+                    self.assertNotEqual(done.returncode, 0, script)
+                    self.assertIn(message, done.stderr)
+        self.assertEqual(self.mutating_calls(), [])
+
+    def test_setup_coordinator_refuses_a_copy_another_user_can_replace(self):
+        # #530, R1-1: under a directory others can write (or not root's, or a link), its user
+        # would rename the copy and put its own script there, which its sudoers runs as root.
+        # setup-coordinator.sh stops before the user, the copy and the sudoers.
+        shared = self.tmp / 'shared'
+        shared.mkdir()
+        shared.chmod(0o777)
+        (shared / 'ops').mkdir()
+        (shared / 'ops').chmod(0o555)
+        self.addCleanup((shared / 'ops').chmod, 0o755)
+        (self.tmp / 'link').symlink_to('/usr/local/lib')
+        (self.tmp / 'copy-link').symlink_to(ROOT_COPY)
+        for path, message in (
+                (shared / 'ops', f'{shared} è 777 {ME}: COORDINATOR_OPS_DIR deve stare sotto '
+                                 'directory di root non scrivibili dal gruppo né dagli altri; '
+                                 'niente installato'),
+                # Not root's, even if no other can write it.
+                (self.tmp / 'lib/devloop-coordinator', f'{self.tmp} è 700 {ME}: '),
+                (self.tmp / 'link/devloop-coordinator', f'{self.tmp}/link è un link'),
+                (self.tmp / 'copy-link', f'{self.tmp}/copy-link è un link')):
+            with self.subTest(path=path):
+                params = self.params(COORDINATOR_OPS_DIR=str(path))
+                done = self.run_script('host/setup-coordinator.sh', '--dry-run', '--params',
+                                       str(params))
+                self.assertNotEqual(done.returncode, 0)
+                self.assertIn(message, done.stderr)
+                self.assertNotIn('useradd', done.stdout)
+                self.assertNotIn('install', done.stdout)
+                self.assertNotIn('sudoers del coordinatore', done.stdout)
+                self.assertNotIn('check-host.sh --read-only', done.stdout)
+        self.assertEqual(self.mutating_calls(), [])
+
+    def test_the_sudoers_of_the_coordinator_gives_no_role_on_the_host(self):
+        # #530: one coordinator per host, like the supervisor: its sudoers, of this project or of
+        # another, does not make its devloop user another installation's.
+        sudoers = self.tmp / 'sudoers.d'
+        sudoers.mkdir()
+        for name, user in (('devloop-coordinator', 'opsdry-nouser'),
+                           ('devloop-coordinator-gadget', 'devloop-gadget')):
+            (sudoers / name).write_text(f'Defaults>{user} always_set_home\n\n'
+                                        f'coordinator ALL=({user}) NOPASSWD: \\\n'
+                                        '    /usr/bin/true\n')
+        params = self.params(DEVLOOP_USER='opsdry-nouser', COORDINATOR_USER='coordinator',
+                             COORDINATOR_OPS_DIR=ROOT_COPY)
+        for script in ('host/setup-devloop.sh', 'host/setup-coordinator.sh'):
+            with self.subTest(script=script):
+                done = self.run_script(script, '--dry-run', '--params', str(params))
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        # A sudoers of a supervisor with the same rule still gives the role (R1-1).
+        (sudoers / 'devloop-supervisor-gadget').write_text(
+            'coordinator ALL=(devloop-gadget) NOPASSWD: \\\n    /usr/bin/true\n')
+        done = self.run_script('host/setup-coordinator.sh', '--dry-run', '--params', str(params))
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("COORDINATOR_USER 'coordinator' è già l'utente supervisor di un'altra "
+                      'installazione', done.stderr)
+        self.assertEqual(self.mutating_calls(), [])
 
     def test_setup_agent_user_dry_run_prints_the_user_the_acls_and_the_sudoers(self):
         # #415: the agent user traverses the home of devloop and state_dir, writes only in the
@@ -2214,13 +2487,16 @@ class CheckHostTests(OpsTestCase):
                           if 'strumento di shell' in line]
         done, lines = run()
         self.assertEqual(done.returncode, 1)
-        self.assertIn(f'  ok: claude come {ME} esegue git --version con il suo strumento di shell',
-                      lines)
-        self.assertIn(f'  ok: codex come {ME} esegue git --version con il suo strumento di shell',
-                      lines)
-        self.assertIn(f'  ERRORE: agy come {ME} non esegue git --version con il suo strumento di '
-                      f'shell (uscita 1): {denied} (ops/host/migrate.md, una CLI che si ferma '
-                      'con permission denied)', lines)
+        self.assertIn(f'  ok: claude come {ME} esegue git --version con il suo strumento di shell '
+                      '(uscita 0)', lines)
+        self.assertIn(f'  ok: codex come {ME} esegue git --version con il suo strumento di shell '
+                      '(uscita 0)', lines)
+        # #530: the outcome and the exit code, never what the CLI printed.
+        failed = (f'  ERRORE: agy come {ME} non esegue git --version con il suo strumento di '
+                  'shell (uscita {}; l\'output non si stampa: ripetere la prova a mano, '
+                  'ops/host/migrate.md, una CLI che si ferma con permission denied)')
+        self.assertIn(failed.format(1), lines)
+        self.assertNotIn(denied, done.stdout + done.stderr)
         self.assertEqual(args.read_text().splitlines()[:2],
                          ['-p', 'Run the shell command `git --version` with your shell tool, '
                                 'then reply with its output only.'])
@@ -2229,9 +2505,8 @@ class CheckHostTests(OpsTestCase):
         # An answer without the output of the command is an error too, whatever the exit.
         agy.write_text('#!/bin/sh\necho \'{"status": "SUCCESS", "result": "I cannot."}\'\n')
         done, lines = run()
-        self.assertIn(f'  ERRORE: agy come {ME} non esegue git --version con il suo strumento di '
-                      'shell (uscita 0): {"status": "SUCCESS", "result": "I cannot."} '
-                      '(ops/host/migrate.md, una CLI che si ferma con permission denied)', lines)
+        self.assertIn(failed.format(0), lines)
+        self.assertNotIn('I cannot', done.stdout + done.stderr)
         # The words without the version, or an explicit denial, are errors with exit 0 too
         # (1/codex/R1-1).
         for result in ('I cannot report the git version: the shell command failed with '
@@ -2241,14 +2516,192 @@ class CheckHostTests(OpsTestCase):
             agy.write_text('#!/bin/sh\necho ' + shlex.quote(answer) + '\n')
             done, lines = run()
             self.assertEqual(done.returncode, 1)
-            self.assertIn(f'  ERRORE: agy come {ME} non esegue git --version con il suo strumento '
-                          f'di shell (uscita 0): {answer} (ops/host/migrate.md, una CLI che si '
-                          'ferma con permission denied)', lines)
+            self.assertIn(failed.format(0), lines)
+            self.assertNotIn(result, done.stdout + done.stderr)
         agy.write_text('#!/bin/sh\necho \'{"status": "SUCCESS", "result": "git version 2.47.0"}\'\n')
         done, lines = run()
-        self.assertIn(f'  ok: agy come {ME} esegue git --version con il suo strumento di shell',
-                      lines)
+        self.assertIn(f'  ok: agy come {ME} esegue git --version con il suo strumento di shell '
+                      '(uscita 0)', lines)
         self.assertEqual([line for line in lines if 'ERRORE' in line], [])
+
+    def fake_clis(self, body):
+        """The CLIs of the agent user and of the supervisor, with ``body`` after a line that
+        records each start in ``bin/started`` (out of ``tree``)."""
+        started = self.bin / 'started'
+        for path in [self.agent / '.local/bin' / cli for cli in agentuser.CLIS] \
+                + [self.supervisor / '.local/bin/claude']:
+            path.write_text(f'#!/bin/sh\necho "$0 $*" >> {shlex.quote(str(started))}\n{body}\n')
+        return started
+
+    def executing_sudo(self):
+        """A classic ``sudo`` that runs the command as the current user and logs, in
+        ``bin/sudo-log`` (out of ``tree``), its options and the program it runs, not as a change
+        of the host."""
+        log = self.bin / 'sudo-log'
+        self.shim('sudo', f'''if [ "$1" = --version ]; then
+    echo {shlex.quote(SUDO_FLAVORS['classic sudo'])}; exit 0
+fi
+opts=
+while [ $# -gt 0 ] && [ "$1" != -- ]; do opts="$opts $1"; shift; done
+shift
+echo "sudo$opts -- $1" >> {shlex.quote(str(log))}
+exec "$@"''')
+        return log
+
+    def test_the_probes_of_the_clis_print_only_the_outcome_and_the_exit_code(self):
+        # #530: the full check runs --version and the shell tool of each CLI, and of their output,
+        # the model's text, prints nothing: only passed or failed, with the exit code.
+        self.fake_host('classic sudo', users=(FAKE_AGENT, FAKE_SUPERVISOR))
+        self.executing_sudo()
+        params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=FAKE_SUPERVISOR,
+                             AGENT_USER=FAKE_AGENT)
+        for status, version, denial in ((0, 'git version 2.47.0', ''),
+                                        (3, '', ': permission denied'),
+                                        (0, 'git version 2.47.0', ': permission denied'),
+                                        (0, '', '')):
+            with self.subTest(status=status, version=version, denial=denial):
+                started = self.fake_clis(f'echo "{version} {MODEL_TEXT} on stdout"\n'
+                                         f'echo "{MODEL_TEXT} on stderr{denial}" >&2\n'
+                                         f'[ "$1" = --version ] && exit 0\nexit {status}')
+                started.unlink(missing_ok=True)
+                done = self.run_script('host/check-host.sh', '--no-apps', '--params', str(params))
+                self.assertNotIn(MODEL_TEXT, done.stdout + done.stderr)
+                # The probes ran: --version of the four CLIs and the shell tool of three.
+                self.assertEqual(len(started.read_text().splitlines()), 7)
+                out = done.stdout
+                for cli in agentuser.CLIS:
+                    self.assertIn(f'  ok: {cli} --version come {FAKE_AGENT} (uscita 0)\n', out)
+                    if version and not denial:
+                        self.assertIn(f'  ok: {cli} come {FAKE_AGENT} esegue git --version con il '
+                                      'suo strumento di shell (uscita 0)\n', out)
+                    else:  # a denial, or no version, is a failure even with exit 0
+                        self.assertIn(f'  ERRORE: {cli} come {FAKE_AGENT} non esegue git --version '
+                                      f'con il suo strumento di shell (uscita {status}; l\'output '
+                                      'non si stampa', out)
+                self.assertIn(f'  ok: claude --version come {FAKE_SUPERVISOR} (uscita 0)\n', out)
+        # A --version that fails: its exit code, not its output.
+        self.fake_clis(f'echo "{MODEL_TEXT}"\nexit 5')
+        done = self.run_script('host/check-host.sh', '--no-apps', '--params', str(params))
+        self.assertNotIn(MODEL_TEXT, done.stdout + done.stderr)
+        self.assertIn(f'  ERRORE: codex --version come {FAKE_AGENT} non riuscito (uscita 5)\n',
+                      done.stdout)
+        self.assertEqual(self.mutating_calls(), [])
+
+    def coordinator_copy(self, params):
+        """The root copy of check-host.sh that setup-coordinator.sh installs (#530), here owned
+        by the user of the tests, with the parameters as its params.env."""
+        lib = (OPS / 'lib.sh').read_text()
+        files = re.search(r"^OPS_COORDINATOR_FILES='(.*)'$", lib, re.M).group(1).split()
+        copy = self.tmp / 'lib/devloop-coordinator'
+        for name in files:
+            (copy / name).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(OPS / name, copy / name)
+            (copy / name).chmod(0o644)
+        shutil.copyfile(params, copy / 'params.env')
+        (copy / 'params.env').chmod(0o644)
+        for directory in (copy, copy / 'host'):
+            directory.chmod(0o755)
+        return copy
+
+    def test_the_read_only_check_starts_no_cli_and_writes_nothing(self):
+        # #530: the coordinator's check, as root through its sudoers, from the root copy: no
+        # CLI started, no devloop apps, nothing written, only status lines.
+        self.fake_host('classic sudo', users=(FAKE_AGENT, FAKE_SUPERVISOR, FAKE_COORDINATOR))
+        sudo_log = self.executing_sudo()
+        self.shim('visudo', 'exit 0')  # visudo -c only reads
+        started = self.fake_clis(f'echo "{MODEL_TEXT}"')
+        params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=FAKE_SUPERVISOR,
+                             AGENT_USER=FAKE_AGENT)
+        copy = self.coordinator_copy(params)
+        sudoers = self.tmp / 'sudoers.d/devloop-coordinator'
+        sudoers.parent.mkdir()
+        sudoers.write_text(render('host/sudoers-coordinator', {
+            'DEVLOOP_USER': ME, 'COORDINATOR_USER': FAKE_COORDINATOR,
+            'DEVLOOP_PATH': f'{self.devloop}/.local/bin:/usr/local/bin:/usr/bin:/bin',
+            'LAUNCHER_CMD': f'/usr/bin/python3 {self.devloop}/ssdlc/scripts/devloop-pinned',
+            'STATE_PATH': str(self.state), 'SERVICE_NAME': 'devloop',
+            'COORDINATOR_OPS_DIR': str(copy)}))
+        sudoers.chmod(0o440)
+        # From the coordinator's own directory, with a module python would import from there.
+        cwd = self.tmp / 'cwd'
+        cwd.mkdir()
+        (cwd / 'tomllib.py').write_text(f'open({str(self.tmp / "imported")!r}, "w")\n')
+        before = self.tree()
+        env = dict(os.environ, PATH=f'{self.bin}:{os.environ.get("PATH", "/usr/bin:/bin")}',
+                   OPS_TEST_CALLS=str(self.calls), OPS_OS_RELEASE=str(self.release),
+                   OPS_ARCH='aarch64', LC_ALL='C.UTF-8')
+        done = subprocess.run([BASH, str(copy / 'host/check-host.sh'), '--read-only'],
+                              capture_output=True, text=True, env=env, cwd=cwd,
+                              stdin=subprocess.DEVNULL, timeout=120)
+        out = done.stdout
+        self.assertNotIn('No such file', done.stderr)
+        self.assertFalse(started.exists(), started.read_text() if started.exists() else '')
+        self.assertNotIn(MODEL_TEXT, out + done.stderr)
+        self.assertEqual(self.tree(), before)
+        self.assertEqual(self.mutating_calls(), [])
+        # The checks as the other users ran, through sudo, and none was a CLI or devloop: only
+        # test and the probes of bash.
+        calls = sudo_log.read_text().splitlines()
+        self.assertTrue(any(f'-u {FAKE_AGENT} ' in call for call in calls), calls)
+        self.assertEqual({call.rsplit(' -- ', 1)[1] for call in calls}, {'test', '/usr/bin/bash'})
+        self.assertIn('Sola lettura (--read-only): nessuna CLI avviata, niente devloop apps.', out)
+        self.assertIn('  prove delle CLI saltate (--read-only): nessuna CLI avviata\n', out)
+        self.assertIn(f'  ok: {self.agent}/.local/bin/agy presente\n', out)
+        self.assertIn(f'  ok: {self.supervisor}/.local/bin/claude presente\n', out)
+        self.assertIn('==> GitHub App (devloop apps)\n  saltato (--read-only)\n', out)
+        # Its parameters and templates are the copy's.
+        self.assertIn(f'  ok: {sudoers} coincide con ops/host/sudoers-coordinator\n', out)
+        self.assertIn(f"  ok: l'utente {FAKE_COORDINATOR} esiste\n", out)
+        self.assertNotIn('è diverso da', out)
+        # Only status lines: steps, results and the count.
+        for line in out.splitlines():
+            self.assertRegex(line, r'^(|==> .*|  \S.*|Sola lettura .*|\d+ errori, \d+ avvisi)$')
+        # The same host, without --read-only, starts the CLIs.
+        done = self.run_script('host/check-host.sh', '--no-apps', '--params', str(params))
+        self.assertTrue(started.exists())
+
+    def test_the_coordinator_is_checked_when_it_is_installed(self):
+        # #530: absent, a line; present, its sudoers and the root copy, equal to this checkout.
+        done, errors = self.check()
+        self.assertEqual(errors, [], done.stdout)
+        self.assertIn(f"  l'utente {FAKE_COORDINATOR} non esiste: coordinatore non installato "
+                      '(setup-coordinator.sh)\n', done.stdout)
+        self.fake_host('classic sudo', users=(FAKE_AGENT, FAKE_SUPERVISOR, FAKE_COORDINATOR))
+        params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=FAKE_SUPERVISOR,
+                             AGENT_USER=FAKE_AGENT)
+        copy = self.coordinator_copy(params)
+        (copy / 'host/check-host.sh').write_text('# an older copy\n')
+        (copy / 'lib.sh').chmod(0o664)
+        done = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params))
+        out = done.stdout
+        self.assertIn(f"  ok: l'utente {FAKE_COORDINATOR} esiste\n", out)
+        self.assertIn(f'  ERRORE: {self.tmp}/sudoers.d/devloop-coordinator non esiste '
+                      '(setup-coordinator.sh)', out)
+        # The copy is not root's here: an error for it and for each directory above it.
+        self.assertIn(f'  ERRORE: {copy}/host è 755 {ME}: deve essere di root e non scrivibile '
+                      'dal gruppo né dagli altri\n', out)
+        self.assertIn(f'  ERRORE: {copy}/lib.sh è 664 {ME}, deve essere 644 root\n', out)
+        self.assertIn(f'  ok: {copy}/params.env coincide con {params}\n', out)
+        self.assertIn(f'  ok: {copy}/host/sudoers-agent coincide con {OPS}/host/sudoers-agent\n',
+                      out)
+        self.assertIn(f'  ATTENZIONE: {copy}/host/check-host.sh è diverso da '
+                      f'{OPS}/host/check-host.sh: rieseguire setup-coordinator.sh\n', out)
+        (copy / 'host/sudoers-agent').unlink()
+        done = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params))
+        self.assertIn(f'  ERRORE: {copy}/host/sudoers-agent non esiste (setup-coordinator.sh)\n',
+                      done.stdout)
+        self.assertEqual(self.mutating_calls(), [])
+
+    def test_the_copy_holds_every_file_of_ops_check_host_reads(self):
+        # #530: setup-coordinator.sh copies the files of ops/host that check-host.sh renders.
+        lib = (OPS / 'lib.sh').read_text()
+        files = set(re.search(r"^OPS_COORDINATOR_FILES='(.*)'$", lib, re.M).group(1).split())
+        script = (OPS / 'host/check-host.sh').read_text()
+        named = {f'host/{p.name}' for p in (OPS / 'host').iterdir()
+                 if p.is_file() and p.suffix not in ('.sh', '.md', '.example', '.json')
+                 and (p.name in script or f'UNIT_TEMPLATE={p.name}' in lib)}
+        self.assertEqual(named | {'lib.sh', 'host/check-host.sh'}, files)
+        self.assertIn('host/devloop@.service', named)
 
     def real_sudo(self, sudo, env_stderr='', env_status=0):
         """A ``sudo`` whose ``--version`` is that of ``SUDO_FLAVORS``, and whose ``sudo -n -E``
