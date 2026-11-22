@@ -6,10 +6,11 @@ Usage:
         <command> [args...]
 
 Examples:
-    python3 scripts/coordinator-token.py --state-dir /home/devloop/ssdlc/.ssdlc/devloop -- \\
-        gh issue comment 76 --body-file command.md
-    python3 scripts/coordinator-token.py --state-dir /home/devloop/ssdlc/.ssdlc/devloop \\
-        --perm actions=read -- gh run view 123 --log-failed
+    DEVLOOP_APP_KEY_DIR=/home/coordinator/.ghapps python3 scripts/coordinator-token.py \\
+        --state-dir /home/devloop/ssdlc/.ssdlc/devloop -- gh issue comment 76 --body-file x.md
+    DEVLOOP_APP_KEY_DIR=/home/coordinator/.ghapps python3 scripts/coordinator-token.py \\
+        --state-dir /home/devloop/ssdlc/.ssdlc/devloop --perm actions=read -- \\
+        gh run view 123 --log-failed
 
 The coordinator's role app (#528, #549; ADR 0002, precision of 2026-11-22) of the project whose
 state_dir is DIR (default: .ssdlc/devloop of this clone): ``repo`` and ``[apps.coordinator]`` of
@@ -19,7 +20,8 @@ read. It signs the coordinator's commands, comments and labels; devloop counts t
 closed perimeter of the coordinator, only with [roles.coordinator]. scripts/agent-token.py does
 not expose it, and devloop never reads its key: the key stays in the key_dir of the
 coordinator's system user ($DEVLOOP_APP_KEY_DIR, else apps.key_dir of the configuration), not in
-devloop's.
+devloop's. apps.key_dir of the overlay is devloop's key_dir: the coordinator always sets
+DEVLOOP_APP_KEY_DIR to its own (COORDINATOR_KEY_DIR of ops/params.env).
 
 Without --perm the token gets issues=write and pull_requests=write: enough for commands,
 comments and labels. Only issues and pull_requests (read or write), and actions, checks,

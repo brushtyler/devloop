@@ -13,6 +13,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import tempfile
 import unittest
@@ -160,6 +161,40 @@ class CoordinatorTokenTests(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 self.script.main(['--state-dir', str(self.state), '--', 'gh', 'x'])
             run.assert_not_called()
+
+    def test_the_key_comes_from_the_coordinators_key_dir_not_from_the_overlays(self):
+        # The overlay's [apps] key_dir is devloop's (DEVLOOP_KEY_DIR; with PROJECT an absolute
+        # path such as /home/devloop-widget/.ghapps): the coordinator's key is not there. With
+        # DEVLOOP_APP_KEY_DIR on its own key_dir (COORDINATOR_KEY_DIR, as setup-coordinator.sh
+        # prints it), the key is found; without it, the script looks in devloop's and fails.
+        devloop_keys = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, devloop_keys)
+        overlay = self.state / 'config.local.toml'
+        text = overlay.read_text(encoding='utf-8')
+        self.assertRegex(text, r'(?m)^key_dir = ')
+        overlay.write_text(re.sub(r'(?m)^key_dir = .*$', f'key_dir = "{devloop_keys}"', text),
+                           encoding='utf-8')
+        self.assertEqual(self.script.load_config(self.state).app_key_dir, str(devloop_keys))
+        env = {k: v for k, v in os.environ.items() if k != 'DEVLOOP_APP_KEY_DIR'}
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(self.script.AppAuth, 'token') as mint, \
+                mock.patch.object(self.script.subprocess, 'run') as run:
+            with self.assertRaisesRegex(FileNotFoundError, re.escape(str(devloop_keys))):
+                self.script.main(['--state-dir', str(self.state), '--', 'gh', 'x'])
+            mint.assert_not_called()
+            run.assert_not_called()
+        seen = {}
+
+        def fake_mint(app, permissions):
+            seen['key'] = app.key_path
+            return SECRET
+        with mock.patch.dict(os.environ, {'DEVLOOP_APP_KEY_DIR': str(self.keys)}), \
+                mock.patch.object(self.script.AppAuth, 'token', fake_mint), \
+                mock.patch.object(self.script.subprocess, 'run',
+                                  return_value=SimpleNamespace(returncode=0)):
+            self.assertEqual(self.script.main(['--state-dir', str(self.state), '--', 'gh', 'x']),
+                             0)
+        self.assertEqual(seen, {'key': self.key})
 
     def test_without_the_app_it_refuses(self):
         cfg = dataclasses.replace(CFG, apps={k: v for k, v in CFG.apps.items()

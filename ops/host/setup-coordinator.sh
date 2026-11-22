@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Prepara l'host per il coordinatore di devloop (ADR 0002, precisazione del 2026-11-22; #530):
-# l'utente, la key_dir della sua GitHub App (700, #549), una copia di root di check-host.sh con i
-# file che legge e i parametri, e un sudoers con soli comandi di lettura
-# (ops/host/sudoers-coordinator).
+# l'utente, l'ACL di solo attraversamento sulla home di devloop (per leggere l'overlay), la key_dir
+# della sua GitHub App (700, #549), una copia di root di check-host.sh con i file che legge e i
+# parametri, e un sudoers con soli comandi di lettura (ops/host/sudoers-coordinator).
 # Idempotente: si può rieseguire, fa solo ciò che manca; va rieseguito dopo ogni aggiornamento di
 # ops/, perché la copia resti uguale al checkout (check-host.sh avvisa se non lo è). Non scrive
 # segreti. La chiave dell'app, la CLI dell'agent del coordinatore, il suo login e il token di sola
@@ -93,6 +93,27 @@ else
     run useradd --create-home --home-dir "$COORDINATOR_HOME" --shell /bin/bash "$COORDINATOR_USER"
 fi
 
+# L'overlay di devloop (#549): scripts/coordinator-token.py ne legge repo e [apps.coordinator],
+# come utente coordinator. Con lo state_dir nella home di devloop (che useradd crea 750) serve
+# l'attraversamento, e solo quello, come per il supervisore: il coordinatore raggiunge l'overlay
+# per percorso, senza elencare la home; key_dir, ~/.claude e ~/.codex di devloop restano 700.
+step "Accesso all'overlay: ACL u:$COORDINATOR_USER:--x su $DEVLOOP_HOME"
+acl_entry=''
+if [ -d "$DEVLOOP_HOME" ]; then
+    acl_entry=$(getfacl -p --omit-header "$DEVLOOP_HOME" 2>/dev/null | grep "^user:$COORDINATOR_USER:" || true)
+fi
+if [ "$acl_entry" = "user:$COORDINATOR_USER:--x" ]; then
+    ok "ACL presente: $acl_entry"
+else
+    [ -z "$acl_entry" ] || warn "ACL attuale $acl_entry: la riduco a --x"
+    run setfacl -m "u:$COORDINATOR_USER:--x" "$DEVLOOP_HOME"
+fi
+for private in "$DEVLOOP_KEY_DIR" "$DEVLOOP_HOME/.claude" "$DEVLOOP_HOME/.codex"; do
+    if [ -d "$private" ] && [ "$(stat -c '%a' "$private")" != 700 ]; then
+        warn "$private non è 700: rieseguire setup-devloop.sh"
+    fi
+done
+
 # La key_dir della sua app (#549): solo il coordinatore ne legge la chiave, con
 # scripts/coordinator-token.py; devloop non la legge mai.
 step "key_dir del coordinatore (700)"
@@ -129,6 +150,9 @@ for role in $COORDINATOR_KEYS; do
         todo "copiare la chiave di $APP_PREFIX$role in $COORDINATOR_KEY_DIR (mode 600, proprietario $COORDINATOR_USER)"
     fi
 done
+# key_dir di [apps] nell'overlay è quella di devloop: il coordinatore indica la propria (#549).
+todo "coniare i token come $COORDINATOR_USER, dal suo clone, con la sua key_dir e lo state_dir di devloop:"
+say "  DEVLOOP_APP_KEY_DIR=$COORDINATOR_KEY_DIR python3 scripts/coordinator-token.py --state-dir $STATE_PATH -- <comando>"
 todo "installare la CLI dell'agent del coordinatore come $COORDINATOR_USER e fare il login"
 todo "token fine-grained di sola lettura per gh, come $COORDINATOR_USER (ops/github/tokens.md)"
 

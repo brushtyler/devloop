@@ -699,13 +699,13 @@ class CoordinatorGuideTests(unittest.TestCase):
         self.assertEqual(commands[:2], ['sudo bash ops/host/setup-coordinator.sh --dry-run',
                                         'sudo bash ops/host/setup-coordinator.sh'])
         # The tokens of its app (#549) are minted as the coordinator, from its clone, not
-        # through sudo.
-        token = [c for c in commands if c.startswith('python3 scripts/coordinator-token.py ')]
+        # through sudo, always with its own key_dir: [apps] key_dir of the overlay is devloop's.
+        token = [c for c in commands if 'scripts/coordinator-token.py' in c]
+        mint = ('DEVLOOP_APP_KEY_DIR=/home/coordinator/.ghapps python3 '
+                'scripts/coordinator-token.py --state-dir /home/devloop/ssdlc/.ssdlc/devloop ')
         self.assertEqual(token, [
-            'python3 scripts/coordinator-token.py --state-dir /home/devloop/ssdlc/.ssdlc/devloop '
-            '-- gh issue comment <ISSUE> --body-file <FILE>',
-            'python3 scripts/coordinator-token.py --state-dir /home/devloop/ssdlc/.ssdlc/devloop '
-            '--perm actions=read -- gh run view <RUN> --log-failed'])
+            mint + '-- gh issue comment <ISSUE> --body-file <FILE>',
+            mint + '--perm actions=read -- gh run view <RUN> --log-failed'])
         # Each other example of the coordinator is a command of its sudoers.
         allowed = self.sudoers()
         for command in [c for c in commands[2:] if c not in token]:
@@ -740,7 +740,13 @@ class CoordinatorGuideTests(unittest.TestCase):
                        'Mai nella `key_dir` di devloop né in quella del supervisore',
                        '`[apps.coordinator]` dell\'overlay', '**nessun accesso ai contenuti**',
                        '`scripts/agent-token.py` non espone l\'app',
-                       '`COORDINATOR_KEY_DIR`, `/home/coordinator/.ghapps`, 700'):
+                       '`COORDINATOR_KEY_DIR`, `/home/coordinator/.ghapps`, 700',
+                       # It reaches the overlay through the home of devloop, traversal only.
+                       '**solo l\'attraversamento** della home di devloop (`setfacl -m '
+                       'u:coordinator:--x /home/devloop`',
+                       '**`DEVLOOP_APP_KEY_DIR` va sempre impostata** al valore di '
+                       '`COORDINATOR_KEY_DIR`',
+                       'l\'ACL `user:coordinator:--x` sulla home di devloop'):
             self.assertIn(phrase, flat)
         self.assertIn('| `coordinator` | issues: write, pull_requests: write, '
                       'actions/checks/statuses: read |', text)
@@ -761,7 +767,8 @@ class CoordinatorGuideTests(unittest.TestCase):
                  'sudo -u coordinator -H sudo -n /usr/bin/bash '
                  '/usr/local/lib/devloop-coordinator/host/check-host.sh --read-only',
                  'rm /etc/sudoers.d/devloop-coordinator',
-                 'rm -r /usr/local/lib/devloop-coordinator', 'userdel -r coordinator']
+                 'rm -r /usr/local/lib/devloop-coordinator',
+                 'setfacl -x u:coordinator /home/devloop', 'userdel -r coordinator']
         self.assertEqual(commands, steps)
         # The check as the coordinator is the one its sudoers allows.
         self.assertIn(steps[6].split(' -n ', 1)[1], self.sudoers())
@@ -1171,6 +1178,13 @@ class DryRunTests(OpsTestCase):
                 self.assertIn(f'da fare a mano: copiare la chiave di {PREFIX}coordinator in '
                               f'{self.home}/coordinator/.ghapps (mode 600, proprietario '
                               f'{FAKE_COORDINATOR})', out)
+                # It reads the overlay of devloop's state_dir through the home of devloop,
+                # traversal only, and mints its tokens with its own key_dir.
+                self.assertIn(f'[dry-run] setfacl -m u:{FAKE_COORDINATOR}:--x '
+                              f'{self.home}/devloop\n', out)
+                self.assertIn(f'  DEVLOOP_APP_KEY_DIR={self.home}/coordinator/.ghapps python3 '
+                              f'scripts/coordinator-token.py --state-dir {state} -- <comando>\n',
+                              out)
                 self.assertNotRegex(out, r'@[A-Z_]+@')
         self.assertEqual(self.mutating_calls(), [])
         self.assertEqual(self.tree(), before)
@@ -1191,6 +1205,13 @@ class DryRunTests(OpsTestCase):
                       f'{self.home}/coordinator/.ghapps-widget\n', out)
         self.assertIn(f'copiare la chiave di acme-devloop-coordinator in '
                       f'{self.home}/coordinator/.ghapps-widget', out)
+        # Not [apps] key_dir of the overlay, devloop's: the token is minted with its key_dir,
+        # from the state_dir of the project, which it reaches through the project's home.
+        self.assertIn(f'[dry-run] setfacl -m u:{FAKE_COORDINATOR}:--x '
+                      f'{self.home}/devloop-widget\n', out)
+        self.assertIn(f'  DEVLOOP_APP_KEY_DIR={self.home}/coordinator/.ghapps-widget python3 '
+                      f'scripts/coordinator-token.py --state-dir '
+                      f'{self.home}/devloop-widget/widget/.ssdlc/devloop -- <comando>\n', out)
         self.assertEqual(self.mutating_calls(), [])
 
     def test_the_coordinator_has_a_user_of_its_own_and_a_copy_out_of_reach(self):
@@ -2790,6 +2811,46 @@ exec "$@"''')
         next(keys.glob(f'{PREFIX}coordinator.*')).unlink()
         done = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params))
         self.assertIn(f'  ERRORE: manca la chiave di {PREFIX}coordinator in {keys}\n', done.stdout)
+        self.assertEqual(self.mutating_calls(), [])
+
+    def test_the_coordinator_reaches_the_overlay_through_the_home_of_devloop_only(self):
+        # #549: scripts/coordinator-token.py reads repo and [apps.coordinator] from the overlay
+        # of devloop's state_dir, in the home of devloop: traversal only, no ACL on devloop's
+        # private directories, and the overlay readable as the coordinator.
+        self.fake_host('classic sudo', users=(FAKE_AGENT, FAKE_SUPERVISOR, FAKE_COORDINATOR))
+        params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=FAKE_SUPERVISOR,
+                             AGENT_USER=FAKE_AGENT)
+        home, keys = self.devloop, self.devloop / '.ghapps'
+
+        def acl(home_entries, keys_entry=''):
+            lines = '\n'.join(f'echo "{e}"' for e in home_entries)
+            self.shim('getfacl', f'for a in "$@"; do last=$a; done\necho "user::rwx"\n'
+                                 f'if [ "$last" = "{home}" ]; then\n{lines}\nfi\n'
+                                 f'if [ "$last" = "{keys}" ] && [ -n "{keys_entry}" ]; then '
+                                 f'echo "{keys_entry}"; fi\necho "other::---"')
+
+        def check():
+            done = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params))
+            out = done.stdout
+            return out[out.index('==> Coordinatore'):]
+        acl([f'user:{FAKE_SUPERVISOR}:--x'])
+        out = check()
+        self.assertIn(f"  ERRORE: manca l'ACL u:{FAKE_COORDINATOR}:--x su {home} "
+                      '(setup-coordinator.sh)\n', out)
+        self.assertIn(f'  [dry-run] sudo -u {FAKE_COORDINATOR} -H -- test -r '
+                      f'{self.state}/config.local.toml\n', out)
+        acl([f'user:{FAKE_SUPERVISOR}:--x', f'user:{FAKE_COORDINATOR}:--x'])
+        out = check()
+        self.assertIn(f'  ok: ACL user:{FAKE_COORDINATOR}:--x su {home}\n', out)
+        self.assertNotIn(f'u:{FAKE_COORDINATOR}', out)
+        # Never more than traversal, and never on devloop's keys.
+        acl([f'user:{FAKE_SUPERVISOR}:--x', f'user:{FAKE_COORDINATOR}:r-x'],
+            f'user:{FAKE_COORDINATOR}:r--')
+        out = check()
+        self.assertIn(f'  ERRORE: ACL user:{FAKE_COORDINATOR}:r-x su {home}: deve essere --x, '
+                      'senza elenco né scrittura\n', out)
+        self.assertIn(f"  ERRORE: {keys} ha un'ACL per {FAKE_COORDINATOR}: deve restare 700 "
+                      'senza eccezioni\n', out)
         self.assertEqual(self.mutating_calls(), [])
 
     def test_the_copy_holds_every_file_of_ops_check_host_reads(self):

@@ -106,7 +106,8 @@
 # Il coordinatore (#528, #549): la sua app conta solo con [roles.coordinator]. devloop non ne
 # legge mai la chiave, che sta nella key_dir dell'utente coordinator (COORDINATOR_KEY_DIR di
 # params.env, preparata da setup-coordinator.sh); il coordinatore ne conia i token con
-# scripts/coordinator-token.py --state-dir <state_dir>, che legge repo e questa tabella.
+# scripts/coordinator-token.py --state-dir <state_dir>, che legge repo e questa tabella, con
+# DEVLOOP_APP_KEY_DIR sulla propria key_dir: key_dir qui sopra è quella di devloop.
 # [apps.coordinator]
 # app_id = 1234567  # l'id che stampa lo scambio del code (ops/README.md, passo 2)
 # slug = "brushtyler-devloop-coordinator"

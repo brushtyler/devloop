@@ -1828,15 +1828,18 @@ model = "gpt-6.1-sol"
   prepared by `ops/host/setup-coordinator.sh` and verified by `ops/host/check-host.sh`), and the
   coordinator mints its tokens with `scripts/coordinator-token.py` (#549), as the supervisor
   does with its own script: `repo` and `[apps.coordinator]` from the overlay of the state_dir
-  given with `--state-dir`, only its key from `$DEVLOOP_APP_KEY_DIR` or `[apps] key_dir`, the
-  token only in `GH_TOKEN`, never printed. Without `--perm` the token gets `issues=write` and
-  `pull_requests=write`; only `issues` and `pull_requests` (read or write) and `actions`,
-  `checks`, `statuses` and `metadata` read may be asked for, any other permission is refused
+  given with `--state-dir` (reached through the home of devloop with a traversal-only ACL that
+  `setup-coordinator.sh` grants), only its key from `$DEVLOOP_APP_KEY_DIR` or else `[apps]
+  key_dir`, the token only in `GH_TOKEN`, never printed. `[apps] key_dir` of the overlay is
+  devloop's, so the coordinator always sets `DEVLOOP_APP_KEY_DIR` to its own key_dir. Without
+  `--perm` the token gets `issues=write` and `pull_requests=write`; only `issues` and
+  `pull_requests` (read or write) and `actions`, `checks`, `statuses` and `metadata` read may be
+  asked for, any other permission is refused
   ([ops/README.md](../../ops/README.md#10-coordinatore-facoltativo)):
 
   ```
-  python3 scripts/coordinator-token.py --state-dir <STATE_DIR> -- gh issue comment <ISSUE> --body-file <FILE>
-  python3 scripts/coordinator-token.py --state-dir <STATE_DIR> --perm actions=read -- gh run view <RUN> --log-failed
+  DEVLOOP_APP_KEY_DIR=<COORDINATOR_KEY_DIR> python3 scripts/coordinator-token.py --state-dir <STATE_DIR> -- gh issue comment <ISSUE> --body-file <FILE>
+  DEVLOOP_APP_KEY_DIR=<COORDINATOR_KEY_DIR> python3 scripts/coordinator-token.py --state-dir <STATE_DIR> --perm actions=read -- gh run view <RUN> --log-failed
   ```
 - Without the table nothing changes: the app is only declared, and its comments and labels count
   for no role, as anyone else's.

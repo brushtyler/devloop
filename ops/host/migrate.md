@@ -1230,14 +1230,19 @@ Come root, **dal checkout dell'operatore** (`/root/repos/ssdlc`), mai dal clone 
 
    La copia va in `/usr/local/lib/devloop-coordinator` (con `PROJECT`,
    `/usr/local/lib/devloop-coordinator-<progetto>`), il sudoers in
-   `/etc/sudoers.d/devloop-coordinator` (con `PROJECT`, `-<progetto>`), dopo `visudo -c`; la
-   `key_dir` della sua app in `/home/coordinator/.ghapps` (con `PROJECT`, `~/.ghapps-<progetto>`),
-   700. Poi la chiave dell'app del coordinatore va lì, 600, proprietario `coordinator`
-   ([ops/README.md](../README.md#10-coordinatore-facoltativo), "App del coordinatore", #549);
+   `/etc/sudoers.d/devloop-coordinator` (con `PROJECT`, `-<progetto>`), dopo `visudo -c`; l'ACL
+   di solo attraversamento `u:coordinator:--x` sulla home di devloop, per leggere l'overlay dello
+   `state_dir`; la `key_dir` della sua app in `/home/coordinator/.ghapps` (con `PROJECT`,
+   `~/.ghapps-<progetto>`), 700. Poi la chiave dell'app del coordinatore va lì, 600, proprietario
+   `coordinator`, e il coordinatore conia i token con `DEVLOOP_APP_KEY_DIR` impostata a quella
+   `key_dir` ([ops/README.md](../README.md#10-coordinatore-facoltativo), "App del coordinatore",
+   #549; `setup-coordinator.sh` stampa il comando con i valori dell'installazione);
 3. verificare, come root: `sudo bash /root/repos/ssdlc/ops/host/check-host.sh --no-apps`, nessun
    errore nel passo `Coordinatore coordinator`: la `key_dir` (700) con la sola chiave dell'app
-   del coordinatore (600), il sudoers (440, root, uguale a quello generato), la copia e le
-   directory sopra di root, ogni file della copia che `coincide` con il checkout;
+   del coordinatore (600), l'ACL `user:coordinator:--x` sulla home di devloop e nessuna sulle sue
+   directory private, l'overlay leggibile dal coordinatore, il sudoers (440, root, uguale a
+   quello generato), la copia e le directory sopra di root, ogni file della copia che `coincide`
+   con il checkout;
 4. verificare **come `coordinator`**, con il suo sudoers: `sudo -n -l` elenca solo i comandi di
    [ops/README.md](../README.md#10-coordinatore-facoltativo), e la verifica in sola lettura non
    avvia nessuna CLI, non esegue `devloop apps` e non scrive nulla:
@@ -1259,10 +1264,11 @@ riporta delle prove delle CLI solo l'esito e il codice di uscita, mai il testo d
 vederlo si ripete la prova a mano, come al passo 5 di [File delle CLI di root sull'utente degli
 agent](#file-delle-cli-di-root-sullutente-degli-agent-438).
 
-**Rollback.** Come root, prima il sudoers, poi la copia e l'utente:
+**Rollback.** Come root, prima il sudoers, poi la copia, l'ACL sulla home di devloop e l'utente:
 
 ```bash
 rm /etc/sudoers.d/devloop-coordinator
 rm -r /usr/local/lib/devloop-coordinator
+setfacl -x u:coordinator /home/devloop
 userdel -r coordinator
 ```

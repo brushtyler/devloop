@@ -29,8 +29,9 @@ ops/
                              degli agent; --unseal per installare e aggiornare le CLI
     setup-supervisor.sh      utente supervisor, ACL di attraversamento su /home/<devloop>,
                              sudoers, clone, key_dir 700, impostazioni di Claude Code
-    setup-coordinator.sh     utente coordinator (facoltativo), key_dir 700, copia di root di
-                             check-host.sh, sudoers in sola lettura
+    setup-coordinator.sh     utente coordinator (facoltativo), ACL di attraversamento su
+                             /home/<devloop>, key_dir 700, copia di root di check-host.sh,
+                             sudoers in sola lettura
     devloop.service          unità systemd (con segnaposto @NOME@)
     devloop@.service         unità template, per più progetti sullo stesso host (PROJECT)
     devloop-project.conf     drop-in di un progetto per devloop@<progetto> (con segnaposto)
@@ -566,7 +567,11 @@ sudo bash ops/host/setup-coordinator.sh
 ```
 
 Lo script crea l'utente e la sua `key_dir` (`COORDINATOR_KEY_DIR`, `/home/coordinator/.ghapps`,
-700, del coordinatore; con `PROJECT`, `~/.ghapps-<progetto>`), installa la **copia di root** di `check-host.sh`, dei file che legge
+700, del coordinatore; con `PROJECT`, `~/.ghapps-<progetto>`), gli dà **solo l'attraversamento**
+della home di devloop (`setfacl -m u:coordinator:--x /home/devloop`, come al supervisore: raggiunge
+per percorso l'overlay dello `state_dir`, da cui `scripts/coordinator-token.py` legge `repo` e
+`[apps.coordinator]`, ma non elenca la home, e `~/.ghapps`, `~/.claude` e `~/.codex` di devloop
+restano 700), installa la **copia di root** di `check-host.sh`, dei file che legge
 (`lib.sh`, i sudoers, le unità e il file di `tmpfiles.d` di `ops/host/`) e dei parametri
 (`params.env`) in `COORDINATOR_OPS_DIR` (`/usr/local/lib/devloop-coordinator`, 755 e 644, di
 root), e il sudoers (`ops/host/sudoers-coordinator`, in `COORDINATOR_SUDOERS_FILE`,
@@ -624,21 +629,29 @@ contenuti**.
    ([docs/devloop/guide.md](../docs/devloop/guide.md), "The coordinator").
 4. Il coordinatore, come utente `coordinator` e dal proprio clone, conia i token con
    `scripts/coordinator-token.py`, che legge `repo` e `[apps.coordinator]` dall'overlay dello
-   `state_dir` di `--state-dir` e solo la propria chiave dalla propria `key_dir`; il token arriva
-   al comando solo in `GH_TOKEN`, mai stampato. Senza `--perm` ha `issues=write` e
+   `state_dir` di `--state-dir` e solo la propria chiave dalla `key_dir` di
+   `DEVLOOP_APP_KEY_DIR`; il token arriva al comando solo in `GH_TOKEN`, mai stampato.
+   **`DEVLOOP_APP_KEY_DIR` va sempre impostata** al valore di `COORDINATOR_KEY_DIR`
+   (`/home/coordinator/.ghapps`; con `PROJECT`, `/home/coordinator/.ghapps-<progetto>`): senza,
+   lo script cerca la chiave in `key_dir` di `[apps]` dell'overlay, che è quella di devloop
+   (`DEVLOOP_KEY_DIR`), e non la trova. `setup-coordinator.sh` stampa il comando con i valori
+   dell'installazione. Senza `--perm` il token ha `issues=write` e
    `pull_requests=write`; si possono chiedere solo `issues` e `pull_requests` (`read` o `write`) e
    `actions`, `checks`, `statuses` e `metadata` in lettura: ogni altro permesso è rifiutato.
    `scripts/agent-token.py` non espone l'app.
 
    ```bash
-   python3 scripts/coordinator-token.py --state-dir /home/devloop/ssdlc/.ssdlc/devloop -- \
-       gh issue comment <ISSUE> --body-file <FILE>
-   python3 scripts/coordinator-token.py --state-dir /home/devloop/ssdlc/.ssdlc/devloop \
-       --perm actions=read -- gh run view <RUN> --log-failed
+   DEVLOOP_APP_KEY_DIR=/home/coordinator/.ghapps python3 scripts/coordinator-token.py \
+       --state-dir /home/devloop/ssdlc/.ssdlc/devloop -- gh issue comment <ISSUE> --body-file <FILE>
+   DEVLOOP_APP_KEY_DIR=/home/coordinator/.ghapps python3 scripts/coordinator-token.py \
+       --state-dir /home/devloop/ssdlc/.ssdlc/devloop --perm actions=read -- \
+       gh run view <RUN> --log-failed
    ```
 
 `check-host.sh` verifica la `key_dir` (700, del coordinatore) e che contenga solo la chiave
-dell'app del coordinatore (600, del coordinatore).
+dell'app del coordinatore (600, del coordinatore), l'ACL `user:coordinator:--x` sulla home di
+devloop, nessuna ACL per il coordinatore sulle directory private di devloop, e che il
+coordinatore legga l'overlay.
 
 Poi, a mano: la CLI dell'agent del coordinatore e il suo login, come utente `coordinator`, e un
 token di sola lettura per `gh` ([github/tokens.md](github/tokens.md)). Su un host già attivo i
