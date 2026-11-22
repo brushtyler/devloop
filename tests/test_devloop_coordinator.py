@@ -9,7 +9,8 @@ coordinator is an agent with a role app of its own, ``[apps.coordinator]``, turn
   credentials and the budget, the resume with the labels) count as a trusted user's;
 - the commands reserved to the operator (``approve``, ``merge-budget``, ``grant-budget``,
   ``capacity``, ``reconcile``, ``trusted_users`` and the keys of trust) never count;
-- any other command is refused, ``merge`` included until its own part of the plan.
+- any other command is refused; ``merge`` is the coordinator's reserved merge (#529,
+  ``test_devloop_coordinator_merge``).
 """
 
 import dataclasses
@@ -126,15 +127,15 @@ class ConfigTests(unittest.TestCase):
     def test_the_perimeter_is_closed(self):
         self.assertEqual(set(supervision.COORDINATOR_DELEGATED),
                          {'retry', 'rereview', 'recheck', 'fix', 'hold', 'release',
-                          'grant-round', 'accept-defaults', 'decide'})
+                          'grant-round', 'accept-defaults', 'decide', 'merge'})
         self.assertEqual(set(supervision.COORDINATOR_RESERVED),
                          {'approve', 'merge-budget', 'grant-budget', 'capacity', 'reconcile'})
         self.assertFalse(set(supervision.COORDINATOR_DELEGATED)
                          & set(supervision.COORDINATOR_RESERVED))
         for command in supervision.COORDINATOR_DELEGATED:
             self.assertIsNone(supervision.coordinator_refusal(command))
-        for command in (*supervision.COORDINATOR_RESERVED, 'merge', 'escalate', 'veto',
-                        'finding', 'nuovo'):
+        for command in (*supervision.COORDINATOR_RESERVED, 'escalate', 'veto', 'finding',
+                        'nuovo'):
             with self.subTest(command=command):
                 self.assertIsNotNone(supervision.coordinator_refusal(command))
 
@@ -246,9 +247,9 @@ class RefusedEscalationTests(EscalationCase):
         # Reserved too, and no supervisor command (#528): read for the coordinator alone.
         'reconcile': ('/devloop reconcile t1 failed\nNota.', 'riservato all\'operatore'),
         'approve': ('/devloop approve Approvo.', 'riservato all\'operatore'),
-        # Not listed: refused, merge until its own part of the plan.
+        # Not listed: refused. ``merge`` is the coordinator's reserved merge (#529,
+        # test_devloop_coordinator_merge).
         'escalate': ('/devloop escalate motivo', 'non è tra i comandi delegati'),
-        'merge': (f'/devloop merge {"a" * 40} motivo', 'non è ancora attivo'),
         'veto': ('/devloop veto motivo', 'non è tra i comandi delegati'),
         'finding': ('/devloop finding 1/codex/F1 resolved corretto',
                     'non è tra i comandi delegati'),

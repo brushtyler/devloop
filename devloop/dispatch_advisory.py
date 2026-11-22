@@ -101,10 +101,12 @@ def advisory_record(head, reviewer, opinion=None):
 
 
 # What the advisory review decides, in the texts devloop publishes (#486): only whether the
-# supervisor may merge the head, when the operator delegated the merge.
+# supervisor may merge the head, when the operator delegated the merge, or the coordinator
+# (#529), when the operator turned it on.
 NO_EFFECT = ('Non conta per il quorum né per il limite dei round, non apre finding e non cambia '
              'label né promozione. Il parere conta solo per il merge delegato al supervisore, '
-             'quando l\'operatore lo ha attivato (`[delegations] merge`): con `contrario`, o '
+             'quando l\'operatore lo ha attivato (`[delegations] merge`), e per il merge '
+             'riservato del coordinatore (`[roles.coordinator]`): con `contrario`, o '
              'senza review consultiva, devloop rifiuta il `/devloop merge` di questo head, e il '
              'merge resta all\'operatore.')
 

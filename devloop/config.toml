@@ -389,13 +389,16 @@ merge = false
 # [apps.coordinator], which it needs. Its commands count only inside a closed perimeter fixed in
 # the code: retry, rereview, recheck, fix, hold, release, grant-round within the caps,
 # accept-defaults, decide (never on the trust policy) and its agent:ready count as a trusted
-# user's; approve, merge-budget, grant-budget, capacity, reconcile and trust stay the operator's;
-# any other command, merge included, is refused (docs/devloop/guide.md, "The coordinator").
+# user's; merge is its reserved merge (issue #529), under conditions of its own and within a
+# daily cap of 10, a constant of the code that max_merges_per_day (optional) may only lower;
+# approve, merge-budget, grant-budget, capacity, reconcile and trust stay the operator's; any
+# other command is refused (docs/devloop/guide.md, "The coordinator").
 # [roles.coordinator]
 # name = "codex-coordinator"
 # kind = "codex"
 # provider = "openai"
 # model = "gpt-6.1-sol"
+# max_merges_per_day = 10
 #
 # Agent keys by role and the implementer app (ADR 0005, P5-3, issue #407), on since issue #499:
 # a key names agent and role in full and serves that role only: "claude-implementer",

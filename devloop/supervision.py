@@ -35,7 +35,12 @@ the attribution header:
   ``operator_merge``, #248), only from the supervisor's identity and only when every condition
   of the delegation holds on ``sha``, its head (#486, ADR 0005, precision of 2026-11-21). A
   delegation of the operator, off by default (``[delegations] merge``), within its own daily cap
-  (``MAX_DELEGATED_MERGES``), separate from the common one;
+  (``MAX_DELEGATED_MERGES``), separate from the common one. From the coordinator's identity
+  (``[roles.coordinator]``, #529, ADR 0002, precision of 2026-11-22) it is the coordinator's
+  reserved merge: the conditions of the delegation without its exclusions for the trust rule,
+  ``docs/adr/`` and the step on the host, an operator's ``/devloop approve`` on the issue when
+  the trust policy or ``docs/adr/`` is touched, and a daily cap of its own
+  (``MAX_COORDINATOR_MERGES``);
 - ``/devloop merge-budget <N> <reason>``: only from a trusted user, on the issue of the daily
   summary (``[report] issue``): ``N`` more delegated merges for the UTC day the command is
   written, from 1 to ``MAX_MERGE_BUDGET``. The command of the supervisor or of an app does not
@@ -136,6 +141,11 @@ CAPACITY_REFUSED = ('max_parallel_actions',)
 # merge-budget <N>``, ``N`` from 1 to ``MAX_MERGE_BUDGET``; the commands of a day add up.
 MAX_DELEGATED_MERGES = 5
 MAX_MERGE_BUDGET = 20
+# The reserved merges of the coordinator (#529, ADR 0002, precision of 2026-11-22): at most so
+# many per UTC day, a cap of their own, apart from the delegated merges of the supervisor. A
+# constant of the code: ``[roles.coordinator] max_merges_per_day`` may only lower it, and no
+# command extends it.
+MAX_COORDINATOR_MERGES = 10
 # The trust rule itself (#486, the operator's decision of 2026-11-21): a delegated merge is
 # refused when the diff touches one of these files, this one included, since it holds the list.
 # A constant of the code: the configuration may only add to it (``[delegations]
@@ -176,13 +186,13 @@ LONG_TEXT = (DECIDE, GRANT_ROUND, GRANT_BUDGET, CAPACITY, MERGE, MERGE_BUDGET, R
 # The closed perimeter of the coordinator's commands (#528, the operator's decision recorded in
 # ADR 0002, precision of 2026-11-22): from the identity of ``[roles.coordinator]`` only the
 # delegated commands count, each as a trusted user's, under the same conditions and caps; the
-# reserved ones are the operator's in person, and any other command, ``merge`` and ``escalate``
-# included, is refused (it fails closed). A constant of the code, like the trust rule: the
-# configuration cannot widen it. ``merge`` stays refused until its own part of the plan (#524,
-# point 3b). The resume with the labels (``agent:ready`` added again) is in
-# ``Dispatcher._admitters``.
+# reserved ones are the operator's in person, and any other command, ``escalate`` included, is
+# refused (it fails closed). A constant of the code, like the trust rule: the configuration
+# cannot widen it. ``merge`` is the coordinator's reserved merge (#529, point 3b of #524), under
+# conditions of its own (``MergeMixin._delegated_merge``). The resume with the labels
+# (``agent:ready`` added again) is in ``Dispatcher._admitters``.
 COORDINATOR_DELEGATED = (RETRY, REREVIEW, 'recheck', 'fix', 'hold', 'release', GRANT_ROUND,
-                         ACCEPT_DEFAULTS, DECIDE)
+                         ACCEPT_DEFAULTS, DECIDE, MERGE)
 COORDINATOR_RESERVED = ('approve', MERGE_BUDGET, GRANT_BUDGET, CAPACITY, 'reconcile')
 # The name of a command of the coordinator's identity outside ``COMMANDS`` (#528), such as
 # ``reconcile`` or ``veto``: refused on an escalation, with its name in the record of the
@@ -201,10 +211,6 @@ def coordinator_refusal(command):
     if command in COORDINATOR_RESERVED:
         return ('reserved to the operator, never the coordinator\'s',
                 f'`/devloop {command}` è riservato all\'operatore di persona, mai al coordinatore')
-    if command == MERGE:
-        return ('the coordinator\'s merge is not active yet',
-                f'`/devloop {MERGE}` del coordinatore non è ancora attivo: il merge resta '
-                'all\'operatore')
     return ('not delegated to the coordinator',
             f'`/devloop {command}` non è tra i comandi delegati al coordinatore')
 
