@@ -1275,7 +1275,9 @@ class MergeMixin:
     def _trusted_comment(self, number, comment, seen):
         """Whether comment ``comment`` of issue or PR ``number`` of the repository is by a user
         of ``trusted_users`` (#486), read with the API now; ``seen`` caches the comments read.
-        A comment that cannot be read is not."""
+        A comment that cannot be read is not: an issue that does not exist (404), or a comment
+        id that is not among its comments in the configured repository, as for a link under a
+        former name of the repository (``repo_aliases``, #540) to a comment of another one."""
         if number not in seen:
             try:
                 seen[number] = {c.get('id'): (c.get('author') or {}).get('login')
@@ -1588,7 +1590,9 @@ class MergeMixin:
         seen = {entry['path'] for entry in files}
         if any(p not in seen for p in adr):
             return f'le modifiche sotto `{ADR_DIR}` non sono tutte leggibili come testo'
-        problems, blocks = adr_problems(files, self.cfg.repo)
+        # A link under a former name of the repository (``repo_aliases``, #540) is checked as
+        # any other: its comment read by id among those of its issue in ``repo``.
+        problems, blocks = adr_problems(files, self.cfg.repo, self.cfg.repo_aliases)
         if problems:
             return (f'sotto `{ADR_DIR}` sono ammesse solo righe aggiunte con il link a una '
                     'decisione dell\'operatore: ' + '; '.join(problems[:MAX_LISTED_PATHS]))

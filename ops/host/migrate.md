@@ -1299,3 +1299,195 @@ setfacl -x u:coordinator /home/devloop/ssdlc/.ssdlc/devloop/config.local.toml
 setfacl -x u:coordinator /home/devloop
 userdel -r coordinator
 ```
+
+## Rinomina del repository in devloop (ADR 0007, R3, #540)
+
+Con R2 dell'[ADR 0007](../../docs/adr/0007-da-ssdlc-a-devloop.md) l'operatore ha rinominato il
+repository su GitHub da `brushtyler/ssdlc` a `brushtyler/devloop`. GitHub reindirizza i vecchi
+URL e le installazioni delle app seguono il repository: devloop continua a funzionare anche prima
+di questo passo, che porta l'host al nome nuovo. Si esegue con l'agent dell'host. **I percorsi
+sull'host non cambiano** (ADR 0007): il clone di devloop resta `/home/devloop/ssdlc`, lo
+`state_dir` `.ssdlc/devloop`, il clone del supervisore `/home/supervisor/ssdlc`, il checkout
+dell'operatore `/root/repos/ssdlc`. Cambiano:
+
+- nell'overlay, `repo = "brushtyler/devloop"` e la chiave nuova `repo_aliases =
+  ["brushtyler/ssdlc"]`
+  ([docs/devloop/reference.md](../../docs/devloop/reference.md#rename-of-the-repository)): con
+  l'alias i record del journal, i marker `story` e i link alle decisioni dell'operatore negli
+  ADR scritti con il vecchio nome restano validi. Un link con il vecchio nome vale solo se il
+  dispatcher trova quel commento per id nel repository configurato, con l'API, e il suo autore è
+  in `trusted_users`;
+- il remote `origin` dei clone del repository;
+- `ops/params.env` del checkout dell'operatore: `REPO=brushtyler/devloop`, e `DEVLOOP_CLONE` e
+  `SUPERVISOR_CLONE` scritti per esteso, perché il loro default viene dal nome del repository
+  (`/home/devloop/devloop`). `SOURCE_REPO` resta vuoto: ssdlc è la sorgente di sé stesso, e
+  `ops/lib.sh` rifiuta un `SOURCE_REPO` uguale a `REPO`. Le installazioni degli altri progetti
+  (#515) avranno `SOURCE_REPO=brushtyler/devloop`;
+- la descrizione dell'unità systemd (`devloop continuous loop (brushtyler/devloop)`), che
+  `setup-devloop.sh` riscrive, e, con `repo_lock_dir`, il file del lock per repository, che
+  diventa `brushtyler--devloop.lock`: devloop lo crea al primo avvio, e quello del vecchio nome
+  resta senza che nessuno lo tenga.
+
+Il nome del repository non entra nella versione della policy: le approvazioni delle PR aperte
+restano valide, e la coda non deve essere vuota.
+
+### Prima
+
+- **R2 fatto**: `gh api repos/brushtyler/devloop --jq .full_name` stampa `brushtyler/devloop`.
+- **La PR di #540 mergiata** su `main`: la copia che conosce `repo_aliases`. La copia di prima
+  rifiuta la chiave nell'overlay (chiave sconosciuta) e non parte: per questo il pin del passo 3
+  viene **prima** della modifica dell'overlay. La PR dichiara il passo (`host_step`): con `[pin]
+  auto = true` devloop non fa il pin automatico finché non lo fa l'operatore
+  ([Ogni cambio con un passo sull'host](#ogni-cambio-con-un-passo-sullhost)).
+
+### Comandi
+
+Come root.
+
+1. **Fermare il loop**:
+
+   ```bash
+   sudo systemctl stop devloop
+   systemctl is-active devloop        # "inactive"
+   ```
+
+2. **I remote dei clone**, ciascuno come il suo utente, perché resti suo. Il clone di devloop e
+   quello del supervisore sono in HTTPS (`setup-devloop.sh`, `setup-supervisor.sh`):
+
+   ```bash
+   sudo -u devloop -H git -C /home/devloop/ssdlc remote set-url origin https://github.com/brushtyler/devloop.git
+   sudo -u supervisor -H git -C /home/supervisor/ssdlc remote set-url origin https://github.com/brushtyler/devloop.git
+   git -C /root/repos/ssdlc remote get-url origin
+   ```
+
+   Il checkout dell'operatore mantiene la forma che ha: con `https://…` lo stesso comando, con
+   `git@github.com:brushtyler/ssdlc.git`
+   `git -C /root/repos/ssdlc remote set-url origin git@github.com:brushtyler/devloop.git`. I
+   worktree di devloop condividono il remote del clone. Un altro clone dell'host che nomina
+   ancora il vecchio nome compare qui, e si aggiorna allo stesso modo, come il suo utente:
+
+   ```bash
+   grep -lE 'github\.com[:/]brushtyler/ssdlc(\.git)?$' /home/*/*/.git/config /root/repos/*/.git/config
+   ```
+
+   Il comando non stampa più nulla quando ogni clone è aggiornato. Poi la lettura dal nome
+   nuovo, che deve riuscire:
+
+   ```bash
+   sudo -u devloop -H git -C /home/devloop/ssdlc fetch origin
+   sudo -u supervisor -H git -C /home/supervisor/ssdlc fetch origin
+   git -C /root/repos/ssdlc fetch origin
+   ```
+
+3. **Clone di devloop e pin** della copia di #540, con l'overlay ancora di prima, che anche la
+   copia nuova accetta:
+
+   ```bash
+   sudo -u devloop -H git -C /home/devloop/ssdlc checkout --detach origin/main
+   sudo -u devloop -H git -C /home/devloop/ssdlc status --short
+   sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned pin origin/main
+   ```
+
+   `status --short` non deve stampare nulla. Il pin finisce con `pinned …` e il link `current`
+   sulla copia nuova.
+
+4. **L'overlay**: una copia di prima, poi `repo` con il nome nuovo e `repo_aliases` subito
+   sotto. Il file si riscrive al suo posto (`cat … >`), così proprietario, modo e ACL (quella
+   del coordinatore, #554) restano:
+
+   ```bash
+   cd /home/devloop/ssdlc/.ssdlc/devloop
+   grep -cx 'repo = "brushtyler/ssdlc"' config.local.toml      # 1
+   grep -c '^repo_aliases' config.local.toml                   # 0
+   install -o devloop -m 600 config.local.toml config.local.toml.prima-rinomina
+   sed 's|^repo = "brushtyler/ssdlc"$|repo = "brushtyler/devloop"\nrepo_aliases = ["brushtyler/ssdlc"]|' \
+       config.local.toml > config.local.toml.nuovo
+   cat config.local.toml.nuovo > config.local.toml && rm config.local.toml.nuovo
+   grep -n '^repo' config.local.toml
+   ```
+
+   L'ultimo comando stampa `repo = "brushtyler/devloop"` e `repo_aliases =
+   ["brushtyler/ssdlc"]` (con `repo_lock_dir`, anche la sua riga). Se il primo `grep` non dà
+   `1`, l'overlay non ha `repo` in quella forma: non si va avanti, e si corregge a mano.
+
+5. **`ops/params.env`** del checkout dell'operatore, portato su `origin/main`:
+
+   ```bash
+   git -C /root/repos/ssdlc checkout --detach origin/main
+   cd /root/repos/ssdlc/ops
+   cp -p params.env params.env.prima-rinomina
+   sed -i 's|^REPO=brushtyler/ssdlc$|REPO=brushtyler/devloop|' params.env
+   grep -q '^DEVLOOP_CLONE=' params.env || echo 'DEVLOOP_CLONE=/home/devloop/ssdlc' >> params.env
+   grep -q '^SUPERVISOR_CLONE=' params.env || echo 'SUPERVISOR_CLONE=/home/supervisor/ssdlc' >> params.env
+   grep -nE '^(REPO|SOURCE_REPO|DEVLOOP_CLONE|SUPERVISOR_CLONE)=' params.env
+   ```
+
+   L'ultimo comando stampa `REPO=brushtyler/devloop`, `DEVLOOP_CLONE=/home/devloop/ssdlc` e
+   `SUPERVISOR_CLONE=/home/supervisor/ssdlc`, e nessun `SOURCE_REPO` non vuoto. Un
+   `DEVLOOP_CLONE` o un `SUPERVISOR_CLONE` che c'era già resta com'è, e deve essere uno di questi
+   percorsi.
+
+6. **Unità e copie di root**, con i parametri nuovi:
+
+   ```bash
+   sudo bash /root/repos/ssdlc/ops/host/setup-devloop.sh --dry-run
+   sudo bash /root/repos/ssdlc/ops/host/setup-devloop.sh
+   ```
+
+   Il dry run mostra l'unità con `Description=devloop continuous loop (brushtyler/devloop)`, e
+   per l'overlay `l'overlay ha repo = "brushtyler/devloop"`; lo script riscrive l'unità e fa
+   `systemctl daemon-reload`, senza avviare il servizio. Se c'è il coordinatore (`id
+   coordinator`), la sua copia di root ha i parametri di prima: si rifà il passo 2 di [Utente del
+   coordinatore](#utente-del-coordinatore-530),
+   `sudo bash /root/repos/ssdlc/ops/host/setup-coordinator.sh`.
+
+7. **Verifica**, a loop fermo:
+
+   ```bash
+   sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned apps
+   sudo bash /root/repos/ssdlc/ops/host/check-host.sh
+   sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned tick --dry-run
+   ```
+
+   `apps` nomina per prima cosa `apps of brushtyler/devloop, keys in …` e trova ogni app
+   installata sul repository. `check-host.sh` non dà nessun `ERRORE` (l'unità `coincide`).
+   `tick --dry-run` esce con 0 e pianifica le azioni attese, senza `not confirmed by the
+   journal`: i record e i marker scritti con il vecchio nome sono del repository. Con un errore,
+   il rollback.
+
+8. **Avvio**:
+
+   ```bash
+   sudo systemctl start devloop
+   systemctl is-active devloop        # "active"
+   ```
+
+   All'avvio il journal di devloop registra il cambio delle chiavi di fiducia `repo` e
+   `repo_aliases`, con il valore di prima e quello nuovo. Le copie `config.local.toml.prima-rinomina` e `params.env.prima-rinomina` si
+   cancellano quando il loop gira con il nome nuovo.
+
+**Rollback.** A loop fermo (passo 1), l'overlay torna al vecchio nome **con il nome nuovo come
+alias**, non alla copia di prima: i record scritti nel frattempo con `brushtyler/devloop` restano
+validi. La copia di #540 accetta entrambe le forme, e il pin non serve:
+
+```bash
+cd /home/devloop/ssdlc/.ssdlc/devloop
+sed -e 's|^repo = "brushtyler/devloop"$|repo = "brushtyler/ssdlc"|' \
+    -e 's|^repo_aliases = \["brushtyler/ssdlc"\]$|repo_aliases = ["brushtyler/devloop"]|' \
+    config.local.toml > config.local.toml.nuovo
+cat config.local.toml.nuovo > config.local.toml && rm config.local.toml.nuovo
+grep -n '^repo' config.local.toml
+cp -p /root/repos/ssdlc/ops/params.env.prima-rinomina /root/repos/ssdlc/ops/params.env
+sudo bash /root/repos/ssdlc/ops/host/setup-devloop.sh
+sudo -u devloop -H git -C /home/devloop/ssdlc remote set-url origin https://github.com/brushtyler/ssdlc.git
+sudo -u supervisor -H git -C /home/supervisor/ssdlc remote set-url origin https://github.com/brushtyler/ssdlc.git
+sudo systemctl start devloop
+```
+
+`grep` stampa `repo = "brushtyler/ssdlc"` e `repo_aliases = ["brushtyler/devloop"]`. Con il
+coordinatore si rifà anche `setup-coordinator.sh`. Il checkout dell'operatore torna al remote di
+prima con `git -C /root/repos/ssdlc remote set-url origin <url di prima>`. I remote con il vecchio
+nome funzionano finché GitHub reindirizza, cioè finché nessun altro repository prende il nome
+`brushtyler/ssdlc`. Tornare a una copia precedente a #540 (`scripts/devloop-pinned pin <sha12>`)
+richiede prima di togliere `repo_aliases` dall'overlay, che quella copia rifiuta; senza l'alias,
+i record scritti con il nome nuovo non sono più del repository.

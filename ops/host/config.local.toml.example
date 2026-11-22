@@ -13,6 +13,10 @@
 # devloop/config.toml. Senza repo e trusted_users devloop non parte. repo è REPO di params.env.
 # repo = "brushtyler/ssdlc"
 # trusted_users = ["brushtyler"]
+# Solo dopo una rinomina del repository su GitHub (#540, ADR 0007): i nomi di prima, perché i
+# link ai commenti, i record del journal e i marker scritti con quei nomi restino validi.
+# ops/host/migrate.md, "Rinomina del repository in devloop".
+# repo_aliases = ["brushtyler/nome-di-prima"]
 
 # Solo per un progetto che non contiene devloop (ADR 0006, R1): il clone della sorgente da cui
 # devloop pin prende il codice (SOURCE_CLONE) e lo state_dir dell'host, lo stesso che l'avviatore

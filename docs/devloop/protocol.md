@@ -1506,6 +1506,11 @@ behaves as before.
 
 Issues taken over before, or with the identity off, have no marker and are handled as before.
 
+After a rename of the repository (#540, ADR 0007) the stories, the attempts and the turns of
+the journal, and the `story` markers, written under a former name listed in `repo_aliases` read
+as the repository's: the journal confirms them under the new name, and the file is never
+rewritten ([rename of the repository](reference.md#rename-of-the-repository)).
+
 ### Attempt identity
 
 Since #384 (ADR 0004, P2-3b, recommendation (i) of section 3.2) the journal can hold the

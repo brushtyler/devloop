@@ -1409,11 +1409,12 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         and logged. The open blocks of the repository are explored in turn, ``agent:ready`` or
         not, up to ``MAX_DEPENDENCY_READS`` issues beyond ``numbers``; an issue of another
         repository blocks as its state says, without reading its own blocks."""
-        home = self.cfg.repo.lower()
+        # The repository under its name or a former one (``repo_aliases``, #540).
+        home = {name.lower() for name in (self.cfg.repo, *self.cfg.repo_aliases)}
 
         def key(item):
             repo = item.get('repo') or ''
-            return ('' if repo.lower() == home else repo, item['number'])
+            return ('' if repo.lower() in home else repo, item['number'])
 
         todo = [('', number) for number in dict.fromkeys(numbers)]
         seen, edges = set(todo), {}
