@@ -1075,11 +1075,29 @@ def _closures_before(fixes, closures):
             and _comment_id(c.get('comment')) is not None and c['comment'] < first]
 
 
+def _approved_before(records, fixes):
+    """Whether every record of the round ``records`` was published before every request of
+    ``fixes`` (#536): each request lists them among the reviews before its comment (``after``,
+    ``(round, owner)`` pairs the dispatcher adds in memory, ``_fixes``). A request without the
+    list proves no order."""
+    needed = {(r['round'], owner_of(r)) for r in records}
+    for request in (q for f in fixes for q in f['requests']):
+        after = request.get('after')
+        if not isinstance(after, (list, tuple)):
+            return False
+        seen = {tuple(pair) for pair in after if isinstance(pair, (list, tuple))}
+        if not needed <= seen:
+            return False
+    return True
+
+
 def _requesters(reviews, fixes, number, trusted, closures=()):
     """The trusted users whose ``/devloop fix`` answered round ``number`` (#536), in order, when
     the round approved the head they asked on: a complete agent round of the quorum with an
     ``approve`` verdict, every record with a valid policy receipt (without one the quorum is not
-    proven), every record on the head (``from``) of every fix that answers it, and no blocking
+    proven), every record on the head (``from``) of every fix that answers it and published
+    before every request of them (``_approved_before``: an approval completed after the
+    command, while the round was still under review, does not count), and no blocking
     finding left open, with the ``closures`` recorded by then (``_closures_before``). Every fix
     that answers the round is one asked with the command, and every request of them comes from
     ``trusted``: a fix of the reviewers' findings, or one the supervisor or the coordinator
@@ -1096,6 +1114,7 @@ def _requesters(reviews, fixes, number, trusted, closures=()):
             or any(receipt_of(r) is None for r in records) or pending_reviewers(records)
             or round_verdict(records) != 'approve'
             or any(r.get('head_sha') != f.get('from') for r in records for f in answering)
+            or not _approved_before(records, answering)
             or open_findings(earlier, _closures_before(answering, closures))):
         return ()
     by = [request.get('by') for f in answering for request in f['requests']]

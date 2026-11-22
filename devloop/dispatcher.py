@@ -1138,11 +1138,12 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             return pr.reviews
         comments = self._pr_thread(pr.number)
         pr.granted_rounds = self._granted_rounds(comments)  # its limit, for the line (#405)
-        # Its fixes and finding closures, for the rounds after a /devloop fix that do not
-        # count (#536).
-        pr.fixes = self._markers(pr, comments, 'fix')
+        # Its fixes, with the reviews before each request, and finding closures, for the
+        # rounds after a /devloop fix that do not count (#536).
+        entries = self._marker_entries(pr, comments, 'review')
+        pr.fixes = self._fixes(pr, comments, entries)
         pr.closures = self._closures(pr, comments)
-        return [record for _, record in self._marker_entries(pr, comments, 'review')]
+        return [record for _, record in entries]
 
     def snapshot(self):
         lb = self.cfg.labels

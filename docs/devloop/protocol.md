@@ -227,7 +227,12 @@ the dispatcher's `supervision` records of the PR, plus the rounds that did not c
 `trusted_users` does not count against `max_review_rounds`, and starts also at the limit, when the
 round the fix answers approved the head the fix ran on: a complete agent round of the quorum
 with an `approve` verdict, every review of it with a valid policy receipt and on the `from` head
-of every fix record that answers the round, no blocking finding left open. The findings closed
+of every fix record that answers the round, no blocking finding left open. The quorum must have
+approved before the request: every review of the round is published before the comment of every
+`/devloop fix` the fix answers, a review comment earlier in the conversation, a native review
+(#325) at a time earlier than the command's, not the same second. A command written while the
+round was still under review, whose approval came after it, gives no exemption even when the fix
+runs after the approval. The findings closed
 count with the dispatcher's closures (`finding` records) already recorded at the request: those
 whose comment comes before the comment of every `/devloop fix` the fix answers, since GitHub's
 comment ids grow with time, on whatever head they were recorded. A closure recorded after the

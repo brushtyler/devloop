@@ -13,13 +13,14 @@ import unittest
 from devloop import markdown
 from devloop.config import (MAX_REQUESTED_FIX_ROUNDS, OVERLAY_KEYS, TRUST_KEYS, ConfigError,
                             parse_config)
-from devloop.dispatcher import pr_status_line, round_limit_reason
+from devloop.dispatcher import (Dispatcher, pr_status_line, round_limit_reason,
+                                with_native_reviews)
 from devloop.planning import (Snapshot, counted_rounds, next_requested, plan, requested_rounds,
                               round_reasons, waived_rounds, waiver)
-from devloop.review import CI, ci_failure_review, normalize_review, open_findings
+from devloop.review import CI, ci_failure_review, normalize_review, open_findings, owner_of
 from helpers import ssdlc_project
-from test_devloop import (CFG, REV_NAME, SHA1, SHA2, SHA3, FakeRunner, finding, fixed, norm,
-                          pr, raw_review)
+from test_devloop import (CFG, REV, REV_NAME, SHA1, SHA2, SHA3, FakeRunner, finding, fixed,
+                          norm, pr, raw_review)
 from test_devloop_fix_command import REQUEST, Case, header, records
 from test_devloop_merge import SUPERVISOR_LOGIN
 
@@ -37,11 +38,15 @@ def changes(number, head):
     return norm(raw_review('request_changes', [finding()]), round_no=number, head=head)
 
 
-def requested(number, start, head, by=TRUSTED):
+def requested(number, start, head, by=TRUSTED, after=None):
     """The record of a fix asked with `/devloop fix` by ``by`` on ``start``, answering round
-    ``number``."""
+    ``number``, as the dispatcher reads it: its request with the reviews published before its
+    comment (``after``, by default the review of round ``number`` by ``REV``, the reviewer of
+    ``approved``)."""
+    after = [(number, REV)] if after is None else after
     return {'round': number, 'head_sha': head, 'responses': [], 'from': start,
-            'requests': [{'comment': 1000 + number, 'by': by, 'request': REQUEST}]}
+            'requests': [{'comment': 1000 + number, 'by': by, 'request': REQUEST,
+                          'after': after}]}
 
 
 def reviewers_fix(number, head):
@@ -180,7 +185,8 @@ class ClosureOrderTests(Case):
                 snap_pr = d.snapshot().prs[0]
                 self.assertEqual([c['comment'] for c in snap_pr.closures], [closed])
                 fixes = [dict(requested(2, SHA2, SHA3),
-                              requests=[{'comment': asked, 'by': TRUSTED, 'request': REQUEST}])]
+                              requests=[{'comment': asked, 'by': TRUSTED, 'request': REQUEST,
+                                         'after': [(2, REV)]}])]
                 self.assertEqual(next_requested(snap_pr.reviews,
                                                 **waiver(TWO, fixes, snap_pr.closures)),
                                  (TRUSTED,) if closed_first else ())
@@ -195,6 +201,36 @@ class CountedTests(unittest.TestCase):
         self.assertEqual(rounds_of(reviews, fixes), (set(), 2))
         reasons = round_reasons(reviews, fixes, (), **_cap(CFG))
         self.assertEqual(reasons[1], (2, 'review dopo una correzione', True))
+
+    def test_an_approval_published_after_the_request_counts(self):
+        # The command came while round 1 was still under review: its approval, published
+        # after the request, does not make the request one on an approved head.
+        fixes = [requested(1, SHA1, SHA2, after=[])]
+        self.assertEqual(next_requested([approved(1, SHA1)], **waiver(ONE, fixes)), ())
+        snap_pr = pr(reviews=[approved(1, SHA1)], fixes=fixes, head=SHA2)
+        self.assertEqual([a.kind for a in plan(_snapshot(snap_pr), ONE)], ['round_limit'])
+        self.assertEqual(rounds_of([approved(1, SHA1), approved(2, SHA2)], fixes), (set(), 2))
+        # Without the list of the reviews before it, the request proves no order either.
+        (fix,) = fixes
+        bare = dict(fix, requests=[{k: v for k, v in fix['requests'][0].items()
+                                    if k != 'after'}])
+        self.assertEqual(next_requested([approved(1, SHA1)], **waiver(ONE, [bare])), ())
+
+    def test_a_quorum_completed_after_the_request_counts(self):
+        # Round 1 needs two reviewers: the first approved before the command, the second
+        # after it. The quorum approved the head only once the request was already there.
+        first = _pending(1, SHA1)
+        second = normalize_review(raw_review(), previous_open=[], round_no=1, max_rounds=3,
+                                  head_sha=SHA1, ci='pass', reviewer='other-reviewer')
+        second['receipt'] = first['receipt']
+        reviews = [first, second]
+        both = [(1, REV), (1, owner_of(second))]
+        self.assertEqual(next_requested(reviews, **waiver(ONE, [requested(1, SHA1, SHA2,
+                                                                          after=both)])),
+                         (TRUSTED,))
+        fixes = [requested(1, SHA1, SHA2, after=[(1, REV)])]
+        self.assertEqual(next_requested(reviews, **waiver(ONE, fixes)), ())
+        self.assertEqual(rounds_of(reviews + [approved(2, SHA2)], fixes), (set(), 2))
 
     def test_the_head_must_be_the_approved_one(self):
         # A sync moved the approved head before the command: the fix ran on SHA3.
@@ -238,8 +274,10 @@ class CountedTests(unittest.TestCase):
                       [requested(1, SHA1, SHA2, by='stranger')],
                       # One request of the fix from outside trusted_users is enough.
                       [dict(requested(1, SHA1, SHA2),
-                            requests=[{'comment': 1, 'by': TRUSTED, 'request': 'a'},
-                                      {'comment': 2, 'by': SUPERVISOR_LOGIN, 'request': 'b'}])]):
+                            requests=[{'comment': 1, 'by': TRUSTED, 'request': 'a',
+                                       'after': [(1, REV)]},
+                                      {'comment': 2, 'by': SUPERVISOR_LOGIN, 'request': 'b',
+                                       'after': [(1, REV)]}])]):
             with self.subTest(fixes=fixes):
                 self.assertEqual(rounds_of(reviews, fixes), (set(), 2))
 
@@ -350,6 +388,53 @@ class DispatcherTests(Case):
         self.assertIn('- round 1: prima review', counted)
         self.assertIn(f'- round 2: review dopo una correzione chiesta da `{TRUSTED}` con '
                       '`/devloop fix` su un head approvato', free)
+
+
+class RequestOrderTests(Case):
+    def test_a_fix_asked_while_the_round_was_under_review_counts(self):
+        # max_review_rounds = 1: the trusted user asked the fix while round 1 was still
+        # under review, and its approval came after the command. The fix runs, but the review
+        # of its head counts: at the limit, it goes to the operator.
+        d = self.make(cfg=ONE, runner=FakeRunner(dict(fixed(), responses=[])))
+        asked = self.gh.say(TRUSTED, f'/devloop fix\n{REQUEST}')
+        self.approve()
+        d.tick()
+        (fix,) = records(self.gh, 'fix')
+        self.assertEqual((fix['round'], fix['from']), (1, SHA1))
+        self.gh.head = SHA2
+        snap_pr = d.snapshot().prs[0]
+        (request,) = snap_pr.fixes[0]['requests']
+        self.assertEqual((request['comment'], request['after']), (asked, []))
+        self.assertEqual(next_requested(snap_pr.reviews, **waiver(ONE, snap_pr.fixes,
+                                                                   snap_pr.closures)), ())
+        self.assertEqual([a.kind for a in plan(d.snapshot(), ONE)], ['round_limit'])
+
+    def test_the_approval_before_the_request_is_listed(self):
+        d = self.make(cfg=ONE, runner=FakeRunner(dict(fixed(), responses=[])))
+        self.approve()
+        self.gh.say(TRUSTED, f'/devloop fix\n{REQUEST}')
+        d.tick()
+        self.gh.head = SHA2
+        (request,) = d.snapshot().prs[0].fixes[0]['requests']
+        self.assertEqual(request['after'], [(1, REV)])
+
+    def test_a_native_review_comes_before_only_at_an_earlier_time(self):
+        # A native review (#325) is placed among the comments by its time: one at the same
+        # second as the command may have come after it.
+        body = markdown.render_review(approved(1, SHA1), header(REV_NAME))
+        native = {'id': 7, 'login': 'reviewer-app[bot]', 'body': body, 'state': 'APPROVED',
+                  'submitted_at': '2026-11-21T12:00:00Z'}
+        for asked_at, after in (('2026-11-21T12:00:00Z', []),
+                                ('2026-11-21T12:00:01Z', [(1, REV)])):
+            with self.subTest(asked_at=asked_at):
+                command = {'id': 1001, 'author': {'login': TRUSTED}, 'created_at': asked_at,
+                           'body': f'/devloop fix\n{REQUEST}'}
+                thread = with_native_reviews([command], [native])
+                self.assertTrue(thread[0]['native'])
+                entries = [(0, approved(1, SHA1))]
+                self.assertEqual(Dispatcher._reviewed_before(thread, entries, 1), after)
+        # A request whose comment is not in the conversation has no review before it.
+        self.assertEqual(Dispatcher._reviewed_before(thread, entries, None), [])
 
 
 def _pending(number, head):

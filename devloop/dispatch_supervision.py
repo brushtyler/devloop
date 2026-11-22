@@ -1927,6 +1927,46 @@ class SupervisionMixin:
                       for c in record['closed']]
         return found
 
+    def _fixes(self, pr, comments, entries):
+        """The fix records of ``comments`` (``_markers``), each request of a ``/devloop fix``
+        with the review records of ``entries`` (``(position in comments, record)``, as
+        ``_marker_entries`` gives them) published before its comment (``after``, ``(round,
+        owner)`` pairs, only in memory): the quorum approved the head the fix ran on only if
+        its approval came before the request (#536). A review comment comes before when it
+        precedes the request in the conversation; a native review, placed among the comments
+        by its time (``with_native_reviews``), only when its time is earlier than the time of
+        the request, not equal. A request whose comment is not in ``comments`` has none."""
+        where = {c.get('id'): n for n, c in enumerate(comments)
+                 if isinstance(c.get('id'), int) and not isinstance(c.get('id'), bool)
+                 and not c.get('native')}
+        found = []
+        for record in self._markers(pr, comments, 'fix'):
+            if isinstance(record.get('requests'), list):
+                record = dict(record, requests=[
+                    dict(q, after=self._reviewed_before(comments, entries, where.get(
+                        q.get('comment')))) if isinstance(q, dict) else q
+                    for q in record['requests']])
+            found.append(record)
+        return found
+
+    @staticmethod
+    def _reviewed_before(comments, entries, asked):
+        """The ``(round, owner)`` of the review records of ``entries`` published before the
+        comment at position ``asked`` of ``comments`` (``_fixes``); ``[]`` when it is None."""
+        if asked is None:
+            return []
+        at = _epoch(comments[asked].get('created_at'))
+        before = []
+        for position, record in entries:
+            if position >= asked:
+                continue
+            if comments[position].get('native'):
+                time = _epoch(comments[position].get('created_at'))
+                if time is None or at is None or time >= at:
+                    continue
+            before.append((record['round'], owner_of(record)))
+        return before
+
     def _read_thread(self, pr, comments):
         """Fill ``pr`` with what its conversation records, from the identities allowed to write
         it: reviews, fixes, syncs, finding closures and commands, policy records, and the hold
@@ -1936,7 +1976,7 @@ class SupervisionMixin:
         entries = sorted(self._marker_entries(pr, comments, 'review', problems),
                          key=lambda e: (e[1]['round'], e[0]))
         pr.reviews = [record for _, record in entries]
-        pr.fixes = self._markers(pr, comments, 'fix')
+        pr.fixes = self._fixes(pr, comments, entries)
         pr.syncs = self._markers(pr, comments, 'sync')
         pr.reruns = self._markers(pr, comments, 'rerun')
         pr.closures = self._closures(pr, comments)
