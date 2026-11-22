@@ -29,7 +29,7 @@ ROOT = Path(__file__).resolve().parents[1]
 OPS = ROOT / 'ops'
 SCRIPTS = ('host/setup-devloop.sh', 'host/setup-supervisor.sh', 'host/setup-agent-user.sh',
            'host/setup-coordinator.sh', 'host/check-host.sh', 'host/start-role.sh',
-           'github/create-apps.sh')
+           'host/coordinator-wait.sh', 'github/create-apps.sh')
 BASH = shutil.which('bash')
 ME = getpass.getuser()
 PREFIX = 'brushtyler-devloop-'
@@ -60,6 +60,10 @@ READS = r'/usr/bin/bash -c \[\ -r\ \"\$1\"\ \] _ '
 # What ``sudo --version`` prints for each sudo the fakes simulate: the host moved from sudo-rs to
 # the classic sudo on 2026-11-20, and the scripts behave the same with either.
 SUDO_FLAVORS = {'sudo-rs': 'sudo-rs 0.2.8', 'classic sudo': 'Sudo version 1.9.17p2'}
+# The read of GitHub of the coordinator's wake-up (#543), as its sudoers allows it: the same
+# arguments in coordinator-wait.sh, with its own state file.
+WAIT_WATCH = ('@LAUNCHER_CMD@ watch --until-change --interval 60 --timeout 300 '
+              '--state @STATE_PATH@/coordinator-watch-state.json')
 
 
 def token_script(name):
@@ -183,6 +187,10 @@ echo "sudo $*" >> "$OPS_TEST_CALLS"''')
             'COORDINATOR_HOME': str(self.home / 'coordinator'),
             'COORDINATOR_SUDOERS_FILE': str(self.tmp / 'sudoers.d' / 'devloop-coordinator'),
             'COORDINATOR_OPS_DIR': str(self.tmp / 'lib' / 'devloop-coordinator'),
+            # The mailbox between supervisor and coordinator (#543), with a group the user of
+            # the tests is a member of.
+            'COORDINATION_DIR': str(self.tmp / 'coordination'),
+            'COORDINATION_GROUP': GROUP,
         }
         values.update(overrides)
         path = self.tmp / 'params.env'
@@ -736,9 +744,14 @@ class CoordinatorGuideTests(unittest.TestCase):
         self.assertEqual(token, [
             mint + '-- gh issue comment <ISSUE> --body-file <FILE>',
             mint + '--perm actions=read -- gh run view <RUN> --log-failed'])
+        # The wake-up (#543) runs as the coordinator, from the root copy, without sudo.
+        wake = [c for c in commands if 'coordinator-wait.sh' in c]
+        self.assertEqual([c.split('#')[0].strip() for c in wake], [
+            'bash /usr/local/lib/devloop-coordinator/host/coordinator-wait.sh',
+            'bash /usr/local/lib/devloop-coordinator/host/coordinator-wait.sh --period 3600'])
         # Each other example of the coordinator is a command of its sudoers.
         allowed = self.sudoers()
-        for command in [c for c in commands[2:] if c not in token]:
+        for command in [c for c in commands[2:] if c not in token and c not in wake]:
             with self.subTest(command=command):
                 argv = command.split()
                 self.assertEqual(argv[0], 'sudo')
@@ -822,7 +835,9 @@ class CoordinatorGuideTests(unittest.TestCase):
                        '/usr/bin/test -r'):
             self.assertIn(phrase, flat)
         whole = ' '.join((OPS / 'host/migrate.md').read_text(encoding='utf-8').split())
-        self.assertIn("L'overlay copiato è un file nuovo, senza ACL", whole)
+        # #543: the copied overlay and project file lose their ACLs, and both setups put them back.
+        self.assertIn("L'overlay e il file di progetto copiati sono file nuovi, senza ACL: dopo la "
+                      "copia si riesegue `setup-supervisor.sh`", whole)
         migrate = ' '.join((OPS / 'host/migrate.md').read_text(encoding='utf-8').split())
         self.assertIn('`setup-supervisor.sh` e, se c\'è il coordinatore, `setup-coordinator.sh`',
                       migrate)
@@ -986,7 +1001,8 @@ class DeclarativeFileTests(unittest.TestCase):
 
     def test_the_coordinator_sudoers_allows_only_reading_commands(self):
         # #530 (ADR 0002, precisazione del 2026-11-22): journalctl and systemctl status of the
-        # unit, run.log, devloop-pinned status and check-host.sh --read-only; nothing else.
+        # unit, run.log, devloop-pinned status and check-host.sh --read-only; and, for the
+        # coordinator's wake-up (#543), devloop-pinned watch with its own state file only.
         text = (OPS / 'host/sudoers-coordinator').read_text()
         body = [line for line in text.replace('\\\n', ' ').splitlines()
                 if line.strip() and not line.startswith('#')]
@@ -995,9 +1011,13 @@ class DeclarativeFileTests(unittest.TestCase):
                                   'secure_path="@DEVLOOP_PATH@"')
         self.assertTrue(body[1].startswith('@COORDINATOR_USER@ ALL=(@DEVLOOP_USER@) NOPASSWD: '))
         as_devloop = [c.strip() for c in body[1].split('NOPASSWD:', 1)[1].split(',')]
-        self.assertEqual(as_devloop, ['@LAUNCHER_CMD@ status',
+        self.assertEqual(as_devloop, ['@LAUNCHER_CMD@ status', WAIT_WATCH,
                                       '/usr/bin/tail -n 200 @STATE_PATH@/run.log',
                                       '/usr/bin/tail -n 1000 @STATE_PATH@/run.log'])
+        # The watch is the one subcommand of devloop-pinned besides status, and not the
+        # supervisor's state file (state_dir/watch-state.json): the events stay the supervisor's.
+        self.assertNotIn('/watch-state.json', WAIT_WATCH)
+        as_devloop.remove(WAIT_WATCH)
         self.assertTrue(body[2].startswith('@COORDINATOR_USER@ ALL=(root) NOPASSWD: '))
         as_root = [c.strip() for c in body[2].split('NOPASSWD:', 1)[1].split(',')]
         self.assertEqual(as_root, [
@@ -1232,9 +1252,69 @@ class DryRunTests(OpsTestCase):
                 # #554: without the overlay there is no ACL to give it, and the script says so.
                 self.assertIn(f'  ATTENZIONE: {state}/config.local.toml non esiste o è un link: '
                               'crearlo (setup-devloop.sh), poi rieseguire questo script\n', out)
+                # #543: the mailbox, with the coordinator in its group; the wake-up in the copy,
+                # and its read of GitHub in the sudoers, with its own state file.
+                self.assertIn(f'[dry-run] usermod -aG {GROUP} {FAKE_COORDINATOR}\n', out)
+                self.assertIn(f'[dry-run] install -d -m 2770 -o root -g {GROUP} '
+                              f'{self.tmp}/coordination/to-coordinator/done\n', out)
+                self.assertIn('host/coordinator-wait.sh', files)
+                watch = WAIT_WATCH.replace('@LAUNCHER_CMD@', launcher).replace('@STATE_PATH@',
+                                                                              state)
+                self.assertIn(f'    |     {watch}, \\\n', out)
+                self.assertIn(f'  bash {copy}/host/coordinator-wait.sh\n', out)
                 self.assertNotRegex(out, r'@[A-Z_]+@')
         self.assertEqual(self.mutating_calls(), [])
         self.assertEqual(self.tree(), before)
+
+    def test_setup_supervisor_gives_the_reading_of_the_state_files_and_the_mailbox(self):
+        # #543: the supervisor reads the overlay and the project file through an ACL r--, which
+        # the script adds when missing (a file replaced with install loses it), and the mailbox
+        # between supervisor and coordinator is made: the group, the supervisor in it, the
+        # directories root's, 2770.
+        state = self.home / 'devloop/ssdlc/.ssdlc/devloop'
+        state.mkdir(parents=True)
+        files = [state / 'config.local.toml', state / 'project.toml']
+        for path in files:
+            path.write_text('')
+            path.chmod(0o600)
+        params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=FAKE_SUPERVISOR,
+                             AGENT_USER=FAKE_AGENT)
+        self.fake_host('classic sudo', users=(FAKE_AGENT, FAKE_SUPERVISOR))
+        box = self.tmp / 'coordination'
+        dirs = [box] + [box / name / sub for name in ('to-coordinator', 'to-supervisor')
+                        for sub in ('', 'done')]
+        done = self.run_script('host/setup-supervisor.sh', '--dry-run', '--params', str(params))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        out = done.stdout
+        for path in files:
+            self.assertIn(f'==> Lettura di {path.name}: ACL u:{FAKE_SUPERVISOR}:r-- su {path}\n'
+                          f'  [dry-run] setfacl -m u:{FAKE_SUPERVISOR}:r-- {path}\n', out)
+        self.assertIn(f'  ok: il gruppo {GROUP} esiste\n', out)
+        self.assertIn(f'  [dry-run] usermod -aG {GROUP} {FAKE_SUPERVISOR}\n', out)
+        for path in dirs:
+            self.assertIn(f'  [dry-run] install -d -m 2770 -o root -g {GROUP} {path}\n', out)
+        # Present, the ACL stays; the directories of the tests are not root's: corrected.
+        self.shim('getfacl', 'echo "user::rw-"\n'
+                             f'echo "user:{FAKE_SUPERVISOR}:r--\t#effective:r--"\necho "other::---"')
+        for path in dirs:
+            path.mkdir(parents=True)
+            path.chmod(0o2770)
+        done = self.run_script('host/setup-supervisor.sh', '--dry-run', '--params', str(params))
+        out = done.stdout
+        self.assertEqual(out.count(f'  ok: ACL presente: user:{FAKE_SUPERVISOR}:r--\n'), 2)
+        self.assertNotIn('setfacl -m u:opsdry-supervisor:r--', out)
+        for path in dirs:
+            self.assertIn(f'  [dry-run] chown root:{GROUP} {path}\n'
+                          f'  [dry-run] chmod 2770 {path}\n', out)
+        # The mailbox of before, one file per destination, is not changed: the script stops.
+        shutil.rmtree(box / 'to-coordinator')
+        (box / 'to-coordinator').write_text('a message\n')
+        done = self.run_script('host/setup-supervisor.sh', '--dry-run', '--params', str(params))
+        self.assertEqual(done.returncode, 1)
+        self.assertIn(f'{box}/to-coordinator non è una directory: la casella di prima va '
+                      'spostata (ops/host/migrate.md, "Casella fra i ruoli e sveglia del '
+                      'coordinatore (#543)")', done.stderr)
+        self.assertEqual(self.mutating_calls(), [])
 
     def test_setup_coordinator_gives_the_coordinator_the_reading_of_the_overlay(self):
         # #554: the overlay is the operator's, 600: the coordinator reads it through an ACL
@@ -2358,6 +2438,14 @@ class CheckHostTests(OpsTestCase):
         self.lock_dir(self.locks)
         (state / 'config.local.toml').write_text(f'repo_lock_dir = "{self.locks}"\n'
                                                  '[agent_user]\nname = "root"\n')
+        (state / 'project.toml').write_text('')
+        # The mailbox between supervisor and coordinator (#543), as setup-supervisor.sh leaves
+        # it, owned by the user of the tests instead of root.
+        self.box = self.tmp / 'coordination'
+        for path in self.box_dirs():
+            path.mkdir(parents=True)
+            os.chown(path, -1, os.getgid())
+            path.chmod(0o2770)
         (self.tmp / 'systemd').mkdir()
         (self.tmp / 'systemd/devloop.service').write_text(render('host/devloop.service', {
             'REPO': 'brushtyler/ssdlc', 'DEVLOOP_USER': ME,
@@ -2378,12 +2466,23 @@ class CheckHostTests(OpsTestCase):
         path.write_text('#!/bin/sh\n')
         path.chmod(0o755)
 
-    def acl(self, entry):
-        """getfacl: ``entry`` on the home of devloop only, nothing on any other path."""
+    def box_dirs(self):
+        """The directories of the mailbox (#543): the box, each destination and its done/."""
+        return [self.box] + [self.box / name / sub for name in ('to-coordinator', 'to-supervisor')
+                             for sub in ('', 'done')]
+
+    def acl(self, entry, reads=f'user:{ME}:r--'):
+        """getfacl: ``entry`` on the home of devloop, ``reads`` on the overlay and the project
+        file (the supervisor's, #543), nothing on any other path."""
+        files = ' '.join(f'"{self.state / name}"' for name in ('config.local.toml', 'project.toml'))
         self.shim('getfacl', f'for a in "$@"; do last=$a; done\n'
                              f'echo "user::rwx"\n'
                              f'if [ "$last" = "{self.devloop}" ] && [ -n "{entry}" ]; then '
                              f'echo "{entry}"; fi\n'
+                             f'for f in {files}; do\n'
+                             f'    if [ "$last" = "$f" ] && [ -n "{reads}" ]; then '
+                             f'echo "{reads}"; fi\n'
+                             f'done\n'
                              f'echo "group::r-x"\necho "other::---"')
 
     def service(self, state):
@@ -2399,10 +2498,11 @@ class CheckHostTests(OpsTestCase):
                 '(setup-agent-user.sh)')
         cli_dirs = {f'  ERRORE: {self.agent}/{d} è 1770 {ME}, deve essere 1770 root'
                     for d in agentuser.CLI_DIRS}  # nor the directories of its CLIs (#517)
+        roots = {f'  ERRORE: {d} è di {ME}, deve essere di root'
+                 for d in [self.locks, *self.box_dirs()]}  # nor the mailbox (#543)
         errors = [line for line in done.stdout.splitlines()
                   if 'ERRORE' in line and 'sudoers' not in line
-                  and line != f'  ERRORE: {self.locks} è di {ME}, deve essere di root'
-                  and line != home and line not in cli_dirs]
+                  and line not in roots and line != home and line not in cli_dirs]
         return done, errors
 
     def test_the_files_of_the_agent_clis_are_checked_as_the_agent_user(self):
@@ -2953,6 +3053,78 @@ exec "$@"''')
                       'senza scrittura\n', out)
         self.assertEqual(self.mutating_calls(), [])
 
+    def test_without_the_mailbox_or_the_supervisors_acl_the_check_fails(self):
+        # #543: the supervisor lost the reading of the overlay when it was replaced, and nothing
+        # saw it; the mailbox between the roles lived only on the host. With both, no error.
+        overlay, project = self.state / 'config.local.toml', self.state / 'project.toml'
+        done, errors = self.check()
+        self.assertEqual(errors, [], done.stdout)
+        out = done.stdout
+        for path in (overlay, project):
+            self.assertIn(f'  ok: ACL user:{ME}:r-- su {path}\n', out)
+            self.assertIn(f'  [dry-run] sudo -u {ME} -H -- {READS}{path}\n', out)
+            # The agent user reads neither (#415).
+            self.assertIn(f'[dry-run] sudo -u root -H -- /usr/bin/bash -c ' + r"\!\ \[\ -r\ "
+                          + r'\"\$1\"\ \]' + f' _ {path}\n', out)
+        self.assertIn(f'  ok: il gruppo {GROUP} esiste\n', out)
+        self.assertIn(f'  ok: {ME} è nel gruppo {GROUP}\n', out)
+        for path in self.box_dirs():
+            self.assertIn(f'  ok: {path}: 2770, gruppo {GROUP}\n', out)
+        # Without the supervisor's ACL (an overlay replaced with install), an error per file.
+        self.acl(f'user:{ME}:--x', reads='')
+        done, errors = self.check()
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(errors, [f"  ERRORE: manca l'ACL u:{ME}:r-- su {path} "
+                                  '(setup-supervisor.sh)' for path in (overlay, project)])
+        self.acl(f'user:{ME}:--x', reads=f'user:{ME}:rw-')
+        done, errors = self.check()
+        self.assertEqual(errors, [f'  ERRORE: ACL user:{ME}:rw- su {path}: deve essere r--, '
+                                  'senza scrittura' for path in (overlay, project)])
+        self.acl(f'user:{ME}:--x')
+        project.unlink()
+        done, errors = self.check()
+        self.assertEqual(errors, [f'  ERRORE: {project} non esiste o è un link'])
+        project.write_text('')
+        # Without the mailbox, an error per directory; a file in place of a destination too.
+        shutil.rmtree(self.box)
+        done, errors = self.check()
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(errors, [f'  ERRORE: {path} non esiste o non è una directory '
+                                  '(setup-supervisor.sh)' for path in self.box_dirs()])
+        for path in self.box_dirs()[:2]:
+            path.mkdir()
+            path.chmod(0o2770)
+        (self.box / 'to-supervisor').write_text('a message of before\n')
+        self.box_dirs()[1].chmod(0o770)
+        done, errors = self.check()
+        self.assertIn(f'  ERRORE: {self.box_dirs()[1]} è 770 {GROUP}, deve essere 2770 del '
+                      f'gruppo {GROUP}', errors)
+        self.assertIn(f'  ERRORE: {self.box}/to-supervisor non esiste o non è una directory '
+                      '(setup-supervisor.sh)', errors)
+        self.assertEqual(self.mutating_calls(), [])
+
+    def test_the_group_of_the_mailbox_holds_the_two_roles_only(self):
+        # #543: supervisor and coordinator in the group, devloop and the agent user out of it.
+        self.fake_host('classic sudo', users=(FAKE_AGENT, FAKE_SUPERVISOR, FAKE_COORDINATOR))
+        # The fake id puts each user in a group of its own: the agent user's is the mailbox's.
+        params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=FAKE_SUPERVISOR,
+                             AGENT_USER=FAKE_AGENT, COORDINATION_GROUP=FAKE_AGENT)
+        done = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params))
+        out = done.stdout
+        self.assertIn(f'  ok: il gruppo {FAKE_AGENT} esiste\n', out)
+        for user in (FAKE_SUPERVISOR, FAKE_COORDINATOR):
+            self.assertIn(f'  ERRORE: {user} non è nel gruppo {FAKE_AGENT} (setup-supervisor.sh, '
+                          'setup-coordinator.sh)\n', out)
+        self.assertIn(f'  ERRORE: {FAKE_AGENT} è nel gruppo {FAKE_AGENT}: deve restarne fuori\n',
+                      out)
+        self.assertNotIn(f'{ME} è nel gruppo {FAKE_AGENT}', out)
+        params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=FAKE_SUPERVISOR,
+                             AGENT_USER=FAKE_AGENT, COORDINATION_GROUP='opsdry-nogroup')
+        done = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params))
+        self.assertIn('  ERRORE: il gruppo opsdry-nogroup non esiste (setup-supervisor.sh)\n',
+                      done.stdout)
+        self.assertEqual(self.mutating_calls(), [])
+
     def test_the_copy_holds_every_file_of_ops_check_host_reads(self):
         # #530: setup-coordinator.sh copies the files of ops/host that check-host.sh renders.
         lib = (OPS / 'lib.sh').read_text()
@@ -2961,7 +3133,10 @@ exec "$@"''')
         named = {f'host/{p.name}' for p in (OPS / 'host').iterdir()
                  if p.is_file() and p.suffix not in ('.sh', '.md', '.example', '.json')
                  and (p.name in script or f'UNIT_TEMPLATE={p.name}' in lib)}
-        self.assertEqual(named | {'lib.sh', 'host/check-host.sh'}, files)
+        # And the coordinator's wake-up (#543), which the coordinator runs from the copy, with
+        # its parameters.
+        self.assertEqual(named | {'lib.sh', 'host/check-host.sh', 'host/coordinator-wait.sh'},
+                         files)
         self.assertIn('host/devloop@.service', named)
 
     def real_sudo(self, sudo, env_stderr='', env_status=0):
@@ -3249,6 +3424,193 @@ class FakeHostTests(OpsTestCase):
         self.assertEqual(self.mutating_calls(), ['sudo -u x -H -- true'] * len(SUDO_FLAVORS))
 
 
+FAKE_DEVLOOP = 'opsdry-devloop'
+
+
+@unittest.skipIf(BASH is None, 'bash is not installed')
+class CoordinatorWaitTests(OpsTestCase):
+    """ops/host/coordinator-wait.sh (#543), the coordinator's wake-up, run as the coordinator
+    (the user of the tests) with simulated commands: ``sudo`` runs the fake of ``devloop-pinned
+    watch``, which answers from ``watch/<n>.out`` and ``watch/<n>.status`` at its n-th call and
+    then, without news, exits 3 as ``--timeout`` does; and the ``tail`` of run.log; ``systemctl
+    is-active`` says the state of ``service``."""
+
+    def setUp(self):
+        super().setUp()
+        self.fake_host('classic sudo', users=(FAKE_DEVLOOP, FAKE_SUPERVISOR, FAKE_AGENT))
+        # The wake-up keeps its own state in the coordinator's home.
+        (self.bin / 'mkdir').unlink()
+        self.watch = self.tmp / 'watch'
+        self.watch.mkdir()
+        self.sudo_log = self.tmp / 'sudo-log'
+        self.log = self.tmp / 'run.log'
+        self.log.write_text('10:00:00 tick ok\n')
+        self.shim('sudo', f'''echo "sudo $*" >> {shlex.quote(str(self.sudo_log))}
+[ "$1" = -n ] && [ "$2" = -u ] && [ "$3" = {FAKE_DEVLOOP} ] && [ "$4" = -- ] || exit 97
+shift 4
+if [ "$1" = /usr/bin/tail ]; then cat {shlex.quote(str(self.log))}; exit 0; fi
+dir={shlex.quote(str(self.watch))}
+n=$(( $(cat "$dir/count" 2>/dev/null || echo 0) + 1 ))
+echo "$n" > "$dir/count"
+if [ -f "$dir/$n.out" ]; then cat "$dir/$n.out"; exit "$(cat "$dir/$n.status")"; fi
+sleep 0.2
+exit 3''')
+        self.service_state = self.tmp / 'service'
+        self.service_state.write_text('active\n')
+        self.shim('systemctl', f'''[ "$1" = is-active ] || exit 2
+state=$(cat {shlex.quote(str(self.service_state))}); echo "$state"
+[ "$state" = active ]''')
+        self.state = self.tmp / 'state'
+        self.state.mkdir()
+        (self.state / 'config.local.toml').write_text('[run]\nalert_issue = 76\n')
+        self.box = self.tmp / 'coordination/to-coordinator'
+        (self.box / 'done').mkdir(parents=True)
+        self.coordinator_home = self.home / 'coordinator'
+        self.params_file = self.params(DEVLOOP_USER=FAKE_DEVLOOP, SUPERVISOR_USER=FAKE_SUPERVISOR,
+                                       AGENT_USER=FAKE_AGENT, COORDINATOR_USER=ME,
+                                       STATE_DIR=str(self.state))
+
+    # devloop watch puts the time before each line (Watcher.run): the fake does the same.
+    STAMP = '12:34 '
+
+    def answer(self, n, lines, status=0):
+        """The answer of the n-th call of the fake watch, each line with the time before it, as
+        devloop watch prints it."""
+        (self.watch / f'{n}.out').write_text(''.join(f'{self.STAMP}{line}\n' for line in lines))
+        (self.watch / f'{n}.status').write_text(f'{status}\n')
+
+    def wait(self, *args):
+        env = dict(os.environ, PATH=f'{self.bin}:{os.environ.get("PATH", "/usr/bin:/bin")}',
+                   OPS_TEST_CALLS=str(self.calls), HOME=str(self.coordinator_home),
+                   LC_ALL='C.UTF-8')
+        return subprocess.run([BASH, str(OPS / 'host/coordinator-wait.sh'), '--params',
+                               str(self.params_file), *args], capture_output=True, text=True,
+                              env=env, stdin=subprocess.DEVNULL, timeout=120)
+
+    def watch_calls(self):
+        if not self.sudo_log.exists():
+            return []
+        return [line for line in self.sudo_log.read_text().splitlines() if ' watch ' in line]
+
+    def test_it_wakes_on_an_event_of_the_coordinator_and_not_on_the_others(self):
+        self.answer(1, ['watch baseline: 3 open PRs, 2 open issues'])
+        self.answer(2, ['PR #5 CI pass @abc1234',
+                        'issue #7 labels +agent:ready -agent:needs-operator',
+                        'new issue #10 [agent:ready] Fix the docs',
+                        'issue #11 operator comment by brushtyler: about agent:needs-operator',
+                        'issue #77 comment by brushtyler-devloop-dispatcher[bot]: ## Allarme'])
+        self.answer(3, ['PR #12 labels +agent:needs-operator -agent:review',
+                        'PR #13 CI fail @def5678'])
+        done = self.wait()
+        self.assertEqual((done.returncode, done.stdout),
+                         (0, f'evento: {self.STAMP}PR #12 labels +agent:needs-operator '
+                             '-agent:review\n'),
+                         done.stderr)
+        # The command of its sudoers, with its own state file: never the supervisor's.
+        clone = f'{self.home}/devloop/ssdlc'
+        launcher = (f'/usr/bin/env -C {clone} /usr/bin/python3 {clone}/scripts/devloop-pinned '
+                    f'--state-dir {self.state}')
+        command = WAIT_WATCH.replace('@LAUNCHER_CMD@', launcher).replace('@STATE_PATH@',
+                                                                        str(self.state))
+        self.assertEqual(self.watch_calls(), [f'sudo -n -u {FAKE_DEVLOOP} -- {command}'] * 3)
+        self.assertIn(f'sudo -n -u {FAKE_DEVLOOP} -- /usr/bin/tail -n 200 {self.state}/run.log',
+                      self.sudo_log.read_text())
+        self.assertEqual(self.mutating_calls(), [])
+
+    def test_the_events_of_the_coordinator(self):
+        for line in ('new PR #14 [agent:review,agent:needs-operator] Bump',
+                     "PR #15 comment by brushtyler-devloop-dispatcher[bot]: ## Il merge spetta "
+                     "all'operatore",
+                     'issue #76 comment by brushtyler-devloop-dispatcher[bot]: ## Agent senza '
+                     'utente dedicato',
+                     'watch error: 3 consecutive rounds could not read GitHub, the last valid '
+                     'state is kept'):
+            with self.subTest(line=line):
+                (self.watch / 'count').unlink(missing_ok=True)
+                self.answer(1, ['PR #5 CI pass @abc1234', line])
+                done = self.wait()
+                self.assertEqual((done.returncode, done.stdout),
+                                 (0, f'evento: {self.STAMP}{line}\n'), done.stderr)
+
+    def test_a_message_in_the_mailbox_wakes_it_without_consuming_it(self):
+        message = self.box / '20261122T101500Z-a1b2c3.txt'
+        message.write_text('CI di main rossa: vedi #560\n')
+        (self.box / '.tmp-x9y8z7').write_text('not published yet\n')
+        (self.box / 'done/20261121T090000Z-ffffff.txt').write_text('read\n')
+        for _ in range(2):
+            done = self.wait()
+            self.assertEqual((done.returncode, done.stdout),
+                             (0, f'casella: 1 messaggi in {self.box}: {message.name}\n'))
+        self.assertTrue(message.exists())
+        self.assertEqual(self.watch_calls(), [])
+
+    def test_the_end_of_the_period_wakes_it(self):
+        self.answer(1, ['PR #5 CI pass @abc1234', 'issue #7 labels +agent:ready'])
+        done = self.wait('--period', '1')
+        self.assertEqual((done.returncode, done.stdout),
+                         (0, 'periodo: 1s senza eventi del coordinatore: il controllo '
+                             'periodico\n'), done.stderr)
+        self.assertGreaterEqual(len(self.watch_calls()), 2)
+
+    def test_a_new_error_in_the_log_wakes_it_once(self):
+        # The lines of run.log at the first run are the base, not events.
+        self.log.write_text('09:00:00 Traceback (most recent call last):\n10:00:00 tick ok\n')
+        done = self.wait('--period', '1')
+        self.assertTrue(done.stdout.startswith('periodo:'), done.stdout)
+        with self.log.open('a') as fh:
+            fh.write('11:00:00 ALERT: 3 consecutive ticks failed (network): the loop stops\n'
+                     '11:00:01 waiting for news failed (authentication): HTTP 401\n'
+                     'devloop: agent user root can read the keys\n'
+                     '11:00:02 tick ok, 2 actions\n')
+        done = self.wait('--period', '1')
+        self.assertEqual(done.stdout.splitlines(), [
+            'log: 11:00:00 ALERT: 3 consecutive ticks failed (network): the loop stops',
+            'log: 11:00:01 waiting for news failed (authentication): HTTP 401',
+            'log: devloop: agent user root can read the keys'])
+        done = self.wait('--period', '1')
+        self.assertTrue(done.stdout.startswith('periodo:'), done.stdout)
+
+    def test_a_line_equal_to_one_already_seen_is_new_when_appended(self):
+        # The new lines are those after the window already seen, not those whose text is new.
+        self.log.write_text('Traceback (most recent call last):\n')
+        self.assertTrue(self.wait('--period', '1').stdout.startswith('periodo:'))
+        with self.log.open('a') as fh:
+            fh.write('Traceback (most recent call last):\n')
+        done = self.wait('--period', '1')
+        self.assertEqual(done.stdout, 'log: Traceback (most recent call last):\n', done.stderr)
+        self.assertTrue(self.wait('--period', '1').stdout.startswith('periodo:'))
+        # A full window that moves on: its first line goes out, a line equal to it comes in.
+        ticks = [f'10:00:{i:03} tick ok\n' for i in range(200)]
+        self.log.write_text(''.join(ticks))
+        self.wait('--period', '1')
+        self.log.write_text(''.join(ticks[1:] + ticks[:1]))
+        self.assertTrue(self.wait('--period', '1').stdout.startswith('periodo:'))
+        self.log.write_text(''.join(ticks[2:] + ticks[:1]) + '10:05:00 HTTP 401\n')
+        self.assertEqual(self.wait('--period', '1').stdout, 'log: 10:05:00 HTTP 401\n')
+
+    def test_a_stopped_service_wakes_it_once_per_change(self):
+        self.service_state.write_text('failed\n')
+        done = self.wait('--period', '1')
+        self.assertEqual(done.stdout, 'servizio: devloop è failed\n')
+        done = self.wait('--period', '1')
+        self.assertTrue(done.stdout.startswith('periodo:'), done.stdout)
+        self.service_state.write_text('active\n')
+        self.assertTrue(self.wait('--period', '1').stdout.startswith('periodo:'))
+        self.service_state.write_text('inactive\n')
+        self.assertEqual(self.wait('--period', '1').stdout, 'servizio: devloop è inactive\n')
+
+    def test_a_failed_watch_and_another_user_are_errors(self):
+        self.answer(1, [], status=1)
+        done = self.wait()
+        self.assertEqual(done.returncode, 1)
+        self.assertIn(f'errore: devloop watch come {FAKE_DEVLOOP} è uscito con 1', done.stdout)
+        self.params_file = self.params(DEVLOOP_USER=FAKE_DEVLOOP, SUPERVISOR_USER=FAKE_SUPERVISOR,
+                                       AGENT_USER=FAKE_AGENT, STATE_DIR=str(self.state))
+        done = self.wait()
+        self.assertEqual(done.returncode, 1)
+        self.assertIn(f'va eseguito come {FAKE_COORDINATOR}', done.stderr)
+
+
 # The runbooks of the roles (#531), which start-role.sh gives as the first message.
 ROLE_RUNBOOKS = {role: ROOT / 'docs' / 'devloop' / 'roles' / f'{role}.md'
                  for role in ('supervisor', 'coordinator', 'host')}
@@ -3387,6 +3749,33 @@ echo "$2:x:1000:"''')
         self.assertEqual(args[:2], ['--model', 'gpt-6.1-sol'])
         self.assert_prompt(args[2], 'coordinator')
 
+    def test_the_session_gets_the_channel_and_starts_from_its_startup(self):
+        # #543: before the runbook, the values of this installation for the channel between the
+        # roles and the coordinator's wake-up, and the start from "At startup": a new session
+        # follows them without instructions from the operator.
+        box = self.tmp / 'coordination'
+        copy = self.tmp / 'lib/devloop-coordinator'
+        for role, directory, inbox, outbox in (
+                ('supervisor', self.clone, 'to-supervisor', 'to-coordinator'),
+                ('coordinator', self.home / 'coordinator', 'to-coordinator', 'to-supervisor')):
+            with self.subTest(role=role):
+                done = self.start(role)
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                prompt = self.cli_args(directory)[3][-1]
+                self.assert_prompt(prompt, role)
+                channel = prompt.split('\n\n')[1]
+                for value in (f'the state_dir of devloop is {self.state}',
+                              f'the mailbox between supervisor and coordinator is {box} '
+                              f'(group {GROUP})', f'your messages are in {box}/{inbox}/',
+                              f'yours to the other role go in {box}/{outbox}/',
+                              f'the coordinator\'s wake-up is bash {copy}/host/'
+                              'coordinator-wait.sh', 'Start now with the section "At startup".'):
+                    self.assertIn(value, channel)
+                self.assertNotRegex(channel, r'@[A-Z_]+@|\$')
+        done = self.start('host', '--cli', 'claude', '--model', 'm', sudo_user=FAKE_OPERATOR)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertNotIn('mailbox between', self.cli_args(self.checkout)[3][-1])
+
     def test_the_overlay_sets_the_table_over_the_installation(self):
         # The installation's table, with the overlay's model over it.
         config = self.checkout / 'devloop/config.toml'
@@ -3468,6 +3857,112 @@ class RoleRunbookTests(unittest.TestCase):
                     self.assertIn(f'\n{heading}\n', text)
                 self.assertIn('valid for any CLI', ' '.join(text.split()))
                 self.assertIn(f'ops/host/start-role.sh {role}', text)
+
+    def test_the_runbooks_describe_the_channel_the_watching_and_the_startup(self):
+        # #543: the channel between supervisor and coordinator (GitHub for what is tracked, the
+        # mailbox for quick alerts), how each role watches, and what it does at startup.
+        for role in ('supervisor', 'coordinator'):
+            text = ' '.join(ROLE_RUNBOOKS[role].read_text().split())
+            other = 'coordinator' if role == 'supervisor' else 'supervisor'
+            with self.subTest(role=role):
+                for heading in ('## At startup', f'## Channel with the {other}', '## Watching'):
+                    self.assertIn(f' {heading} ', text)
+                startup = text.split('## At startup')[1].split('## ')[0]
+                self.assertIn(f'Read your mailbox, `to-{role}/`', startup)
+                self.assertIn('the journal of the project (issue #76 for ssdlc)', startup)
+                self.assertIn('#316 for ssdlc', startup)
+                self.assertIn('There is no local handoff file', startup)
+                channel = text.split(f'## Channel with the {other}')[1].split('## ')[0]
+                for phrase in ('**On GitHub**, for what must be tracked', '`agent:needs-operator`',
+                               '**The mailbox**, for quick alerts, always available, also when '
+                               'GitHub', '`/var/lib/devloop-coordination`', 'group `devloop-roles`',
+                               'atomic rename', 'moves it to `done/` or removes it',
+                               'never in the mailbox', f'box=/var/lib/devloop-coordination/to-{other}'):
+                    self.assertIn(phrase, channel)
+        supervisor = ' '.join(ROLE_RUNBOOKS['supervisor'].read_text().split())
+        self.assertIn('You follow the continuous stream', supervisor)
+        coordinator = ' '.join(ROLE_RUNBOOKS['coordinator'].read_text().split())
+        self.assertIn('You do not follow the continuous stream, which is the supervisor\'s: only '
+                      'your events and a periodic check', coordinator)
+        self.assertIn('bash /usr/local/lib/devloop-coordinator/host/coordinator-wait.sh',
+                      coordinator)
+        host = ' '.join(ROLE_RUNBOOKS['host'].read_text().split())
+        self.assertIn('## Channel, watching and startup', host)
+        self.assertIn('never read its messages', host)
+
+    def test_the_mailbox_command_of_the_runbooks_publishes_a_readable_message_atomically(self):
+        # #543: the command of the runbooks, run as written (with the box of the tests): one
+        # file per message, readable by the group, with a unique name, no temporary file left.
+        if BASH is None:
+            self.skipTest('bash is not installed')
+        text = ROLE_RUNBOOKS['coordinator'].read_text()
+        block = text.split('box=/var/lib/devloop-coordination/to-supervisor', 1)[1]
+        block = block.split('```', 1)[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            box = Path(tmp) / 'to-supervisor'
+            box.mkdir()
+            script = f'box={shlex.quote(str(box))}{block}'.replace('<message>', 'CI rossa')
+            for _ in range(2):
+                subprocess.run([BASH, '-c', script], check=True, timeout=60)
+            messages = sorted(box.iterdir())
+            self.assertEqual(len(messages), 2)
+            for message in messages:
+                self.assertRegex(message.name, r'^\d{8}T\d{6}Z-[A-Za-z0-9]{6}\.txt$')
+                self.assertEqual(message.read_text(), 'CI rossa\n')
+                self.assertEqual(stat.S_IMODE(message.stat().st_mode), 0o640)
+
+    def test_the_anchors_between_the_ops_guide_and_the_migration_guide_resolve(self):
+        # ops/ is not among the pages of test_doc_links: its anchors are checked here (#543).
+        from test_doc_links import slug
+        readme = (OPS / 'README.md').read_text()
+        migrate = (OPS / 'host/migrate.md').read_text()
+
+        def slugs(text):
+            return {slug(h) for h in re.findall(r'^#+ (.*)$', text, re.M)}
+        for source, pattern, target in ((readme, r'host/migrate\.md#([^)\s]+)\)', migrate),
+                                        (readme, r'\]\(#([^)\s]+)\)', readme),
+                                        (migrate, r'\]\(#([^)\s]+)\)', migrate),
+                                        (migrate, r'\.\./README\.md#([^)\s]+)\)', readme)):
+            for anchor in re.findall(pattern, source):
+                with self.subTest(anchor=anchor):
+                    self.assertIn(anchor, slugs(target))
+        for anchor in ('spostare-linstallazione-su-un-altro-host-543',
+                       'acl-delloverlay-e-del-file-di-progetto-543',
+                       'casella-fra-i-ruoli-e-sveglia-del-coordinatore-543'):
+            self.assertIn(f'(host/migrate.md#{anchor})', readme)
+
+    def test_the_migration_guide_moves_the_installation_to_another_host(self):
+        # #543: a procedure for the agent of the host, with users, keys, state_dir, project file
+        # and overlay with their ACLs, mailbox, roles, services, logins of the CLIs and the final
+        # check; and the warning that a file replaced with install loses its ACLs.
+        migrate = (OPS / 'host/migrate.md').read_text()
+        start = migrate.index("\n## Spostare l'installazione su un altro host (#543)\n")
+        section = ' '.join(migrate[start:migrate.index('\n## ', start + 1)].split())
+        for phrase in ("[agent dell'host](../../docs/devloop/roles/host.md)", '**Utenti**',
+                       '**`state_dir`**', '**file di progetto**', "**overlay**",
+                       "**Le ACL dell'overlay e del file di progetto**", '**La casella**',
+                       '**Chiavi delle GitHub App**', '**Copie fissate, worktree, servizio e '
+                       'sudoers**', '**Login delle CLI**', '**Verifica finale**',
+                       'start-role.sh supervisor', '`coordinator-wait.sh`', '### Ordine',
+                       '### Da copiare', '### Da ricreare', '### Chiavi delle GitHub App',
+                       '### Dopo'):
+            self.assertIn(phrase, section)
+        start = migrate.index("\n## ACL dell'overlay e del file di progetto (#543)\n")
+        acl = ' '.join(migrate[start:migrate.index('\n## ', start + 1)].split())
+        self.assertIn('**Sostituire uno dei due file cancella le ACL.** Un `install -m 600`', acl)
+        for command in ('sudo bash /root/repos/ssdlc/ops/host/setup-supervisor.sh',
+                        'sudo bash /root/repos/ssdlc/ops/host/setup-coordinator.sh',
+                        'sudo bash /root/repos/ssdlc/ops/host/check-host.sh --no-apps'):
+            self.assertIn(command, acl)
+        step = RootStepsGuideTests().section('## Casella fra i ruoli e sveglia del coordinatore '
+                                             '(#543)')
+        commands = RootStepsGuideTests.commands(step, inline=False)
+        self.assertIn('for f in to-coordinator to-supervisor; do test -f "$f" && mv "$f" '
+                      '"$f.prima-543"; done', commands)
+        for script in ('setup-supervisor.sh', 'setup-coordinator.sh'):
+            self.assertIn(f'sudo bash /root/repos/ssdlc/ops/host/{script}', commands)
+        self.assertIn('il coordinatore** (non l\'agent dell\'host, che non legge i messaggi degli '
+                      'agent)', ' '.join(step.split()))
 
     def test_the_agent_of_the_host_runs_only_main_and_reads_no_agent_text(self):
         host = ' '.join(ROLE_RUNBOOKS['host'].read_text().split())

@@ -32,7 +32,12 @@ OPS_TEMPLATE_VARS='REPO DEVLOOP_USER SUPERVISOR_USER AGENT_USER COORDINATOR_USER
 # I file di ops/ che check-host.sh legge (#530): setup-coordinator.sh li copia, con i parametri
 # (params.env), nella directory di root COORDINATOR_OPS_DIR, da cui il coordinatore esegue come
 # root `check-host.sh --read-only`, mai dal clone di devloop né da un checkout scrivibile.
-OPS_COORDINATOR_FILES='lib.sh host/check-host.sh host/sudoers-supervisor host/sudoers-agent host/sudoers-coordinator host/tmpfiles-devloop-repos.conf host/devloop.service host/devloop@.service host/devloop-project.conf'
+OPS_COORDINATOR_FILES='lib.sh host/check-host.sh host/coordinator-wait.sh host/sudoers-supervisor host/sudoers-agent host/sudoers-coordinator host/tmpfiles-devloop-repos.conf host/devloop.service host/devloop@.service host/devloop-project.conf'
+
+# La casella fra supervisore e coordinatore (#543): sotto COORDINATION_DIR una directory di
+# messaggi per destinatario, ciascuna con la sua done/ per i messaggi letti. Tutte di root, del
+# gruppo COORDINATION_GROUP (supervisore e coordinatore, nessun altro), 2770.
+COORDINATION_BOXES='to-coordinator to-supervisor'
 
 # Nella home dell'utente degli agent (#438), come CLI_DIRS, CLI_SEALED e CLIS di
 # devloop/agentuser.py: le directory delle CLI, di root, del gruppo dell'utente degli agent e con
@@ -313,6 +318,9 @@ ops_load_params() {
         : "${SUPERVISOR_CLONE:=${SUPERVISOR_HOME:-/home/${SUPERVISOR_USER:-supervisor}}/devloop-$PROJECT}"
         # Anche il coordinatore: la key_dir della sua app (#549) è del progetto.
         : "${COORDINATOR_KEY_DIR:=${COORDINATOR_HOME:-/home/${COORDINATOR_USER:-coordinator}}/.ghapps-$PROJECT}"
+        # La casella fra supervisore e coordinatore (#543) è del progetto, come la sveglia del
+        # coordinatore che la legge.
+        : "${COORDINATION_DIR:=/var/lib/devloop-coordination-$PROJECT}"
         [ "$SERVICE_NAME" = "devloop@$PROJECT" ] \
             || die "con PROJECT il servizio è l'istanza devloop@$PROJECT dell'unità template: '$SERVICE_NAME'"
     fi
@@ -351,6 +359,9 @@ ops_load_params() {
     : "${REPO_LOCK_DIR:=/run/devloop/repos}"
     : "${REPO_LOCK_GROUP:=devloop-repos}"
     : "${TMPFILES_FILE:=/etc/tmpfiles.d/devloop-repos.conf}"
+    : "${COORDINATION_DIR:=/var/lib/devloop-coordination}"
+    : "${COORDINATION_GROUP:=devloop-roles}"
+    : "${COORDINATOR_WAIT_PERIOD:=14400}"
 
     [[ $REPO =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$ ]] || die "REPO deve essere owner/nome: '$REPO'"
     [[ $APP_PREFIX =~ ^[a-z0-9-]*$ ]] || die "APP_PREFIX ammette solo minuscole, cifre e '-': '$APP_PREFIX'"
@@ -447,6 +458,19 @@ ops_load_params() {
         [[ $COORDINATOR_OPS_DIR/ != "$inside"/* ]] && [[ $inside/ != "$COORDINATOR_OPS_DIR"/* ]] \
             || die "COORDINATOR_OPS_DIR non può stare dentro né contenere $inside: il coordinatore ne esegue i file come root"
     done
+    # La casella fra supervisore e coordinatore (#543): di root, fuori dalle home e dallo
+    # state_dir, con un gruppo suo (check-host.sh verifica che gli utenti devloop non ci siano).
+    [[ $COORDINATION_DIR =~ ^/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+$ ]] \
+        && ! [[ $COORDINATION_DIR/ =~ /\.\.?/ ]] \
+        || die "COORDINATION_DIR deve essere un percorso assoluto di almeno due livelli, senza spazi né '.' o '..': '$COORDINATION_DIR'"
+    for inside in "$DEVLOOP_HOME" "$SUPERVISOR_HOME" "$AGENT_HOME" "$COORDINATOR_HOME" \
+        "$STATE_PATH" "$DEVLOOP_CLONE" "$COORDINATOR_OPS_DIR"; do
+        [[ $COORDINATION_DIR/ != "$inside"/* ]] && [[ $inside/ != "$COORDINATION_DIR"/* ]] \
+            || die "COORDINATION_DIR non può stare dentro né contenere $inside"
+    done
+    _require_name COORDINATION_GROUP
+    [[ $COORDINATOR_WAIT_PERIOD =~ ^[1-9][0-9]{0,6}$ ]] \
+        || die "COORDINATOR_WAIT_PERIOD è un numero di secondi, da 1 a 9999999: '$COORDINATOR_WAIT_PERIOD'"
     ops_check_host_users
 }
 
@@ -567,6 +591,65 @@ ensure_dir() {
         run chown "$owner:$group" "$dir"
         run chmod "$mode" "$dir"
     fi
+}
+
+# ensure_read_acl USER FILE: l'ACL di sola lettura u:USER:r-- su FILE (#554, #543), se manca;
+# una più ampia la riduce a r--. Un FILE che non esiste, o che è un link, è un avviso: un file
+# sostituito (install, cp, rsync) perde le ACL, e lo script si riesegue dopo averlo rimesso.
+ensure_read_acl() {
+    local user=$1 file=$2 entry
+    if ! [ -f "$file" ] || [ -L "$file" ]; then
+        warn "$file non esiste o è un link: crearlo (setup-devloop.sh), poi rieseguire questo script"
+        return 0
+    fi
+    # getfacl può aggiungere alla riga un commento #effective.
+    entry=$(getfacl -p --omit-header "$file" 2>/dev/null | grep "^user:$user:" | head -n 1 || true)
+    entry=${entry%%[[:space:]]*}
+    if [ "$entry" = "user:$user:r--" ]; then
+        ok "ACL presente: $entry"
+    else
+        [ -z "$entry" ] || warn "ACL attuale $entry: la riduco a r--"
+        run setfacl -m "u:$user:r--" "$file"
+    fi
+}
+
+# ensure_coordination USER: la casella fra supervisore e coordinatore (#543). Il gruppo
+# COORDINATION_GROUP con dentro USER, e COORDINATION_DIR con una directory di messaggi per
+# destinatario (COORDINATION_BOXES) e la sua done/, tutte root:COORDINATION_GROUP 2770: i due
+# ruoli si scrivono a vicenda, nessun altro utente vi entra. Una voce che è un link o un file al
+# posto di una directory (la casella di prima, con un file per destinatario) ferma lo script.
+ensure_coordination() {
+    local user=$1 box dir actual
+    if getent group "$COORDINATION_GROUP" >/dev/null; then
+        ok "il gruppo $COORDINATION_GROUP esiste"
+    else
+        run groupadd --system "$COORDINATION_GROUP"
+    fi
+    if id -nG "$user" 2>/dev/null | tr ' ' '\n' | grep -qxF "$COORDINATION_GROUP"; then
+        ok "$user è nel gruppo $COORDINATION_GROUP"
+    else
+        # Vale dalla prossima sessione dell'utente.
+        run usermod -aG "$COORDINATION_GROUP" "$user"
+    fi
+    for dir in "$COORDINATION_DIR" \
+        $(for box in $COORDINATION_BOXES; do
+              printf '%s\n' "$COORDINATION_DIR/$box" "$COORDINATION_DIR/$box/done"
+          done); do
+        if [ -L "$dir" ] || { [ -e "$dir" ] && ! [ -d "$dir" ]; }; then
+            die "$dir non è una directory: la casella di prima va spostata (ops/host/migrate.md, \"Casella fra i ruoli e sveglia del coordinatore (#543)\"); niente cambiato da qui"
+        fi
+        if ! [ -d "$dir" ]; then
+            run install -d -m 2770 -o root -g "$COORDINATION_GROUP" "$dir"
+            continue
+        fi
+        actual=$(stat -c '%a %U %G' "$dir")
+        if [ "$actual" = "2770 root $COORDINATION_GROUP" ]; then
+            ok "$dir: 2770, root, gruppo $COORDINATION_GROUP"
+        else
+            run chown "root:$COORDINATION_GROUP" "$dir"
+            run chmod 2770 "$dir"
+        fi
+    done
 }
 
 # Sostituisce i segnaposto @NOME@ di un file dichiarativo con i valori dei parametri.

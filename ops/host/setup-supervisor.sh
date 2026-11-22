@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Prepara l'host per il supervisore di devloop: utente, ACL di solo attraversamento sulla home
-# di devloop (per leggere i log), sudoers minimale, clone, key_dir 700, impostazioni di Claude
-# Code senza aggiornamenti automatici.
+# di devloop (per leggere i log) e di sola lettura sull'overlay e sul file di progetto dello
+# state_dir (#543), la casella fra supervisore e coordinatore (#543), sudoers minimale, clone,
+# key_dir 700, impostazioni di Claude Code senza aggiornamenti automatici.
 # Idempotente: si può rieseguire, fa solo ciò che manca. Non scrive segreti. Claude Code, il suo
 # login, la chiave dell'app e il token di sola lettura per gh restano passi manuali (ops/README.md).
 # Va eseguito dopo setup-devloop.sh.
@@ -78,6 +79,18 @@ for private in .ghapps .claude .codex; do
         warn "$dir non è 700: rieseguire setup-devloop.sh"
     fi
 done
+
+# L'overlay e il file di progetto dello state_dir (#543): scripts/supervisor-token.py legge repo e
+# [apps.supervisor] dall'overlay, e il supervisore legge la configurazione del progetto. Sono
+# dell'operatore, 600: il supervisore li legge con un'ACL di sola lettura, che si aggiunge se
+# manca. Un file sostituito (install, cp, rsync) perde l'ACL: si riesegue questo script.
+for file in "$STATE_PATH/config.local.toml" "$STATE_PATH/project.toml"; do
+    step "Lettura di $(basename "$file"): ACL u:$SUPERVISOR_USER:r-- su $file"
+    ensure_read_acl "$SUPERVISOR_USER" "$file"
+done
+
+step "Casella fra supervisore e coordinatore: $COORDINATION_DIR, gruppo $COORDINATION_GROUP (#543)"
+ensure_coordination "$SUPERVISOR_USER"
 
 step "sudoers del supervisore ($SUDOERS_FILE)"
 SUDOERS=$(render "$OPS_DIR/host/sudoers-supervisor")

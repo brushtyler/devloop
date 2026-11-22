@@ -2,7 +2,8 @@
 # Avvia la sessione di un ruolo di devloop (ADR 0002, precisazione del 2026-11-22; #531): il
 # supervisore, il coordinatore o l'agent dell'host, ciascuno in una sessione tmux, con l'utente
 # del ruolo, la CLI e il modello del ruolo, e il suo runbook (docs/devloop/roles/<ruolo>.md di
-# questo checkout) come istruzioni iniziali.
+# questo checkout) come istruzioni iniziali; per supervisore e coordinatore, prima del runbook, i
+# valori dell'installazione per il canale fra i due ruoli e la sveglia del coordinatore (#543).
 #
 # - supervisor, coordinator: CLI (kind) e modello dalla tabella [roles.<ruolo>] della
 #   configurazione di devloop: devloop/config.toml di questo checkout con sopra l'overlay
@@ -160,10 +161,23 @@ ok "$ROLE_USER, directory di lavoro $ROLE_DIR"
 command -v tmux >/dev/null 2>&1 || die 'manca tmux: installarlo (apt-get install tmux)'
 
 # Il runbook, intero, è il primo messaggio della sessione: le istruzioni del ruolo, valide per
-# qualunque CLI.
+# qualunque CLI. Per supervisore e coordinatore, prima del runbook, i valori di questa
+# installazione per il canale fra i due ruoli e la sveglia del coordinatore (#543), e l'avvio dalla
+# sezione "At startup": una sessione nuova li segue senza istruzioni dell'operatore.
+CHANNEL=''
+case $ROLE in
+    supervisor) INBOX=to-supervisor OUTBOX=to-coordinator ;;
+    coordinator) INBOX=to-coordinator OUTBOX=to-supervisor ;;
+    host) INBOX='' ;;
+esac
+if [ -n "$INBOX" ]; then
+    CHANNEL="Values of this installation (ops/params.env), for the sections \"At startup\", \"Channel\" and \"Watching\" of the runbook: the state_dir of devloop is $STATE_PATH; the mailbox between supervisor and coordinator is $COORDINATION_DIR (group $COORDINATION_GROUP): your messages are in $COORDINATION_DIR/$INBOX/, yours to the other role go in $COORDINATION_DIR/$OUTBOX/; the coordinator's wake-up is bash $COORDINATOR_OPS_DIR/host/coordinator-wait.sh. Start now with the section \"At startup\".
+
+"
+fi
 PROMPT="You hold the role \"$ROLE\" of devloop for $REPO. Your instructions are the runbook below ($RUNBOOK of the checkout $ROOT_DIR, started by ops/host/start-role.sh): follow it for the whole session.
 
-$(<"$ROOT_DIR/$RUNBOOK")"
+$CHANNEL$(<"$ROOT_DIR/$RUNBOOK")"
 
 # La riga di comando della CLI, interattiva, con il modello e il primo messaggio.
 case $CLI in

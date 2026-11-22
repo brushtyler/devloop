@@ -7,7 +7,51 @@ clone in `/home/devloop/ssdlc`, `state_dir` = `.ssdlc/devloop`).
 **Regola:** mai due dispatcher attivi sullo stesso repository. Il dispatcher nuovo parte solo
 quando quello vecchio è fermo e non ripartirà.
 
-## Ordine
+## Spostare l'installazione su un altro host (#543)
+
+La procedura per l'[agent dell'host](../../docs/devloop/roles/host.md), lanciato dall'operatore
+sulla macchina nuova da un checkout di `main` aggiornato, con `ops/params.env` dell'installazione.
+Quello che sta solo sull'host (casella, ACL, ruoli) è negli script o in questa sezione: niente si
+ricostruisce dalla memoria di una sessione. Le sottosezioni qui sotto ne danno i dettagli; i passi
+che chiedono una persona (chiavi, login, token, avvio) li fa l'operatore, e l'agent si ferma e
+glieli chiede.
+
+1. **Piattaforma e `sudo`** (#496): sudo 1.9, non sudo-rs (passo 1 di [Ordine](#ordine)).
+2. **Utenti**, senza avviare nulla, nell'ordine: `setup-devloop.sh`, `setup-agent-user.sh`,
+   `setup-supervisor.sh` e, se c'è il coordinatore, `setup-coordinator.sh`, ciascuno prima con
+   `--dry-run` ([ops/README.md](../README.md)). Creano anche il gruppo `devloop-roles` e la
+   casella fra supervisore e coordinatore (passo 6).
+3. **Fermare devloop sulla macchina vecchia** e disabilitarlo (passo 2 di [Ordine](#ordine)).
+4. **`state_dir`**: copiare i file di [Da copiare](#da-copiare), fra cui il **file di progetto**
+   (`project.toml`) e l'**overlay** (`config.local.toml`), 600 di `devloop`.
+5. **Le ACL dell'overlay e del file di progetto**: i file copiati sono nuovi e non hanno ACL.
+   Rieseguire `setup-agent-user.sh` (le chiude a `devloop-agent`), `setup-supervisor.sh` (la
+   lettura `u:supervisor:r--`) e, se c'è il coordinatore, `setup-coordinator.sh` (`u:coordinator:r--`
+   sull'overlay), come in [ACL dell'overlay e del file di
+   progetto](#acl-delloverlay-e-del-file-di-progetto-543).
+6. **La casella** (`COORDINATION_DIR`, `/var/lib/devloop-coordination`): la ricreano vuota
+   `setup-supervisor.sh` e `setup-coordinator.sh`. I messaggi non letti della macchina vecchia
+   li legge il loro destinatario prima dello spostamento; lo stato del lavoro è su GitHub (il
+   diario #76 e le issue), e non si copia.
+7. **Chiavi delle GitHub App** in ogni `key_dir`, 600 ([Chiavi delle GitHub
+   App](#chiavi-delle-github-app)): passo dell'operatore.
+8. **Copie fissate, worktree, servizio e sudoers** come in [Da ricreare](#da-ricreare): il
+   primo pin dal clone, l'unità e i sudoers dagli script.
+9. **Login delle CLI** e token di sola lettura, per `devloop-agent`, `supervisor` e
+   `coordinator` ([Da ricreare](#da-ricreare)): passi dell'operatore.
+10. **Verifica finale**: `sudo bash <checkout>/ops/host/check-host.sh`, nessun errore (fra
+    l'altro: l'ACL `user:supervisor:r--` sull'overlay e sul file di progetto, la casella e il
+    gruppo, il coordinatore e la sua copia), poi `devloop-pinned status` e `tick --dry-run` come
+    `devloop` ([ops/README.md](../README.md#8-verifica)). L'agent riporta all'operatore cosa ha
+    eseguito, come quale utente, e il codice di uscita.
+11. **Avvio**, dell'operatore: il servizio (`systemctl start devloop`, ed `enable`), poi le
+    sessioni dei ruoli con `ops/host/start-role.sh supervisor` e `coordinator`
+    ([ops/README.md](../README.md#i-quattro-ruoli)): ciascuna parte dalla sezione *At startup*
+    del suo runbook, rilegge la sua casella, il diario (#76) e il riepilogo (#316), e riprende a
+    sorvegliare (il coordinatore con `coordinator-wait.sh`).
+12. **La macchina vecchia** come in [Dopo](#dopo).
+
+### Ordine
 
 1. **Preparare la macchina nuova** senza avviare nulla: `setup-devloop.sh`,
    `setup-agent-user.sh`, `setup-supervisor.sh` e, se c'è il coordinatore, `setup-coordinator.sh`
@@ -33,7 +77,7 @@ quando quello vecchio è fermo e non ripartirà.
 5. **Verificare** con `sudo bash ops/host/check-host.sh` e `devloop-pinned status`, poi **avviare** sulla
    macchina nuova: `sudo systemctl start devloop` (e `enable`, se deve ripartire al boot).
 
-## Da copiare
+### Da copiare
 
 Dallo `state_dir` di devloop (`/home/devloop/ssdlc/.ssdlc/devloop`), come utente `devloop`:
 
@@ -56,19 +100,22 @@ sudo -u devloop -H rsync -a --chmod=F600 \
 
 Un file che sulla macchina vecchia non c'è non va creato.
 
-L'overlay copiato è un file nuovo, senza ACL: se c'è il coordinatore, dopo la copia si riesegue
-`setup-coordinator.sh`, che gli rimette `u:coordinator:r--`, e un'eventuale ACL del supervisore
-sull'overlay va ridata a mano ([Utente del coordinatore](#utente-del-coordinatore-530), #554).
+L'overlay e il file di progetto copiati sono file nuovi, senza ACL: dopo la copia si riesegue
+`setup-supervisor.sh`, che rimette `u:supervisor:r--` su entrambi, e, se c'è il coordinatore,
+`setup-coordinator.sh`, che rimette `u:coordinator:r--` sull'overlay ([ACL dell'overlay e del
+file di progetto](#acl-delloverlay-e-del-file-di-progetto-543), #554).
 
 Dal supervisore, come utente `supervisor`:
 
 - la directory degli strumenti e dei file del diario, `~/supervisor`: sono strumenti locali del
-  supervisore, non di devloop, e non si installano dal repository;
+  supervisore, non di devloop, e non si installano dal repository. Lo stato del lavoro (cosa è in
+  corso, cosa aspetta l'operatore) non sta lì né in un `HANDOFF.md` locale, ma su GitHub, nel
+  diario #76 e nelle issue (#543);
 - la memoria di Claude Code, `~/.claude/projects/<progetto>/memory`. `<progetto>` è il percorso
   del clone del supervisore con `/` sostituito da `-` (per esempio `-home-supervisor-ssdlc`): se il
   clone nuovo ha lo stesso percorso il nome resta valido, altrimenti va rinominata.
 
-## Da ricreare
+### Da ricreare
 
 - **Le copie fissate** (`pinned-*` e `current`): non si copiano. Al primo avvio si fa un nuovo pin
   del branch principale, che rifà anche lo smoke test sulla macchina nuova. Lo esegue il devloop
@@ -95,11 +142,18 @@ Dal supervisore, come utente `supervisor`:
 - **Il servizio**: lo installa `setup-devloop.sh` da `ops/host/devloop.service`; non si copia
   l'unità della macchina vecchia.
 - **Il sudoers del supervisore**: lo installa `setup-supervisor.sh`.
-- **Il coordinatore**, se c'è (#530): utente, copia di root di `check-host.sh` e sudoers in sola
-  lettura li installa `setup-coordinator.sh` ([Utente del coordinatore](#utente-del-coordinatore-530));
-  la CLI del suo agent, il login e il token di sola lettura si rifanno a mano.
+- **La casella fra supervisore e coordinatore** (#543): il gruppo `devloop-roles` e
+  `/var/lib/devloop-coordination` con `to-coordinator/`, `to-supervisor/` e le loro `done/`, di
+  root, del gruppo, 2770; la creano `setup-supervisor.sh` e `setup-coordinator.sh`. Non si copia.
+- **Il coordinatore**, se c'è (#530): utente, copia di root di `check-host.sh` e della sveglia
+  `coordinator-wait.sh`, e sudoers in sola lettura li installa `setup-coordinator.sh`
+  ([Utente del coordinatore](#utente-del-coordinatore-530)); la CLI del suo agent, il login, la
+  chiave della sua app e il token di sola lettura si rifanno a mano.
+- **Le sessioni dei ruoli**: si avviano con `ops/host/start-role.sh supervisor` e `coordinator`
+  ([ops/README.md](../README.md#i-quattro-ruoli)), che passa a ciascuna il suo runbook e i
+  valori della casella; non si copia nessun file di stato delle sessioni.
 
-## Chiavi delle GitHub App
+### Chiavi delle GitHub App
 
 Due modi:
 
@@ -115,11 +169,111 @@ In entrambi i casi: in `key_dir` di `devloop` le chiavi delle app che usa il dis
 del supervisore solo la chiave `supervisor` e, finché P5-4 non è attivo, `claude-agent`.
 `check-host.sh` lo verifica.
 
-## Dopo
+### Dopo
 
 - La macchina vecchia: servizio disabilitato, chiavi e token revocati o cancellati, login delle
-  CLI chiusi.
+  CLI chiusi, sessioni dei ruoli chiuse.
 - Se cambia l'host, cambia anche il nome suggerito del token del supervisore: rinominarlo.
+
+## ACL dell'overlay e del file di progetto (#543)
+
+Il supervisore legge l'overlay (`<state_dir>/config.local.toml`: `scripts/supervisor-token.py` ne
+legge `repo` e `[apps.supervisor]`) e il file di progetto (`<state_dir>/project.toml`) con
+un'ACL di sola lettura, `u:supervisor:r--`, che mette `setup-supervisor.sh`; il coordinatore
+l'overlay con `u:coordinator:r--`, che mette `setup-coordinator.sh`. I due file sono
+dell'operatore, 600 di `devloop`; `devloop-agent` non li legge.
+
+**Sostituire uno dei due file cancella le ACL.** Un `install -m 600`, un `cp` senza `-p`, un
+`rsync` o un editor che scrive un file nuovo al posto di quello vecchio lasciano un file senza
+ACL. Il 21/11/2026 la sostituzione dell'overlay della migrazione di #510 ha cancellato così
+`user:supervisor:r--`: l'app del supervisore non firmava più, e nessun controllo se n'è
+accorto. Da #543 `check-host.sh` lo segnala come errore (`ERRORE: manca l'ACL u:supervisor:r--
+su …`).
+
+Per rimetterle, come root, dal checkout dell'operatore aggiornato (`/root/repos/ssdlc`), dopo
+**ogni** sostituzione di uno dei due file:
+
+```bash
+sudo bash /root/repos/ssdlc/ops/host/setup-supervisor.sh --dry-run
+sudo bash /root/repos/ssdlc/ops/host/setup-supervisor.sh
+sudo bash /root/repos/ssdlc/ops/host/setup-coordinator.sh    # se c'è il coordinatore
+sudo bash /root/repos/ssdlc/ops/host/check-host.sh --no-apps
+```
+
+Il primo rimette `u:supervisor:r--` sull'overlay e sul file di progetto, il secondo
+`u:coordinator:r--` sull'overlay; ciascuno solo se manca, e riduce a `r--` un'ACL più ampia.
+`check-host.sh` non deve dare errori nei passi `Lettura dell'overlay e del file di progetto per
+supervisor (#543)` e `Coordinatore coordinator`, e deve trovare che `devloop-agent` non legge
+nessuno dei due. Le copie di sicurezza (`install … config.local.toml.prima-…`) sono file nuovi e
+non toccano l'originale.
+
+## Casella fra i ruoli e sveglia del coordinatore (#543)
+
+Il passo sull'host di #543, su un host già attivo, a loop attivo: non tocca devloop né la copia
+fissata. Porta nel repository la casella fra supervisore e coordinatore, la lettura dell'overlay e
+del file di progetto per il supervisore, e la sveglia del coordinatore, che prima esistevano solo
+sull'host ([ops/README.md](../README.md#i-quattro-ruoli)).
+
+Prima, **il coordinatore** (non l'agent dell'host, che non legge i messaggi degli agent): legge
+i file `to-coordinator` e `to-supervisor` della casella di prima
+(`/var/lib/devloop-coordination/`, file al posto delle directory, `root:supervisor` 2770) e ne
+riporta ciò che serve ancora nel diario #76, in un'issue o, dopo il passo, come messaggio nella
+casella nuova; trasferisce lo stato di `HANDOFF.md` del supervisore nel diario #76 e nelle issue.
+Poi dice all'operatore che il passo si può fare.
+
+Come root, **dal checkout dell'operatore** (`/root/repos/ssdlc`), aggiornato come al passo 1 di
+[Utente del coordinatore](#utente-del-coordinatore-530):
+
+1. mettere da parte i file della casella di prima, che `setup-supervisor.sh` non sostituisce (si
+   ferma con `… non è una directory: la casella di prima va spostata`):
+
+   ```bash
+   cd /var/lib/devloop-coordination
+   for f in to-coordinator to-supervisor; do test -f "$f" && mv "$f" "$f.prima-543"; done
+   ```
+
+2. il supervisore: il gruppo `devloop-roles` con dentro `supervisor`, la casella (`root:devloop-roles`,
+   2770, con `to-coordinator/`, `to-supervisor/` e le loro `done/`) e l'ACL `u:supervisor:r--`
+   sull'overlay e sul file di progetto:
+
+   ```bash
+   sudo bash /root/repos/ssdlc/ops/host/setup-supervisor.sh --dry-run
+   sudo bash /root/repos/ssdlc/ops/host/setup-supervisor.sh
+   ```
+
+3. il coordinatore, se c'è: `coordinator` nel gruppo, la copia di root aggiornata con
+   `coordinator-wait.sh`, e il sudoers con la riga di `devloop-pinned watch` della sveglia:
+
+   ```bash
+   sudo bash /root/repos/ssdlc/ops/host/setup-coordinator.sh --dry-run
+   sudo bash /root/repos/ssdlc/ops/host/setup-coordinator.sh
+   ```
+
+4. verificare: `sudo bash /root/repos/ssdlc/ops/host/check-host.sh --no-apps`, nessun errore nei
+   passi `Lettura dell'overlay e del file di progetto per supervisor (#543)`, `Casella fra
+   supervisore e coordinatore` e `Coordinatore coordinator`; poi, come `coordinator`, il suo
+   sudoers ammette la sveglia:
+
+   ```bash
+   sudo -u coordinator -H sudo -n -l
+   ```
+
+5. chiudere le sessioni di supervisore e coordinatore e riavviarle con `ops/host/start-role.sh`
+   (passo dell'operatore): l'appartenenza al gruppo vale dalla sessione nuova, che parte dalla
+   sezione *At startup* del suo runbook. La sveglia di prima, `/root/coordinator-wait.sh`, non
+   serve più: il coordinatore usa `/usr/local/lib/devloop-coordinator/host/coordinator-wait.sh`.
+   Rimuoverla: `rm /root/coordinator-wait.sh`. I file `*.prima-543` si rimuovono quando il
+   coordinatore dice che il loro contenuto è stato riportato.
+
+Il `HANDOFF.md` locale del supervisore non serve più: le istruzioni sono nei runbook, lo stato
+su GitHub.
+
+**Rollback.** Come root: `gpasswd -d supervisor devloop-roles` e `gpasswd -d coordinator
+devloop-roles`, `rm -r /var/lib/devloop-coordination/to-coordinator
+/var/lib/devloop-coordination/to-supervisor`, `chgrp supervisor /var/lib/devloop-coordination`,
+poi i file `*.prima-543` al loro posto con `mv`, e
+`setup-coordinator.sh` dal checkout della versione di prima, che rimette copia e sudoers di
+prima. L'ACL `u:supervisor:r--` sui due file resta: è quella che serviva già.
 
 ## Configurazione di ssdlc nel suo file di progetto
 
@@ -1274,7 +1428,8 @@ setup-coordinator.sh`).
 `install -m 600`, un `cp` o un `rsync` che scrive un file nuovo al posto di
 `/home/devloop/ssdlc/.ssdlc/devloop/config.local.toml`, come la copia dalla macchina vecchia di
 [Da copiare](#da-copiare), ne toglie le ACL: quella del coordinatore, che lo script rimette solo
-se manca, e quella del supervisore, se l'operatore gliel'ha data, che lo script non tocca.
+se manca, e quella del supervisore, che rimette `setup-supervisor.sh` ([ACL dell'overlay e del
+file di progetto](#acl-delloverlay-e-del-file-di-progetto-543), #543).
 Senza, `scripts/coordinator-token.py` si ferma con `Permission denied` e `check-host.sh` dà
 `ERRORE: manca l'ACL u:coordinator:r-- su …`. Le copie di sicurezza dell'overlay delle altre
 sezioni (`install … config.local.toml.prima-…`) sono file nuovi e non toccano l'overlay.
