@@ -548,7 +548,11 @@ the suite fails only in modules not pertinent to the PR and another job fails wi
 - **Pertinent, or not determinable.** A failed module pertinent to the diff, a failed check that
   is not a GitHub Actions job (a commit status), a failed job whose log lacks the
   `FAILED MODULE` lines or the final summary, a count that does not match, a worker problem: the
-  failure is a round at once, as before, and nothing is re-run.
+  failure is a round at once, as before, and nothing is re-run. A log that `gh` cannot read is
+  not determinable either: the tick log then says why, with the error of `gh` (cut), as `CI rerun:
+  the log of the failed job <name> (run <id>) cannot be read: <error>; CI round` (#545); the same
+  goes for the tail of the log the CI round quotes (`the failed log of run <id> cannot be read:
+  <error>`), which is then left empty.
 - **While the re-run starts.** As long as GitHub still shows the very failed checks the re-run
   replaces (same links: a re-run job is a new check run), the dispatcher waits: no round, no
   review, no merge. A ready PR stays in `agent:ready-to-merge` meanwhile, and goes back to
@@ -558,6 +562,11 @@ the suite fails only in modules not pertinent to the PR and another job fails wi
   head whose review round asked for changes (#352) or approved (#359) the failure joins that
   round instead, without a round of its own ([one head, one round](protocol.md#approval-and-ci)).
   A new head starts again from its first failure.
+
+Every `gh` of the dispatcher runs with a temporary directory of its own,
+`<state_dir>/gh-tmp` (`TMPDIR`, created with mode `700`; #545): `gh run view --log-failed` keeps
+there the cache of the logs it downloads (`gh-cli-cache`), which in the system's `/tmp` may belong
+to another user, such as `root`, and not be writable by devloop's user.
 
 The rerun needs **`actions: write`** on the dispatcher's app. Its token is minted with only that
 permission. Without it (GitHub answers 403, or refuses to mint the token; also when the

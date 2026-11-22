@@ -51,6 +51,11 @@ The dispatcher reaches GitHub through three ports, declared in `devloop/ports.py
 | `CodeReview` | PRs and reviews: `open_prs`, `merged_prs`, `find_pr` (#362), `commit_prs` (#473), `branch_prs` (#384), `merge_state` (`clean`, `conflict` or `unknown`), `pr_head`, `pr_state`, `merge_pr`, `pr_reviews`, `create_pr`, `submit_review` |
 | `CI` | checks of a commit: `checks` (summarized by `summarize_checks`), `check_details`, `check_runs`, `failed_log`, `job_log` (#300), `rerun_failed_jobs` (#200) |
 
+`CI.failed_log` raises `LogUnreadable`, with the error of `gh`, when `gh` cannot read the log
+(#545): the dispatcher writes the reason to the tick log. The `GitHub` adapter runs each `gh` with
+the temporary directory devloop gives it (`tmp_dir`, `<state_dir>/gh-tmp`, mode `700`), not the
+system's `/tmp`, where the cache of the logs (`gh-cli-cache`) may belong to another user.
+
 `Tracker` also has `issue_dependencies` (#277): the native "blocked by" dependencies of an
 issue, with the state of each blocking issue and who added each block, read with GraphQL (one
 query, more only when the events of an open block are older than the latest 100)

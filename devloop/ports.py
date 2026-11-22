@@ -198,7 +198,8 @@ class CI(Protocol):
 
     def failed_log(self, run_id, max_lines=80, job_id=None):
         """The last ``max_lines`` of the failed steps of run ``run_id`` (all of them with None),
-        or only of its job ``job_id`` when given."""
+        or only of its job ``job_id`` when given; raises ``LogUnreadable`` with the reason when
+        the log cannot be read (#545)."""
 
     def job_log(self, job_id):
         """The whole log of GitHub Actions job ``job_id`` (#300), or None when unreadable."""

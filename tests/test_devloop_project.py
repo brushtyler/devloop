@@ -438,18 +438,22 @@ class CommandTests(FilesCase):
         args = self.args(self.project)
         with mock.patch.object(cli, 'main_checkout', return_value=self.root), \
                 mock.patch.object(cli.Identities, 'from_config',
-                                  side_effect=lambda cfg: cli.Identities(cfg.repo, {})):
+                                  side_effect=lambda cfg, **kw: cli.Identities(cfg.repo, {},
+                                                                               **kw)):
             cfg, state, d = cli.build(args)
         self.assertEqual(cfg.language, 'Italiano')
         self.assertEqual(state, self.state)
         self.assertEqual(d.pinner.project, str(self.project))
+        # Every `gh` of the dispatcher has its temporary directory in state_dir (#545).
+        self.assertEqual(d.identities.tmp_dir, self.state / 'gh-tmp')
 
     def test_the_start_records_the_files_build_read_not_a_new_read(self):
         self.write('language = "Italiano"\n')
         args = self.args(self.project, 'run')
         with mock.patch.object(cli, 'main_checkout', return_value=self.root), \
                 mock.patch.object(cli.Identities, 'from_config',
-                                  side_effect=lambda cfg: cli.Identities(cfg.repo, {})):
+                                  side_effect=lambda cfg, **kw: cli.Identities(cfg.repo, {},
+                                                                               **kw)):
             cfg, _, d = cli.build(args)
         used = cfg.review_policy.project
         # The operator changes the file between the load and the record.

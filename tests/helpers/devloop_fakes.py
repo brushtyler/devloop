@@ -10,7 +10,7 @@ import datetime
 import functools
 
 from devloop import config, markdown
-from devloop.github import GitHubNotFound, GitHubUncertain, merge_state
+from devloop.github import GitHubNotFound, GitHubUncertain, LogUnreadable, merge_state
 from devloop.ports import PORTS, port_methods
 
 from . import ssdlc_project
@@ -267,9 +267,13 @@ class FakeGH:
     # The failed logs by run id, and of single jobs by ``(run id, job id)`` (#200); any other
     # run or job has a log without modules.
     logs = {}
+    # The logs `gh` cannot read (#545), with the reason it gives, by the same keys.
+    log_errors = {}
 
     def failed_log(self, run_id, max_lines=80, job_id=None):
         key = run_id if job_id is None else (run_id, job_id)
+        if key in self.log_errors:
+            raise LogUnreadable(self.log_errors[key])
         log = self.logs.get(key, f'log of {key}')
         return log if max_lines is None else '\n'.join(log.splitlines()[-max_lines:])
 

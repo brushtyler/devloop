@@ -239,11 +239,13 @@ class AppAuth:
 class Identities:
     """Who acts on GitHub for each actor, with an app or with the ambient ``gh`` login."""
 
-    def __init__(self, repo, apps, run=subprocess.run):
+    def __init__(self, repo, apps, run=subprocess.run, tmp_dir=None):
         self.repo = repo
         self.apps = dict(apps)
         self._run = run
-        self._ambient = GitHub(repo, run=run)
+        # The temporary directory of every client's `gh` (``GitHub.tmp_dir``, #545).
+        self.tmp_dir = tmp_dir
+        self._ambient = GitHub(repo, run=run, tmp_dir=tmp_dir)
         self._lock_fd = None
         self._repo_lock_fd = None
         # The app clients already handed out (``build`` creates the dispatcher's and the
@@ -251,7 +253,7 @@ class Identities:
         self._clients = weakref.WeakSet()
 
     @classmethod
-    def from_config(cls, cfg, run=subprocess.run):
+    def from_config(cls, cfg, run=subprocess.run, tmp_dir=None):
         key_dir = os.environ.get('DEVLOOP_APP_KEY_DIR') or cfg.app_key_dir
         # Not the supervisor's app (#408): devloop never acts as the supervisor, and its key is
         # with the supervisor's system user, not in devloop's key_dir. Nor the implementer's
@@ -259,7 +261,7 @@ class Identities:
         # it.
         apps = {actor: AppAuth(app.app_id, app.slug, find_key(key_dir, app.slug), cfg.repo)
                 for actor, app in cfg.apps.items() if used(cfg, actor)}
-        return cls(cfg.repo, apps, run=run)
+        return cls(cfg.repo, apps, run=run, tmp_dir=tmp_dir)
 
     # The outbox of the publications (#385, ``outbox.Outbox``), set by devloop when
     # ``publication_outbox`` is on: the clients write their comments, native reviews and pull
@@ -305,7 +307,8 @@ class Identities:
             return self._ambient
         # The client's ``time_left`` (set by ``devloop watch``) bounds the mint of its token too.
         client = GitHub(self.repo, run=self._run,
-                        token=lambda: app.token(permissions, time_left=client.time_left))
+                        token=lambda: app.token(permissions, time_left=client.time_left),
+                        tmp_dir=self.tmp_dir)
         client.lock_fd = self._lock_fd
         client.repo_lock_fd = self._repo_lock_fd
         client.uncertain_publications = self._outbox is not None
