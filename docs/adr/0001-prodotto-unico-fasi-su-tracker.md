@@ -1,6 +1,6 @@
 # ADR 0001: un unico prodotto, con le fasi su issue e PR e il backend come porta
 
-- **Stato:** approvato dall'operatore con il merge di PR #137 (2026-11-16). Le decisioni riservate sono state prese il 2026-11-16 (vedi la sezione relativa).
+- **Stato:** approvato dall'operatore con il merge di PR #137 (2026-11-16). Le decisioni riservate sono state prese il 2026-11-16 (vedi la sezione relativa). **Superato per la parte del motore da [ADR 0007](0007-da-ssdlc-a-devloop.md)** (2026-11-22): il motore SSDLC è congelato e si toglie da `main`, e devloop è il prodotto. I principi che devloop eredita (tracciabilità su GitHub, decisioni riservate) restano validi tramite gli ADR 0002-0006.
 - **Fase:** design (#126, `phase:design`). È la prima fase di design eseguita nella forma che devloop dovrà automatizzare: issue di design, conclave come review, PR con ADR, merge dell'operatore.
 - **Data:** 2026-11-15.
 - **Revisione:** la versione 2 corregge la prima stesura dopo una verifica di fedeltà ai voti, fatta da Codex.
