@@ -27,6 +27,7 @@ import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from devloop import agents, agentuser, config, markdown
 from devloop.agentuser import AgentUser, AgentUserError
@@ -51,6 +52,23 @@ def sticky_of_another():
             or not os.access(tmp, os.W_OK | os.X_OK)):
         return None
     return tmp
+
+
+def placeholder_of_another(entries, uid):
+    """A placeholder of root among ``entries`` (#535): a regular file, not a link, of another
+    user than ``uid``, that ``uid`` cannot write. None if there is none. The system's temporary
+    directory also holds the files of other processes, some writable by everyone (mode 666,
+    locks): those are no placeholder, and the probe rightly finds them writable. Neither a
+    directory, whose content may be writable, nor a socket or a pipe is taken."""
+    for path in sorted(entries):
+        try:
+            info = path.lstat()
+        except OSError:  # gone meanwhile: another process's temporary file
+            continue
+        if (stat.S_ISREG(info.st_mode) and info.st_uid != uid
+                and not os.access(path, os.W_OK)):
+            return path
+    return None
 
 
 class StickyDirectoryTests(unittest.TestCase):
@@ -104,12 +122,11 @@ class StickyDirectoryTests(unittest.TestCase):
         self.assertFalse(lock.exists())
 
     def test_the_agent_user_cannot_create_a_placeholder_nor_rename_or_remove_it(self):
-        # A placeholder of root: an entry of another user in the sticky directory.
-        others = [p for p in self.dir.iterdir()
-                  if p.lstat().st_uid != os.geteuid() and not p.is_symlink()]
-        if not others:
-            self.skipTest(f'no entry of another user in {self.dir}')
-        placeholder = others[0]
+        # A placeholder of root: a file of another user in the sticky directory that the
+        # agent user cannot write (#535).
+        placeholder = placeholder_of_another(self.dir.iterdir(), os.geteuid())
+        if placeholder is None:
+            self.skipTest(f'no file of another user, not writable, in {self.dir}')
         found = {code for code, _ in LocalUser(self.dir).probe([('sealed', placeholder)])}
         self.assertFalse(found & {'c', 'm', 'w', 'o'}, found)  # neither replaced nor written
         with self.assertRaises(FileExistsError):  # its name cannot be created again
@@ -119,6 +136,65 @@ class StickyDirectoryTests(unittest.TestCase):
         # check refuses that.
         missing = self.dir / f'{self.tag}-CLAUDE.md'
         self.assertIn(('c', str(missing)), LocalUser(self.dir).probe([('sealed', missing)]))
+
+
+@unittest.skipIf(os.geteuid() == 0, 'root may write every file')
+class PlaceholderChoiceTests(unittest.TestCase):
+    """The placeholder of StickyDirectoryTests does not depend on what other processes leave
+    in the system's temporary directory (#535): a directory of the test stands for it, and its
+    entries are "of another user" for a uid that is not the test's."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(tmp.name)
+        self.other = os.geteuid() + 1
+
+    def entry(self, name, mode):
+        path = self.dir / name
+        path.write_text('x\n')
+        path.chmod(mode)
+        return path
+
+    def directory(self, name):
+        path = self.dir / name
+        path.mkdir(mode=0o555)
+        self.addCleanup(path.chmod, 0o755)
+        return path
+
+    def test_a_file_writable_by_everyone_is_passed_over_for_one_not_writable(self):
+        # Listed first, as the lock of another process in /tmp on the runner of the CI.
+        self.entry('a-lock', 0o666)
+        self.directory('b-directory')
+        (self.dir / 'c-link').symlink_to(self.dir / 'e-placeholder')
+        self.entry('d-writable', 0o644)
+        placeholder = self.entry('e-placeholder', 0o444)
+        self.assertEqual(placeholder_of_another(self.dir.iterdir(), self.other), placeholder)
+        self.assertFalse(os.access(placeholder, os.W_OK))
+
+    def test_without_a_file_that_cannot_be_written_there_is_none(self):
+        self.entry('a-lock', 0o666)
+        self.directory('b-directory')
+        self.assertIsNone(placeholder_of_another(self.dir.iterdir(), self.other))
+
+    def test_the_files_of_the_user_itself_are_no_placeholder(self):
+        self.entry('a-mine', 0o444)
+        self.assertIsNone(placeholder_of_another(self.dir.iterdir(), os.geteuid()))
+
+    def test_an_entry_gone_meanwhile_is_skipped(self):
+        placeholder = self.entry('b-placeholder', 0o444)
+        self.assertEqual(placeholder_of_another([self.dir / 'a-gone', placeholder], self.other),
+                         placeholder)
+
+    def test_with_only_a_file_writable_by_everyone_the_sticky_test_skips(self):
+        self.entry('a-lock', 0o666)
+        test = StickyDirectoryTests(
+            'test_the_agent_user_cannot_create_a_placeholder_nor_rename_or_remove_it')
+        test.dir, test.tag = self.dir, 'devloop-535'
+        # The lock is of another user for the test, as the files of other processes in /tmp.
+        with mock.patch('os.geteuid', return_value=self.other), \
+                self.assertRaises(unittest.SkipTest):
+            test.test_the_agent_user_cannot_create_a_placeholder_nor_rename_or_remove_it()
 
 
 class AclMigrationTests(unittest.TestCase):
