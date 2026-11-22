@@ -148,8 +148,9 @@ with its revocation key and off by default: `rounds` (true or false, default fal
 supervisor [grant a review round](guide.md#granting-a-review-round) to a PR at the round limit;
 `max_rounds_per_pr` (default 2) and `max_grants_per_day` (default 3) may only lower the caps of
 the code, `MAX_GRANTED_ROUNDS` and `MAX_DAILY_GRANTS` in `devloop/supervision.py`;
-`retry_own_prs` (true or false, default false, #406) lets a `tool_failure` on a PR implemented by
-the supervisor's agent go to the supervisor, who may retry it
+`retry_own_prs` (true or false, default false, #406) has no effect since #527, and is still
+accepted so that an overlay that sets it keeps loading: the supervisor decides the escalations
+of process on the PRs of its own agent too, whatever its value
 ([Escalations to the supervisor](guide.md#escalations-to-the-supervisor)); `budget` (true or
 false, default false, #411) lets the supervisor
 [extend the budget envelope](guide.md#extending-the-budget-envelope) of a story once, in turns
@@ -1723,8 +1724,8 @@ model = "claude-opus-5-5"
   [escalations](guide.md#escalations-to-the-supervisor)), those of the agent's app that was the
   supervisor stop counting. An issue the supervisor opens with its app counts as one of devloop's
   apps, as one opened with the agent's app did.
-- A PR counts as implemented by the supervisor's agent (ADR 0002, principle 4, and
-  `[delegations] retry_own_prs`) when the `kind`, the `model` or the provider of its
+- A PR counts as implemented by the supervisor's agent (since #527 only to keep a
+  `budget_grantable` escalation on it with the operator) when the `kind`, the `model` or the provider of its
   implementer, as the profile of the PR's marker records them, is the actor's (the configured
   agent the marker names, for a marker without a profile); a PR whose agent cannot be read counts
   as the supervisor's. The actor's provider is the `provider` it declares; the implementer's is

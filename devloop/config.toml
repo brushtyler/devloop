@@ -321,10 +321,11 @@ enabled = false
 # more round, with the analysis of the causes in the reason; turned off, the round limit goes to
 # the operator, as before. max_rounds_per_pr and max_grants_per_day may only lower the caps of
 # the code (2 rounds per PR, 3 grants per UTC day, ADR 0005, D4): a higher value is refused at
-# startup. retry_own_prs (issue #406, P5-2): in "auto", a tool_failure escalation on a PR
-# implemented by the agent of roles.supervisor goes to the supervisor, who may retry it with
-# /devloop retry within the 2 retries it shares with the operator; every other class on such a PR
-# still goes to the operator. budget (issue #411, P5-7): in "auto", a turn the budget envelope of
+# startup. retry_own_prs (issue #406, P5-2) has no effect since issue #527: in "auto" the
+# supervisor decides the escalations of process (retry, rereview, grant-round, accept-defaults,
+# decide, hold and release, delegated merge) on the PRs of its own agent too, within the caps;
+# only a budget extension on such a PR still goes to the operator. The key is still accepted so
+# that an overlay that sets it keeps loading. budget (issue #411, P5-7): in "auto", a turn the budget envelope of
 # its story refused at a limit (LIMIT_REACHED) that one extension would cover, on a story never
 # extended, goes to the supervisor as budget_grantable, and `/devloop grant-budget <reason>`
 # extends the envelope of that story once: each turn cap and the time by 25% of their value,
@@ -374,7 +375,8 @@ merge = false
 # the app of [apps.supervisor], and no longer the app of an agent: the commands, labels, issues
 # and fix or hold requests of the agent's app stop counting as the supervisor's. A PR counts as
 # implemented by the supervisor's agent when the kind or the model of its implementer, as its
-# marker records them, is the actor's.
+# marker records them, is the actor's: since issue #527 that keeps only a budget extension on it
+# with the operator.
 # [roles.supervisor]
 # name = "claude-supervisor"
 # kind = "claude"

@@ -120,7 +120,9 @@ class SupervisionMixin:
         supervisor, the supervisor actor (``[roles.supervisor]`` as a table, P5-4, #408, with the
         ``provider`` it declares) or the agent ``roles.supervisor`` names. With an agent key, a
         PR whose implementer is that key is the supervisor's in any case. A PR whose agent
-        cannot be read counts as the supervisor's, so it goes to the operator."""
+        cannot be read counts as the supervisor's, so it goes to the operator. Since #527 it
+        holds back only an extension of the budget (``_supervised``): the escalations of process
+        the supervisor decides on its agent's PRs too."""
         cfg = self.cfg
         implementer = pr.meta.get('implementer')
         actor = cfg.supervisor_actor
@@ -152,12 +154,20 @@ class SupervisionMixin:
 
         Only in merge mode ``auto`` with a supervisor, and only when nothing makes the
         escalation critical: a PR whose own merge mode is not ``auto`` (the override of its
-        level, an ``operator_only_paths`` path), a PR the supervisor implemented (except for a
-        ``tool_failure`` with ``[delegations] retry_own_prs`` on, #406), an issue
-        opened by someone else than a trusted user or a devloop app, an issue text no longer
-        approved by ``agent:ready``, the ``phase:design`` label, or anything that cannot be
-        verified. With ``any_merge`` the PR's own merge mode is not checked: the supervisor's
-        rereview (#491) does not touch the merge, which stays where that mode puts it."""
+        level, an ``operator_only_paths`` path), a ``budget_grantable`` escalation on a PR the
+        supervisor's agent implemented, an issue opened by someone else than a trusted user or a
+        devloop app, an issue text no longer approved by ``agent:ready``, the ``phase:design``
+        label, or anything that cannot be verified. With ``any_merge`` the PR's own merge mode is
+        not checked: the supervisor's rereview (#491) does not touch the merge, which stays where
+        that mode puts it.
+
+        Every other non-critical class goes to the supervisor on its agent's PRs too (#527,
+        principle 4 of ADR 0002 as clarified on #524): ``retry``, ``rereview``, ``grant-round``
+        within the caps, ``accept-defaults`` and ``decide`` are escalations of process, which
+        never override nor replace a reviewer's verdict; a verdict that asks for the operator
+        is a critical class, which never reaches the supervisor. This replaces option (a) of
+        ADR 0005, P5-2 (#406), and with it ``[delegations] retry_own_prs``, now without
+        effect."""
         cfg, lb = self.cfg, self.cfg.labels
         if critical(cls) or cfg.merge.mode != 'auto' or not cfg.supervisor:
             return None, ''
@@ -170,13 +180,13 @@ class SupervisionMixin:
                     return None, ('il corpo della PR non termina più con il suo marker: chi l\'ha '
                                   'implementata e la sua modalità di merge non sono verificabili')
                 labels |= pr.labels
-                if self._supervisor_implemented(pr) and not (
-                        cls == TOOL_FAILURE and cfg.delegations.retry_own_prs):
-                    # A retry of a tool failure judges nothing (ADR 0005, P5-2, #406): with
-                    # the delegation on, only that class leaves the supervisor's own PRs.
-                    return None, 'il supervisore ha implementato questa PR' + (
-                        ' (la delega `[delegations] retry_own_prs` è spenta)'
-                        if cls == TOOL_FAILURE else '')
+                if cls == BUDGET_GRANTABLE and self._supervisor_implemented(pr):
+                    # The escalations of process the supervisor decides on its agent's PRs too
+                    # (#527) are those the operator listed on #524; an extension of the budget
+                    # is not among them.
+                    return None, ('il supervisore ha implementato questa PR, e la concessione di '
+                                  'budget non è fra le escalation di processo che decide anche '
+                                  'sulle PR del proprio agent')
                 mode = 'auto' if any_merge else self._merge_mode(pr)
                 if mode != 'auto':
                     return None, (f'la modalità di merge di questa PR è `{mode or "non calcolabile"}`'
@@ -696,10 +706,10 @@ class SupervisionMixin:
         review never overrides a verdict. It is refused too when a new review was already asked
         after the latest review record (``pr.rereview``: a trusted user's request, or a
         rereview of the supervisor applied): a round that wrote no record does not count against
-        ``max_review_rounds``, and without this the command would have no limit. On a PR the supervisor's agent implemented it is
-        refused and goes to the operator: ``[delegations] retry_own_prs`` admits only a retry
-        there (ADR 0005, P5-2). With ``operator`` the PR is in ``agent:needs-operator``
-        (``_operator_rereview``): a refusal leaves it there, with ``resume``, how the operator
+        ``max_review_rounds``, and without this the command would have no limit. It applies on a
+        PR the supervisor's agent implemented too (#527): it never overrides a verdict, and
+        these refusals hold there as anywhere. With ``operator`` the PR is in
+        ``agent:needs-operator`` (``_operator_rereview``): a refusal leaves it there, with ``resume``, how the operator
         resumes it.
 
         Applied, the ``supervision`` record is written first: written after the latest review
@@ -707,21 +717,10 @@ class SupervisionMixin:
         and spends the command. Then the PR goes back to ``agent:review``, where the next tick
         opens the new round; the merge is untouched and stays where the merge mode puts it."""
         lb = self.cfg.labels
-        by = command['by']
         label = lb.needs_operator if operator else lb.needs_supervisor
         stays = (f'Il comando è speso; la PR resta in `{label}`.\n\n{resume}' if operator
                  else 'Il comando è speso; l\'escalation resta al supervisore.\n\n'
                       + self._supervisor_resume(escalation, True))
-        if self._supervisor_implemented(pr):
-            why = ('la PR è implementata dall\'agent del supervisore, su cui la delega ammette '
-                   'solo `/devloop retry`')
-            if operator:
-                return trace('refused', f'rifiutato: {why}. {stays}')
-            trace('refused', f'rifiutato: {why}.')
-            return self._to_operator(number, 'Il supervisore non può chiedere una nuova review '
-                                     'di una PR implementata dal suo agent: '
-                                     f'`/devloop {REREVIEW}` di `{by}` è stato rifiutato.',
-                                     'supervisor_refused')
         latest = current_round(pr.reviews)
         missing = missing_verdicts(pr)
         asked = [owner_of(r) for r in latest
