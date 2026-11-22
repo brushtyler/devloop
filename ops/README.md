@@ -29,15 +29,19 @@ ops/
                              degli agent; --unseal per installare e aggiornare le CLI
     setup-supervisor.sh      utente supervisor, ACL di attraversamento su /home/<devloop>,
                              sudoers, clone, key_dir 700, impostazioni di Claude Code
+    setup-coordinator.sh     utente coordinator (facoltativo), copia di root di check-host.sh,
+                             sudoers in sola lettura
     devloop.service          unità systemd (con segnaposto @NOME@)
     devloop@.service         unità template, per più progetti sullo stesso host (PROJECT)
     devloop-project.conf     drop-in di un progetto per devloop@<progetto> (con segnaposto)
     tmpfiles-devloop-repos.conf  directory dei lock per repository, comune all'host
     sudoers-agent            sudoers con cui devloop avvia CLI e test come utente degli agent
     sudoers-supervisor       sudoers minimale del supervisore (con segnaposto @NOME@)
+    sudoers-coordinator      sudoers del coordinatore, solo comandi di lettura (con segnaposto)
     config.local.toml.example  overlay di devloop, tutto commentato
     check-host.sh            verifica utenti, permessi (700/600), chiavi, ACL, sudoers, utente
-                             degli agent, servizio, CLI e `devloop apps`
+                             degli agent, coordinatore, servizio, CLI e `devloop apps`;
+                             --read-only per il coordinatore
     migrate.md               cosa copiare dalla macchina vecchia e cosa ricreare, e la
                              configurazione di ssdlc nel suo file di progetto (ADR 0006, R3)
     ssdlc/project.toml       il file di progetto di ssdlc, d'esempio: l'operatore lo copia in
@@ -507,10 +511,18 @@ che nessun'altra unità di devloop dell'host gestisca lo stesso repository, e lo
 servizio; che `devloop-agent` scriva le voci di `AGENT_CLI_WRITABLE`; `--version` di ogni CLI
 come `devloop-agent` e, sempre come `devloop-agent`, un prompt che le fa eseguire `git --version`
 con il loro strumento di shell (#494: passa dal modello, con la rete e il login della CLI; un
-errore se non risponde con `git version`, con la riga del `permission denied` se c'è); e
+errore se non risponde con `git version` o se nell'output c'è un `permission denied`); e
 `devloop apps`
 (ogni app, la sua installazione e i suoi permessi). Con `--dry-run` stampa, senza eseguirle, le
 verifiche che passano da `sudo` o dalla rete.
+
+Delle prove delle CLI (`--version` e strumento di shell) lo script riporta **solo l'esito, con il
+codice di uscita** (`ok: … (uscita 0)`, `ERRORE: … (uscita N; l'output non si stampa …)`), mai
+l'output della CLI né il testo del modello (#530): chi esegue la verifica, anche un agent, non lo
+legge. Per vederlo si ripete la prova a mano
+([host/migrate.md](host/migrate.md#file-delle-cli-di-root-sullutente-degli-agent-438), passo 5).
+Se il coordinatore è installato (passo 10) verifica anche il suo sudoers e la copia di root di
+`check-host.sh`; altrimenti lo dice in una riga, senza errore.
 
 Poi, come in [docs/devloop/guide.md](../docs/devloop/guide.md#installation-as-a-dedicated-user):
 
@@ -536,6 +548,57 @@ L'unità (`ops/host/devloop.service`) è quella dell'installazione attuale: uten
 azioni in corso, fino a `agent_timeout_seconds`), `TimeoutStopSec=4200`, `Restart=on-failure`
 con `RestartSec=60`, e `RestartPreventExitStatus=4` (dopo l'allarme di tre tick falliti il loop
 resta fermo, come descritto in *Continuous loop* della guida di devloop).
+
+### 10. Coordinatore (facoltativo)
+
+Il coordinatore ([ADR 0002](../docs/adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-22-modello-a-quattro-ruoli-524-527))
+ha sull'host **solo lettura**: un utente di sistema suo, `coordinator` (`COORDINATOR_USER`,
+diverso da `devloop`, `devloop-agent` e `supervisor`), con un sudoers di soli comandi di lettura.
+Si installa quando l'operatore assegna il ruolo; devloop non lo richiede.
+
+```bash
+sudo bash ops/host/setup-coordinator.sh --dry-run
+sudo bash ops/host/setup-coordinator.sh
+```
+
+Lo script crea l'utente, installa la **copia di root** di `check-host.sh`, dei file che legge
+(`lib.sh`, i sudoers, le unità e il file di `tmpfiles.d` di `ops/host/`) e dei parametri
+(`params.env`) in `COORDINATOR_OPS_DIR` (`/usr/local/lib/devloop-coordinator`, 755 e 644, di
+root), e il sudoers (`ops/host/sudoers-coordinator`, in `COORDINATOR_SUDOERS_FILE`,
+`/etc/sudoers.d/devloop-coordinator`, 440) dopo averlo validato con `visudo -c`. La copia sta
+fuori dalle home e dallo `state_dir`: il coordinatore la esegue come root, quindi non viene né dal
+clone di devloop, che `devloop` scrive, né dal checkout dell'operatore. Il file dei parametri
+deve bastare a sé (nessun `.` di un altro file). **Dopo ogni aggiornamento di `ops/`** lo script
+si riesegue: `check-host.sh` avvisa se la copia è diversa dal checkout.
+
+Il **sudoers** permette, ciascun comando con i suoi argomenti esatti, senza caratteri jolly:
+
+- come `devloop`: `scripts/devloop-pinned status` (lo stesso comando dell'unità, come per il
+  supervisore) e `/usr/bin/tail -n 200` o `-n 1000` di `<state_dir>/run.log`;
+- come root: `/usr/bin/journalctl --no-pager -n 200` o `-n 1000 -u devloop`,
+  `/usr/bin/systemctl status --no-pager devloop` e
+  `/usr/bin/bash /usr/local/lib/devloop-coordinator/host/check-host.sh --read-only`.
+
+Niente che modifichi: né `start`, `stop` o `restart` del servizio, né `pin`, `tick` o `watch`, né
+un pager o una shell. Per esempio, come `coordinator`:
+
+```bash
+sudo -u devloop /usr/bin/python3 /home/devloop/ssdlc/scripts/devloop-pinned status
+sudo -u devloop /usr/bin/tail -n 200 /home/devloop/ssdlc/.ssdlc/devloop/run.log
+sudo /usr/bin/journalctl --no-pager -n 200 -u devloop
+sudo /usr/bin/systemctl status --no-pager devloop
+sudo /usr/bin/bash /usr/local/lib/devloop-coordinator/host/check-host.sh --read-only
+```
+
+**`check-host.sh --read-only`** fa le verifiche del passo 8 senza avviare nessuna CLI (né
+`--version` né lo strumento di shell: nessun modello, nessuna quota, nessuna scrittura nelle
+sessioni o nelle cache delle CLI), senza `devloop apps` e senza scrivere nulla; stampa solo righe
+di stato. Delle CLI verifica che ci siano. Gira dalla directory `/` e con Python isolato, così
+nessun file della directory di chi lo lancia entra nelle verifiche.
+
+Poi, a mano: la CLI dell'agent del coordinatore e il suo login, come utente `coordinator`, e un
+token di sola lettura per `gh` ([github/tokens.md](github/tokens.md)). Su un host già attivo i
+passi sono in [host/migrate.md](host/migrate.md#utente-del-coordinatore-530).
 
 ## Migrazione su un'altra macchina
 
@@ -670,16 +733,19 @@ progetto:
 | `SUDOERS_FILE`, `AGENT_SUDOERS_FILE` | `/etc/sudoers.d/devloop-supervisor-widget`, `/etc/sudoers.d/devloop-agent-widget` |
 | `SUPERVISOR_KEY_DIR` | `/home/supervisor/.ghapps-widget`: le chiavi dell'insieme di app del progetto |
 | `SUPERVISOR_CLONE` | `/home/supervisor/devloop-widget`: il clone del supervisore per il progetto |
+| `COORDINATOR_SUDOERS_FILE`, `COORDINATOR_OPS_DIR` | `/etc/sudoers.d/devloop-coordinator-widget`, `/usr/local/lib/devloop-coordinator-widget` |
 
-`SUPERVISOR_USER`, `REPO_LOCK_DIR`, `REPO_LOCK_GROUP` e `TMPFILES_FILE` sono gli stessi per tutti i
-progetti dell'host. Un `params.env` senza `PROJECT`, come quello di ssdlc, continua a installare
+`SUPERVISOR_USER`, `COORDINATOR_USER`, `REPO_LOCK_DIR`, `REPO_LOCK_GROUP` e `TMPFILES_FILE` sono
+gli stessi per tutti i progetti dell'host. Un `params.env` senza `PROJECT`, come quello di ssdlc, continua a installare
 `devloop.service` come prima.
 
 **Utenti distinti.** I nomi derivati da `PROJECT` non coincidono mai con l'utente di un altro
 ruolo o di un altro progetto. Ogni script lo verifica anche sull'host: legge gli utenti delle altre
 installazioni di devloop dalle loro unità (`User=`) e dai loro sudoers (`devloop-*`), e si ferma
 se `DEVLOOP_USER` o `AGENT_USER` vi hanno già un ruolo, o se `SUPERVISOR_USER` vi è l'utente
-devloop o degli agent. Solo il supervisore è lo stesso in ogni progetto. I sudoers sono di root:
+devloop o degli agent. Solo il supervisore è lo stesso in ogni progetto, e così il coordinatore
+(`COORDINATOR_USER`), che non deve essere l'utente di nessun ruolo di un'altra installazione: i
+sudoers `devloop-coordinator*` non danno ruoli, e la verifica li salta. I sudoers sono di root:
 senza root (`--dry-run`) la verifica legge solo le unità. `setup-supervisor.sh` si ferma anche se
 `SUPERVISOR_CLONE` è già un clone di un altro repository.
 
