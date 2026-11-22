@@ -907,7 +907,9 @@ that carries one, otherwise that of the PR. A sync carries no map, so the previo
 holds after it.
 
 Implementer and fixer also return `host_step` (#462): empty, or the short text of a step the
-operator makes on the host before the code is pinned, with a reference to its document. A
+operator makes on the host before the code is pinned, with a reference that names a section of
+`ops/host/migrate.md` or a script of `ops/host/`, never free commands (#531; the reviewer
+verifies that it exists on the head and describes the step). A
 non-empty one is recorded in the PR marker (`host_step`) and shown in the PR description under
 "Passo sull'host"; each fix records its declaration again in its `fix` marker (`host_step`, empty
 when there is none), and the latest holds, as for the map. The reviewer receives it and checks

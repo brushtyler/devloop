@@ -305,7 +305,12 @@ di devloop prima del pin e del riavvio e di fare il pin con il codice nuovo, dal
 come al passo 6: la copia in uso non sa passare alla copia nuova ciò che ancora non conosce.
 
 Dal #462 il passo è anche dichiarato nell'output strutturato dell'implementer (`host_step`: un
-testo breve con il rimando a questa guida), e il reviewer controlla che ci sia. devloop mergia la
+testo breve con il rimando a questa guida), e il reviewer controlla che ci sia. Dal #531 il
+rimando nomina una sezione di questa guida o uno script di `ops/host/`, che la PR aggiunge o
+aggiorna se manca, mai comandi liberi, e il reviewer verifica che esista e descriva il passo:
+l'agent dell'host, che l'operatore lancia con `start-role.sh host` di questa directory
+([I quattro ruoli](../README.md#i-quattro-ruoli), [runbook](../../docs/devloop/roles/host.md)), esegue solo quella sezione o quello script, dalla
+versione su `main` dopo il merge. devloop mergia la
 PR come le altre, ma con `[pin] auto = true` **non fa il pin automatico** di quel commit né dei
 successivi: scrive un allarme con il passo su `[run].alert_issue` e mette `agent:needs-operator`
 sull'issue chiusa. Dopo il passo, a loop fermo, il pin a mano (`scripts/devloop-pinned pin

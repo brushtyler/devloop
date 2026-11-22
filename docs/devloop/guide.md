@@ -1786,6 +1786,15 @@ them, and this guide does not repeat them: it describes how devloop applies them
 [The coordinator](#the-coordinator). Which agent holds each role is
 in `[roles]` of the configuration ([reference](reference.md#configuration)).
 
+The agents of the roles that devloop does not run have a runbook each, valid for any CLI, with
+their inputs, privileges, tasks and prohibitions: the [supervisor](roles/supervisor.md), the
+[coordinator](roles/coordinator.md) and the [agent of the host](roles/host.md).
+`ops/host/start-role.sh`, with the role (`supervisor`, `coordinator` or `host`), starts its
+session in tmux, as
+the role's user, with the CLI and the model of `[roles.supervisor]` or `[roles.coordinator]`
+(for `host`, those the operator chooses at launch) and the runbook as its first message
+([ops/README.md](../../ops/README.md#i-quattro-ruoli)).
+
 ## Usage
 
 ```bash
@@ -3105,8 +3114,14 @@ of `ops/host/migrate.md`; empty when there is none), the PR description shows it
 when, the pinned code cannot run as intended without a file in the `state_dir`, a key or table
 of the project file or of the overlay that is required, or a command run as root or on the
 service; a change only to the documents of `ops/host/`, or an optional key or table with a
-default, needs none. A missing declaration is a blocking finding, a superfluous one only a
-non-blocking finding. The latest declaration holds: the PR's, or that of its latest fix.
+default, needs none. Since #531 the reference names a section of `ops/host/migrate.md` or a
+script of `ops/host/`, which the PR adds or updates when none describes the step yet, never free
+commands: the reviewer verifies that it exists on the head of the PR and describes the step, and
+a needed declaration whose reference does not counts as missing. After the merge the operator
+launches the agent of the host (`ops/host/start-role.sh host`,
+[runbook](roles/host.md)), which runs only that section or script, as `main` has it. A missing
+declaration is a blocking finding, a superfluous one only a non-blocking finding. The latest
+declaration holds: the PR's, or that of its latest fix.
 
 devloop merges such a PR as any other: the queue does not stop. With `[pin] auto = true`,
 though, the merge does not request the pin. Before merging, devloop records a hold of the
