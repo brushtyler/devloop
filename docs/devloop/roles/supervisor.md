@@ -43,6 +43,13 @@ you decide what the operator delegated to you, and you tell the operator what ne
   `retry`, `rereview`, `grant-round` within the caps, `accept-defaults`, `decide`, `hold` and
   `release` ([Escalations to the supervisor](../guide.md#escalations-to-the-supervisor)), each
   with its reason.
+- Only when the operator turned the delegation on, and only when every one of its conditions
+  holds: `grant-budget` on a `budget_grantable` escalation, once per story and never on a pull
+  request implemented by your own agent
+  ([Extending the budget envelope](../guide.md#extending-the-budget-envelope)), with
+  `[delegations] budget`; `capacity` on the issue of the daily summary, within the caps and with
+  an expiry ([Temporary capacity limits](../guide.md#temporary-capacity-limits)), with
+  `[delegations] capacity`. Each with the analysis of the causes in its reason.
 - The delegated merges, when the operator delegated them
   ([Delegated merge](../guide.md#delegated-merge)).
 - Analyse the runs, and open an issue for each problem you see, with its evidence.
@@ -55,9 +62,11 @@ you decide what the operator delegated to you, and you tell the operator what ne
 - Never decide an escalation that exceeds or replaces a verdict of the reviewers: a merge
   against a negative verdict is the operator's only. The escalations of the critical classes go
   to the operator.
-- Never use a command reserved to the operator in person: `approve`, `merge-budget`,
-  `grant-budget`, `capacity`, `reconcile`, and no change of `trusted_users`, of the overlay or of
-  the trust policy.
+- Never use a command reserved to the operator: `approve`, `merge-budget`, `reconcile`, and no
+  change of `trusted_users`, of the overlay or of the trust policy. `grant-budget` and `capacity`
+  are the operator's too while their delegation is off, or when one of its conditions does not
+  hold; `grant-budget` stays the operator's on the pull requests of your own agent. (The
+  coordinator never uses them: [coordinator runbook](coordinator.md).)
 - Never exceed the caps of the delegations ([ADR 0005](../../adr/0005-deleghe-e-ruoli-degli-agent.md),
   D4).
 - Never write with the operator's `gh` login, never push, never merge with an app: a merge

@@ -3217,6 +3217,28 @@ class RoleRunbookTests(unittest.TestCase):
         self.assertIn('Check that the checkout is on `main` and equal to `origin/main`', host)
         self.assertIn('**No** writing on GitHub', host)
 
+    def test_the_supervisor_may_grant_budget_and_capacity_only_through_their_delegations(self):
+        # ADR 0005, D2 and D4: grant-budget and capacity are delegations of the supervisor,
+        # reserved to the operator only for the coordinator (ADR 0002, 2026-11-22).
+        supervisor = ' '.join(ROLE_RUNBOOKS['supervisor'].read_text().split())
+        tasks, prohibitions = supervisor.split('## Prohibitions')
+        tasks = tasks.split('## Tasks')[1]
+        self.assertIn('Only when the operator turned the delegation on, and only when every one '
+                      'of its conditions holds: `grant-budget`', tasks)
+        self.assertIn('`[delegations] budget`', tasks)
+        self.assertIn('`[delegations] capacity`', tasks)
+        self.assertIn('never on a pull request implemented by your own agent', tasks)
+        reserved = prohibitions.split('Never use a command reserved to the operator:')[1]
+        reserved = reserved.split('.')[0]
+        self.assertNotIn('grant-budget', reserved)
+        self.assertNotIn('capacity', reserved)
+        self.assertIn('`grant-budget` stays the operator\'s on the pull requests of your own '
+                      'agent', prohibitions)
+        coordinator = ' '.join(ROLE_RUNBOOKS['coordinator'].read_text().split())
+        coordinator_prohibitions = coordinator.split('## Prohibitions')[1]
+        self.assertIn('`grant-budget`, `capacity`, `reconcile` and the keys of trust are the '
+                      'operator\'s in person', coordinator_prohibitions)
+
     def test_the_documents_cite_the_runbooks(self):
         readme = (OPS / 'README.md').read_text()
         guide = (ROOT / 'docs' / 'devloop' / 'guide.md').read_text()
