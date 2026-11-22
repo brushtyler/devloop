@@ -567,7 +567,10 @@ Lo script crea l'utente, installa la **copia di root** di `check-host.sh`, dei f
 root), e il sudoers (`ops/host/sudoers-coordinator`, in `COORDINATOR_SUDOERS_FILE`,
 `/etc/sudoers.d/devloop-coordinator`, 440) dopo averlo validato con `visudo -c`. La copia sta
 fuori dalle home e dallo `state_dir`: il coordinatore la esegue come root, quindi non viene né dal
-clone di devloop, che `devloop` scrive, né dal checkout dell'operatore. Il file dei parametri
+clone di devloop, che `devloop` scrive, né dal checkout dell'operatore. Ogni directory sopra la
+copia che esiste già deve essere di root e non scrivibile dal gruppo né dagli altri, e nessuna
+può essere un link: altrimenti chi la scrive potrebbe sostituire la copia, e lo script si ferma
+prima di creare l'utente, la copia e il sudoers. Il file dei parametri
 deve bastare a sé (nessun `.` di un altro file). **Dopo ogni aggiornamento di `ops/`** lo script
 si riesegue: `check-host.sh` avvisa se la copia è diversa dal checkout.
 

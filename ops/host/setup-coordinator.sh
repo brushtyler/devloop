@@ -28,6 +28,41 @@ ops_load_params
 ops_check_platform
 require_root
 
+# Prima di creare utente, copia o sudoers: ogni directory sopra COORDINATOR_OPS_DIR che esiste già
+# è di root e non scrivibile dal gruppo né dagli altri (nemmeno con lo sticky bit), e nessuna,
+# né la copia né la sua host/, è un link. Altrimenti chi può scrivere in una di esse rinomina la
+# copia e ne mette un'altra al suo posto, che il sudoers gli fa eseguire come root. Le directory
+# che mancano le crea root (install -d, umask 022). check-host.sh rifà lo stesso controllo.
+check_ops_dir_ancestors() {
+    local q owner mode
+    for q in "$COORDINATOR_OPS_DIR/host" "$COORDINATOR_OPS_DIR"; do
+        if [ -L "$q" ]; then
+            die "$q è un link: la copia non può esserlo; niente installato"
+        fi
+    done
+    q=$COORDINATOR_OPS_DIR
+    while [ "$q" != / ]; do
+        q=$(dirname "$q")
+        if [ -L "$q" ]; then
+            die "$q è un link: COORDINATOR_OPS_DIR deve stare sotto directory di root, non link; niente installato"
+        fi
+        if ! [ -e "$q" ]; then
+            continue
+        fi
+        if ! [ -d "$q" ]; then
+            die "$q non è una directory: niente installato"
+        fi
+        read -r owner mode < <(stat -c '%U %a' "$q")
+        if [ "$owner" != root ] || (( 8#$mode & 8#022 )); then
+            die "$q è $mode $owner: COORDINATOR_OPS_DIR deve stare sotto directory di root non scrivibili dal gruppo né dagli altri; niente installato"
+        fi
+    done
+    ok "le directory sopra $COORDINATOR_OPS_DIR sono di root, non scrivibili da altri"
+}
+umask 022
+step "Directory sopra $COORDINATOR_OPS_DIR"
+check_ops_dir_ancestors
+
 # copy_file SRC DEST: DEST uguale a SRC byte per byte, 644 di root; lo riscrive solo se serve.
 copy_file() {
     local src=$1 dest=$2

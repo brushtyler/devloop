@@ -49,6 +49,10 @@ FAKE_SUPERVISOR = 'opsdry-supervisor'
 FAKE_COORDINATOR = 'opsdry-coordinator'
 # What the fakes of the CLIs print, as a model would: check-host.sh never shows it (#530).
 MODEL_TEXT = 'MODEL-TEXT-4c1d9e'
+# A COORDINATOR_OPS_DIR for setup-coordinator.sh --dry-run, which refuses one under directories
+# not root's (#530, R1-1): the temporary directories of the tests are the user's. It need not
+# exist: the directories above it that exist (/usr, /usr/local) are root's on any host.
+ROOT_COPY = '/usr/local/lib/devloop-coordinator-opstest'
 # What ``sudo --version`` prints for each sudo the fakes simulate: the host moved from sudo-rs to
 # the classic sudo on 2026-11-20, and the scripts behave the same with either.
 SUDO_FLAVORS = {'sudo-rs': 'sudo-rs 0.2.8', 'classic sudo': 'Sudo version 1.9.17p2'}
@@ -1081,8 +1085,8 @@ class DryRunTests(OpsTestCase):
         # and the parameters, and the sudoers with reading commands only.
         (self.home / 'devloop').mkdir(parents=True)
         params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=FAKE_SUPERVISOR,
-                             AGENT_USER=FAKE_AGENT)
-        copy = self.tmp / 'lib/devloop-coordinator'
+                             AGENT_USER=FAKE_AGENT, COORDINATOR_OPS_DIR=ROOT_COPY)
+        copy = ROOT_COPY
         before = self.tree()
         for sudo in SUDO_FLAVORS:
             with self.subTest(sudo):
@@ -1156,6 +1160,38 @@ class DryRunTests(OpsTestCase):
                     self.assertIn(message, done.stderr)
         self.assertEqual(self.mutating_calls(), [])
 
+    def test_setup_coordinator_refuses_a_copy_another_user_can_replace(self):
+        # #530, R1-1: under a directory others can write (or not root's, or a link), its user
+        # would rename the copy and put its own script there, which its sudoers runs as root.
+        # setup-coordinator.sh stops before the user, the copy and the sudoers.
+        shared = self.tmp / 'shared'
+        shared.mkdir()
+        shared.chmod(0o777)
+        (shared / 'ops').mkdir()
+        (shared / 'ops').chmod(0o555)
+        self.addCleanup((shared / 'ops').chmod, 0o755)
+        (self.tmp / 'link').symlink_to('/usr/local/lib')
+        (self.tmp / 'copy-link').symlink_to(ROOT_COPY)
+        for path, message in (
+                (shared / 'ops', f'{shared} è 777 {ME}: COORDINATOR_OPS_DIR deve stare sotto '
+                                 'directory di root non scrivibili dal gruppo né dagli altri; '
+                                 'niente installato'),
+                # Not root's, even if no other can write it.
+                (self.tmp / 'lib/devloop-coordinator', f'{self.tmp} è 700 {ME}: '),
+                (self.tmp / 'link/devloop-coordinator', f'{self.tmp}/link è un link'),
+                (self.tmp / 'copy-link', f'{self.tmp}/copy-link è un link')):
+            with self.subTest(path=path):
+                params = self.params(COORDINATOR_OPS_DIR=str(path))
+                done = self.run_script('host/setup-coordinator.sh', '--dry-run', '--params',
+                                       str(params))
+                self.assertNotEqual(done.returncode, 0)
+                self.assertIn(message, done.stderr)
+                self.assertNotIn('useradd', done.stdout)
+                self.assertNotIn('install', done.stdout)
+                self.assertNotIn('sudoers del coordinatore', done.stdout)
+                self.assertNotIn('check-host.sh --read-only', done.stdout)
+        self.assertEqual(self.mutating_calls(), [])
+
     def test_the_sudoers_of_the_coordinator_gives_no_role_on_the_host(self):
         # #530: one coordinator per host, like the supervisor: its sudoers, of this project or of
         # another, does not make its devloop user another installation's.
@@ -1166,7 +1202,8 @@ class DryRunTests(OpsTestCase):
             (sudoers / name).write_text(f'Defaults>{user} always_set_home\n\n'
                                         f'coordinator ALL=({user}) NOPASSWD: \\\n'
                                         '    /usr/bin/true\n')
-        params = self.params(DEVLOOP_USER='opsdry-nouser', COORDINATOR_USER='coordinator')
+        params = self.params(DEVLOOP_USER='opsdry-nouser', COORDINATOR_USER='coordinator',
+                             COORDINATOR_OPS_DIR=ROOT_COPY)
         for script in ('host/setup-devloop.sh', 'host/setup-coordinator.sh'):
             with self.subTest(script=script):
                 done = self.run_script(script, '--dry-run', '--params', str(params))
