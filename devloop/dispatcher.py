@@ -514,7 +514,7 @@ def pr_status_line(pr, cfg, reviews=None):
     them (``Dispatcher.status_reviews``); by default ``pr.reviews``."""
     reviews = pr.reviews if reviews is None else reviews
     labels = ', '.join(sorted(l for l in pr.labels if l.startswith('agent:')))
-    waive = waiver(cfg, pr.fixes)  # with the rounds after a /devloop fix (#536)
+    waive = waiver(cfg, pr.fixes, pr.closures)  # with the rounds after a /devloop fix (#536)
     waived = len(waived_rounds(reviews, **waive))
     granted = pr.granted_rounds
     rounds = (f'rounds={counted_rounds(reviews, **waive)}/{cfg.max_review_rounds + granted}'
@@ -526,15 +526,15 @@ def pr_status_line(pr, cfg, reviews=None):
 
 
 def round_limit_reason(lead, reviews, fixes, syncs, limit, granted=0, grantable=False,
-                       trusted=(), cap=0):
+                       trusted=(), cap=0, closures=()):
     """The reason of a ``round_limit`` escalation (#289): ``lead``, then the rounds of
     ``reviews`` that count against ``limit`` (``max_review_rounds`` plus the ``granted`` rounds,
     #405), each with its reason, and those that do not, so that the operator sees where the
-    limit comes from: with the ``trusted`` users and the ``cap`` of ``waiver``, also the reviews
-    after a ``/devloop fix`` of a trusted user on an approved head, with who asked it (#536).
-    ``grantable``: a ``round_grantable`` escalation, whose next round the supervisor may
-    grant."""
-    rounds = round_reasons(reviews, fixes, syncs, trusted, cap)
+    limit comes from: with the ``trusted`` users, the ``cap`` and the finding ``closures`` of
+    ``waiver``, also the reviews after a ``/devloop fix`` of a trusted user on an approved
+    head, with who asked it (#536). ``grantable``: a ``round_grantable`` escalation, whose next
+    round the supervisor may grant."""
+    rounds = round_reasons(reviews, fixes, syncs, trusted, cap, closures)
     counted = [(n, why) for n, why, counts in rounds if counts]
     more = f' più {granted} concessi dal supervisore' if granted else ''
     text = (lead.rstrip() + f'\n\nRound contati sul limite ({len(counted)} di {limit}, '
@@ -1138,8 +1138,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             return pr.reviews
         comments = self._pr_thread(pr.number)
         pr.granted_rounds = self._granted_rounds(comments)  # its limit, for the line (#405)
-        # Its fixes, for the rounds after a /devloop fix that do not count (#536).
+        # Its fixes and finding closures, for the rounds after a /devloop fix that do not
+        # count (#536).
         pr.fixes = self._markers(pr, comments, 'fix')
+        pr.closures = [c for record in self._markers(pr, comments, 'finding')
+                       for c in record['closed']]
         return [record for _, record in self._marker_entries(pr, comments, 'review')]
 
     def snapshot(self):
@@ -3313,7 +3316,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                      'every reviewer (unproven)')
             self.gh.edit_labels(pr.number, add=[lb.review],
                                 remove=[lb.changes, lb.ready_to_merge, *self._released(pr)])
-        elif (counted_rounds(reviews, **waiver(self.cfg, pr.fixes))
+        elif (counted_rounds(reviews, **waiver(self.cfg, pr.fixes, pr.closures))
               >= self.cfg.max_review_rounds + pr.granted_rounds):
             limit = self.cfg.max_review_rounds + pr.granted_rounds
             # The next round may be the supervisor's to grant (#405); else the operator's.
@@ -3322,7 +3325,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                 f'Raggiunto il limite di {limit} round di review con finding bloccanti ancora '
                 'aperti.', reviews, pr.fixes, pr.syncs, limit, pr.granted_rounds,
                 grantable=route is not None, trusted=self.cfg.trusted_users,
-                cap=self.cfg.max_requested_fix_rounds)
+                cap=self.cfg.max_requested_fix_rounds, closures=pr.closures)
             if route is not None:
                 self._escalate(pr.number, reason, remove=transient, cls=ROUND_GRANTABLE,
                                supervised=route)
@@ -3494,7 +3497,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             'un round di review che ha approvato o chiesto modifiche entra in quel round e non '
             'ne apre uno nuovo.', pr.reviews, pr.fixes,
             pr.syncs, limit, pr.granted_rounds, grantable=route is not None,
-            trusted=self.cfg.trusted_users, cap=self.cfg.max_requested_fix_rounds),
+            trusted=self.cfg.trusted_users, cap=self.cfg.max_requested_fix_rounds,
+            closures=pr.closures),
             remove=[lb.review, lb.changes, lb.ready_to_merge],
             cls=ROUND_GRANTABLE if route else 'round_limit', supervised=route, why=why)
 

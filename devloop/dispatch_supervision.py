@@ -908,7 +908,7 @@ class SupervisionMixin:
                     + ', '.join(f'`{k}`' for k in security) if security
                else 'l\'ultimo round contato non è una CI fallita e i finding bloccanti aperti '
                     'non sono meno di quelli del round precedente'
-               if not (last_counted_ci(reviews, **waiver(cfg, pr.fixes))
+               if not (last_counted_ci(reviews, **waiver(cfg, pr.fixes, pr.closures))
                        or findings_decreasing(reviews, pr.closures))
                else '')
         if why:

@@ -226,14 +226,20 @@ the dispatcher's `supervision` records of the PR, plus the rounds that did not c
 [`/devloop fix`](guide.md#fix-requested-by-the-operator-or-the-supervisor) of a user in
 `trusted_users` does not count against `max_review_rounds`, and starts also at the limit, when the
 round the fix answers approved the head the fix ran on: a complete agent round of the quorum
-with an `approve` verdict, every review of it on the `from` head of the fix record, no blocking
-finding left open. Every fix that answers that round must be one asked with the command, and every
-request of it must come from a trusted user. The round's own verdict does not matter. At most
+with an `approve` verdict, every review of it with a valid policy receipt and on the `from` head
+of every fix record that answers the round, no blocking finding left open. The findings closed
+count with the dispatcher's closures (`finding` records) recorded on that head or on an earlier
+reviewed one, those it had already recorded at the request: a closure recorded later, on a later
+head, does not reach back to it. Every fix that answers that round must be one asked with the
+command, and every request of it must come from a trusted user: two `/devloop fix` before a new
+review answer one round, and the second ran on a head no review approved. The round's own
+verdict does not matter. At most
 `max_requested_fix_rounds` such rounds per PR do not count (2, a cap of the code the configuration
 may only lower, [Configuration](reference.md#configuration)); beyond them they count. The round
 still counts after a fix of the reviewers' findings, after a `/devloop fix` on a head with a
-request for changes, open findings, a CI failure that voided its approval or a reviewer still
-pending, after a fix on a head other than the approved one (a sync in between), and when the
+request for changes, open findings, a CI failure that voided its approval, a reviewer still
+pending or a review without a receipt, after a fix on a head other than the approved one (a sync
+in between, or a second `/devloop fix` before the review), and when the
 command came from the supervisor's or the coordinator's identity. A CI failure of the corrected
 head is a round of its own and counts, as before. A round that replaces such a review because the
 base advanced (#160) does not count either, and the cap counts it once.

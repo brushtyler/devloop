@@ -15,7 +15,7 @@ from devloop.config import (MAX_REQUESTED_FIX_ROUNDS, OVERLAY_KEYS, TRUST_KEYS, 
 from devloop.dispatcher import pr_status_line, round_limit_reason
 from devloop.planning import (Snapshot, counted_rounds, next_requested, plan, requested_rounds,
                               round_reasons, waived_rounds, waiver)
-from devloop.review import ci_failure_review
+from devloop.review import CI, ci_failure_review, normalize_review, open_findings
 from helpers import ssdlc_project
 from test_devloop import (CFG, SHA1, SHA2, SHA3, FakeRunner, finding, fixed, norm, pr,
                           raw_review)
@@ -47,8 +47,17 @@ def reviewers_fix(number, head):
             'responses': [{'finding_id': 'R1-1', 'action': 'fixed', 'note': 'done'}]}
 
 
-def rounds_of(reviews, fixes, cfg=CFG):
-    return waived_rounds(reviews, **waiver(cfg, fixes)), counted_rounds(reviews, **waiver(cfg, fixes))
+def rounds_of(reviews, fixes, cfg=CFG, closures=()):
+    waive = waiver(cfg, fixes, closures)
+    return waived_rounds(reviews, **waive), counted_rounds(reviews, **waive)
+
+
+def ci_closure(reviews, head):
+    """The closures the dispatcher records for the CI findings of ``reviews`` once the CI
+    passes on ``head``."""
+    return [{'key': f['key'], 'status': 'resolved', 'by': CI, 'author': 'devloop dispatcher',
+             'reason': f'CI verde sul commit {head[:12]}', 'head_sha': head}
+            for f in open_findings(reviews) if f['owner'] == CI]
 
 
 class NotCountedTests(unittest.TestCase):
@@ -84,6 +93,28 @@ class NotCountedTests(unittest.TestCase):
         self.assertEqual(next_requested(before, **waiver(CFG, fixes), replacing=2), (TRUSTED,))
         self.assertEqual(next_requested(before, **waiver(CFG, fixes)), ())
 
+    def test_a_ci_finding_closed_before_the_request_does_not_block_it(self):
+        # Round 1: the CI failed on SHA1. Round 2 approved SHA2, and the CI passed on it: the
+        # dispatcher closed the CI finding. Then the trusted user's fix pushed SHA3.
+        ci = ci_failure_review(failed_checks=['Unit Tests'], log_tail='', previous_open=[],
+                               round_no=1, max_rounds=3, head_sha=SHA1)
+        reviews = [ci, approved(2, SHA2)]
+        closures = ci_closure(reviews, SHA2)
+        fixes = [requested(2, SHA2, SHA3)]
+        two = dataclasses.replace(CFG, max_review_rounds=2)
+        self.assertEqual(next_requested(reviews, **waiver(two, fixes, closures)), (TRUSTED,))
+        snap_pr = dataclasses.replace(pr(reviews=reviews, fixes=fixes, head=SHA3),
+                                      closures=closures)
+        self.assertEqual([a.kind for a in plan(_snapshot(snap_pr), two)], ['review'])
+        done = reviews + [approved(3, SHA3)]
+        self.assertEqual(rounds_of(done, fixes, closures=closures), ({3}, 2))
+        # Without the closure the finding was open at the request: the round counts.
+        self.assertEqual(rounds_of(done, fixes), (set(), 3))
+        # A closure recorded only after the request, on the corrected head, does not reach
+        # back to it.
+        self.assertEqual(rounds_of(done, fixes, closures=ci_closure(reviews, SHA3)),
+                         (set(), 3))
+
 
 class CountedTests(unittest.TestCase):
     def test_after_a_request_for_changes_the_round_counts(self):
@@ -98,6 +129,36 @@ class CountedTests(unittest.TestCase):
         # A sync moved the approved head before the command: the fix ran on SHA3.
         reviews = [approved(1, SHA1), approved(2, SHA2)]
         self.assertEqual(rounds_of(reviews, [requested(1, SHA3, SHA2)]), (set(), 2))
+
+    def test_an_approval_with_a_finding_still_open_counts(self):
+        # Round 1: a reviewer outside the later quorum asked for changes; the reviewers' fix
+        # pushed SHA2, and round 2 approved it without the owner of the finding, which stays
+        # open. The trusted user's fix on SHA2 answers an approval, not a head without findings.
+        other = normalize_review(raw_review('request_changes', [finding()]), previous_open=[],
+                                 round_no=1, max_rounds=3, head_sha=SHA1, ci='pass',
+                                 reviewer='other-reviewer')
+        reviews = [other, approved(2, SHA2)]
+        self.assertEqual(len(open_findings(reviews)), 1)
+        fixes = [reviewers_fix(1, SHA2), requested(2, SHA2, SHA3)]
+        self.assertEqual(next_requested(reviews, **waiver(CFG, fixes)), ())
+        self.assertEqual(rounds_of(reviews + [approved(3, SHA3)], fixes), (set(), 3))
+
+    def test_two_fixes_before_a_review_count(self):
+        # Two /devloop fix in a row on round 1: the second ran on SHA2, which no review
+        # approved.
+        fixes = [requested(1, SHA1, SHA2), requested(1, SHA2, SHA3)]
+        self.assertEqual(next_requested([approved(1, SHA1)], **waiver(ONE, fixes)), ())
+        snap_pr = pr(reviews=[approved(1, SHA1)], fixes=fixes, head=SHA3)
+        self.assertEqual([a.kind for a in plan(_snapshot(snap_pr), ONE)], ['round_limit'])
+        self.assertEqual(rounds_of([approved(1, SHA1), approved(2, SHA3)], fixes), (set(), 2))
+
+    def test_an_approval_without_a_receipt_proves_no_quorum(self):
+        unbound = norm(raw_review(), round_no=1, head=SHA1, bound=False)
+        fixes = [requested(1, SHA1, SHA2)]
+        self.assertEqual(next_requested([unbound], **waiver(ONE, fixes)), ())
+        snap_pr = pr(reviews=[unbound], fixes=fixes, head=SHA2)
+        self.assertEqual([a.kind for a in plan(_snapshot(snap_pr), ONE)], ['round_limit'])
+        self.assertEqual(rounds_of([unbound, approved(2, SHA2)], fixes), (set(), 2))
 
     def test_a_fix_of_the_reviewers_or_of_an_untrusted_author_counts(self):
         reviews = [approved(1, SHA1), approved(2, SHA2)]

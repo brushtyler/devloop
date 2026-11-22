@@ -544,7 +544,7 @@ class MergeMixin:
             pr_records=on_pr, reviews=reviews, closures=pr.closures,
             approved_round=approved_round, criteria=criteria,
             acceptance_map=latest_map(pr.meta, pr.fixes), advisory=advisory,
-            budget=self._budget_view(pr.issue), waiver=waiver(self.cfg, pr.fixes))
+            budget=self._budget_view(pr.issue), waiver=waiver(self.cfg, pr.fixes, pr.closures))
 
     def _supersede_receipts(self, number, why, comments=None, strict=False):
         """Mark superseded, because ``why``, every receipt of PR ``number`` still current: the

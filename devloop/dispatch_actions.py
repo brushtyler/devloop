@@ -310,7 +310,7 @@ class ActionsMixin:
                                    round_no=round_no,
                                    max_rounds=self._last_round_allowed(pr.reviews,
                                                                        pr.granted_rounds,
-                                                                       pr.fixes),
+                                                                       pr.fixes, pr.closures),
                                    head_sha=pr.head_sha)
         notes = []
         if voided:
@@ -473,12 +473,12 @@ class ActionsMixin:
         return format_ci_summary(pr.head_sha, summarize_checks(details)[0], jobs,
                                  conflict_base=conflict), jobs
 
-    def _last_round_allowed(self, reviews, granted=0, fixes=()):
+    def _last_round_allowed(self, reviews, granted=0, fixes=(), closures=()):
         """The number of the last round ``max_review_rounds`` allows, given the waived rounds
-        among ``reviews`` (with the PR's ``fixes``, #536) and the rounds the supervisor
-        ``granted`` (#405): what records and prompts show as the limit."""
+        among ``reviews`` (with the PR's ``fixes`` and finding ``closures``, #536) and the
+        rounds the supervisor ``granted`` (#405): what records and prompts show as the limit."""
         return (self.cfg.max_review_rounds + granted
-                + len(waived_rounds(reviews, **waiver(self.cfg, fixes))))
+                + len(waived_rounds(reviews, **waiver(self.cfg, fixes, closures))))
 
     def _open_round(self, pr, records):
         """Whether the round ``records`` is still open for this head: an agent round of the
@@ -538,7 +538,7 @@ class ActionsMixin:
             return
         joins = bases is not None and all(c['outcome'] == 'disjoint' for c in bases)
         restarts = resync = requested = None
-        waive = waiver(cfg, pr.fixes)
+        waive = waiver(cfg, pr.fixes, pr.closures)
         if joins:
             round_no, done, comments = latest[0]['round'], latest, pr.round_comments
             counted = counted_rounds(pr.reviews, **waive)
@@ -1217,7 +1217,7 @@ class ActionsMixin:
         reason = pr.resync.get('reason') if pr.resync else None
         resynced = reason in (RESYNC_AFTER_APPROVAL, RESYNC_CONFLICTS)
         after_approval = not fix and not pr.rereview and (approved or resynced)
-        number = counted_rounds(pr.reviews, **waiver(self.cfg, pr.fixes)) + 1
+        number = counted_rounds(pr.reviews, **waiver(self.cfg, pr.fixes, pr.closures)) + 1
         if after_approval and not conflicts and reason != RESYNC_CONFLICTS:
             return ('La review del nuovo head **non conterà** come round: differisce da quello '
                     'approvato solo per il merge senza conflitti della base (conta invece se la '
