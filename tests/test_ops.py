@@ -3470,9 +3470,13 @@ state=$(cat {shlex.quote(str(self.service_state))}); echo "$state"
                                        AGENT_USER=FAKE_AGENT, COORDINATOR_USER=ME,
                                        STATE_DIR=str(self.state))
 
+    # devloop watch puts the time before each line (Watcher.run): the fake does the same.
+    STAMP = '12:34 '
+
     def answer(self, n, lines, status=0):
-        """The answer of the n-th call of the fake watch."""
-        (self.watch / f'{n}.out').write_text(''.join(f'{line}\n' for line in lines))
+        """The answer of the n-th call of the fake watch, each line with the time before it, as
+        devloop watch prints it."""
+        (self.watch / f'{n}.out').write_text(''.join(f'{self.STAMP}{line}\n' for line in lines))
         (self.watch / f'{n}.status').write_text(f'{status}\n')
 
     def wait(self, *args):
@@ -3499,7 +3503,8 @@ state=$(cat {shlex.quote(str(self.service_state))}); echo "$state"
                         'PR #13 CI fail @def5678'])
         done = self.wait()
         self.assertEqual((done.returncode, done.stdout),
-                         (0, 'evento: PR #12 labels +agent:needs-operator -agent:review\n'),
+                         (0, f'evento: {self.STAMP}PR #12 labels +agent:needs-operator '
+                             '-agent:review\n'),
                          done.stderr)
         # The command of its sudoers, with its own state file: never the supervisor's.
         clone = f'{self.home}/devloop/ssdlc'
@@ -3524,7 +3529,8 @@ state=$(cat {shlex.quote(str(self.service_state))}); echo "$state"
                 (self.watch / 'count').unlink(missing_ok=True)
                 self.answer(1, ['PR #5 CI pass @abc1234', line])
                 done = self.wait()
-                self.assertEqual((done.returncode, done.stdout), (0, f'evento: {line}\n'))
+                self.assertEqual((done.returncode, done.stdout),
+                                 (0, f'evento: {self.STAMP}{line}\n'), done.stderr)
 
     def test_a_message_in_the_mailbox_wakes_it_without_consuming_it(self):
         message = self.box / '20261122T101500Z-a1b2c3.txt'
@@ -3563,6 +3569,24 @@ state=$(cat {shlex.quote(str(self.service_state))}); echo "$state"
             'log: devloop: agent user root can read the keys'])
         done = self.wait('--period', '1')
         self.assertTrue(done.stdout.startswith('periodo:'), done.stdout)
+
+    def test_a_line_equal_to_one_already_seen_is_new_when_appended(self):
+        # The new lines are those after the window already seen, not those whose text is new.
+        self.log.write_text('Traceback (most recent call last):\n')
+        self.assertTrue(self.wait('--period', '1').stdout.startswith('periodo:'))
+        with self.log.open('a') as fh:
+            fh.write('Traceback (most recent call last):\n')
+        done = self.wait('--period', '1')
+        self.assertEqual(done.stdout, 'log: Traceback (most recent call last):\n', done.stderr)
+        self.assertTrue(self.wait('--period', '1').stdout.startswith('periodo:'))
+        # A full window that moves on: its first line goes out, a line equal to it comes in.
+        ticks = [f'10:00:{i:03} tick ok\n' for i in range(200)]
+        self.log.write_text(''.join(ticks))
+        self.wait('--period', '1')
+        self.log.write_text(''.join(ticks[1:] + ticks[:1]))
+        self.assertTrue(self.wait('--period', '1').stdout.startswith('periodo:'))
+        self.log.write_text(''.join(ticks[2:] + ticks[:1]) + '10:05:00 HTTP 401\n')
+        self.assertEqual(self.wait('--period', '1').stdout, 'log: 10:05:00 HTTP 401\n')
 
     def test_a_stopped_service_wakes_it_once_per_change(self):
         self.service_state.write_text('failed\n')

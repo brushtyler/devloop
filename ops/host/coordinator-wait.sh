@@ -92,9 +92,10 @@ EOF
 )
 
 # Una riga di devloop watch che riguarda il coordinatore (docs/devloop/guide.md, "Waking the
-# supervising agent").
+# supervising agent"). devloop watch antepone l'ora ("HH:MM ") a ogni riga: i filtri la saltano.
 coordinator_event() {
     local line=$1
+    [[ $line =~ ^[0-9]{2}:[0-9]{2}\ (.*)$ ]] && line=${BASH_REMATCH[1]}
     # La label aggiunta, o fra quelle di un'issue o di una PR nuova ("new PR #N [a,b] titolo").
     [[ $line == *" +$NEEDS_OPERATOR"* ]] && return 0
     if [[ $line =~ ^new\ (PR|issue)\ \#[0-9]+\ \[([^]]*)\] ]]; then
@@ -113,6 +114,24 @@ save() {
     printf '%s' "$text" >"$file.tmp" && mv -f "$file.tmp" "$file"
 }
 
+# Le righe aggiunte a run.log: quelle della finestra nuova (stdin) dopo la parte che continua la
+# finestra già vista (SEEN), cioè il più lungo suffisso di SEEN che è anche un prefisso della
+# nuova. Si confrontano sequenze, non testi: una riga uguale a una già vista, aggiunta dopo, è
+# nuova. Senza sovrapposizione (il log ruotato o più di LOG_LINES righe nuove) è nuova tutta.
+new_log_lines() {
+    python3 -I -B -c '
+import sys
+with open(sys.argv[1], "rb") as fh:
+    old = fh.read().split(b"\n")
+new = sys.stdin.buffer.read().split(b"\n")
+old, new = [line for line in old if line], [line for line in new if line]
+k = min(len(old), len(new))
+while k and old[len(old) - k:] != new[:k]:
+    k -= 1
+sys.stdout.buffer.write(b"".join(line + b"\n" for line in new[k:]))
+' "$1"
+}
+
 TAIL_FAILED=0
 # In EVENTS le righe della casella, del log e del servizio, una per evento; vuoto se nulla.
 local_events() {
@@ -129,7 +148,7 @@ local_events() {
     if tail_out=$(sudo -n -u "$DEVLOOP_USER" -- /usr/bin/tail -n "$LOG_LINES" "$LOG" 2>/dev/null); then
         # La prima volta le righe di run.log sono la base, non eventi.
         if [ -f "$SEEN" ]; then
-            new=$(grep -Fxv -f "$SEEN" <<<"$tail_out")
+            new=$(new_log_lines "$SEEN" <<<"$tail_out")
             while IFS= read -r line; do
                 [ -n "$line" ] || continue
                 if grep -Eq 'Traceback|ALERT:|(^|[^0-9])401([^0-9]|$)|[Bb]ad credentials|^devloop: ' \
