@@ -33,7 +33,7 @@ from .ledger import timestamp as ledger_timestamp
 from .markdown import (MAX_BODY, carries_record, dispatcher_header, publishable, read_marker,
                        split_markers, with_record)
 from .pin import ScanFailed, merge_known
-from .planning import MERGING, label_names, pending_reviewers, touched_by_base
+from .planning import MERGING, label_names, pending_reviewers, touched_by_base, waiver
 from .policy import describe as describe_receipt
 from .policy import (MAX_LISTED_PATHS, ZERO_LEVEL, another_model, changes_requested,
                      check_outcome, check_states, differences, distinct, evaluate, independent, profile_of,
@@ -544,7 +544,7 @@ class MergeMixin:
             pr_records=on_pr, reviews=reviews, closures=pr.closures,
             approved_round=approved_round, criteria=criteria,
             acceptance_map=latest_map(pr.meta, pr.fixes), advisory=advisory,
-            budget=self._budget_view(pr.issue))
+            budget=self._budget_view(pr.issue), waiver=waiver(self.cfg, pr.fixes))
 
     def _supersede_receipts(self, number, why, comments=None, strict=False):
         """Mark superseded, because ``why``, every receipt of PR ``number`` still current: the

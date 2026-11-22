@@ -167,15 +167,16 @@ def _acceptance(criteria, acceptance_map):
     return {'criteria': criteria, 'map': entries}
 
 
-def totals(turns, verifications, ci, reviews):
-    """The totals of a receipt: rounds (all and those counted against the limit), turns, the
+def totals(turns, verifications, ci, reviews, waiver=None):
+    """The totals of a receipt: rounds (all and those counted against the limit, with the
+    ``waiver`` of ``planning.waiver`` for the rounds after a ``/devloop fix``, #536), turns, the
     summed duration of the turns, the known tokens and cost, how many turns reported no cost
     and no tokens; the duration of the verifications apart: the local tests and the checks of
     the CI on the approved head."""
     telemetry = [t['telemetry'] for t in turns]
     return {
         'rounds': len({r['round'] for r in reviews}),
-        'counted_rounds': counted_rounds(reviews),
+        'counted_rounds': counted_rounds(reviews, **(waiver or {})),
         'turns': len(turns),
         'turns_ms': _known_sum(t['duration_ms'] for t in turns),
         'tokens': {k: _known_sum(t.get(k) for t in telemetry) for k in TOKENS},
@@ -189,7 +190,8 @@ def totals(turns, verifications, ci, reviews):
 
 
 def build(*, pr, issue, head, promotion, policy, request, issue_records, pr_records, reviews,
-          closures, approved_round, criteria, acceptance_map, advisory=None, budget=None):
+          closures, approved_round, criteria, acceptance_map, advisory=None, budget=None,
+          waiver=None):
     """The content of the receipt of PR ``pr`` (issue ``issue``) promoted on ``head``.
 
     ``policy``: the policy receipt recomputed for the promotion; ``request``: the latest
@@ -202,7 +204,9 @@ def build(*, pr, issue, head, promotion, policy, request, issue_records, pr_reco
     Without one the content has no ``advisory`` key, and its digest is the one before #369.
     ``budget``: with the budget on (#393), the state of the budget of the issue's story from
     the journal (``budget.view``), or ``{'story': None}`` when the issue belongs to no story;
-    None with the budget off, and then the content has no ``budget`` key."""
+    None with the budget off, and then the content has no ``budget`` key. ``waiver``: the
+    arguments of ``planning.waiver``, for the rounds after a ``/devloop fix`` that do not count
+    (#536)."""
     turns = ([_turn(t, 'issue') for t in issue_records['turns']]
              + [_turn(t, 'pr') for t in pr_records['turns']])
     events = [_event(e) for e in pr_records['events']]
@@ -222,7 +226,7 @@ def build(*, pr, issue, head, promotion, policy, request, issue_records, pr_reco
         'findings': _findings(reviews, closures),
         'policy': policy,
         'acceptance': _acceptance(criteria, acceptance_map),
-        'totals': totals(turns, verifications, ci, reviews),
+        'totals': totals(turns, verifications, ci, reviews, waiver),
     }
     if advisory is not None:
         # Only the identity and the opinion, never the text the agent wrote (#369).

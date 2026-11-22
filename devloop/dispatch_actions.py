@@ -36,8 +36,9 @@ from .markdown import (dispatcher_header, publishable, render_fix, render_native
 from .config import foreign, provider_quorum, same_agent
 from .planning import (BASE_CHANGED, FIX_COMMAND, RESYNC_AFTER_APPROVAL, RESYNC_CONFLICTS,
                        carried_resync, ci_joins_round, closed_by_first, counted_rounds,
-                       findings_reviewers, implementer_choice, pending_reviewers, preflight_state,
-                       voided_approval, waived_rounds, waiting_reviewers)
+                       findings_reviewers, implementer_choice, next_requested, pending_reviewers,
+                       preflight_state, voided_approval, waived_rounds, waiver,
+                       waiting_reviewers)
 from .policy import (PARALLEL_CANCEL, SEQUENTIAL, ZERO_LEVEL, another_model, distinct,
                      independent, profile_of)
 from .ports import summarize_checks
@@ -308,7 +309,8 @@ class ActionsMixin:
                                    previous_open=open_findings(earlier, pr.closures),
                                    round_no=round_no,
                                    max_rounds=self._last_round_allowed(pr.reviews,
-                                                                       pr.granted_rounds),
+                                                                       pr.granted_rounds,
+                                                                       pr.fixes),
                                    head_sha=pr.head_sha)
         notes = []
         if voided:
@@ -471,11 +473,12 @@ class ActionsMixin:
         return format_ci_summary(pr.head_sha, summarize_checks(details)[0], jobs,
                                  conflict_base=conflict), jobs
 
-    def _last_round_allowed(self, reviews, granted=0):
+    def _last_round_allowed(self, reviews, granted=0, fixes=()):
         """The number of the last round ``max_review_rounds`` allows, given the waived rounds
-        among ``reviews`` and the rounds the supervisor ``granted`` (#405): what records and
-        prompts show as the limit."""
-        return self.cfg.max_review_rounds + granted + len(waived_rounds(reviews))
+        among ``reviews`` (with the PR's ``fixes``, #536) and the rounds the supervisor
+        ``granted`` (#405): what records and prompts show as the limit."""
+        return (self.cfg.max_review_rounds + granted
+                + len(waived_rounds(reviews, **waiver(self.cfg, fixes))))
 
     def _open_round(self, pr, records):
         """Whether the round ``records`` is still open for this head: an agent round of the
@@ -534,20 +537,21 @@ class ActionsMixin:
             self.log('  the PR conflicts with the new base; no review until the sync')
             return
         joins = bases is not None and all(c['outcome'] == 'disjoint' for c in bases)
-        restarts = resync = None
+        restarts = resync = requested = None
+        waive = waiver(cfg, pr.fixes)
         if joins:
             round_no, done, comments = latest[0]['round'], latest, pr.round_comments
-            counted = counted_rounds(pr.reviews)
+            counted = counted_rounds(pr.reviews, **waive)
         else:
             round_no, done, comments = last_round(pr.reviews) + 1, [], pr.operator_comments
-            counted = counted_rounds(pr.reviews) + 1
+            counted = counted_rounds(pr.reviews, **waive) + 1
             # A new round chooses its reviewers again (#409): one whose chain is remembered
             # unavailable gives its place to the next valid one of the pool.
             receipt = self._fresh_receipt(pr, receipt)
             if bases:
                 # Abandoned only because the base advanced: the round does not count.
                 restarts = {'round': latest[0]['round'], 'bases': bases}
-                if latest[0]['round'] not in waived_rounds(pr.reviews):
+                if latest[0]['round'] not in waived_rounds(pr.reviews, **waive):
                     counted -= 1  # it counted until now; replaced, it does not
                 self.log(f'  round {latest[0]["round"]} restarts: the base touched the PR')
                 # The round it replaces reviewed a resync or a revocation for the base (#458):
@@ -574,6 +578,18 @@ class ActionsMixin:
                        else 'head was synced with the base')
                 self.log(f'  the {why} after round {resync["round"]}: this round does not count'
                          + (' if it approves' if resync['reason'] == RESYNC_CONFLICTS else ''))
+            if not resync:
+                # The review of a correction a trusted user asked with /devloop fix on a head
+                # the quorum approved (#536), within max_requested_fix_rounds: this round does
+                # not count, as its records will say (``requested_rounds``). One that replaces
+                # such a round because the base advanced does not count either.
+                requested = next_requested(
+                    pr.reviews, **waive, replacing=latest[0]['round'] if bases else None)
+                if requested:
+                    counted -= 1
+                    self.log('  a correction asked with /devloop fix by '
+                             + ', '.join(requested) + ' on an approved head: this round does '
+                             'not count')
         # The limit of this PR: max_review_rounds plus the rounds the supervisor granted (#405).
         limit = cfg.max_review_rounds + pr.granted_rounds
         if counted > limit:
@@ -1201,7 +1217,7 @@ class ActionsMixin:
         reason = pr.resync.get('reason') if pr.resync else None
         resynced = reason in (RESYNC_AFTER_APPROVAL, RESYNC_CONFLICTS)
         after_approval = not fix and not pr.rereview and (approved or resynced)
-        number = counted_rounds(pr.reviews) + 1
+        number = counted_rounds(pr.reviews, **waiver(self.cfg, pr.fixes)) + 1
         if after_approval and not conflicts and reason != RESYNC_CONFLICTS:
             return ('La review del nuovo head **non conterà** come round: differisce da quello '
                     'approvato solo per il merge senza conflitti della base (conta invece se la '

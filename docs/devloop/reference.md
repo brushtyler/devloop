@@ -148,6 +148,11 @@ file from `key_dir` and revoke the token.
 `devloop run` takes a new `max_open_prs`, `max_parked_prs`, `max_review_rounds` or
 `[delegations]` from the next tick; any other key needs a restart
 ([Changes while the loop runs](guide.md#changes-while-the-loop-runs)).
+`max_requested_fix_rounds` (#536, default 2) is how many review rounds of a PR that answer a
+`/devloop fix` of a trusted user on a head the quorum approved do not count against
+`max_review_rounds` ([Rounds](protocol.md#rounds)): a whole number from 0 to the cap of the code,
+`MAX_REQUESTED_FIX_ROUNDS` in `devloop/config.py`, which the configuration and the overlay may
+only lower; 0 makes every such round count, as before #536.
 `[delegations]` (#405, ADR 0005) sets the delegations of the operator to the supervisor, each
 with its revocation key and off by default: `rounds` (true or false, default false) lets the
 supervisor [grant a review round](guide.md#granting-a-review-round) to a PR at the round limit;
@@ -318,8 +323,8 @@ a `config` event: the SHA-256 of the overlay and of the project file, that of th
 configuration, and the trust keys whose value changed since the previous one, with the value
 before and after. The trust keys are `repo`, `base_branch`, `state_dir`, `source`, `test_cmd`,
 `trusted_users`, `preflight`, `conclave`, `[roles]`, `[agents]`, `[apps]`, `[merge]`,
-`[review_policy]`, `max_review_rounds`, `protected_paths`, `blocked_labels`, `[budget]`,
-`[delegations]`, `[agent_user]` and `[pin]`. The start records the files the dispatcher was
+`[review_policy]`, `max_review_rounds`, `max_requested_fix_rounds`, `protected_paths`,
+`blocked_labels`, `[budget]`, `[delegations]`, `[agent_user]` and `[pin]`. The start records the files the dispatcher was
 built from, as they were read, never a second read of them. Its log says the same. A start whose
 record cannot be written stops devloop.
 

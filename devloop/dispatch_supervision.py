@@ -24,7 +24,8 @@ from .ledger import entries as ledger_entries
 from .markdown import (PREFLIGHT_RESUME, RESUME, carries_record, operator_retry_text,
                        read_marker, render_escalation, render_supervision)
 from .planning import (FIX_COMMAND, Action, PullRequest, closed_by_first, findings_decreasing,
-                       label_names, last_counted_ci, missing_verdicts, operator_blocked)
+                       label_names, last_counted_ci, missing_verdicts, operator_blocked,
+                       waiver)
 from .policy import ZERO_LEVEL, profile_of
 from .review import current_round, current_verdict, finding_state, owner_of
 from .supervision import (ACCEPT_DEFAULTS, BUDGET_GRANTABLE, CAPACITY, CAPACITY_REFUSED, DECIDE,
@@ -907,7 +908,8 @@ class SupervisionMixin:
                     + ', '.join(f'`{k}`' for k in security) if security
                else 'l\'ultimo round contato non è una CI fallita e i finding bloccanti aperti '
                     'non sono meno di quelli del round precedente'
-               if not (last_counted_ci(reviews) or findings_decreasing(reviews, pr.closures))
+               if not (last_counted_ci(reviews, **waiver(cfg, pr.fixes))
+                       or findings_decreasing(reviews, pr.closures))
                else '')
         if why:
             return None, f'la delega dei round non si applica: {why}'

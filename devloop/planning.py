@@ -558,7 +558,8 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None, implement=Tr
         pending = waiting_reviewers(latest, cfg.conclave)
         verdict = round_verdict(latest) if latest and not pending else None
         head = latest[0]['head_sha'] if latest else None
-        rounds_left = counted_rounds(pr.reviews) < cfg.max_review_rounds + pr.granted_rounds
+        rounds_left = (counted_rounds(pr.reviews, **waiver(cfg, pr.fixes))
+                       < cfg.max_review_rounds + pr.granted_rounds)
         if lb.ready_to_merge in pr.labels:
             # Readiness belongs to the approved commit: re-check it on every tick. A level-0
             # promotion belongs to its head and to the labels that allowed it, and the snapshot
@@ -668,6 +669,11 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None, implement=Tr
             # conflicts the implementer resolved (#458) the review starts also beyond the limit,
             # and counts only if it does not approve (``waived_rounds``).
             resync = pr.resync is not None and not pr.rereview and pr.checks != 'fail'
+            # Nor is the review of a correction a trusted user asked with /devloop fix on a
+            # head the quorum approved (#536), within ``max_requested_fix_rounds``; a CI
+            # failure of the corrected head still is a round.
+            requested = (pr.checks != 'fail' and not resync
+                         and bool(next_requested(pr.reviews, **waiver(cfg, pr.fixes))))
             if replay and verdict != 'approve':
                 actions.append(Action('apply_review', pr.number, 'verdict already recorded'))
             elif pr.merge_state == 'conflict':
@@ -707,7 +713,7 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None, implement=Tr
             elif partial and (pr.checks != 'fail' or ci_in_round(latest)):
                 actions.append(Action('review', pr.number, 'the round waits for '
                                       + ', '.join(pending)))
-            elif not rounds_left and not resync:
+            elif not rounds_left and not resync and not requested:
                 # Every new round, a CI failure or a review, counts against the limit.
                 actions.append(Action('round_limit', pr.number))
             elif pr.checks == 'fail':
@@ -721,6 +727,8 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None, implement=Tr
                                'resolved: the round counts only if it does not approve'
                           if resync and pr.resync['reason'] == RESYNC_CONFLICTS
                           else 'the approved head was synced with the base' if resync
+                          else f'{FIX_COMMAND} of a trusted user on an approved head: the '
+                               'round does not count' if requested
                           else 'the approval has no matching policy receipt' if unbound
                           else 'the acceptance map does not hold' if unmapped
                           else 'every finding of the request for changes is closed' if settled
@@ -1039,7 +1047,93 @@ def _round_records(reviews, number):
     return records
 
 
-def waived_rounds(reviews):
+def waiver(cfg, fixes):
+    """The keyword arguments of ``waived_rounds``, ``counted_rounds`` and ``round_reasons`` for
+    the rounds after a ``/devloop fix`` of a trusted user (#536): the PR's ``fixes``, the
+    ``trusted_users`` of ``cfg`` and its cap ``max_requested_fix_rounds``."""
+    return {'fixes': fixes, 'trusted': cfg.trusted_users, 'cap': cfg.max_requested_fix_rounds}
+
+
+def _requesters(reviews, fixes, number, trusted):
+    """The trusted users whose ``/devloop fix`` answered round ``number`` (#536), in order, when
+    the round approved the head they asked on: a complete agent round of the quorum with an
+    ``approve`` verdict, every record on the head (``from``) of the first fix that answers it,
+    and no blocking finding left open. Every fix that answers the round is one asked with the
+    command, and every request of them comes from ``trusted``: a fix of the reviewers' findings,
+    or one the supervisor or the coordinator asked, gives none. ``()`` otherwise."""
+    answering = [f for f in fixes if f.get('round') == number]
+    if not answering or not all(isinstance(f.get('requests'), list) and f['requests']
+                                and all(isinstance(q, dict) for q in f['requests'])
+                                for f in answering):
+        return ()
+    records = _round_records(reviews, number)
+    if (not records or records[0]['source'] != 'agent' or pending_reviewers(records)
+            or round_verdict(records) != 'approve'
+            or any(r.get('head_sha') != answering[0].get('from') for r in records)
+            or open_findings([r for r in reviews if r['round'] <= number])):
+        return ()
+    by = [request.get('by') for f in answering for request in f['requests']]
+    if not all(isinstance(login, str) and login in trusted for login in by):
+        return ()
+    return tuple(dict.fromkeys(by))
+
+
+def _requested_walk(reviews, fixes, trusted, cap, replacing=None):
+    """``(rounds, previous)``: the review rounds of ``reviews`` that answer a ``/devloop fix``
+    of a trusted user on an approved head (``_requesters``), as ``{round: requesters}``, at
+    most ``cap`` of them, oldest first; and the latest round a new one would follow. A round
+    the base interrupted and a later one replaced (#160), or ``replacing``, which the next
+    round replaces, is skipped: the round replacing it follows what came before it. A round
+    that does not count already for another reason (``_base_waived``) is no such round, nor
+    is a CI failure."""
+    replaced = _replaced_rounds(reviews) | ({replacing} if replacing is not None else set())
+    other = _base_waived(reviews)
+    rounds, previous = {}, None
+    for number in sorted({r['round'] for r in reviews}):
+        if number in replaced:
+            continue
+        if (previous is not None and len(rounds) < cap and number not in other
+                and _round_records(reviews, number)[0]['source'] == 'agent'):
+            by = _requesters(reviews, fixes, previous, trusted)
+            if by:
+                rounds[number] = by
+        previous = number
+    return rounds, previous
+
+
+def requested_rounds(reviews, fixes=(), trusted=(), cap=0):
+    """The review rounds that do not count against ``max_review_rounds`` because they answer a
+    ``/devloop fix`` of a trusted user on a head the quorum approved, with no finding open
+    (#536), as ``{round: requesters}``: the first review round after that approved round, at
+    most ``cap`` per PR (``max_requested_fix_rounds``); beyond them they count. Its verdict
+    does not matter: the fix that follows a request for changes in it answers the reviewers,
+    and the round after that counts."""
+    if cap <= 0 or not fixes:
+        return {}
+    return _requested_walk(reviews, fixes, trusted, cap)[0]
+
+
+def next_requested(reviews, fixes=(), trusted=(), cap=0, replacing=None):
+    """The trusted users whose ``/devloop fix`` the next review round of ``reviews`` answers,
+    when that round will not count (``requested_rounds``, #536); ``()`` otherwise. ``replacing``:
+    the round the next one replaces because the base advanced (#160)."""
+    if cap <= 0 or not fixes:
+        return ()
+    rounds, previous = _requested_walk(reviews, fixes, trusted, cap, replacing)
+    if previous is None or len(rounds) >= cap:
+        return ()
+    return _requesters(reviews, fixes, previous, trusted)
+
+
+def waived_rounds(reviews, fixes=(), trusted=(), cap=0):
+    """The rounds that do not count against ``max_review_rounds``: those of ``_base_waived``
+    and, with the PR's ``fixes``, the ``trusted`` users and the ``cap`` (``waiver``), the review
+    rounds that answer a ``/devloop fix`` of a trusted user on an approved head
+    (``requested_rounds``, #536)."""
+    return _base_waived(reviews) | set(requested_rounds(reviews, fixes, trusted, cap))
+
+
+def _base_waived(reviews):
     """The rounds that do not count against ``max_review_rounds``: each incomplete agent round
     that a later round replaced only because the base branch advanced, as the later round's
     records say (``restarts``, #160); and each round that reviewed a head differing only by
@@ -1181,16 +1275,18 @@ def changes_before_ci(pr):
             and not ci_in_round(latest))
 
 
-def counted_rounds(reviews):
+def counted_rounds(reviews, fixes=(), trusted=(), cap=0):
     """How many rounds count against ``max_review_rounds``: every round, CI rounds and rereviews
-    included, except the waived ones (``waived_rounds``). Round numbers stay progressive."""
-    return len({r['round'] for r in reviews} - waived_rounds(reviews))
+    included, except the waived ones (``waived_rounds``, with the PR's ``fixes``, the
+    ``trusted`` users and the ``cap`` of ``waiver``, #536). Round numbers stay progressive."""
+    return len({r['round'] for r in reviews} - waived_rounds(reviews, fixes, trusted, cap))
 
 
-def last_counted_ci(reviews):
+def last_counted_ci(reviews, fixes=(), trusted=(), cap=0):
     """Whether the latest round of ``reviews`` that counts against the limit (``counted_rounds``)
     is a CI failure, as ``round_reasons`` names it (#405)."""
-    counted = sorted({r['round'] for r in reviews} - waived_rounds(reviews))
+    counted = sorted({r['round'] for r in reviews}
+                     - waived_rounds(reviews, fixes, trusted, cap))
     return bool(counted) and _round_records(reviews, counted[-1])[0]['source'] != 'agent'
 
 
@@ -1205,23 +1301,35 @@ def findings_decreasing(reviews, closures=()):
     return len(open_findings(reviews, closures)) < len(open_findings(before, closures))
 
 
-def round_reasons(reviews, fixes=(), syncs=()):
+def _logins(requesters):
+    return ', '.join(f'`{login}`' for login in requesters)
+
+
+def round_reasons(reviews, fixes=(), syncs=(), trusted=(), cap=0):
     """Every round of ``reviews``, oldest first, as ``(round, reason, counts)`` with the reason
     in Italian (#289) and whether it counts against ``max_review_rounds`` (``counted_rounds``).
     A counted round is a CI failure, the review of a head an agent's conflict resolution
     produced (``syncs``, the ``sync`` markers), the review after a fix (``fixes``) of the round
     before, the first review, or a new review of the same or of another head. A waived round
     (``waived_rounds``) is a review after a resync or a revocation for the base, an approving
-    review after a sync with conflicts of an approved head (#458), or a round the base
-    interrupted and a later one replaced."""
-    waived = waived_rounds(reviews)
+    review after a sync with conflicts of an approved head (#458), a round the base
+    interrupted and a later one replaced, or, with the ``trusted`` users and the ``cap`` of
+    ``waiver``, the review after a correction a trusted user asked with ``/devloop fix`` on an
+    approved head (#536), naming who asked it; such a review beyond the ``cap`` counts, and
+    says so."""
+    requested = requested_rounds(reviews, fixes, trusted, cap)
+    waived = waived_rounds(reviews) | set(requested)
     replaced = _replaced_rounds(reviews)
     synced = {s.get('head_sha') for s in syncs} - {None}
     fixed = {f.get('round') for f in fixes}
     reasons, previous = [], None
     for number in sorted({r['round'] for r in reviews}):
         first = _round_records(reviews, number)[0]
-        if number in waived:
+        if number in requested:
+            reasons.append((number, 'review dopo una correzione chiesta da '
+                            + _logins(requested[number]) + ' con `/devloop fix` su un head '
+                            'approvato', False))
+        elif number in waived:
             resync = first.get('resync')
             reason = resync.get('reason') if isinstance(resync, dict) else None
             if number in replaced:
@@ -1246,6 +1354,13 @@ def round_reasons(reviews, fixes=(), syncs=()):
             elif (previous['round'] if previous else 0) in fixed:
                 # A fix answers the round before (round 0: a requested fix before any review).
                 why = 'review dopo una correzione'
+                by = (_requesters(reviews, fixes, previous['round'], trusted)
+                      if previous and cap > 0 else ())
+                if by:
+                    # #536: beyond the cap of the rounds that do not count, it counts.
+                    why += (f' chiesta da {_logins(by)} con `/devloop fix` su un head '
+                            f'approvato, oltre i {cap} round di questo tipo che non contano '
+                            '(`max_requested_fix_rounds`)')
             elif previous is None:
                 why = 'prima review'
             elif previous.get('head_sha') == first.get('head_sha'):
