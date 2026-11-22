@@ -355,7 +355,8 @@ with them the prompts are the same, byte for byte, as before R4, which
 `tests/test_devloop_prompt_data.py` proves against the templates of before R4
 (`tests/fixtures/ssdlc-pre-r4/prompts/`), with the changes of the templates made since then
 listed one by one, each with its issue (`SINCE_R4` in `tests/helpers/ssdlc_project.py`, such as
-`host_step`, #462, with the review criterion made precise by #473, the trust policy, #472, or the
+`host_step`, #462, with the review criterion made precise by #473 and its reference to a section
+of `ops/host/migrate.md` or a script of `ops/host/`, #531, the trust policy, #472, or the
 evidence of a blocking finding and its dispute, #481). The text of the trust policy in the review
 and advisory review prompts is the installation's and does not change; the readiness check gets
 the same text, read from the review prompt of the installation (#472). On a host, the project

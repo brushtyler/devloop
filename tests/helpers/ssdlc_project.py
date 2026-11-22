@@ -217,6 +217,77 @@ _HOST_STEP_REVIEW = """\
    none is needed is only a non-blocking finding: devloop merges the PR all the same, and the
    declaration only holds the automatic pin until the operator pins by hand.
 """
+# #531: the reference of the declaration names a section of ops/host/migrate.md or a script of
+# ops/host/, never free commands, and the reviewer verifies it. Applied after the texts above.
+_HOST_STEP_REFERENCE_531 = {
+    'implement': (
+        '  text, in $language, of what the operator must do, with a reference to the document that\n'
+        '  describes it (for example the section of the migration guide of the host). devloop '
+        'merges a\n'
+        '  pull request that declares it as any other, but holds the automatic pin of that commit '
+        'and\n'
+        '  of the later ones until the operator pins by hand, after the step. The reviewer checks '
+        'that\n'
+        '  the declaration is there when it is needed and empty otherwise.\n',
+        '  text, in $language, of what the operator must do, with a reference that names the '
+        'section of\n'
+        '  `ops/host/migrate.md` or the script of `ops/host/` that describes it, added or updated '
+        'by your\n'
+        '  change when none does yet: never free commands, since the agent of the host runs only '
+        'that\n'
+        '  section or script, from `main`. devloop merges a pull request that declares it as any '
+        'other,\n'
+        '  but holds the automatic pin of that commit and of the later ones until the operator '
+        'pins by\n'
+        '  hand, after the step. The reviewer checks that the declaration is there when it is '
+        'needed and\n'
+        '  empty otherwise, and that its reference names such a section or script.\n'),
+    'fix': (
+        '  `ops/host/`). Then a short text, in $language, of what the operator must do, with a '
+        'reference\n'
+        '  to the document that describes it. Return the current declaration again when it still\n'
+        '  holds. devloop holds the automatic pin after the merge of a pull request that declares '
+        'one,\n'
+        '  until the operator pins by hand after the step.\n',
+        '  `ops/host/`). Then a short text, in $language, of what the operator must do, with a '
+        'reference\n'
+        '  that names the section of `ops/host/migrate.md` or the script of `ops/host/` that '
+        'describes\n'
+        '  it, never free commands, since the agent of the host runs only that section or script, '
+        'from\n'
+        '  `main`. Return the current declaration again when it still holds. devloop holds the '
+        'automatic\n'
+        '  pin after the merge of a pull request that declares one, until the operator pins by '
+        'hand\n'
+        '  after the step.\n'),
+    'review': (
+        '   a command run as root or on the service. Then the declaration must be there, with a '
+        'short\n'
+        '   text of the step and a reference to the document that describes it. None is needed '
+        'for a\n'
+        '   change only to the documents of `ops/host/`, nor for a key or table that is optional '
+        'and has\n'
+        '   a default the code uses when it is absent. A declaration missing where one is needed '
+        'is a\n',
+        '   a command run as root or on the service. Then the declaration must be there, with a '
+        'short\n'
+        '   text of the step and a reference that names a section of `ops/host/migrate.md` or a '
+        'script\n'
+        '   of `ops/host/`, never free commands: the agent of the host runs only that section or '
+        'script,\n'
+        '   from `main` after the merge. Verify the reference against the head of the PR: the '
+        'section or\n'
+        '   the script exists there and describes the step. A declaration whose reference names '
+        'neither,\n'
+        '   names one that does not exist, or one that does not describe the step counts as '
+        'missing.\n'
+        '   Commands written in the declaration itself are no reference. None is needed for a '
+        'change\n'
+        '   only to the documents of `ops/host/`, nor for a key or table that is optional and has '
+        'a\n'
+        '   default the code uses when it is absent. A declaration missing where one is needed is '
+        'a\n'),
+}
 
 
 class Replaced(tuple):
@@ -497,6 +568,7 @@ SINCE_R4 = {
     'implement': (
         ('  list (`[]`) when the issue has no recognisable acceptance criteria.\n',
          _HOST_STEP_IMPLEMENT),
+        Replaced(*_HOST_STEP_REFERENCE_531['implement']),
         ('  the issue explicitly asks for it.\n', _PERMALINK_IMPLEMENT),
     ),
     'fix': (
@@ -504,6 +576,7 @@ SINCE_R4 = {
         ('  technical reason (for example, the finding misreads the code or the issue). Do not '
          'dispute to avoid work.\n', _EVIDENCE_FIX),
         ('  the issue has no recognisable acceptance criteria.\n', _HOST_STEP_FIX),
+        Replaced(*_HOST_STEP_REFERENCE_531['fix']),
         ('Current acceptance map of the pull request:\n\n$acceptance_map\n\n',
          '## Step on the host\n\nCurrent declaration of the pull request (`host_step`):\n\n'
          '$host_step\n\n'),
@@ -512,6 +585,7 @@ SINCE_R4 = {
     ),
     'review': (
         ('   the next section.\n', _HOST_STEP_REVIEW),
+        Replaced(*_HOST_STEP_REFERENCE_531['review']),
         ('Latest coverage map of the pull request, from the implementer or its latest fix:\n\n'
          '$acceptance_map\n\n',
          '## Step on the host\n\nLatest declaration of the pull request (`host_step`), from the '

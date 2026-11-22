@@ -24,8 +24,8 @@ from devloop.planning import Snapshot
 from devloop.schema import load_schema, validate, with_defaults
 from helpers import ssdlc_project
 from helpers.devloop_fakes import META, FakeGH
-from test_devloop import (CFG, REV_NAME, SHA1, FakeRunner, FakeWS, implemented, norm, raw_review,
-                          receipt)
+from test_devloop import (CFG, REV_NAME, SHA1, FakeRunner, FakeWS, implemented, norm, pr,
+                          raw_review, receipt)
 from test_devloop_merge import Identities, MergeGH, header, records
 from test_devloop_pin import AutoPinTests, FakePinner, GitCase, git
 from test_devloop_zero import changes
@@ -803,6 +803,41 @@ class PromptTests(unittest.TestCase):
         # The ambiguous wording of #462 is gone.
         self.assertNotIn('or present where it is not', point)
         self.assertNotIn('or the procedures of the host', point)
+
+    def test_the_rendered_review_prompt_asks_to_verify_the_reference(self):
+        # #531: the reference of the step names a section of ops/host/migrate.md or a script of
+        # ops/host/, never free commands, and the reviewer verifies it on the head of the PR.
+        gh, runner = FakeGH(), FakeRunner(raw_review())
+        p = pr()
+        p.meta = dict(META, host_step=STEP)
+        gh.labels[100] = set(p.labels)
+        Dispatcher(CFG, gh, FakeWS(), runner, log=lambda m: None)._do_review(p)
+        prompt = ' '.join(runner.calls[0][3].split())
+        point = prompt[prompt.index('8. The declaration of a step on the host'):
+                       prompt.index('## Trust policy')]
+        self.assertIn('a reference that names a section of `ops/host/migrate.md` or a script of '
+                      '`ops/host/`, never free commands', point)
+        self.assertIn('the agent of the host runs only that section or script, from `main` '
+                      'after the merge', point)
+        self.assertIn('Verify the reference against the head of the PR: the section or the '
+                      'script exists there and describes the step', point)
+        self.assertIn('A declaration whose reference names neither, names one that does not '
+                      'exist, or one that does not describe the step counts as missing', point)
+        self.assertIn('A declaration missing where one is needed is a blocking finding', point)
+        # The declaration to verify reaches the reviewer.
+        self.assertIn('## Step on the host', prompt)
+        self.assertIn(' '.join(hoststep.format_step(STEP).split()), prompt)
+
+    def test_the_implementer_and_the_fixer_name_the_reference(self):
+        # #531: the prompts that ask for the declaration say what its reference names.
+        from devloop.context import PROMPT_DIR
+        for name in ('implement', 'fix'):
+            text = ' '.join((PROMPT_DIR / f'{name}.md').read_text(encoding='utf-8').split())
+            with self.subTest(prompt=name):
+                self.assertIn('the section of `ops/host/migrate.md` or the script of '
+                              '`ops/host/` that describes', text)
+                self.assertIn('never free commands, since the agent of the host runs only that '
+                              'section or script, from `main`', text)
 
     def test_the_reviewer_and_the_fixer_get_the_declaration(self):
         self.assertEqual(hoststep.format_step(''), 'None: the pull request declares no step on '

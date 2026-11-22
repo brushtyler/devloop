@@ -49,9 +49,14 @@ $ci_summary
    code needs in the `state_dir`; a key or table of the project file or of the local overlay
    that is required, so that without it the code fails, refuses to start or runs degraded; or
    a command run as root or on the service. Then the declaration must be there, with a short
-   text of the step and a reference to the document that describes it. None is needed for a
-   change only to the documents of `ops/host/`, nor for a key or table that is optional and has
-   a default the code uses when it is absent. A declaration missing where one is needed is a
+   text of the step and a reference that names a section of `ops/host/migrate.md` or a script
+   of `ops/host/`, never free commands: the agent of the host runs only that section or script,
+   from `main` after the merge. Verify the reference against the head of the PR: the section or
+   the script exists there and describes the step. A declaration whose reference names neither,
+   names one that does not exist, or one that does not describe the step counts as missing.
+   Commands written in the declaration itself are no reference. None is needed for a change
+   only to the documents of `ops/host/`, nor for a key or table that is optional and has a
+   default the code uses when it is absent. A declaration missing where one is needed is a
    blocking finding: devloop pins a PR that declares none without waiting. A declaration where
    none is needed is only a non-blocking finding: devloop merges the PR all the same, and the
    declaration only holds the automatic pin until the operator pins by hand.

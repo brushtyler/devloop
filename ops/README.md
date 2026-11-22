@@ -14,6 +14,57 @@ Il funzionamento di devloop è descritto in [docs/devloop/guide.md](../docs/devl
 [docs/devloop/reference.md](../docs/devloop/reference.md) (*GitHub identities*); ruoli e
 responsabilità in [ADR 0002](../docs/adr/0002-ruoli-e-responsabilita.md).
 
+## I quattro ruoli
+
+L'installazione separa i privilegi sull'host dall'esposizione a testo non controllato (issue, PR,
+output degli agent), con i [quattro ruoli dell'ADR 0002](../docs/adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-22-modello-a-quattro-ruoli-524-527).
+Ogni ruolo agent ha un runbook, valido per qualunque CLI, con input, privilegi, compiti e
+divieti:
+
+| Ruolo | Utente sull'host | Privilegi | Runbook |
+|---|---|---|---|
+| **Operatore** | il suo | tutti: decisioni di persona, credenziali, login delle CLI, GitHub App; lancia l'agent dell'host | — |
+| **Coordinatore** | `coordinator` (`COORDINATOR_USER`, passo 10) | la sua app; sull'host solo lettura (`sudoers-coordinator`) | [coordinator.md](../docs/devloop/roles/coordinator.md) |
+| **Supervisore** | `supervisor` (`SUPERVISOR_USER`, passo 7) | la sua app; sull'host i comandi di `sudoers-supervisor` | [supervisor.md](../docs/devloop/roles/supervisor.md) |
+| **Agent dell'host** | quello dell'operatore che lo lancia | `sudo` sull'host; nessuna scrittura su GitHub; legge solo procedure e script di `main`, mai issue, PR o output degli agent | [host.md](../docs/devloop/roles/host.md) |
+
+devloop (dispatcher, preflight, implementer, reviewer) gira come `devloop` e `devloop-agent` e
+non ha un runbook: le sue istruzioni sono i prompt di `devloop/prompts/`.
+
+**Avvio di una sessione.** `ops/host/start-role.sh` avvia la sessione di un ruolo agent in tmux,
+con l'utente del ruolo e il suo runbook come istruzioni iniziali:
+
+```bash
+sudo bash ops/host/start-role.sh --dry-run supervisor     # stampa il comando senza avviarlo
+sudo bash ops/host/start-role.sh supervisor
+sudo bash ops/host/start-role.sh coordinator
+sudo bash ops/host/start-role.sh host --cli claude --model claude-opus-5-5
+sudo -u supervisor -H tmux attach -t devloop-supervisor   # per entrare nella sessione
+```
+
+- **Supervisore e coordinatore:** CLI e modello sono `kind` e `model` della tabella
+  `[roles.supervisor]` o `[roles.coordinator]`, letta da `devloop/config.toml` del checkout con
+  sopra l'overlay (`<state_dir>/config.local.toml`), come li compone devloop. Senza la tabella,
+  o con `roles.supervisor` come chiave di un agent, lo script si ferma. La sessione gira con
+  `SUPERVISOR_USER` nel suo clone (`SUPERVISOR_CLONE`) o con `COORDINATOR_USER` nella sua home.
+- **Agent dell'host:** CLI e modello li sceglie l'operatore al lancio (`--cli`, `--model`). La
+  sessione gira con l'utente dell'operatore che lancia lo script con `sudo` (`SUDO_USER`, quello
+  che ha `sudo`), mai come root né come l'utente di un altro ruolo, nel checkout da cui parte lo
+  script: va lanciato da un checkout di `main` aggiornato.
+- La CLI si cerca in `~/.local/bin` dell'utente del ruolo, poi in `/usr/local/bin`, `/usr/bin` e
+  `/bin`, e parte interattiva con il modello e il runbook intero come primo messaggio:
+  `claude --model <modello> <runbook>`, `codex --model <modello> <runbook>`,
+  `agy --model <modello> -i <runbook>`.
+- La sessione si chiama `devloop-<ruolo>`; se esiste già, lo script si ferma e dice come
+  entrarci. Serve `tmux` sull'host (`apt-get install tmux`).
+
+**Passi sull'host.** Il `host_step` di una PR nomina una sezione di
+[host/migrate.md](host/migrate.md) o uno script di `ops/host/`, mai comandi liberi, e il reviewer
+verifica che esista e descriva il passo
+([docs/devloop/guide.md](../docs/devloop/guide.md#step-on-the-host)). Dopo il merge, l'operatore
+lancia l'agent dell'host, che esegue solo quella sezione o quello script, dalla versione su
+`main`.
+
 ## Contenuto
 
 ```
@@ -42,6 +93,8 @@ ops/
     check-host.sh            verifica utenti, permessi (700/600), chiavi, ACL, sudoers, utente
                              degli agent, coordinatore, servizio, CLI e `devloop apps`;
                              --read-only per il coordinatore
+    start-role.sh            avvia in tmux la sessione di supervisore, coordinatore o agent
+                             dell'host, con il suo utente, CLI, modello e runbook
     migrate.md               cosa copiare dalla macchina vecchia e cosa ricreare, e la
                              configurazione di ssdlc nel suo file di progetto (ADR 0006, R3)
     ssdlc/project.toml       il file di progetto di ssdlc, d'esempio: l'operatore lo copia in

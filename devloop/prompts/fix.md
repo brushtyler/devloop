@@ -59,9 +59,11 @@ Return only the structured result:
   (for example a new table or key of the project file or of the local overlay that the code
   reads, a change to the schema of either, or to the procedures of the host such as
   `ops/host/`). Then a short text, in $language, of what the operator must do, with a reference
-  to the document that describes it. Return the current declaration again when it still
-  holds. devloop holds the automatic pin after the merge of a pull request that declares one,
-  until the operator pins by hand after the step.
+  that names the section of `ops/host/migrate.md` or the script of `ops/host/` that describes
+  it, never free commands, since the agent of the host runs only that section or script, from
+  `main`. Return the current declaration again when it still holds. devloop holds the automatic
+  pin after the merge of a pull request that declares one, until the operator pins by hand
+  after the step.
 - `blocked_reason`: empty unless `status` is `blocked`.
 
 ## Open findings

@@ -46,11 +46,13 @@ Return only the structured result:
   it, without a step the operator makes on the host first, with the loop stopped: for example
   a new table or key of the project file or of the local overlay that the code reads, a change
   to the schema of either, or to the procedures of the host (such as `ops/host/`). Then a short
-  text, in $language, of what the operator must do, with a reference to the document that
-  describes it (for example the section of the migration guide of the host). devloop merges a
-  pull request that declares it as any other, but holds the automatic pin of that commit and
-  of the later ones until the operator pins by hand, after the step. The reviewer checks that
-  the declaration is there when it is needed and empty otherwise.
+  text, in $language, of what the operator must do, with a reference that names the section of
+  `ops/host/migrate.md` or the script of `ops/host/` that describes it, added or updated by your
+  change when none does yet: never free commands, since the agent of the host runs only that
+  section or script, from `main`. devloop merges a pull request that declares it as any other,
+  but holds the automatic pin of that commit and of the later ones until the operator pins by
+  hand, after the step. The reviewer checks that the declaration is there when it is needed and
+  empty otherwise, and that its reference names such a section or script.
 - `blocked_reason`: empty unless `status` is `blocked`.
 
 ## Acceptance criteria
