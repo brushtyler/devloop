@@ -6,8 +6,8 @@
 # istruzioni, configurazione e binari delle sue CLI; l'ambiente dei turni gli arriva con sudo -E,
 # che sudo-rs ignora), il lock per repository (directory comune, gruppo, overlay; ADR 0006, R8),
 # servizio, CLI degli agent (--version, e un `git --version` con il loro strumento di shell,
-# #494) e `devloop apps`, e il coordinatore, se c'è (sudoers e copia di root di questo script,
-# #530). Con più progetti sullo stesso host si esegue una volta per progetto, con i suoi
+# #494) e `devloop apps`, e il coordinatore, se c'è (key_dir e chiave della sua app, #549;
+# sudoers e copia di root di questo script, #530). Con più progetti sullo stesso host si esegue una volta per progetto, con i suoi
 # parametri (--params).
 # Non cambia nulla, se non le sessioni e le cache che le CLI degli agent scrivono da sé. Delle
 # prove delle CLI riporta solo l'esito e il codice di uscita, mai il loro output né il testo del
@@ -216,13 +216,17 @@ check_root_path() {
     [ "$bad" = 1 ] || ok "$path e le directory sopra sono di root, non scrivibili da altri"
 }
 
-# Il coordinatore (#530), facoltativo: il suo sudoers in sola lettura e la copia di root di
-# check-host.sh, dei file che legge e dei parametri, da cui esegue `check-host.sh --read-only`.
+# Il coordinatore (#530), facoltativo: la key_dir della sua app (#549), il suo sudoers in sola
+# lettura e la copia di root di check-host.sh, dei file che legge e dei parametri, da cui esegue
+# `check-host.sh --read-only`.
 step "Coordinatore $COORDINATOR_USER (facoltativo, #530)"
 if ! user_exists "$COORDINATOR_USER"; then
     say "  l'utente $COORDINATOR_USER non esiste: coordinatore non installato (setup-coordinator.sh)"
 else
     ok "l'utente $COORDINATOR_USER esiste"
+    # La key_dir della sua app (#549): 700, solo la chiave del coordinatore, 600.
+    check_dir "$COORDINATOR_KEY_DIR" 700 "$COORDINATOR_USER"
+    check_keys "$COORDINATOR_KEY_DIR" "$COORDINATOR_USER" "$COORDINATOR_KEYS" 1
     check_sudoers "$COORDINATOR_SUDOERS_FILE" sudoers-coordinator setup-coordinator.sh
     check_root_path "$COORDINATOR_OPS_DIR/host"
     for name in $OPS_COORDINATOR_FILES params.env; do

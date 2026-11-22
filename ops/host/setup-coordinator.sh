@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Prepara l'host per il coordinatore di devloop (ADR 0002, precisazione del 2026-11-22; #530):
-# l'utente, una copia di root di check-host.sh con i file che legge e i parametri, e un sudoers con
-# soli comandi di lettura (ops/host/sudoers-coordinator).
+# l'utente, la key_dir della sua GitHub App (700, #549), una copia di root di check-host.sh con i
+# file che legge e i parametri, e un sudoers con soli comandi di lettura
+# (ops/host/sudoers-coordinator).
 # Idempotente: si può rieseguire, fa solo ciò che manca; va rieseguito dopo ogni aggiornamento di
 # ops/, perché la copia resti uguale al checkout (check-host.sh avvisa se non lo è). Non scrive
-# segreti. La CLI dell'agent del coordinatore, il suo login e il token di sola lettura per gh
-# restano passi manuali (ops/README.md). Va eseguito dopo setup-devloop.sh.
+# segreti. La chiave dell'app, la CLI dell'agent del coordinatore, il suo login e il token di sola
+# lettura per gh restano passi manuali (ops/README.md). Va eseguito dopo setup-devloop.sh.
 
 OPS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # shellcheck source=../lib.sh
@@ -92,6 +93,11 @@ else
     run useradd --create-home --home-dir "$COORDINATOR_HOME" --shell /bin/bash "$COORDINATOR_USER"
 fi
 
+# La key_dir della sua app (#549): solo il coordinatore ne legge la chiave, con
+# scripts/coordinator-token.py; devloop non la legge mai.
+step "key_dir del coordinatore (700)"
+ensure_dir "$COORDINATOR_KEY_DIR" 700 "$COORDINATOR_USER"
+
 # Il coordinatore esegue come root solo questa copia, di root, mai il clone di devloop (che
 # devloop scrive) né il checkout dell'operatore.
 step "Copia di root di check-host.sh ($COORDINATOR_OPS_DIR)"
@@ -115,7 +121,14 @@ if [ "$DRY_RUN" != 1 ]; then
 fi
 put_file "$COORDINATOR_SUDOERS_FILE" 440 root "$SUDOERS" || true
 
-step 'CLI e token (passi manuali)'
+step 'Chiave, CLI e token (passi manuali)'
+for role in $COORDINATOR_KEYS; do
+    if compgen -G "$COORDINATOR_KEY_DIR/$APP_PREFIX$role.*.private-key.pem" >/dev/null 2>&1; then
+        ok "chiave di $APP_PREFIX$role presente"
+    else
+        todo "copiare la chiave di $APP_PREFIX$role in $COORDINATOR_KEY_DIR (mode 600, proprietario $COORDINATOR_USER)"
+    fi
+done
 todo "installare la CLI dell'agent del coordinatore come $COORDINATOR_USER e fare il login"
 todo "token fine-grained di sola lettura per gh, come $COORDINATOR_USER (ops/github/tokens.md)"
 

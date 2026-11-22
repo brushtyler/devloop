@@ -1230,10 +1230,14 @@ Come root, **dal checkout dell'operatore** (`/root/repos/ssdlc`), mai dal clone 
 
    La copia va in `/usr/local/lib/devloop-coordinator` (con `PROJECT`,
    `/usr/local/lib/devloop-coordinator-<progetto>`), il sudoers in
-   `/etc/sudoers.d/devloop-coordinator` (con `PROJECT`, `-<progetto>`), dopo `visudo -c`;
+   `/etc/sudoers.d/devloop-coordinator` (con `PROJECT`, `-<progetto>`), dopo `visudo -c`; la
+   `key_dir` della sua app in `/home/coordinator/.ghapps` (con `PROJECT`, `~/.ghapps-<progetto>`),
+   700. Poi la chiave dell'app del coordinatore va lì, 600, proprietario `coordinator`
+   ([ops/README.md](../README.md#10-coordinatore-facoltativo), "App del coordinatore", #549);
 3. verificare, come root: `sudo bash /root/repos/ssdlc/ops/host/check-host.sh --no-apps`, nessun
-   errore nel passo `Coordinatore coordinator`: il sudoers (440, root, uguale a quello generato),
-   la copia e le directory sopra di root, ogni file della copia che `coincide` con il checkout;
+   errore nel passo `Coordinatore coordinator`: la `key_dir` (700) con la sola chiave dell'app
+   del coordinatore (600), il sudoers (440, root, uguale a quello generato), la copia e le
+   directory sopra di root, ogni file della copia che `coincide` con il checkout;
 4. verificare **come `coordinator`**, con il suo sudoers: `sudo -n -l` elenca solo i comandi di
    [ops/README.md](../README.md#10-coordinatore-facoltativo), e la verifica in sola lettura non
    avvia nessuna CLI, non esegue `devloop apps` e non scrive nulla:

@@ -572,8 +572,10 @@ review_args = ["--allowedTools", "Bash(git diff *)", "Bash(git log *)", "Bash(gi
 #   supervisor's system user; the supervisor mints its tokens with scripts/supervisor-token.py,
 #   and `devloop token` does not expose it.
 # [apps.coordinator]: the coordinator's role app (issue #528), with issues: write and
-#   pull_requests: write and no contents. It counts as the coordinator only with
-#   [roles.coordinator]. devloop never reads its key, and `devloop token` does not expose it.
+#   pull_requests: write, actions, checks and statuses read, and no contents. It counts as the
+#   coordinator only with [roles.coordinator]. devloop never reads its key, which is in the
+#   key_dir of the coordinator's system user; the coordinator mints its tokens with
+#   scripts/coordinator-token.py (issue #549), and `devloop token` does not expose it.
 # [apps.implementer]: the implementer's role app (ADR 0005, P5-3, issue #407), with contents:
 #   write, pull_requests: write and issues: write, without workflows. It signs commits, pushes,
 #   PRs and the records of fixes and syncs of every agent that declares app = "implementer", and

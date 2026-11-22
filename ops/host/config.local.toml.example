@@ -77,9 +77,9 @@
 
 # L'insieme di GitHub App del progetto (ADR 0006, R6 e D3): uno per repository, mai condiviso,
 # installato solo su REPO, con la sua key_dir (DEVLOOP_KEY_DIR di params.env). Una tabella per
-# app (dispatcher, claude, codex, agy, merger, supervisor, implementer) con app_id e slug
-# (<APP_PREFIX><ruolo>, ops/github/create-apps.sh). merger solo se devloop fa i merge ([merge]
-# mode "strict" o "auto"). Gli agent di devloop/config.toml dichiarano le app implementer,
+# app (dispatcher, claude, codex, agy, merger, supervisor, implementer, coordinator) con app_id
+# e slug (<APP_PREFIX><ruolo>, ops/github/create-apps.sh). merger solo se devloop fa i merge
+# ([merge] mode "strict" o "auto"), coordinator solo se c'è il coordinatore. Gli agent di devloop/config.toml dichiarano le app implementer,
 # claude, codex e agy (#499): senza le loro tabelle devloop non parte. Un attore senza app (il
 # dispatcher, il merger) usa il login gh dell'utente devloop.
 # Verifica: devloop-pinned apps (docs/devloop/reference.md, "GitHub identities").
@@ -103,3 +103,10 @@
 # [apps.implementer]
 # app_id = 5824194
 # slug = "brushtyler-devloop-implementer"
+# Il coordinatore (#528, #549): la sua app conta solo con [roles.coordinator]. devloop non ne
+# legge mai la chiave, che sta nella key_dir dell'utente coordinator (COORDINATOR_KEY_DIR di
+# params.env, preparata da setup-coordinator.sh); il coordinatore ne conia i token con
+# scripts/coordinator-token.py --state-dir <state_dir>, che legge repo e questa tabella.
+# [apps.coordinator]
+# app_id = 1234567  # l'id che stampa lo scambio del code (ops/README.md, passo 2)
+# slug = "brushtyler-devloop-coordinator"

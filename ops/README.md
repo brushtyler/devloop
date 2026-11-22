@@ -29,8 +29,8 @@ ops/
                              degli agent; --unseal per installare e aggiornare le CLI
     setup-supervisor.sh      utente supervisor, ACL di attraversamento su /home/<devloop>,
                              sudoers, clone, key_dir 700, impostazioni di Claude Code
-    setup-coordinator.sh     utente coordinator (facoltativo), copia di root di check-host.sh,
-                             sudoers in sola lettura
+    setup-coordinator.sh     utente coordinator (facoltativo), key_dir 700, copia di root di
+                             check-host.sh, sudoers in sola lettura
     devloop.service          unità systemd (con segnaposto @NOME@)
     devloop@.service         unità template, per più progetti sullo stesso host (PROJECT)
     devloop-project.conf     drop-in di un progetto per devloop@<progetto> (con segnaposto)
@@ -129,6 +129,7 @@ possiede).
 | `claude-agent`, `codex-agent`, `agy-agent` | contents: write, issues: write, pull_requests: write, actions/checks/statuses: read | con l'ADR 0005, quando l'implementer è un'app a sé, i reviewer scendono a contents: read |
 | `implementer` | contents: write, issues: write, pull_requests: write | **mai `workflows`**: senza quel permesso GitHub rifiuta i push che cambiano `.github/workflows/` |
 | `supervisor` | issues: write, pull_requests: write | **nessun contents** |
+| `coordinator` | issues: write, pull_requests: write, actions/checks/statuses: read | **nessun contents**; le letture per la diagnosi della CI; solo se c'è il coordinatore (passo 10) |
 
 Nessuna app ha `workflows` o permessi di amministrazione. I permessi che devloop chiede per ogni
 azione sono in `devloop/apps.py` (`IMPLEMENT`, `REVIEW`, `PR_COMMENT`, `ISSUE_COMMENT`, `MERGE`,
@@ -190,8 +191,10 @@ proprietario del repository (`GITHUB_OWNER_TYPE=org` per un'organizzazione). Per
    di [`ssdlc/overlay.toml`](host/ssdlc/overlay.toml)), non in `devloop/config.toml`, che da
    ADR 0006, R6 non ha identità di progetto (sezione 4). L'app `supervisor` è in
    `[apps.supervisor]` (ADR 0005, P5-4): devloop non ne legge la
-   chiave, che sta solo nella `key_dir` del supervisore. L'app `implementer` non è ancora in
-   `[apps]`: si crea quando serve (ADR 0005, P5-3).
+   chiave, che sta solo nella `key_dir` del supervisore. L'app `coordinator` è in
+   `[apps.coordinator]` (#528): devloop non ne legge la chiave, che sta solo nella `key_dir` del
+   coordinatore (passo 10). L'app `implementer` non è ancora in `[apps]`: si crea quando serve
+   (ADR 0005, P5-3).
 
 Se una regola del branch principale limita chi può fare push o merge, aggiungere `merger` fra gli
 ammessi.
@@ -562,7 +565,8 @@ sudo bash ops/host/setup-coordinator.sh --dry-run
 sudo bash ops/host/setup-coordinator.sh
 ```
 
-Lo script crea l'utente, installa la **copia di root** di `check-host.sh`, dei file che legge
+Lo script crea l'utente e la sua `key_dir` (`COORDINATOR_KEY_DIR`, `/home/coordinator/.ghapps`,
+700, del coordinatore; con `PROJECT`, `~/.ghapps-<progetto>`), installa la **copia di root** di `check-host.sh`, dei file che legge
 (`lib.sh`, i sudoers, le unità e il file di `tmpfiles.d` di `ops/host/`) e dei parametri
 (`params.env`) in `COORDINATOR_OPS_DIR` (`/usr/local/lib/devloop-coordinator`, 755 e 644, di
 root), e il sudoers (`ops/host/sudoers-coordinator`, in `COORDINATOR_SUDOERS_FILE`,
@@ -599,6 +603,42 @@ sudo /usr/bin/bash /usr/local/lib/devloop-coordinator/host/check-host.sh --read-
 sessioni o nelle cache delle CLI), senza `devloop apps` e senza scrivere nulla; stampa solo righe
 di stato. Delle CLI verifica che ci siano. Gira dalla directory `/` e con Python isolato, così
 nessun file della directory di chi lo lancia entra nelle verifiche.
+
+**App del coordinatore** (#549). Il coordinatore firma comandi, commenti e label con un'app sua,
+`<APP_PREFIX>coordinator`, che l'operatore crea come le altre (passo 2), dal manifest
+`ops/github/apps/coordinator.json`: `issues: write`, `pull_requests: write`, `metadata: read` e,
+in sola lettura per la diagnosi della CI, `actions`, `checks` e `statuses`; **nessun accesso ai
+contenuti**.
+
+1. `bash ops/github/create-apps.sh --dry-run` la elenca (`coordinator` è in `APPS`) con i suoi
+   permessi; la pagina generata ha il suo pulsante. Creata l'app, si completa lo scambio del
+   `code` e la si installa solo sul repository gestito (passo 2, punti 2 e 3).
+2. **La chiave** `<APP_PREFIX>coordinator.<data>.private-key.pem` va **solo** nella `key_dir`
+   del coordinatore, mode 600, proprietario `coordinator`:
+   `sudo install -o coordinator -g coordinator -m 600 "$work"/*.private-key.pem
+   /home/coordinator/.ghapps/`, poi `rm -rf "$work"`. Mai nella `key_dir` di devloop né in quella
+   del supervisore: devloop non la legge.
+3. `app_id` e `slug` vanno in `[apps.coordinator]` dell'overlay dello `state_dir` di devloop
+   ([host/config.local.toml.example](host/config.local.toml.example)). L'app conta come
+   coordinatore solo con `[roles.coordinator]`, decisione dell'operatore
+   ([docs/devloop/guide.md](../docs/devloop/guide.md), "The coordinator").
+4. Il coordinatore, come utente `coordinator` e dal proprio clone, conia i token con
+   `scripts/coordinator-token.py`, che legge `repo` e `[apps.coordinator]` dall'overlay dello
+   `state_dir` di `--state-dir` e solo la propria chiave dalla propria `key_dir`; il token arriva
+   al comando solo in `GH_TOKEN`, mai stampato. Senza `--perm` ha `issues=write` e
+   `pull_requests=write`; si possono chiedere solo `issues` e `pull_requests` (`read` o `write`) e
+   `actions`, `checks`, `statuses` e `metadata` in lettura: ogni altro permesso è rifiutato.
+   `scripts/agent-token.py` non espone l'app.
+
+   ```bash
+   python3 scripts/coordinator-token.py --state-dir /home/devloop/ssdlc/.ssdlc/devloop -- \
+       gh issue comment <ISSUE> --body-file <FILE>
+   python3 scripts/coordinator-token.py --state-dir /home/devloop/ssdlc/.ssdlc/devloop \
+       --perm actions=read -- gh run view <RUN> --log-failed
+   ```
+
+`check-host.sh` verifica la `key_dir` (700, del coordinatore) e che contenga solo la chiave
+dell'app del coordinatore (600, del coordinatore).
 
 Poi, a mano: la CLI dell'agent del coordinatore e il suo login, come utente `coordinator`, e un
 token di sola lettura per `gh` ([github/tokens.md](github/tokens.md)). Su un host già attivo i
