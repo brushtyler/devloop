@@ -200,9 +200,11 @@ class EscalationCase(Case):
         self.assertEqual(self.tick(d), [('review', 100)])
         self.assertEqual(self.gh.labels[100], {label})
 
-    def answer(self):
+    def answer(self, command=None):
         decision = self.decisions(100)[-1]
         self.assertEqual((decision['by'], decision['outcome']), (COORDINATOR, 'refused'))
+        if command is not None:
+            self.assertEqual(decision['command'], command)
         return self.gh.threads[100][-1]['body']
 
 
@@ -241,9 +243,16 @@ class RefusedEscalationTests(EscalationCase):
         'grant-budget': ('/devloop grant-budget motivo', 'riservato all\'operatore'),
         'capacity': ('/devloop capacity max_open_prs 3 2h motivo', 'riservato all\'operatore'),
         'merge-budget': ('/devloop merge-budget 2 motivo', 'riservato all\'operatore'),
+        # Reserved too, and no supervisor command (#528): read for the coordinator alone.
+        'reconcile': ('/devloop reconcile t1 failed\nNota.', 'riservato all\'operatore'),
+        'approve': ('/devloop approve Approvo.', 'riservato all\'operatore'),
         # Not listed: refused, merge until its own part of the plan.
         'escalate': ('/devloop escalate motivo', 'non è tra i comandi delegati'),
         'merge': (f'/devloop merge {"a" * 40} motivo', 'non è ancora attivo'),
+        'veto': ('/devloop veto motivo', 'non è tra i comandi delegati'),
+        'finding': ('/devloop finding 1/codex/F1 resolved corretto',
+                    'non è tra i comandi delegati'),
+        'nuovo': ('/devloop nuovo motivo', 'non è tra i comandi delegati'),
     }
 
     def test_on_an_escalation_to_the_supervisor(self):
@@ -253,7 +262,7 @@ class RefusedEscalationTests(EscalationCase):
                 self.fail_review(d, SUPER)
                 self.gh.command(100, text, login=COORDINATOR)
                 self.assertEqual(self.tick(d), [('supervise', 100)])
-                body = self.answer()
+                body = self.answer(name)
                 self.assertIn('non applicabile', body)
                 self.assertIn(why, body)
                 self.assertEqual(self.gh.labels[100], {SUPER})
@@ -266,10 +275,43 @@ class RefusedEscalationTests(EscalationCase):
                 self.fail_review(d, HUMAN)
                 self.gh.command(100, text, login=COORDINATOR)
                 self.assertEqual(self.tick(d), [('supervise', 100)])
-                body = self.answer()
+                body = self.answer(name)
                 self.assertIn(why, body)
                 self.assertEqual(self.gh.labels[100], {HUMAN})
                 self.assertEqual(self.tick(d), [])
+
+    def test_the_delegated_commands_of_other_readers_are_not_refused(self):
+        # recheck, fix, hold and release are read elsewhere: on an escalation nothing answers
+        # them as refused, as for a trusted user's.
+        for text in ('/devloop recheck', '/devloop fix motivo', '/devloop hold motivo',
+                     '/devloop release motivo'):
+            with self.subTest(command=text):
+                d = self.make(coordinated(AUTO), crash(), raw_review())
+                self.fail_review(d, SUPER)
+                self.gh.command(100, text, login=COORDINATOR)
+                self.assertIsNone(d._supervisor_view(100, self.gh.pr_comments(100)))
+                self.assertEqual(self.decisions(100), [])
+
+    def test_off_the_reserved_and_unlisted_ones_are_ignored(self):
+        # With the table off the coordinator's app is anyone else's: no answer, no record.
+        for text in ('/devloop reconcile t1 failed\nNota.', '/devloop veto motivo',
+                     '/devloop nuovo motivo'):
+            with self.subTest(command=text):
+                d = self.make(declared(AUTO), crash(), raw_review())
+                self.fail_review(d, SUPER)
+                self.gh.command(100, text, login=COORDINATOR)
+                self.assertEqual(self.tick(d), [])
+                self.assertEqual(self.decisions(100), [])
+
+    def test_only_a_plain_name_is_a_command(self):
+        self.assertEqual(supervision.coordinator_command(header() + '/devloop veto motivo'),
+                         ('veto', 'motivo'))
+        for body in ('/devloop', '/devloop `x`', '/devloop Veto', 'veto', '/devloop ' + 'a' * 33):
+            with self.subTest(body=body):
+                self.assertIsNone(supervision.coordinator_command(body))
+        self.assertTrue(supervision.recorded_command('veto', 'refused'))
+        self.assertFalse(supervision.recorded_command('veto', 'applied'))
+        self.assertFalse(supervision.recorded_command('`x`', 'refused'))
 
     def test_a_trusted_users_command_waiting_wins(self):
         d = self.make(coordinated(STRICT), crash(), raw_review())

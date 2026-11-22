@@ -184,6 +184,10 @@ LONG_TEXT = (DECIDE, GRANT_ROUND, GRANT_BUDGET, CAPACITY, MERGE, MERGE_BUDGET, R
 COORDINATOR_DELEGATED = (RETRY, REREVIEW, 'recheck', 'fix', 'hold', 'release', GRANT_ROUND,
                          ACCEPT_DEFAULTS, DECIDE)
 COORDINATOR_RESERVED = ('approve', MERGE_BUDGET, GRANT_BUDGET, CAPACITY, 'reconcile')
+# The name of a command of the coordinator's identity outside ``COMMANDS`` (#528), such as
+# ``reconcile`` or ``veto``: refused on an escalation, with its name in the record of the
+# refusal, so it is kept to a plain word that fits a code span.
+COMMAND_NAME = re.compile(r'[a-z][a-z0-9-]{0,31}')
 # What a supervision record says happened to a command.
 OUTCOMES = ('applied', 'accepted', 'decided', 'escalated', 'refused', 'limit', 'granted',
             'merged')
@@ -203,6 +207,14 @@ def coordinator_refusal(command):
                 'all\'operatore')
     return ('not delegated to the coordinator',
             f'`/devloop {command}` non è tra i comandi delegati al coordinatore')
+
+
+def recorded_command(command, outcome):
+    """Whether a ``supervision`` record may carry ``command`` with ``outcome``: a command of
+    ``COMMANDS``, or, refused, any other of the coordinator's identity (``coordinator_command``,
+    #528), so that its refusal spends it."""
+    return command in COMMANDS or (outcome == 'refused' and isinstance(command, str)
+                                   and COMMAND_NAME.fullmatch(command) is not None)
 
 
 def critical(cls):
@@ -306,6 +318,19 @@ def supervisor_command(body):
     if tokens[1] in NEEDS_TEXT:
         return tokens[1], reason or None
     return tokens[1], reason
+
+
+def coordinator_command(body):
+    """``(command, text)`` of a ``/devloop <command>`` on the first line after the attribution
+    header (``command_line``), whatever ``command`` is, when its name is a plain word
+    (``COMMAND_NAME``); None otherwise. What the escalation reader reads of the coordinator's
+    identity (#528) when ``supervisor_command`` reads nothing: the reserved commands, such as
+    ``reconcile`` or ``approve``, and those not listed, such as ``veto``, refused there. The
+    text is the rest of the first line."""
+    tokens = command_line(body).split(None, 2)
+    if len(tokens) < 2 or tokens[0] != '/devloop' or not COMMAND_NAME.fullmatch(tokens[1]):
+        return None
+    return tokens[1], tokens[2].strip() if len(tokens) > 2 else ''
 
 
 # Far more than any cap or duration of a capacity command needs (#412).

@@ -32,7 +32,8 @@ from .supervision import (ACCEPT_DEFAULTS, BUDGET_GRANTABLE, CAPACITY, CAPACITY_
                           MAX_CAPACITY, MAX_MERGE_BUDGET, MAX_RETRIES, MERGE, MERGE_BUDGET,
                           MERGED_ISSUE, PREFLIGHT_DEFAULT, REREVIEW, RETRY, RETRY_STEPS,
                           ROUND_GRANTABLE, SYNC_FAILED, TOOL_FAILURE, capacity_arguments,
-                          changed_input, command_line, coordinator_refusal, critical,
+                          changed_input, command_line, coordinator_command,
+                          coordinator_refusal, critical,
                           merge_budget_arguments, preflight_class, retries_done,
                           supervisor_command)
 from .workspace import WorkspaceError
@@ -368,14 +369,22 @@ class SupervisionMixin:
         found = refused = supervised = None
         for comment in comments[start + 1:]:
             body = comment.get('body') or ''
+            login = (comment.get('author') or {}).get('login')
             parsed = None if carries_record(body) else supervisor_command(body)
+            if parsed is None and not carries_record(body) and self._is_coordinator(login):
+                # The coordinator's commands no supervisor command names (#528): the reserved
+                # ones, such as ``reconcile``, and those not listed, such as ``veto``, are
+                # refused below; the delegated ones read elsewhere (``recheck``, ``fix``,
+                # ``hold``, ``release``) are none of this reader's.
+                parsed = coordinator_command(body)
+                if parsed is not None and coordinator_refusal(parsed[0]) is None:
+                    continue
             if parsed is None:
                 continue
             ident = comment.get('id')
             if spent is not None and (not isinstance(ident, int) or ident <= spent):
                 continue
             command, reason = parsed
-            login = (comment.get('author') or {}).get('login')
             if command == REREVIEW and (login in self.cfg.trusted_users
                                         and login != self._supervisor_login()
                                         or self._coordinator_may(login, REREVIEW)):
