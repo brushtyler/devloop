@@ -25,7 +25,7 @@ from .dispatch_advisory import AdvisoryFailures, AdvisoryResults
 from .dispatch_base import MainAlerts
 from .dispatcher import (Dispatcher, TickLog, Workers, ensure_labels, pr_counts_line,
                          pr_status_line)
-from .github import GitHub, GitHubError
+from .github import GH_TMP_DIR, GitHub, GitHubError
 from .housekeeping import Housekeeping
 from .journal import MIB, TurnJournal
 from .ledger import Ledger
@@ -417,7 +417,8 @@ def build(args):
     cfg, sources = load_sources(args, root)
     state = state_path(cfg, root)
     try:
-        identities = Identities.from_config(cfg)
+        # Every `gh` of the dispatcher with a temporary directory of its own (#545).
+        identities = Identities.from_config(cfg, tmp_dir=state / GH_TMP_DIR)
     except OSError as exc:
         raise ConfigError(f'GitHub App key: {exc}. Set $DEVLOOP_APP_KEY_DIR or remove the app '
                           'from [apps] to use the ambient gh login.') from exc
