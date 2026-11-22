@@ -311,6 +311,8 @@ ops_load_params() {
         # Il supervisore è uno per host: la sua key_dir e il suo clone sono del progetto.
         : "${SUPERVISOR_KEY_DIR:=${SUPERVISOR_HOME:-/home/${SUPERVISOR_USER:-supervisor}}/.ghapps-$PROJECT}"
         : "${SUPERVISOR_CLONE:=${SUPERVISOR_HOME:-/home/${SUPERVISOR_USER:-supervisor}}/devloop-$PROJECT}"
+        # Anche il coordinatore: la key_dir della sua app (#549) è del progetto.
+        : "${COORDINATOR_KEY_DIR:=${COORDINATOR_HOME:-/home/${COORDINATOR_USER:-coordinator}}/.ghapps-$PROJECT}"
         [ "$SERVICE_NAME" = "devloop@$PROJECT" ] \
             || die "con PROJECT il servizio è l'istanza devloop@$PROJECT dell'unità template: '$SERVICE_NAME'"
     fi
@@ -329,8 +331,10 @@ ops_load_params() {
     : "${STATE_DIR:=$OPS_STATE_DIR}"
     : "${DEVLOOP_KEY_DIR:=$DEVLOOP_HOME/.ghapps}"
     : "${SUPERVISOR_KEY_DIR:=$SUPERVISOR_HOME/.ghapps}"
+    : "${COORDINATOR_KEY_DIR:=$COORDINATOR_HOME/.ghapps}"
     : "${DEVLOOP_KEYS:=dispatcher merger claude-agent codex-agent agy-agent}"
     : "${SUPERVISOR_KEYS:=supervisor claude-agent}"
+    : "${COORDINATOR_KEYS:=coordinator}"
     : "${DEVLOOP_PATH:=$DEVLOOP_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin}"
     : "${AGENT_PATH:=$AGENT_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin}"
     : "${SERVICE_NAME:=devloop}"
@@ -339,7 +343,7 @@ ops_load_params() {
     : "${AGENT_SUDOERS_FILE:=/etc/sudoers.d/devloop-agent}"
     : "${COORDINATOR_SUDOERS_FILE:=/etc/sudoers.d/devloop-coordinator}"
     : "${COORDINATOR_OPS_DIR:=/usr/local/lib/devloop-coordinator}"
-    : "${APPS:=dispatcher merger claude-agent codex-agent agy-agent implementer supervisor}"
+    : "${APPS:=dispatcher merger claude-agent codex-agent agy-agent implementer supervisor coordinator}"
     : "${SOURCE_REPO:=}"
     : "${SOURCE_REF:=}"
     : "${SOURCE_CLONE:=$DEVLOOP_HOME/devloop-source}"
@@ -428,7 +432,8 @@ ops_load_params() {
     done
     local path
     for path in DEVLOOP_HOME SUPERVISOR_HOME AGENT_HOME COORDINATOR_HOME DEVLOOP_CLONE \
-        SUPERVISOR_CLONE DEVLOOP_KEY_DIR SUPERVISOR_KEY_DIR SYSTEMD_DIR SUDOERS_FILE \
+        SUPERVISOR_CLONE DEVLOOP_KEY_DIR SUPERVISOR_KEY_DIR COORDINATOR_KEY_DIR SYSTEMD_DIR \
+        SUDOERS_FILE \
         AGENT_SUDOERS_FILE COORDINATOR_SUDOERS_FILE TMPFILES_FILE; do
         _require_abs "$path"
     done

@@ -59,12 +59,25 @@ ROOT_COPY = '/usr/local/lib/devloop-coordinator-opstest'
 SUDO_FLAVORS = {'sudo-rs': 'sudo-rs 0.2.8', 'classic sudo': 'Sudo version 1.9.17p2'}
 
 
-def supervisor_token():
-    spec = importlib.util.spec_from_file_location('supervisor_token',
-                                                  ROOT / 'scripts/supervisor-token.py')
+def token_script(name):
+    spec = importlib.util.spec_from_file_location(name.replace('-', '_'),
+                                                  ROOT / 'scripts' / f'{name}.py')
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def supervisor_token():
+    return token_script('supervisor-token')
+
+
+def coordinator_token():
+    return token_script('coordinator-token')
+
+
+def highest(allowed):
+    """The highest level of each permission a token script may ask for."""
+    return {name: max(levels, key=LEVEL.get) for name, levels in allowed.items()}
 
 
 def manifest(role):
@@ -82,9 +95,9 @@ REQUIRED = {
     'implementer': (apps.IMPLEMENT, apps.PR_COMMENT, apps.ISSUE_COMMENT),
     # The supervisor writes through scripts/supervisor-token.py (#408): its default permissions
     # and the highest level of each permission it may ask for.
-    'supervisor': (supervisor_token().DEFAULT,
-                   {name: max(levels, key=LEVEL.get)
-                    for name, levels in supervisor_token().ALLOWED.items()}),
+    'supervisor': (supervisor_token().DEFAULT, highest(supervisor_token().ALLOWED)),
+    # The coordinator, likewise, through scripts/coordinator-token.py (#549).
+    'coordinator': (coordinator_token().DEFAULT, highest(coordinator_token().ALLOWED)),
 }
 
 
@@ -686,9 +699,17 @@ class CoordinatorGuideTests(unittest.TestCase):
         commands = RootStepsGuideTests.commands(section, inline=False)
         self.assertEqual(commands[:2], ['sudo bash ops/host/setup-coordinator.sh --dry-run',
                                         'sudo bash ops/host/setup-coordinator.sh'])
-        # Each example of the coordinator is a command of its sudoers.
+        # The tokens of its app (#549) are minted as the coordinator, from its clone, not
+        # through sudo, always with its own key_dir: [apps] key_dir of the overlay is devloop's.
+        token = [c for c in commands if 'scripts/coordinator-token.py' in c]
+        mint = ('DEVLOOP_APP_KEY_DIR=/home/coordinator/.ghapps python3 '
+                'scripts/coordinator-token.py --state-dir /home/devloop/ssdlc/.ssdlc/devloop ')
+        self.assertEqual(token, [
+            mint + '-- gh issue comment <ISSUE> --body-file <FILE>',
+            mint + '--perm actions=read -- gh run view <RUN> --log-failed'])
+        # Each other example of the coordinator is a command of its sudoers.
         allowed = self.sudoers()
-        for command in commands[2:]:
+        for command in [c for c in commands[2:] if c not in token]:
             with self.subTest(command=command):
                 argv = command.split()
                 self.assertEqual(argv[0], 'sudo')
@@ -709,6 +730,27 @@ class CoordinatorGuideTests(unittest.TestCase):
                        '(../docs/adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-22-'
                        'modello-a-quattro-ruoli-524-527)'):
             self.assertIn(phrase, flat)
+        # #549: how the operator creates the coordinator's app and where its key goes.
+        for phrase in ('**App del coordinatore** (#549)', '`ops/github/apps/coordinator.json`',
+                       '`bash ops/github/create-apps.sh --dry-run` la elenca (`coordinator` è in '
+                       '`APPS`)', 'passo 2, punti 2 e 3',
+                       '**solo** nella `key_dir` del coordinatore, mode 600, proprietario '
+                       '`coordinator`',
+                       '`sudo install -o coordinator -g coordinator -m 600 '
+                       '"$work"/*.private-key.pem /home/coordinator/.ghapps/`',
+                       'Mai nella `key_dir` di devloop né in quella del supervisore',
+                       '`[apps.coordinator]` dell\'overlay', '**nessun accesso ai contenuti**',
+                       '`scripts/agent-token.py` non espone l\'app',
+                       '`COORDINATOR_KEY_DIR`, `/home/coordinator/.ghapps`, 700',
+                       # It reaches the overlay through the home of devloop, traversal only.
+                       '**solo l\'attraversamento** della home di devloop (`setfacl -m '
+                       'u:coordinator:--x /home/devloop`',
+                       '**`DEVLOOP_APP_KEY_DIR` va sempre impostata** al valore di '
+                       '`COORDINATOR_KEY_DIR`',
+                       'l\'ACL `user:coordinator:--x` sulla home di devloop'):
+            self.assertIn(phrase, flat)
+        self.assertIn('| `coordinator` | issues: write, pull_requests: write, '
+                      'actions/checks/statuses: read |', text)
         self.assertIn('### Precisazione del 2026-11-22: modello a quattro ruoli (#524, #527)',
                       (ROOT / 'docs/adr/0002-ruoli-e-responsabilita.md').read_text())
         flat = ' '.join(text.split())
@@ -726,7 +768,8 @@ class CoordinatorGuideTests(unittest.TestCase):
                  'sudo -u coordinator -H sudo -n /usr/bin/bash '
                  '/usr/local/lib/devloop-coordinator/host/check-host.sh --read-only',
                  'rm /etc/sudoers.d/devloop-coordinator',
-                 'rm -r /usr/local/lib/devloop-coordinator', 'userdel -r coordinator']
+                 'rm -r /usr/local/lib/devloop-coordinator',
+                 'setfacl -x u:coordinator /home/devloop', 'userdel -r coordinator']
         self.assertEqual(commands, steps)
         # The check as the coordinator is the one its sudoers allows.
         self.assertIn(steps[6].split(' -n ', 1)[1], self.sudoers())
@@ -757,10 +800,20 @@ class ManifestTests(unittest.TestCase):
     def test_no_workflows_to_the_implementer_and_no_contents_to_the_supervisor(self):
         self.assertNotIn('workflows', manifest('implementer')['default_permissions'])
         self.assertNotIn('contents', manifest('supervisor')['default_permissions'])
+        self.assertNotIn('contents', manifest('coordinator')['default_permissions'])
         for role in REQUIRED:  # no app pushes workflows or administers the repository
             granted = manifest(role)['default_permissions']
             self.assertNotIn('workflows', granted, role)
             self.assertNotIn('administration', granted, role)
+
+    def test_the_coordinator_has_no_contents_and_reads_the_ci(self):
+        # #549: issues and pull_requests to write, actions, checks and statuses to read for the
+        # diagnosis of the CI, no contents; exactly what scripts/coordinator-token.py may ask.
+        granted = manifest('coordinator')['default_permissions']
+        self.assertEqual(granted, {'issues': 'write', 'pull_requests': 'write',
+                                   'metadata': 'read', 'actions': 'read', 'checks': 'read',
+                                   'statuses': 'read'})
+        self.assertEqual(granted, highest(coordinator_token().ALLOWED))
 
     def test_the_merger_only_merges(self):
         self.assertEqual(manifest('merger')['default_permissions'],
@@ -1120,6 +1173,19 @@ class DryRunTests(OpsTestCase):
                              f'    /usr/bin/bash {copy}/host/check-host.sh --read-only'):
                     self.assertIn(f'    | {line}\n', out)
                 self.assertIn('token fine-grained di sola lettura', out)
+                # #549: the key_dir of its app, 700 and its own, and its key a manual step.
+                self.assertIn(f'[dry-run] install -d -m 700 -o {FAKE_COORDINATOR} -g '
+                              f'{FAKE_COORDINATOR} {self.home}/coordinator/.ghapps\n', out)
+                self.assertIn(f'da fare a mano: copiare la chiave di {PREFIX}coordinator in '
+                              f'{self.home}/coordinator/.ghapps (mode 600, proprietario '
+                              f'{FAKE_COORDINATOR})', out)
+                # It reads the overlay of devloop's state_dir through the home of devloop,
+                # traversal only, and mints its tokens with its own key_dir.
+                self.assertIn(f'[dry-run] setfacl -m u:{FAKE_COORDINATOR}:--x '
+                              f'{self.home}/devloop\n', out)
+                self.assertIn(f'  DEVLOOP_APP_KEY_DIR={self.home}/coordinator/.ghapps python3 '
+                              f'scripts/coordinator-token.py --state-dir {state} -- <comando>\n',
+                              out)
                 self.assertNotRegex(out, r'@[A-Z_]+@')
         self.assertEqual(self.mutating_calls(), [])
         self.assertEqual(self.tree(), before)
@@ -1135,6 +1201,18 @@ class DryRunTests(OpsTestCase):
         self.assertIn('    /usr/bin/journalctl --no-pager -n 200 -u devloop@widget, \\\n', out)
         self.assertIn('    /usr/bin/bash /usr/local/lib/devloop-coordinator-widget/host/check-host.sh'
                       ' --read-only\n', out)
+        # One coordinator per host: the key_dir of its app is the project's (#549).
+        self.assertIn(f'-o {FAKE_COORDINATOR} -g {FAKE_COORDINATOR} '
+                      f'{self.home}/coordinator/.ghapps-widget\n', out)
+        self.assertIn(f'copiare la chiave di acme-devloop-coordinator in '
+                      f'{self.home}/coordinator/.ghapps-widget', out)
+        # Not [apps] key_dir of the overlay, devloop's: the token is minted with its key_dir,
+        # from the state_dir of the project, which it reaches through the project's home.
+        self.assertIn(f'[dry-run] setfacl -m u:{FAKE_COORDINATOR}:--x '
+                      f'{self.home}/devloop-widget\n', out)
+        self.assertIn(f'  DEVLOOP_APP_KEY_DIR={self.home}/coordinator/.ghapps-widget python3 '
+                      f'scripts/coordinator-token.py --state-dir '
+                      f'{self.home}/devloop-widget/widget/.ssdlc/devloop -- <comando>\n', out)
         self.assertEqual(self.mutating_calls(), [])
 
     def test_the_coordinator_has_a_user_of_its_own_and_a_copy_out_of_reach(self):
@@ -1721,6 +1799,21 @@ esac''')
         self.assertIn('brushtyler-devloop-supervisor: issues: write, metadata: read, '
                       'pull_requests: write', done.stderr)
         self.assertFalse(page.exists())
+        self.assertEqual(self.mutating_calls(), [])
+
+    def test_create_apps_dry_run_lists_the_coordinators_app_with_its_manifest(self):
+        # #549: the coordinator's app is among the default APPS, with the permissions of
+        # ops/github/apps/coordinator.json.
+        done = self.run_script('github/create-apps.sh', '--dry-run', '--params', str(self.params()),
+                               '--out', str(self.tmp / 'page.html'))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        permissions = ', '.join(f'{k}: {v}' for k, v in
+                                sorted(manifest('coordinator')['default_permissions'].items()))
+        self.assertEqual(permissions, 'actions: read, checks: read, issues: write, '
+                                      'metadata: read, pull_requests: write, statuses: read')
+        self.assertIn(f'  brushtyler-devloop-coordinator: {permissions}\n', done.stderr)
+        listed = re.findall(r'^  brushtyler-devloop-([a-z-]+): ', done.stderr, re.M)
+        self.assertEqual(sorted(listed), sorted(REQUIRED))
         self.assertEqual(self.mutating_calls(), [])
 
     def test_create_apps_writes_a_page_with_one_form_per_manifest(self):
@@ -2691,6 +2784,74 @@ exec "$@"''')
         done = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params))
         self.assertIn(f'  ERRORE: {copy}/host/sudoers-agent non esiste (setup-coordinator.sh)\n',
                       done.stdout)
+        self.assertEqual(self.mutating_calls(), [])
+
+    def test_the_key_dir_of_the_coordinator_is_checked(self):
+        # #549: the key_dir of the coordinator's app, 700 and its own, with only its key, 600.
+        self.fake_host('classic sudo', users=(FAKE_AGENT, FAKE_SUPERVISOR, FAKE_COORDINATOR))
+        params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=FAKE_SUPERVISOR,
+                             AGENT_USER=FAKE_AGENT)
+        keys = self.home / 'coordinator/.ghapps'
+        done = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params))
+        self.assertIn(f'  ERRORE: {keys} non esiste\n', done.stdout)
+        keys.mkdir(parents=True, mode=0o700)
+        for role in ('coordinator', 'supervisor'):
+            key = keys / f'{PREFIX}{role}.2026-11-22.private-key.pem'
+            key.write_text('k')
+            key.chmod(0o600)
+        done = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params))
+        out = done.stdout
+        # Here the files are the user's of the tests, not the coordinator's.
+        self.assertIn(f'  ERRORE: {keys} è 700 {ME}, deve essere 700 {FAKE_COORDINATOR}\n', out)
+        self.assertIn(f'  ERRORE: {keys}/{PREFIX}coordinator.2026-11-22.private-key.pem è 600 '
+                      f'{ME}, deve essere 600 {FAKE_COORDINATOR}\n', out)
+        self.assertIn(f'  ok: chiave di {PREFIX}coordinator presente\n', out)
+        # Any other key is an error: the coordinator holds only its own.
+        self.assertIn(f'  ERRORE: {keys}/{PREFIX}supervisor.2026-11-22.private-key.pem: chiave '
+                      f'non attesa in {keys} (attese: coordinator)\n', out)
+        next(keys.glob(f'{PREFIX}coordinator.*')).unlink()
+        done = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params))
+        self.assertIn(f'  ERRORE: manca la chiave di {PREFIX}coordinator in {keys}\n', done.stdout)
+        self.assertEqual(self.mutating_calls(), [])
+
+    def test_the_coordinator_reaches_the_overlay_through_the_home_of_devloop_only(self):
+        # #549: scripts/coordinator-token.py reads repo and [apps.coordinator] from the overlay
+        # of devloop's state_dir, in the home of devloop: traversal only, no ACL on devloop's
+        # private directories, and the overlay readable as the coordinator.
+        self.fake_host('classic sudo', users=(FAKE_AGENT, FAKE_SUPERVISOR, FAKE_COORDINATOR))
+        params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=FAKE_SUPERVISOR,
+                             AGENT_USER=FAKE_AGENT)
+        home, keys = self.devloop, self.devloop / '.ghapps'
+
+        def acl(home_entries, keys_entry=''):
+            lines = '\n'.join(f'echo "{e}"' for e in home_entries)
+            self.shim('getfacl', f'for a in "$@"; do last=$a; done\necho "user::rwx"\n'
+                                 f'if [ "$last" = "{home}" ]; then\n{lines}\nfi\n'
+                                 f'if [ "$last" = "{keys}" ] && [ -n "{keys_entry}" ]; then '
+                                 f'echo "{keys_entry}"; fi\necho "other::---"')
+
+        def check():
+            done = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params))
+            out = done.stdout
+            return out[out.index('==> Coordinatore'):]
+        acl([f'user:{FAKE_SUPERVISOR}:--x'])
+        out = check()
+        self.assertIn(f"  ERRORE: manca l'ACL u:{FAKE_COORDINATOR}:--x su {home} "
+                      '(setup-coordinator.sh)\n', out)
+        self.assertIn(f'  [dry-run] sudo -u {FAKE_COORDINATOR} -H -- test -r '
+                      f'{self.state}/config.local.toml\n', out)
+        acl([f'user:{FAKE_SUPERVISOR}:--x', f'user:{FAKE_COORDINATOR}:--x'])
+        out = check()
+        self.assertIn(f'  ok: ACL user:{FAKE_COORDINATOR}:--x su {home}\n', out)
+        self.assertNotIn(f'u:{FAKE_COORDINATOR}', out)
+        # Never more than traversal, and never on devloop's keys.
+        acl([f'user:{FAKE_SUPERVISOR}:--x', f'user:{FAKE_COORDINATOR}:r-x'],
+            f'user:{FAKE_COORDINATOR}:r--')
+        out = check()
+        self.assertIn(f'  ERRORE: ACL user:{FAKE_COORDINATOR}:r-x su {home}: deve essere --x, '
+                      'senza elenco né scrittura\n', out)
+        self.assertIn(f"  ERRORE: {keys} ha un'ACL per {FAKE_COORDINATOR}: deve restare 700 "
+                      'senza eccezioni\n', out)
         self.assertEqual(self.mutating_calls(), [])
 
     def test_the_copy_holds_every_file_of_ops_check_host_reads(self):

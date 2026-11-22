@@ -1,0 +1,21 @@
+{
+  "name": "coordinator",
+  "description": "devloop: il coordinatore. Comandi, commenti e label; diagnosi della CI in sola lettura; nessun accesso ai contenuti.",
+  "url": "https://github.com/@REPO@",
+  "hook_attributes": {
+    "url": "https://github.com/@REPO@",
+    "active": false
+  },
+  "redirect_url": "https://github.com/@REPO@",
+  "public": false,
+  "request_oauth_on_install": false,
+  "default_permissions": {
+    "actions": "read",
+    "checks": "read",
+    "issues": "write",
+    "metadata": "read",
+    "pull_requests": "write",
+    "statuses": "read"
+  },
+  "default_events": []
+}

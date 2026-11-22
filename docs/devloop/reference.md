@@ -1781,8 +1781,10 @@ rather than widening it.
 
 The coordinator is an agent with a role app of its own (#528, the operator's decision recorded
 in the [precision of ADR 0002 of 2026-11-22](../adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-22-modello-a-quattro-ruoli-524-527)):
-`[apps.coordinator]`, created by the operator with `Issues: Read and write`, `Pull requests:
-Read and write` and `Metadata: Read-only`, and **no** `Contents`. It is distinct from the
+`[apps.coordinator]`, created by the operator from the manifest
+`ops/github/apps/coordinator.json` (#549) with `Issues: Read and write`, `Pull requests: Read
+and write`, `Metadata: Read-only` and, read-only for the diagnosis of the CI, `Actions`,
+`Checks` and `Commit statuses`, and **no** `Contents`. It is distinct from the
 supervisor's app, whose work the coordinator verifies: two actors never share an app. The local
 overlay of the project declares it, and turns it on with `[roles.coordinator]`, off by default
 (D10):
@@ -1822,9 +1824,24 @@ model = "gpt-6.1-sol"
   its own ([The reserved merge of the coordinator](guide.md#the-reserved-merge-of-the-coordinator)).
 - devloop never reads the app's key and never writes with it: `python3 -m devloop apps` does not
   list it, the watcher does not count it among the writers of devloop's records, and
-  `devloop token` and `scripts/agent-token.py` refuse it (`unknown actor`). How the coordinator
-  gets its tokens, its system user and its read-only sudoers are later parts of the plan of
-  #524.
+  `devloop token` and `scripts/agent-token.py` refuse it (`unknown actor`). Its key is only in
+  the key_dir of the coordinator's system user (`COORDINATOR_KEY_DIR` of `ops/params.env`, 700,
+  prepared by `ops/host/setup-coordinator.sh` and verified by `ops/host/check-host.sh`), and the
+  coordinator mints its tokens with `scripts/coordinator-token.py` (#549), as the supervisor
+  does with its own script: `repo` and `[apps.coordinator]` from the overlay of the state_dir
+  given with `--state-dir` (reached through the home of devloop with a traversal-only ACL that
+  `setup-coordinator.sh` grants), only its key from `$DEVLOOP_APP_KEY_DIR` or else `[apps]
+  key_dir`, the token only in `GH_TOKEN`, never printed. `[apps] key_dir` of the overlay is
+  devloop's, so the coordinator always sets `DEVLOOP_APP_KEY_DIR` to its own key_dir. Without
+  `--perm` the token gets `issues=write` and `pull_requests=write`; only `issues` and
+  `pull_requests` (read or write) and `actions`, `checks`, `statuses` and `metadata` read may be
+  asked for, any other permission is refused
+  ([ops/README.md](../../ops/README.md#10-coordinatore-facoltativo)):
+
+  ```
+  DEVLOOP_APP_KEY_DIR=<COORDINATOR_KEY_DIR> python3 scripts/coordinator-token.py --state-dir <STATE_DIR> -- gh issue comment <ISSUE> --body-file <FILE>
+  DEVLOOP_APP_KEY_DIR=<COORDINATOR_KEY_DIR> python3 scripts/coordinator-token.py --state-dir <STATE_DIR> --perm actions=read -- gh run view <RUN> --log-failed
+  ```
 - Without the table nothing changes: the app is only declared, and its comments and labels count
   for no role, as anyone else's.
 

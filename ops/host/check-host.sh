@@ -6,8 +6,8 @@
 # istruzioni, configurazione e binari delle sue CLI; l'ambiente dei turni gli arriva con sudo -E,
 # che sudo-rs ignora), il lock per repository (directory comune, gruppo, overlay; ADR 0006, R8),
 # servizio, CLI degli agent (--version, e un `git --version` con il loro strumento di shell,
-# #494) e `devloop apps`, e il coordinatore, se c'è (sudoers e copia di root di questo script,
-# #530). Con più progetti sullo stesso host si esegue una volta per progetto, con i suoi
+# #494) e `devloop apps`, e il coordinatore, se c'è (key_dir e chiave della sua app, ACL e lettura dell'overlay, #549;
+# sudoers e copia di root di questo script, #530). Con più progetti sullo stesso host si esegue una volta per progetto, con i suoi
 # parametri (--params).
 # Non cambia nulla, se non le sessioni e le cache che le CLI degli agent scrivono da sé. Delle
 # prove delle CLI riporta solo l'esito e il codice di uscita, mai il loro output né il testo del
@@ -145,26 +145,33 @@ step 'Chiavi delle GitHub App (600)'
 check_keys "$DEVLOOP_KEY_DIR" "$DEVLOOP_USER" "$DEVLOOP_KEYS" 0
 check_keys "$SUPERVISOR_KEY_DIR" "$SUPERVISOR_USER" "$SUPERVISOR_KEYS" 1
 
+# check_traverse USER SETUP: USER attraversa soltanto la home di devloop (ACL --x, che mette lo
+# script SETUP) e non ha ACL sulle directory private di devloop, che restano 700.
+check_traverse() {
+    local user=$1 setup=$2 entry private
+    entry=$(getfacl -p --omit-header "$DEVLOOP_HOME" 2>/dev/null | grep "^user:$user:")
+    case $entry in
+        "user:$user:--x") ok "ACL $entry su $DEVLOOP_HOME" ;;
+        '') fail "manca l'ACL u:$user:--x su $DEVLOOP_HOME ($setup)" ;;
+        *) fail "ACL $entry su $DEVLOOP_HOME: deve essere --x, senza elenco né scrittura" ;;
+    esac
+    for private in "$DEVLOOP_KEY_DIR" "$DEVLOOP_HOME/.claude" "$DEVLOOP_HOME/.codex"; do
+        [ -d "$private" ] || continue
+        if getfacl -p --omit-header "$private" 2>/dev/null | grep -q "^user:$user:"; then
+            fail "$private ha un'ACL per $user: deve restare 700 senza eccezioni"
+        fi
+    done
+}
+
 step "ACL: solo attraversamento di $DEVLOOP_HOME per $SUPERVISOR_USER"
 if ! command -v getfacl >/dev/null; then
     fail 'getfacl non trovato (pacchetto acl)'
 elif [ ! -d "$DEVLOOP_HOME" ]; then
     fail "$DEVLOOP_HOME non esiste"
 else
-    entry=$(getfacl -p --omit-header "$DEVLOOP_HOME" 2>/dev/null | grep "^user:$SUPERVISOR_USER:")
-    case $entry in
-        "user:$SUPERVISOR_USER:--x") ok "ACL $entry su $DEVLOOP_HOME" ;;
-        '') fail "manca l'ACL u:$SUPERVISOR_USER:--x su $DEVLOOP_HOME (setup-supervisor.sh)" ;;
-        *) fail "ACL $entry su $DEVLOOP_HOME: deve essere --x, senza elenco né scrittura" ;;
-    esac
+    check_traverse "$SUPERVISOR_USER" setup-supervisor.sh
     other=$(stat -c '%A' "$DEVLOOP_HOME")
     [ "${other:7:1}" = r ] && warn "$DEVLOOP_HOME è leggibile da tutti ($other)"
-    for private in "$DEVLOOP_KEY_DIR" "$DEVLOOP_HOME/.claude" "$DEVLOOP_HOME/.codex"; do
-        [ -d "$private" ] || continue
-        if getfacl -p --omit-header "$private" 2>/dev/null | grep -q "^user:$SUPERVISOR_USER:"; then
-            fail "$private ha un'ACL per $SUPERVISOR_USER: deve restare 700 senza eccezioni"
-        fi
-    done
 fi
 LOG="$STATE_PATH/run.log"
 check_as "$SUPERVISOR_USER" "$SUPERVISOR_USER legge $LOG" test -r "$LOG"
@@ -216,13 +223,25 @@ check_root_path() {
     [ "$bad" = 1 ] || ok "$path e le directory sopra sono di root, non scrivibili da altri"
 }
 
-# Il coordinatore (#530), facoltativo: il suo sudoers in sola lettura e la copia di root di
-# check-host.sh, dei file che legge e dei parametri, da cui esegue `check-host.sh --read-only`.
+# Il coordinatore (#530), facoltativo: la key_dir della sua app e la lettura dell'overlay, con
+# il solo attraversamento della home di devloop (#549), il suo sudoers in sola
+# lettura e la copia di root di check-host.sh, dei file che legge e dei parametri, da cui esegue
+# `check-host.sh --read-only`.
 step "Coordinatore $COORDINATOR_USER (facoltativo, #530)"
 if ! user_exists "$COORDINATOR_USER"; then
     say "  l'utente $COORDINATOR_USER non esiste: coordinatore non installato (setup-coordinator.sh)"
 else
     ok "l'utente $COORDINATOR_USER esiste"
+    # La key_dir della sua app (#549): 700, solo la chiave del coordinatore, 600.
+    check_dir "$COORDINATOR_KEY_DIR" 700 "$COORDINATOR_USER"
+    check_keys "$COORDINATOR_KEY_DIR" "$COORDINATOR_USER" "$COORDINATOR_KEYS" 1
+    # L'overlay di devloop, da cui scripts/coordinator-token.py legge repo e [apps.coordinator]
+    # (#549): solo l'attraversamento della home di devloop, e che il coordinatore lo legga.
+    if command -v getfacl >/dev/null && [ -d "$DEVLOOP_HOME" ]; then
+        check_traverse "$COORDINATOR_USER" setup-coordinator.sh
+    fi
+    check_as "$COORDINATOR_USER" "$COORDINATOR_USER legge $STATE_PATH/config.local.toml" \
+        test -r "$STATE_PATH/config.local.toml"
     check_sudoers "$COORDINATOR_SUDOERS_FILE" sudoers-coordinator setup-coordinator.sh
     check_root_path "$COORDINATOR_OPS_DIR/host"
     for name in $OPS_COORDINATOR_FILES params.env; do
