@@ -184,9 +184,10 @@ class DelegationPolicy:
     """``[delegations]`` (ADR 0005): the delegations of the operator to the supervisor, each
     with its revocation key, all off by default (D10) and revoked by turning them off.
 
-    - ``retry_own_prs`` (P5-2, #406): a ``tool_failure`` escalation on a PR implemented by the
-      supervisor's agent goes to the supervisor, who may retry it within ``MAX_RETRIES``; every
-      other class on such a PR still goes to the operator.
+    - ``retry_own_prs`` (P5-2, #406): without effect since #527, still accepted so that an
+      overlay that sets it keeps loading. The supervisor decides the escalations of process on
+      the PRs of its own agent too (principle 4 of ADR 0002 as clarified on #524), whatever its
+      value.
     - ``rounds`` (P5-1, #405): the supervisor may grant one more review round to a PR at the
       round limit (``/devloop grant-round``). ``max_rounds_per_pr`` and ``max_grants_per_day``
       lower the caps of the code (``supervision.MAX_GRANTED_ROUNDS`` and ``MAX_DAILY_GRANTS``),

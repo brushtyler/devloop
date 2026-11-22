@@ -124,11 +124,17 @@ class RoutingTests(GrantCase):
         d = self.make(cfg)
         self.assertEqual(self.at_limit(d, first, second)['class'], 'round_grantable')
 
+    def test_a_pr_of_the_supervisors_agent_is_grantable_too(self):
+        # A grant within the caps is an escalation of process (#527, principle 4 of ADR 0002
+        # as clarified on #524): the supervisor decides it on its agent's PRs too.
+        d = self.make(dataclasses.replace(ON, supervisor=CFG.implementer))
+        record = self.at_limit(d, ci_round())
+        self.assertEqual((record['class'], record['to']), ('round_grantable', 'supervisor'))
+        self.assertEqual(self.gh.labels[100], {SUPER})
+        self.assertNotIn('il supervisore ha implementato', self.body())
+
     def test_what_makes_the_grant_the_operators(self):
         cases = {
-            'the supervisor implemented the PR': (
-                dataclasses.replace(ON, supervisor=CFG.implementer), lambda gh: None,
-                'il supervisore ha implementato'),
             'phase:design': (ON, lambda gh: gh.labels[7].add('phase:design'), 'phase:design'),
             'a merge mode other than auto': (
                 dataclasses.replace(ON, merge=config.MergePolicy(mode='auto',

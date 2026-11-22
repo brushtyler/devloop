@@ -292,10 +292,11 @@ class RoutingTests(Case):
                     if cfg is STRICT:
                         self.assertEqual(self.gh.labels[100], {HUMAN})
 
-    def test_a_pr_the_supervisor_implemented_goes_to_the_operator(self):
+    def test_a_pr_the_supervisor_implemented_goes_to_the_supervisor(self):
+        # An escalation of process (#527, principle 4 of ADR 0002 as clarified on #524).
         d = self.make(dataclasses.replace(AUTO, supervisor=CFG.implementer), crash())
         self.tick(d)
-        self.assertEqual(self.gh.labels[100], {HUMAN})
+        self.assertEqual(self.gh.labels[100], {SUPER})
 
 
 class RetryTests(Case):
@@ -654,8 +655,10 @@ class EscalateTests(Case):
 class OperatorCommandTests(Case):
     """Commands on the escalations to the operator (#321)."""
 
-    # The case of PR #318: in "auto", but the supervisor implemented the PR.
-    OWN = dataclasses.replace(AUTO, supervisor=CFG.implementer)
+    # In "auto", but the escalation still goes to the operator: the PR's own merge mode is not
+    # "auto". (The case of PR #318, a PR the supervisor implemented, goes to the supervisor
+    # since #527.)
+    OWN = dataclasses.replace(AUTO, merge=MergePolicy(mode='auto', levels=((1, 'strict'),)))
 
     def fail_review(self, d):
         self.assertEqual(self.tick(d), [('review', 100)])

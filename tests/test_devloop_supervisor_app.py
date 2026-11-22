@@ -234,10 +234,15 @@ class CommandTests(Case):
         (decision,) = self.decisions(100)
         self.assertEqual((decision['by'], decision['outcome']), (SUPERVISOR_APP, 'applied'))
 
-    def test_a_pr_of_the_supervisors_agent_goes_to_the_operator(self):
-        d = self.make(OWN, crash())
-        self.fail_review(d, HUMAN)
-        self.assertIn('il supervisore ha implementato questa PR', self.gh.threads[100][-1]['body'])
+    def test_a_pr_of_the_supervisors_agent_goes_to_the_supervisor(self):
+        # A retry is an escalation of process (#527): the role app decides it on its agent's
+        # PRs too.
+        d = self.make(OWN, crash(), raw_review())
+        self.fail_review(d, SUPER)
+        self.gh.command(100, '/devloop retry', login=SUPERVISOR_APP)
+        self.assertEqual(self.tick(d), [('supervise', 100)])
+        self.assertEqual(self.gh.labels[100], {REVIEW})
+        self.assertEqual(self.decisions(100)[-1]['outcome'], 'applied')
 
 
 class AgentTokenTests(unittest.TestCase):

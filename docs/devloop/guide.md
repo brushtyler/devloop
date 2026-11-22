@@ -1084,16 +1084,21 @@ Any other class, or none (escalations written before #182), is critical.
 stays with the operator, with a comment that says why, when:
 
 - the [merge mode](#merge-modes) of the PR is not `"auto"`;
-- the supervisor's agent implemented the PR, except for a `tool_failure` with
-  `[delegations] retry_own_prs = true` (#406, ADR 0005, P5-2): a retry judges nothing, it runs
-  the same step on the same input, within the same two retries shared with the operator. The key
-  is off by default and turning it on is the operator's decision; off, every escalation on such a
-  PR goes to the operator, and one already waiting for the supervisor is refused at its retry
-  (`supervisor_refused`). The other classes on such a PR always go to the operator. The PR is
-  the supervisor's agent's when the `kind`, the `model` or the provider of its implementer, as
-  the PR's marker records them, is the supervisor's: the supervisor actor's, with `[roles.supervisor]` as a table
-  (#408), or the agent's that `roles.supervisor` names (#407, which also counts a PR whose
-  implementer is that key). So the check keeps firing when the keys are renamed by role
+- the escalation is `budget_grantable` and the supervisor's agent implemented the PR: an
+  extension of the budget is not among the escalations of process the operator delegated on
+  those PRs. Every other non-critical escalation on a PR of the supervisor's agent goes to the
+  supervisor like any other (#527, principle 4 of
+  [ADR 0002](../adr/0002-ruoli-e-responsabilita.md#principi) as clarified on #524): `retry`,
+  `rereview`, `grant-round` within the caps, `accept-defaults`, `decide`, hold and release and
+  the delegated merge are decisions of process, which never override nor replace a reviewer's
+  verdict. A verdict that asks for the operator stays a critical class, which never reaches the
+  supervisor, and the supervisor's rereview is refused when every reviewer has a verdict, on
+  these PRs as on any other. This replaces option (a) of ADR 0005, P5-2 (#406):
+  `[delegations] retry_own_prs` has no effect any more, and is still accepted so that an overlay
+  that sets it keeps loading. The PR is the supervisor's agent's when the `kind`, the `model` or
+  the provider of its implementer, as the PR's marker records them, is the supervisor's: the
+  supervisor actor's, with `[roles.supervisor]` as a table (#408), or the agent's that
+  `roles.supervisor` names (#407, which also counts a PR whose implementer is that key)
   ([The supervisor app](reference.md#the-supervisor-app),
   [the keys by role](reference.md#the-implementer-app-and-the-keys-by-role));
 - the issue was opened by someone outside `trusted_users` and devloop's apps, or its text is no
@@ -1213,8 +1218,8 @@ one wins; without one, the latest that does not apply is answered.
   rereview of the supervisor applied, and its round wrote no record (a round without records does
   not count against `max_review_rounds`, so a second rereview would have no limit); on any other
   escalation or step. Its input and what made the escalation non-critical are checked
-  again as for a retry; on a PR the supervisor's agent implemented it is refused and goes to the
-  operator, since `[delegations] retry_own_prs` admits only a retry. Applied, the dispatcher's
+  again as for a retry, on a PR the supervisor's agent implemented too (#527). Applied, the
+  dispatcher's
   `supervision` record voids the round as a trusted user's request does, and the PR goes back to
   `agent:review`. It needs a reason, which may go on in the lines below the command. The command
   does not touch the merge, so it also applies to a PR whose merge is the operator's (a level
@@ -1249,8 +1254,8 @@ With `rounds = true`, in merge mode `"auto"`, a PR that reaches its round limit 
 `round_limit`, when every one of these holds, each verified by the dispatcher:
 
 - the conditions of **Routing** above: the merge mode of the PR is `"auto"` (so it touches no
-  `operator_only_paths`), the supervisor's agent did not implement it, the issue is trusted and
-  still approved, no `phase:design`;
+  `operator_only_paths`), the issue is trusted and still approved, no `phase:design`; since #527
+  the PR may be one the supervisor's agent implemented;
 - the latest round that counts against the limit is a CI failure, **or** the blocking findings
   left open are fewer than after the round before;
 - no open blocking finding is a security finding: one whose `security` field (in the
@@ -2911,8 +2916,8 @@ keys take effect without a restart:
   tick, with a line `config: <key> <old> -> <new> from this tick` in the log. The actions already
   running go on and are not interrupted: a higher `max_open_prs` lets the next tick start an
   issue alongside them.
-- `[delegations]` (#405, #406, #411, #412, #486): a delegation turned off, `rounds`,
-  `retry_own_prs`, `budget`, `capacity` or `merge`, is revoked from the next tick
+- `[delegations]` (#405, #411, #412, #486): a delegation turned off, `rounds`, `budget`,
+  `capacity` or `merge`, is revoked from the next tick (`retry_own_prs` has no effect since #527)
   ([Granting a review round](#granting-a-review-round),
   [Extending the budget envelope](#extending-the-budget-envelope),
   [Escalations to the supervisor](#escalations-to-the-supervisor),
