@@ -243,6 +243,23 @@ class SupervisorActor:
 SUPERVISOR_KEYS = ('name', 'kind', 'provider', 'model')
 
 
+@dataclass(frozen=True)
+class CoordinatorActor:
+    """``[roles.coordinator]`` (ADR 0002, precision of 2026-11-22, #528): the coordinator actor,
+    such as ``claude-coordinator``. devloop does not run it, so it is not in ``[agents]``; it
+    signs with the role app ``[apps.coordinator]``, which no agent declares, and its commands
+    count only within the closed perimeter of ``supervision.COORDINATOR_DELEGATED``. ``kind``,
+    ``provider`` and ``model`` say which agent runs it."""
+    name: str
+    kind: str
+    provider: str
+    model: str
+
+
+# The keys of the ``[roles.coordinator]`` table, those of the supervisor actor.
+COORDINATOR_KEYS = SUPERVISOR_KEYS
+
+
 # The roles of a turn in the budget envelope (#365): the kinds of the turns charged to a story.
 # A readiness check (``preflight``) comes before the takeover and is outside the envelope.
 BUDGET_ROLES = ('implement', 'fix', 'review', 'sync', 'conclave', 'advisory')
@@ -405,9 +422,11 @@ class AgentConfig:
 
 # Actors that are an app of devloop's and never an agent: the dispatcher, the merger, the app
 # that only merges (#201), the supervisor's role app (ADR 0005, P5-4, #408), which counts only
-# with ``[roles.supervisor]`` as a table and whose key devloop never reads, and the
-# implementer's role app (ADR 0005, P5-3, #407), which the implementers declare.
-APP_ONLY_ACTORS = ('dispatcher', 'merger', 'supervisor', 'implementer')
+# with ``[roles.supervisor]`` as a table and whose key devloop never reads, the
+# implementer's role app (ADR 0005, P5-3, #407), which the implementers declare, and the
+# coordinator's role app (#528), which counts only with ``[roles.coordinator]`` and whose key
+# devloop never reads either.
+APP_ONLY_ACTORS = ('dispatcher', 'merger', 'supervisor', 'implementer', 'coordinator')
 # The role app of the implementers (#407): commits, pushes, PRs and the records of fixes and
 # syncs, whichever agent does the work. Only a ``<kind>-implementer`` key may declare it.
 IMPLEMENTER_APP = 'implementer'
@@ -631,6 +650,10 @@ class Config:
     # ``[roles.supervisor]`` as a table (#408): the supervisor actor, which signs with the app of
     # ``[apps.supervisor]``; None with the agent key of before.
     supervisor_actor: SupervisorActor = None
+    # ``[roles.coordinator]`` (#528): the coordinator actor, which signs with the app of
+    # ``[apps.coordinator]``; None, the default (D10), without it: no command of the coordinator
+    # counts, and devloop behaves as before.
+    coordinator: CoordinatorActor = None
     # The delegations to the supervisor (ADR 0005), each off by default (D10).
     delegations: DelegationPolicy = field(default_factory=DelegationPolicy)
     pin: PinPolicy = field(default_factory=PinPolicy)
@@ -1689,6 +1712,35 @@ def parse_supervisor(roles, agents):
     return name, SupervisorActor(name=name, kind=kind, provider=provider, model=model)
 
 
+def parse_coordinator(roles, agents):
+    """The coordinator actor of ``[roles.coordinator]`` (#528), or None without it (off by
+    default, D10). Only a table, with the keys of ``COORDINATOR_KEYS``: ``name`` names agent and
+    role in full (``<kind>-coordinator``) and is not a key of ``[agents]``, since devloop does
+    not run it."""
+    if 'coordinator' not in roles:
+        return None
+    value = roles['coordinator']
+    where = 'roles.coordinator'
+    if not isinstance(value, dict):
+        raise ConfigError(f'{where}: expected a table')
+    unknown = sorted(set(value) - set(COORDINATOR_KEYS))
+    if unknown:
+        raise ConfigError(f'{where}: unknown key {unknown[0]!r}')
+    name, kind, provider, model = (_require(value, key, str, where) for key in COORDINATOR_KEYS)
+    if kind not in AGENT_KINDS:
+        raise ConfigError(f'{where}.kind: must be one of {AGENT_KINDS}')
+    if name != f'{kind}-coordinator':
+        raise ConfigError(f'{where}.name: must be {kind + "-coordinator"!r}, the agent and the '
+                          'role in full')
+    if name in agents:
+        raise ConfigError(f'{where}.name: {name!r} is an agent of [agents]; the coordinator '
+                          'actor is not run by devloop')
+    for key, text in (('provider', provider), ('model', model)):
+        if not text.strip():
+            raise ConfigError(f'{where}.{key}: must not be empty')
+    return CoordinatorActor(name=name, kind=kind, provider=provider, model=model)
+
+
 def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
     """``root`` is where relative ``review_policy.sensitive_path_lists`` are read. ``project``
     is the SHA-256 of the project file (ADR 0006, R2) composed into ``data``, '' without one:
@@ -1762,6 +1814,7 @@ def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
                   | {key for key in agents if key_role(key) == 'implementer'})
     pool = _reviewer_pool(roles, agents, selectable)
     supervisor, supervisor_actor = parse_supervisor(roles, agents)
+    coordinator = parse_coordinator(roles, agents)
     preflight = ''
     if 'preflight' in data:
         preflight = _require(data, 'preflight', str, 'config')
@@ -1802,6 +1855,9 @@ def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
     if supervisor_actor is not None and 'supervisor' not in apps:
         # The actor exists to sign with its role app: without it nobody would be the supervisor.
         raise ConfigError('roles.supervisor: the supervisor actor needs [apps.supervisor]')
+    if coordinator is not None and 'coordinator' not in apps:
+        # The coordinator exists to sign with its role app (#528): without it nobody would be.
+        raise ConfigError('roles.coordinator: the coordinator actor needs [apps.coordinator]')
     ints = {}
     for key in ('max_open_prs', 'max_parked_prs', 'max_review_rounds', 'max_actions_per_tick',
                 'max_parallel_actions', 'implement_test_retries', 'agent_timeout_seconds', 'test_timeout_seconds',
@@ -1893,7 +1949,7 @@ def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
         block_uncertain_turns=block_uncertain, story_identity=story_identity,
         publication_outbox=outbox, attempt_identity=attempt_identity, budget=budget,
         merge=merge, supervisor=supervisor,
-        supervisor_actor=supervisor_actor,
+        supervisor_actor=supervisor_actor, coordinator=coordinator,
         pin=parse_pin(data.get('pin', {}), sensitive_lists(data)),
         run=parse_run(data.get('run', {})),
         report=report,
@@ -1988,7 +2044,8 @@ OVERLAY_KEYS = {
                                        'second_reviewer')),
                       'zero': dict.fromkeys(('label', 'allowlist', 'checks'))},
     'merge': {'mode': None, 'operator_only_paths': None, 'levels': {'*': None}},
-    'roles': {**dict.fromkeys(('implementer', 'reviewer', 'reviewers', 'supervisor')),
+    'roles': {**dict.fromkeys(('implementer', 'reviewer', 'reviewers', 'supervisor',
+                               'coordinator')),
               'implementers': {'*': None}},
     'agents': {'*': _AGENT_KEYS},
     'apps': {'key_dir': None, '*': dict.fromkeys(('app_id', 'slug'))},

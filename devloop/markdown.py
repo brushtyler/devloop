@@ -26,7 +26,7 @@ from .journal import ATTEMPT_ID, PHASES, STORY_ID
 from .policy import EVENTS, valid_receipt
 from .review import (LEGACY_VERDICT, current_verdict, findings_only, own_open_findings,
                      trust_policy)
-from .supervision import COMMANDS, MAX_RETRIES, OUTCOMES, critical, describe
+from .supervision import MAX_RETRIES, OUTCOMES, critical, describe, recorded_command
 
 UNKNOWN = 'non noto'
 UNKNOWN_VERSION = 'non nota'
@@ -430,9 +430,11 @@ def _valid_hold(h):
 def _valid_supervision(s):
     """A supervisor command the dispatcher handled (#182): the command, its author, the outcome
     and in ``comment`` the id of the comment that carried it (the commands it spends). A
-    ``decide`` (#258) that was applied carries its text in ``reason`` and the gaps it answers."""
+    ``decide`` (#258) that was applied carries its text in ``reason`` and the gaps it answers.
+    A refused command of the coordinator's identity may be outside ``COMMANDS`` (#528,
+    ``recorded_command``)."""
     lists = [s.get('defaults', []), s.get('gaps', [])]
-    return (s.get('command') in COMMANDS and s.get('outcome') in OUTCOMES
+    return (recorded_command(s.get('command'), s.get('outcome')) and s.get('outcome') in OUTCOMES
             and isinstance(s.get('by'), str) and isinstance(s.get('reason', ''), str)
             and (s['outcome'] != 'decided'
                  or (s['command'] == 'decide' and bool(s.get('reason', '').strip())))
