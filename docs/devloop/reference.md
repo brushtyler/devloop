@@ -1514,6 +1514,30 @@ created and installed only for a repository where devloop merges (`[merge] mode`
 with it configured, the mode `"off"` and no coordinator, `devloop apps` says so. Creating and
 installing the apps stay operator actions, since they are credentials.
 
+#### Rename of the repository
+
+`repo_aliases` (empty by default, #540, [ADR 0007](../adr/0007-da-ssdlc-a-devloop.md)) lists
+the names `owner/name` the repository had before a rename on GitHub, a trust key of the
+operator in the overlay, like `repo`: never in the project file, and a change is recorded in
+the journal with the other trust keys. A name appears once and is never `repo` itself. For a
+project never renamed it stays empty. With it:
+
+- a link to a comment under a former name counts as one under `repo` wherever devloop checks
+  the link of a decision of the operator (the ADR blocks of a [delegated
+  merge](guide.md#delegated-merge)), only when the dispatcher finds that comment by id among
+  the comments of its issue **in `repo`**, with the API, and its author is in `trusted_users`.
+  No date limit is needed: a comment of another repository that took the old name is not in
+  `repo` (the read gives a 404, or no such id), and the link is refused. Without
+  `repo_aliases` the old name is another repository, and the link is refused;
+- the records of the journal (turns, stories, attempts) and the dispatcher's `story` markers
+  written under a former name are the repository's: they read as written under `repo`, and
+  the journal is never rewritten;
+- a native "blocked by" dependency on an issue named under a former name is an issue of the
+  repository.
+
+The steps on the host are in
+[ops/host/migrate.md](../../ops/host/migrate.md#rinomina-del-repository-in-devloop-adr-0007-r3-540).
+
 **`devloop token`.** An interactive session publishes with an agent's app of the project:
 
 ```bash

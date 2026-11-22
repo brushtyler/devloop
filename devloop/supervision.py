@@ -432,23 +432,30 @@ def adr_paths(paths):
     return sorted(p for p in paths if _under(p, ADR_DIR))
 
 
-def comment_links(text, repo):
+def comment_links(text, repo, aliases=()):
     """The comments of the repository ``repo`` that ``text`` links to (#486), as ``(number,
     comment id)``, in order: ``https://github.com/<repo>/issues/<N>#issuecomment-<id>`` or
-    ``.../pull/<N>#issuecomment-<id>``. A link to another repository does not count."""
-    pattern = (r'https://github\.com/' + re.escape(repo)
-               + r'/(?:issues|pull)/([1-9][0-9]{0,9})#issuecomment-([1-9][0-9]{0,19})\b')
+    ``.../pull/<N>#issuecomment-<id>``. A link to another repository does not count.
+
+    ``aliases``: the names ``repo`` had before a rename (``repo_aliases``, #540): a link under
+    one of them counts as one under ``repo``. Whether the comment is in ``repo`` is the
+    caller's check, with the API, as for any link: a comment of another repository that took
+    the old name is not found there, and the link is refused."""
+    names = '|'.join(re.escape(name) for name in (repo, *aliases))
+    pattern = (r'https://github\.com/(?:' + names
+               + r')/(?:issues|pull)/([1-9][0-9]{0,9})#issuecomment-([1-9][0-9]{0,19})\b')
     return [(int(n), int(c)) for n, c in re.findall(pattern, text or '')]
 
 
-def adr_problems(files, repo):
+def adr_problems(files, repo, aliases=()):
     """Why the changes of ``docs/adr/`` in ``files`` (``Workspace.diff_blocks``) do not only
     record decisions of the operator already written on GitHub (#486), as Italian phrases, and
     the links each block needs verified: ``(problems, blocks)``, ``blocks`` a list of ``(path,
     links)``. A file that is not plain text, or that loses or changes a line (a deleted line,
     a removed file, a new mode) has a problem; so has each block of added lines without a link
-    to a comment of ``repo``. Whether each comment linked is by a trusted user is the
-    dispatcher's check, with the API."""
+    to a comment of ``repo`` (or of one of its ``aliases``, ``comment_links``). Whether each
+    comment linked is in ``repo`` and by a trusted user is the dispatcher's check, with the
+    API."""
     problems, blocks = [], []
     for entry in files:
         path = entry['path']
@@ -457,7 +464,7 @@ def adr_problems(files, repo):
                             'file rimosso o binario, o cambio di modo)')
             continue
         for block in entry.get('blocks') or []:
-            links = comment_links(block, repo)
+            links = comment_links(block, repo, aliases)
             if not links:
                 first = next((ln.strip() for ln in block.splitlines() if ln.strip()), '')
                 problems.append(f'un blocco aggiunto in `{path}` non ha il link a un commento '

@@ -454,8 +454,10 @@ def build(args):
     # write it (#362): the running dispatcher keeps its chain in memory.
     command = getattr(args, 'command', None)
     read_only = command == 'status' or (command == 'tick' and getattr(args, 'dry_run', False))
+    # The records written before a rename of the repository stay its own (#540).
     ledger = Ledger(None, state_dir=state, read_only=read_only,
-                    journal_max_bytes=cfg.journal_max_mib * MIB)
+                    journal_max_bytes=cfg.journal_max_mib * MIB,
+                    repo_aliases=dict.fromkeys(cfg.repo_aliases, cfg.repo))
     # With publication_outbox (#385), every client's comments, native reviews and pull requests
     # are in that journal before they are sent; never from status or a dry run, which do not
     # write it.

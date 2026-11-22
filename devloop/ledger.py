@@ -181,12 +181,14 @@ class Ledger:
     edited. The dispatcher sets it to its own check; without it every author counts."""
 
     def __init__(self, gh: Tracker, clock=time.time, monotonic=time.monotonic, state_dir=None,
-                 signed=None, read_only=False, journal_max_bytes=MAX_BYTES):
+                 signed=None, read_only=False, journal_max_bytes=MAX_BYTES, repo_aliases=None):
         self.gh = gh
         self._clock = clock
         self._monotonic = monotonic
+        # ``repo_aliases``: ``{former name: name}`` of a renamed repository (#540): the records
+        # of the journal and the markers written under a former name stay the repository's.
         self.journal = TurnJournal(state_dir, clock=clock, read_only=read_only,
-                                   max_bytes=journal_max_bytes)
+                                   max_bytes=journal_max_bytes, aliases=repo_aliases)
         self.signed = signed
         # Reviewers in parallel write the same register (#325): one write at a time, each on
         # the register as GitHub has it right before.
@@ -338,7 +340,9 @@ class Ledger:
         mark = found[-1]
         story = self.journal.stories().get(mark['story'])
         role = self.journal.story_of(repo, number)
-        if (mark['issue'] != number or mark['repo'] != repo or story is None
+        # A marker written under a former name of the repository (#540) is the repository's.
+        if (mark['issue'] != number or self.journal.repo_name(mark['repo']) != repo
+                or story is None
                 or story['issue'] != mark['root'] or role is None
                 or role[0]['story'] != story['story']):
             raise JournalError(f'#{number}: the dispatcher\'s story marker ({mark["story"]}, '
