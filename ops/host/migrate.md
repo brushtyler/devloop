@@ -10,7 +10,8 @@ quando quello vecchio è fermo e non ripartirà.
 ## Ordine
 
 1. **Preparare la macchina nuova** senza avviare nulla: `setup-devloop.sh`,
-   `setup-agent-user.sh` e `setup-supervisor.sh` ([ops/README.md](../README.md)). Il servizio viene installato ma non
+   `setup-agent-user.sh`, `setup-supervisor.sh` e, se c'è il coordinatore, `setup-coordinator.sh`
+   ([ops/README.md](../README.md)). Il servizio viene installato ma non
    avviato. `sudo` deve essere sudo 1.9, non sudo-rs, il default di Ubuntu, che ignora `sudo -E`
    e farebbe girare gli agent senza l'ambiente che devloop prepara (#496): come root,
    `update-alternatives --set sudo /usr/bin/sudo.ws`, poi `sudo --version | head -n 1` dice
@@ -90,6 +91,9 @@ Dal supervisore, come utente `supervisor`:
 - **Il servizio**: lo installa `setup-devloop.sh` da `ops/host/devloop.service`; non si copia
   l'unità della macchina vecchia.
 - **Il sudoers del supervisore**: lo installa `setup-supervisor.sh`.
+- **Il coordinatore**, se c'è (#530): utente, copia di root di `check-host.sh` e sudoers in sola
+  lettura li installa `setup-coordinator.sh` ([Utente del coordinatore](#utente-del-coordinatore-530));
+  la CLI del suo agent, il login e il token di sola lettura si rifanno a mano.
 
 ## Chiavi delle GitHub App
 
@@ -1127,3 +1131,62 @@ passo.
 che contiene #499: gli agent di `config.toml` dichiarano le app `implementer`, `claude`, `codex` e
 `agy`, e il suo overlay deve avere le loro tabelle `[apps.*]`, con le chiavi nella sua
 `key_dir`.
+
+## Utente del coordinatore (#530)
+
+Il coordinatore ha sull'host **solo lettura**: l'utente `coordinator`, con un sudoers di soli
+comandi di lettura e `check-host.sh --read-only` da una copia di root
+([ops/README.md](../README.md#10-coordinatore-facoltativo)). Il passo non tocca devloop né la
+copia fissata: si fa a loop attivo, quando l'operatore assegna il ruolo, e nessun pin lo aspetta.
+
+Come root, **dal checkout dell'operatore** (`/root/repos/ssdlc`), mai dal clone di devloop:
+
+1. aggiornare il checkout dell'operatore, che deve avere `ops/params.env`:
+
+   ```bash
+   git -C /root/repos/ssdlc fetch origin
+   git -C /root/repos/ssdlc checkout --detach origin/main
+   test -f /root/repos/ssdlc/ops/params.env
+   ```
+
+2. installare utente, copia di root e sudoers:
+
+   ```bash
+   sudo bash /root/repos/ssdlc/ops/host/setup-coordinator.sh --dry-run
+   sudo bash /root/repos/ssdlc/ops/host/setup-coordinator.sh
+   ```
+
+   La copia va in `/usr/local/lib/devloop-coordinator` (con `PROJECT`,
+   `/usr/local/lib/devloop-coordinator-<progetto>`), il sudoers in
+   `/etc/sudoers.d/devloop-coordinator` (con `PROJECT`, `-<progetto>`), dopo `visudo -c`;
+3. verificare, come root: `sudo bash /root/repos/ssdlc/ops/host/check-host.sh --no-apps`, nessun
+   errore nel passo `Coordinatore coordinator`: il sudoers (440, root, uguale a quello generato),
+   la copia e le directory sopra di root, ogni file della copia che `coincide` con il checkout;
+4. verificare **come `coordinator`**, con il suo sudoers: `sudo -n -l` elenca solo i comandi di
+   [ops/README.md](../README.md#10-coordinatore-facoltativo), e la verifica in sola lettura non
+   avvia nessuna CLI, non esegue `devloop apps` e non scrive nulla:
+
+   ```bash
+   sudo -u coordinator -H sudo -n -l
+   sudo -u coordinator -H sudo -n /usr/bin/bash /usr/local/lib/devloop-coordinator/host/check-host.sh --read-only
+   ```
+
+5. a mano: la CLI dell'agent del coordinatore e il suo login, come `coordinator`, e un token di
+   sola lettura per `gh` ([ops/github/tokens.md](../github/tokens.md)).
+
+**Dopo ogni aggiornamento di `ops/`** si rifà il passo 2 dal checkout aggiornato: la copia di root
+non segue il checkout, e `check-host.sh` lo segnala (`ATTENZIONE: … è diverso da …: rieseguire
+setup-coordinator.sh`).
+
+Dal #530 anche `check-host.sh` completo, che l'operatore o l'agent dell'host esegue come root,
+riporta delle prove delle CLI solo l'esito e il codice di uscita, mai il testo del modello: per
+vederlo si ripete la prova a mano, come al passo 5 di [File delle CLI di root sull'utente degli
+agent](#file-delle-cli-di-root-sullutente-degli-agent-438).
+
+**Rollback.** Come root, prima il sudoers, poi la copia e l'utente:
+
+```bash
+rm /etc/sudoers.d/devloop-coordinator
+rm -r /usr/local/lib/devloop-coordinator
+userdel -r coordinator
+```
