@@ -27,7 +27,12 @@ VERIFIED_ARCH=aarch64
 OPS_STATE_DIR=.ssdlc/devloop
 
 # I segnaposto @NOME@ che `render` sostituisce nei file dichiarativi (unità, sudoers).
-OPS_TEMPLATE_VARS='REPO DEVLOOP_USER SUPERVISOR_USER AGENT_USER DEVLOOP_HOME AGENT_HOME DEVLOOP_CLONE STATE_DIR STATE_PATH LAUNCHER_CMD DEVLOOP_PATH AGENT_PATH SERVICE_NAME REPO_LOCK_DIR REPO_LOCK_GROUP'
+OPS_TEMPLATE_VARS='REPO DEVLOOP_USER SUPERVISOR_USER AGENT_USER COORDINATOR_USER DEVLOOP_HOME AGENT_HOME DEVLOOP_CLONE STATE_DIR STATE_PATH LAUNCHER_CMD DEVLOOP_PATH AGENT_PATH SERVICE_NAME REPO_LOCK_DIR REPO_LOCK_GROUP COORDINATOR_OPS_DIR'
+
+# I file di ops/ che check-host.sh legge (#530): setup-coordinator.sh li copia, con i parametri
+# (params.env), nella directory di root COORDINATOR_OPS_DIR, da cui il coordinatore esegue come
+# root `check-host.sh --read-only`, mai dal clone di devloop né da un checkout scrivibile.
+OPS_COORDINATOR_FILES='lib.sh host/check-host.sh host/sudoers-supervisor host/sudoers-agent host/sudoers-coordinator host/tmpfiles-devloop-repos.conf host/devloop.service host/devloop@.service host/devloop-project.conf'
 
 # Nella home dell'utente degli agent (#438), come CLI_DIRS, CLI_SEALED e CLIS di
 # devloop/agentuser.py: le directory delle CLI, di root, del gruppo dell'utente degli agent e con
@@ -152,8 +157,10 @@ AGENT_CLI_WRITABLE=(.gemini/antigravity-cli/bin)
 # se è così, 1 se non lo è (con il motivo su stdout). Con DEST, se manca solo la riga (anche
 # FILE che non esiste), scrive in DEST FILE con la riga aggiunta (nella tabella [features], o in
 # una nuova in fondo) e torna 3; una riga con un altro valore non la cambia: torna 1.
+# Python isolato (-I) e senza bytecode (-B): gira come root da qualunque directory, e un modulo
+# nella directory corrente non deve essere importato al posto di quello della libreria.
 codex_memories() {
-    python3 - "$@" <<'EOF'
+    python3 -I -B - "$@" <<'EOF'
 import re, sys, tomllib
 path, dest = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else None)
 LIMIT = 1 << 20
@@ -297,6 +304,10 @@ ops_load_params() {
         : "${SERVICE_NAME:=devloop@$PROJECT}"
         : "${SUDOERS_FILE:=/etc/sudoers.d/devloop-supervisor-$PROJECT}"
         : "${AGENT_SUDOERS_FILE:=/etc/sudoers.d/devloop-agent-$PROJECT}"
+        # Il coordinatore è uno per host, come il supervisore: sudoers e copia di check-host.sh
+        # sono del progetto.
+        : "${COORDINATOR_SUDOERS_FILE:=/etc/sudoers.d/devloop-coordinator-$PROJECT}"
+        : "${COORDINATOR_OPS_DIR:=/usr/local/lib/devloop-coordinator-$PROJECT}"
         # Il supervisore è uno per host: la sua key_dir e il suo clone sono del progetto.
         : "${SUPERVISOR_KEY_DIR:=${SUPERVISOR_HOME:-/home/${SUPERVISOR_USER:-supervisor}}/.ghapps-$PROJECT}"
         : "${SUPERVISOR_CLONE:=${SUPERVISOR_HOME:-/home/${SUPERVISOR_USER:-supervisor}}/devloop-$PROJECT}"
@@ -306,11 +317,13 @@ ops_load_params() {
     : "${DEVLOOP_USER:=devloop}"
     : "${SUPERVISOR_USER:=supervisor}"
     : "${AGENT_USER:=devloop-agent}"
+    : "${COORDINATOR_USER:=coordinator}"
     : "${DEFAULT_BRANCH:=main}"
     : "${GITHUB_OWNER_TYPE:=user}"
     : "${DEVLOOP_HOME:=/home/$DEVLOOP_USER}"
     : "${SUPERVISOR_HOME:=/home/$SUPERVISOR_USER}"
     : "${AGENT_HOME:=/home/$AGENT_USER}"
+    : "${COORDINATOR_HOME:=/home/$COORDINATOR_USER}"
     : "${DEVLOOP_CLONE:=$DEVLOOP_HOME/${REPO#*/}}"
     : "${SUPERVISOR_CLONE:=$SUPERVISOR_HOME/${REPO#*/}}"
     : "${STATE_DIR:=$OPS_STATE_DIR}"
@@ -324,6 +337,8 @@ ops_load_params() {
     : "${SYSTEMD_DIR:=/etc/systemd/system}"
     : "${SUDOERS_FILE:=/etc/sudoers.d/devloop-supervisor}"
     : "${AGENT_SUDOERS_FILE:=/etc/sudoers.d/devloop-agent}"
+    : "${COORDINATOR_SUDOERS_FILE:=/etc/sudoers.d/devloop-coordinator}"
+    : "${COORDINATOR_OPS_DIR:=/usr/local/lib/devloop-coordinator}"
     : "${APPS:=dispatcher merger claude-agent codex-agent agy-agent implementer supervisor}"
     : "${SOURCE_REPO:=}"
     : "${SOURCE_REF:=}"
@@ -394,21 +409,38 @@ ops_load_params() {
     [[ $DEVLOOP_PATH =~ ^[A-Za-z0-9._/:-]+$ ]] || die "DEVLOOP_PATH non valido: '$DEVLOOP_PATH'"
     [[ $AGENT_PATH =~ ^[A-Za-z0-9._/:-]+$ ]] || die "AGENT_PATH non valido: '$AGENT_PATH'"
     local sudoers
-    for sudoers in SUDOERS_FILE AGENT_SUDOERS_FILE; do
+    for sudoers in SUDOERS_FILE AGENT_SUDOERS_FILE COORDINATOR_SUDOERS_FILE; do
         [[ $(basename "${!sudoers}") =~ ^[A-Za-z0-9_-]+$ ]] \
             || die "il nome di $sudoers non può contenere '.' né '~' (sudo lo ignorerebbe)"
     done
     _require_name DEVLOOP_USER
     _require_name SUPERVISOR_USER
     _require_name AGENT_USER
+    _require_name COORDINATOR_USER
     _require_name REPO_LOCK_GROUP
     [ "$AGENT_USER" != "$DEVLOOP_USER" ] || die "AGENT_USER deve essere diverso da DEVLOOP_USER"
     [ "$AGENT_USER" != "$SUPERVISOR_USER" ] || die "AGENT_USER deve essere diverso da SUPERVISOR_USER"
+    # Il coordinatore (#530) ha solo comandi di lettura: un utente suo, che non ha i privilegi
+    # di nessun altro ruolo.
+    local role
+    for role in DEVLOOP_USER SUPERVISOR_USER AGENT_USER; do
+        [ "$COORDINATOR_USER" != "${!role}" ] || die "COORDINATOR_USER deve essere diverso da $role"
+    done
     local path
-    for path in DEVLOOP_HOME SUPERVISOR_HOME AGENT_HOME DEVLOOP_CLONE SUPERVISOR_CLONE \
-        DEVLOOP_KEY_DIR SUPERVISOR_KEY_DIR SYSTEMD_DIR SUDOERS_FILE AGENT_SUDOERS_FILE \
-        TMPFILES_FILE; do
+    for path in DEVLOOP_HOME SUPERVISOR_HOME AGENT_HOME COORDINATOR_HOME DEVLOOP_CLONE \
+        SUPERVISOR_CLONE DEVLOOP_KEY_DIR SUPERVISOR_KEY_DIR SYSTEMD_DIR SUDOERS_FILE \
+        AGENT_SUDOERS_FILE COORDINATOR_SUDOERS_FILE TMPFILES_FILE; do
         _require_abs "$path"
+    done
+    # La copia di root di check-host.sh che il coordinatore esegue come root (#530): fuori dalle
+    # home degli utenti e dallo state_dir, che altri possono scrivere.
+    [[ $COORDINATOR_OPS_DIR =~ ^/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+$ ]] \
+        && ! [[ $COORDINATOR_OPS_DIR/ =~ /\.\.?/ ]] \
+        || die "COORDINATOR_OPS_DIR deve essere un percorso assoluto di almeno due livelli, senza spazi né '.' o '..': '$COORDINATOR_OPS_DIR'"
+    for inside in "$DEVLOOP_HOME" "$SUPERVISOR_HOME" "$AGENT_HOME" "$COORDINATOR_HOME" \
+        "$STATE_PATH" "$DEVLOOP_CLONE"; do
+        [[ $COORDINATOR_OPS_DIR/ != "$inside"/* ]] && [[ $inside/ != "$COORDINATOR_OPS_DIR"/* ]] \
+            || die "COORDINATOR_OPS_DIR non può stare dentro né contenere $inside: il coordinatore ne esegue i file come root"
     done
     ops_check_host_users
 }
@@ -418,7 +450,8 @@ ops_load_params() {
 # (User=) e dai loro sudoers (devloop-*: "<devloop> ALL=(<agent>) NOPASSWD:SETENV:" di
 # sudoers-agent, "<supervisore> ALL=(<devloop>) NOPASSWD:" di sudoers-supervisor). Salta i file
 # di questa installazione e quelli che non può leggere: i sudoers sono di root, quindi senza
-# root (--dry-run) legge solo le unità.
+# root (--dry-run) legge solo le unità. Salta anche i sudoers del coordinatore
+# (devloop-coordinator*, #530), uno per host come il supervisore, che non danno ruoli.
 _ops_host_users() {
     local file dir
     for file in "$SYSTEMD_DIR"/devloop*.service "$SYSTEMD_DIR"/devloop@*.service.d/project.conf; do
@@ -430,6 +463,8 @@ _ops_host_users() {
         for file in "$dir"/devloop-*; do
             [ -f "$file" ] && [ -r "$file" ] || continue
             [ "$file" = "$SUDOERS_FILE" ] || [ "$file" = "$AGENT_SUDOERS_FILE" ] && continue
+            [ "$file" = "$COORDINATOR_SUDOERS_FILE" ] && continue
+            case $(basename "$file") in devloop-coordinator*) continue ;; esac
             awk -v file="$file" '
                 $2 ~ /^ALL=[(][a-z_][a-z0-9_-]*[)]$/ && $1 ~ /^[a-z_][a-z0-9_-]*$/ \
                         && $3 ~ /^NOPASSWD:/ {
@@ -447,11 +482,11 @@ _ops_host_users() {
 # Rifiuta un utente di questa installazione che sull'host abbia già un ruolo in un'altra (ADR
 # 0006, R8; D6): ogni progetto ha il suo utente devloop e il suo utente degli agent, che non sono
 # di nessun altro progetto né di un altro ruolo. Solo il supervisore, uno per host, è lo stesso in
-# ogni progetto.
+# ogni progetto; il coordinatore (#530), anch'esso uno per host, non ha nessuno di questi ruoli.
 ops_check_host_users() {
     local user role file var
     while read -r user role file; do
-        for var in DEVLOOP_USER AGENT_USER SUPERVISOR_USER; do
+        for var in DEVLOOP_USER AGENT_USER SUPERVISOR_USER COORDINATOR_USER; do
             [ "${!var}" = "$user" ] || continue
             [ "$var" = SUPERVISOR_USER ] && [ "$role" = supervisor ] && continue
             die "$var '$user' è già l'utente $role di un'altra installazione di devloop dell'host ($file): ogni progetto ha i suoi utenti"
