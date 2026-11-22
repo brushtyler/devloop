@@ -1338,6 +1338,8 @@ class MergeMixin:
 
         - neither ``[delegations] merge`` nor the merge mode, of the configuration or of the
           PR, counts: the PR waits for the operator's merge for whatever reason;
+        - the merger's app (``[apps.merger]``) is required: without it the command is refused
+          before the cap is touched, and nothing merges with the ambient ``gh`` login;
         - the paths of the trust rule and of the delegations, ``docs/adr/`` (with any change,
           not only added lines) and a ``host_step`` refuse nothing: those are the coordinator's
           cases. A step on the host holds the auto-pin, as for every merge;
@@ -1362,6 +1364,10 @@ class MergeMixin:
             if cfg.coordinator.max_merges_per_day < 1:
                 return refuse('il merge del coordinatore è spento (`[roles.coordinator] '
                               'max_merges_per_day` = 0)')
+            if not self._app_login(MERGER):
+                # Executed by the merger's app (ADR 0002), never with the ambient gh login.
+                return refuse('il merge del coordinatore si esegue solo con l\'app merger, e '
+                              'devloop non ce l\'ha (`[apps.merger]`)')
         elif not rules.merge:
             return refuse('la delega del merge è spenta (`[delegations] merge`)')
         elif cfg.merge.mode != 'auto' or not cfg.supervisor:

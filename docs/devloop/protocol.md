@@ -503,7 +503,8 @@ How devloop merges in the `"strict"` and `"auto"` [merge modes](guide.md#merge-m
   the head is still the approved one. It runs with the [merger app](reference.md#the-merger-app) when
   `[apps.merger]` is configured, with a token minted at that moment and limited to
   `contents=write` and `pull_requests=write`; without it, with the local `gh` login devloop runs
-  with. No other GitHub App, the dispatcher's included, gets `contents=write`. The branch is
+  with, except a [reserved merge of the coordinator](guide.md#the-reserved-merge-of-the-coordinator)
+  (#529), which without the merger app is refused. No other GitHub App, the dispatcher's included, gets `contents=write`. The branch is
   kept. A merge that GitHub refuses goes to `agent:needs-operator` like any `gh` failure.
 - **Slot.** A merge takes a slot of `max_actions_per_tick`. In `devloop tick` it runs alone,
   after the actions planned before it and before those planned after it

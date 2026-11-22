@@ -22,7 +22,7 @@ import dataclasses
 import unittest
 
 import test_devloop_delegated_merge as delegated
-from devloop import config, markdown, report, supervision
+from devloop import apps, config, markdown, report, supervision
 from devloop.config import ConfigError, DelegationPolicy, MergePolicy
 from devloop.journal import COORDINATOR_MERGE, DELEGATED_MERGE, JournalError
 from devloop.planning import Action
@@ -31,7 +31,8 @@ from helpers import ssdlc_project
 from test_devloop import CFG, REV_NAME, SHA1, SHA2, norm, raw_review, receipt
 from test_devloop_coordinator import ACTOR, COORDINATOR, TABLE, coordinated, with_coordinator
 from test_devloop_delegated_merge import ADR, OFF, OPERATOR, PRECISION, READY, REASON, adr_entry
-from test_devloop_merge import SUPERVISOR_LOGIN, header, records
+from test_devloop_merge import MERGER_LOGIN, SUPERVISOR_LOGIN, header, records
+from test_devloop_operator import GitIdentities
 
 ISSUE = 7  # the issue PR #100 closes (its ``pr`` marker)
 TAKEN = '2026-11-20T11:00:00Z'  # when devloop took the issue on (``agent:working``)
@@ -56,13 +57,23 @@ def review_body(record):
     return markdown.render_review(record, header(REV_NAME))
 
 
+class MergerIdentities(GitIdentities):
+    """The identities of the delegated merge tests, plus the merger's app (#201)."""
+
+    def login(self, actor):
+        return MERGER_LOGIN if actor == apps.MERGER else super().login(actor)
+
+
 class Case(delegated.Case):
     def make(self, cfg=COORD, diff=('x.py',), adr=None, opinion='ok', before=(),
-             approve=False):
+             approve=False, merger=True):
         """PR #100, approved and ready, whose merge is the operator's (``delegated.Case``), with
         the history of issue #7, taken on at ``TAKEN``, and its comments; with ``approve`` the
-        operator's ``/devloop approve`` written before the takeover."""
+        operator's ``/devloop approve`` written before the takeover. ``merger``: whether devloop
+        has the merger's app, which the coordinator's merge requires."""
         d = super().make(cfg, diff, adr, opinion, before)
+        if merger:
+            d.identities = MergerIdentities(self.gh)
         self.gh.others[ISSUE] = []
         read = self.gh.issue_history
 
@@ -133,6 +144,8 @@ class MergeTests(Case):
         self.assertEqual(self.gh.merged, [(100, SHA1)])
         (merged,) = records(self.gh, 'merged')
         self.assertEqual((merged['head'], merged['mode'], merged['level']), (SHA1, 'auto', 1))
+        # Executed by the merger's app (ADR 0002).
+        self.assertEqual(merged['merged_by'], MERGER_LOGIN)
         self.assertEqual(merged['delegation'], {'command': 'merge', 'by': COORDINATOR,
                                                 'comment': comment, 'reason': REASON,
                                                 'role': 'coordinator'})
@@ -310,6 +323,14 @@ class RefusalTests(Case):
         self.gh.edits = ('2026-11-21T09:00:00Z', 'brushtyler')
         self.merge()
         self.assert_refused(d, 'non ha un `/devloop approve` valido dell\'operatore')
+
+    def test_without_the_merger_app(self):
+        # A configuration without [apps.merger] is valid, and devloop would merge with the
+        # ambient gh login: the coordinator's merge is refused instead, before the cap.
+        d = self.make(merger=False)
+        self.merge()
+        self.assert_refused(d, 'il merge del coordinatore si esegue solo con l\'app merger, e '
+                               'devloop non ce l\'ha (`[apps.merger]`)')
 
     def test_a_hold_after_the_command_cancels_it(self):
         d = self.make()

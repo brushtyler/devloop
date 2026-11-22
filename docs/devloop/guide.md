@@ -930,6 +930,13 @@ Which modes exist, and that choosing one is the operator's decision, is set by
   override never relaxes `mode`.
 - **Operator-only paths.** A PR whose diff touches `operator_only_paths` (default `docs/adr/`,
   `AGENTS.md` and `CLAUDE.md`) is merged by a person, whatever the mode.
+- **The coordinator's exception.** With `[roles.coordinator]`, a PR whose merge is the
+  operator's for any of these reasons (mode `"off"`, a level `"off"`, an operator-only path) may
+  also be merged by devloop with the merger app on a `/devloop merge` of the coordinator, under
+  the conditions and the daily cap of
+  [The reserved merge of the coordinator](#the-reserved-merge-of-the-coordinator) (#529). The
+  merge mode decides only what devloop merges by itself; without the coordinator, or without
+  its command, the PR stays a person's.
 - **The merge mode of a PR** is therefore `mode`, made more restrictive by the override of the
   PR's review level, and `"off"` when its diff touches an operator-only path. Elsewhere in this
   guide, "the merge mode of a PR" means this one.
@@ -1755,7 +1762,9 @@ With every condition true devloop merges the PR with the merger's app: the `merg
 carries the command, its author, its comment, its reason and `role: coordinator` in
 `delegation`, and its text says that the coordinator asked for it; the `supervision` record
 `merged`, with `role: coordinator`, names the `/devloop approve` that covered it (`approval`)
-when one was needed.
+when one was needed. The reserved merge needs the [merger app](reference.md#the-merger-app)
+(`[apps.merger]`) whatever the merge mode, `off` included: without it the command is refused
+before the daily cap is touched, and devloop never runs it with the local `gh` login.
 
 **Daily cap.** At most **10** reserved merges of the coordinator per UTC day
 (`MAX_COORDINATOR_MERGES` in `devloop/supervision.py`), a cap of their own, apart from the
@@ -2399,7 +2408,8 @@ manifests, a host check and the migration steps.
 - the GitHub App keys in `~/.ghapps` of that user (each key mode `600`), and no `gh` login:
   devloop acts with its apps. A [merge mode](#merge-modes) other than `off` merges with the
   [merger app](reference.md#the-merger-app), whose key is there too; without that app it would
-  need a local `gh` login;
+  need a local `gh` login. The [reserved merge of the coordinator](#the-reserved-merge-of-the-coordinator)
+  needs the merger app in any mode, and never uses a local `gh` login;
 - a second system user, `devloop-agent`, that runs the agent CLIs and the tests: devloop starts
   them as that user through `sudo`, so that they cannot read the keys, `state_dir` nor the local
   overlay ([Agent user](#agent-user), #415);
@@ -3243,7 +3253,9 @@ devloop does not import `core` yet, so the pinned copy does not need it.
 ## Limits
 
 - **Merge off by default.** A human merges every PR unless the operator chooses another
-  [merge mode](#merge-modes).
+  [merge mode](#merge-modes), or turns on the coordinator (`[roles.coordinator]`), whose
+  [reserved merge](#the-reserved-merge-of-the-coordinator) merges, on its command, also in mode
+  `off` and on operator-only paths.
 - **Identities need apps.** An agent without a GitHub App publishes through the operator's `gh`
   login, and then cannot submit a native review of a PR opened with that same login.
 - **Trust comes from labels and identities.** Only issues whose `agent:ready` label was added by

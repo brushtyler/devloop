@@ -8,6 +8,7 @@ wrapper that calls it through the launcher, from the pinned copy. ``Identities``
 apps`` act on the project's ``repo`` too, with its own set of apps and key_dir (D3).
 """
 
+import dataclasses
 import importlib.machinery
 import importlib.util
 import io
@@ -238,6 +239,11 @@ class IdentitiesTests(ProjectCase):
         strict = config.parse_config(config._merge(ssdlc_project.data(), {'merge': {'mode':
                                                                                      'strict'}}))
         self.assertNotIn('[merge] mode is off', self.apps_lines(strict))
+        # With the coordinator on, its reserved merge (#529) runs with the merger app in mode
+        # off too: no note.
+        coordinated = dataclasses.replace(cfg, coordinator=config.CoordinatorActor(
+            name='codex-coordinator', kind='codex', provider='openai', model='m'))
+        self.assertNotIn('[merge] mode is off', self.apps_lines(coordinated))
 
 
 class WrapperTests(unittest.TestCase):
