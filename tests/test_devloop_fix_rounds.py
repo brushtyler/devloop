@@ -10,6 +10,7 @@ request for changes, the round counts as before.
 import dataclasses
 import unittest
 
+from devloop import markdown
 from devloop.config import (MAX_REQUESTED_FIX_ROUNDS, OVERLAY_KEYS, TRUST_KEYS, ConfigError,
                             parse_config)
 from devloop.dispatcher import pr_status_line, round_limit_reason
@@ -17,14 +18,15 @@ from devloop.planning import (Snapshot, counted_rounds, next_requested, plan, re
                               round_reasons, waived_rounds, waiver)
 from devloop.review import CI, ci_failure_review, normalize_review, open_findings
 from helpers import ssdlc_project
-from test_devloop import (CFG, SHA1, SHA2, SHA3, FakeRunner, finding, fixed, norm, pr,
-                          raw_review)
-from test_devloop_fix_command import REQUEST, Case, records
+from test_devloop import (CFG, REV_NAME, SHA1, SHA2, SHA3, FakeRunner, finding, fixed, norm,
+                          pr, raw_review)
+from test_devloop_fix_command import REQUEST, Case, header, records
 from test_devloop_merge import SUPERVISOR_LOGIN
 
 SHA4, SHA5 = 'e' * 40, 'f' * 40
 TRUSTED = CFG.trusted_users[0]
 ONE = dataclasses.replace(CFG, max_review_rounds=1)
+TWO = dataclasses.replace(CFG, max_review_rounds=2)
 
 
 def approved(number, head):
@@ -52,12 +54,17 @@ def rounds_of(reviews, fixes, cfg=CFG, closures=()):
     return waived_rounds(reviews, **waive), counted_rounds(reviews, **waive)
 
 
-def ci_closure(reviews, head):
+def ci_closure(reviews, head, comment):
     """The closures the dispatcher records for the CI findings of ``reviews`` once the CI
-    passes on ``head``."""
+    passes on ``head``, in its comment ``comment`` (the id ``_closures`` gives them)."""
     return [{'key': f['key'], 'status': 'resolved', 'by': CI, 'author': 'devloop dispatcher',
-             'reason': f'CI verde sul commit {head[:12]}', 'head_sha': head}
+             'reason': f'CI verde sul commit {head[:12]}', 'head_sha': head, 'comment': comment}
             for f in open_findings(reviews) if f['owner'] == CI]
+
+
+def ci_failure(number, head):
+    return ci_failure_review(failed_checks=['Unit Tests'], log_tail='', previous_open=[],
+                             round_no=number, max_rounds=3, head_sha=head)
 
 
 class NotCountedTests(unittest.TestCase):
@@ -95,25 +102,89 @@ class NotCountedTests(unittest.TestCase):
 
     def test_a_ci_finding_closed_before_the_request_does_not_block_it(self):
         # Round 1: the CI failed on SHA1. Round 2 approved SHA2, and the CI passed on it: the
-        # dispatcher closed the CI finding. Then the trusted user's fix pushed SHA3.
-        ci = ci_failure_review(failed_checks=['Unit Tests'], log_tail='', previous_open=[],
-                               round_no=1, max_rounds=3, head_sha=SHA1)
-        reviews = [ci, approved(2, SHA2)]
-        closures = ci_closure(reviews, SHA2)
+        # dispatcher closed the CI finding (comment 1001). Then the trusted user's fix, asked
+        # in comment 1002, pushed SHA3.
+        reviews = [ci_failure(1, SHA1), approved(2, SHA2)]
+        closures = ci_closure(reviews, SHA2, 1001)
         fixes = [requested(2, SHA2, SHA3)]
-        two = dataclasses.replace(CFG, max_review_rounds=2)
-        self.assertEqual(next_requested(reviews, **waiver(two, fixes, closures)), (TRUSTED,))
+        self.assertEqual(next_requested(reviews, **waiver(TWO, fixes, closures)), (TRUSTED,))
         snap_pr = dataclasses.replace(pr(reviews=reviews, fixes=fixes, head=SHA3),
                                       closures=closures)
-        self.assertEqual([a.kind for a in plan(_snapshot(snap_pr), two)], ['review'])
+        self.assertEqual([a.kind for a in plan(_snapshot(snap_pr), TWO)], ['review'])
         done = reviews + [approved(3, SHA3)]
         self.assertEqual(rounds_of(done, fixes, closures=closures), ({3}, 2))
         # Without the closure the finding was open at the request: the round counts.
         self.assertEqual(rounds_of(done, fixes), (set(), 3))
-        # A closure recorded only after the request, on the corrected head, does not reach
-        # back to it.
-        self.assertEqual(rounds_of(done, fixes, closures=ci_closure(reviews, SHA3)),
+        # A closure recorded only after the request does not reach back to it.
+        self.assertEqual(rounds_of(done, fixes, closures=ci_closure(reviews, SHA3, 1003)),
                          (set(), 3))
+
+    def test_a_closure_on_a_head_no_review_saw_counts_when_it_came_first(self):
+        # The CI failed on SHA1 and passed on SHA2, which no review saw: the dispatcher closed
+        # the finding (comment 1001). Round 2 approved SHA3, then the fix was asked (1002).
+        reviews = [ci_failure(1, SHA1), approved(2, SHA3)]
+        closures = ci_closure(reviews, SHA2, 1001)
+        fixes = [requested(2, SHA3, SHA4)]
+        self.assertEqual(open_findings(reviews, closures), [])
+        self.assertEqual(next_requested(reviews, **waiver(TWO, fixes, closures)), (TRUSTED,))
+        self.assertEqual(rounds_of(reviews + [approved(3, SHA4)], fixes, closures=closures),
+                         ({3}, 2))
+
+
+class ClosureOrderTests(Case):
+    def test_a_closure_after_the_request_on_the_same_head_does_not_reach_back(self):
+        # Round 2 approved SHA2 with the CI finding of round 1 still open; the trusted user
+        # asked a fix (1002), which made no commit: the head stays SHA2. The CI then passed on
+        # SHA2 and the dispatcher closed the finding (1003), after the request.
+        reviews = [ci_failure(1, SHA1), approved(2, SHA2)]
+        fixes = [requested(2, SHA2, SHA2)]
+        snap_pr = pr(reviews=reviews, fixes=fixes, head=SHA2)
+        # The CI passed: the dispatcher records the closure first.
+        self.assertEqual([a.kind for a in plan(_snapshot(snap_pr), TWO)], ['findings'])
+        closures = ci_closure(reviews, SHA2, 1003)
+        self.assertEqual(open_findings(reviews, closures), [])
+        self.assertEqual(next_requested(reviews, **waiver(TWO, fixes, closures)), ())
+        closed = dataclasses.replace(snap_pr, closures=closures)
+        self.assertEqual([a.kind for a in plan(_snapshot(closed), TWO)], ['round_limit'])
+        self.assertEqual(rounds_of(reviews + [approved(3, SHA2)], fixes, closures=closures),
+                         (set(), 3))
+
+    def test_without_the_ids_no_closure_counts(self):
+        reviews = [ci_failure(1, SHA1), approved(2, SHA2)]
+        (fix,) = [requested(2, SHA2, SHA3)]
+        anonymous = dict(fix, requests=[dict(fix['requests'][0], comment=None)])
+        for closures, fixes in ((ci_closure(reviews, SHA2, None), [fix]),
+                                (ci_closure(reviews, SHA2, 1001), [anonymous])):
+            with self.subTest(closures=closures, fixes=fixes):
+                self.assertEqual(next_requested(reviews, **waiver(TWO, fixes, closures)), ())
+
+    def test_the_dispatcher_orders_closures_and_requests_by_their_comments(self):
+        d = self.make(cfg=TWO)
+        self.gh.head = SHA2
+        reviews = [ci_failure(1, SHA1), approved(2, SHA2)]
+        self.gh.say('brushtyler', markdown.render_review(reviews[0], header()))
+        self.gh.say('brushtyler', markdown.render_review(reviews[1], header(REV_NAME)))
+        (closure,) = ci_closure(reviews, SHA2, None)
+        del closure['comment']
+        body = markdown.publishable('Finding chiusi.', 'finding', {'closed': [closure]})
+        command = '/devloop fix\n' + REQUEST
+        for closed_first in (True, False):
+            with self.subTest(closed_first=closed_first):
+                thread = list(self.gh.thread)
+                if closed_first:
+                    closed = self.gh.say('brushtyler', body)
+                    asked = self.gh.say(TRUSTED, command)
+                else:
+                    asked = self.gh.say(TRUSTED, command)
+                    closed = self.gh.say('brushtyler', body)
+                snap_pr = d.snapshot().prs[0]
+                self.assertEqual([c['comment'] for c in snap_pr.closures], [closed])
+                fixes = [dict(requested(2, SHA2, SHA3),
+                              requests=[{'comment': asked, 'by': TRUSTED, 'request': REQUEST}])]
+                self.assertEqual(next_requested(snap_pr.reviews,
+                                                **waiver(TWO, fixes, snap_pr.closures)),
+                                 (TRUSTED,) if closed_first else ())
+                self.gh.thread = thread
 
 
 class CountedTests(unittest.TestCase):

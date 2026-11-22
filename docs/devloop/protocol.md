@@ -228,9 +228,11 @@ the dispatcher's `supervision` records of the PR, plus the rounds that did not c
 round the fix answers approved the head the fix ran on: a complete agent round of the quorum
 with an `approve` verdict, every review of it with a valid policy receipt and on the `from` head
 of every fix record that answers the round, no blocking finding left open. The findings closed
-count with the dispatcher's closures (`finding` records) recorded on that head or on an earlier
-reviewed one, those it had already recorded at the request: a closure recorded later, on a later
-head, does not reach back to it. Every fix that answers that round must be one asked with the
+count with the dispatcher's closures (`finding` records) already recorded at the request: those
+whose comment comes before the comment of every `/devloop fix` the fix answers, since GitHub's
+comment ids grow with time, on whatever head they were recorded. A closure recorded after the
+request never reaches back to it, even on the same head (a fix without a commit leaves it as it
+was); without the comment ids no closure counts. Every fix that answers that round must be one asked with the
 command, and every request of it must come from a trusted user: two `/devloop fix` before a new
 review answer one round, and the second ran on a head no review approved. The round's own
 verdict does not matter. At most

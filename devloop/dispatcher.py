@@ -1141,8 +1141,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         # Its fixes and finding closures, for the rounds after a /devloop fix that do not
         # count (#536).
         pr.fixes = self._markers(pr, comments, 'fix')
-        pr.closures = [c for record in self._markers(pr, comments, 'finding')
-                       for c in record['closed']]
+        pr.closures = self._closures(pr, comments)
         return [record for _, record in self._marker_entries(pr, comments, 'review')]
 
     def snapshot(self):

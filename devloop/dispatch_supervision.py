@@ -1914,6 +1914,19 @@ class SupervisionMixin:
             found = {'event': event, 'by': login, 'reason': reason, 'comment': number}
         return found
 
+    def _closures(self, pr, comments):
+        """The finding closures the dispatcher recorded in ``comments`` (``finding`` markers),
+        oldest first, each with the id of the comment that records it (``comment``, only in
+        memory): GitHub's comment ids grow with time, so the id tells whether a closure came
+        before a ``/devloop fix`` (#536). A comment without an id leaves it None."""
+        found = []
+        for position, record in self._marker_entries(pr, comments, 'finding'):
+            ident = comments[position].get('id')
+            found += [dict(c, comment=ident if isinstance(ident, int)
+                           and not isinstance(ident, bool) else None)
+                      for c in record['closed']]
+        return found
+
     def _read_thread(self, pr, comments):
         """Fill ``pr`` with what its conversation records, from the identities allowed to write
         it: reviews, fixes, syncs, finding closures and commands, policy records, and the hold
@@ -1926,8 +1939,7 @@ class SupervisionMixin:
         pr.fixes = self._markers(pr, comments, 'fix')
         pr.syncs = self._markers(pr, comments, 'sync')
         pr.reruns = self._markers(pr, comments, 'rerun')
-        pr.closures =[c for record in self._markers(pr, comments, 'finding')
-                       for c in record['closed']]
+        pr.closures = self._closures(pr, comments)
         state = finding_state(pr.reviews, pr.closures)
         pr.finding_problems = problems + state.problems
         pr.commands = self._finding_commands(pr, comments, state)

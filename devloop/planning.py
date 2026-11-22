@@ -1056,13 +1056,23 @@ def waiver(cfg, fixes, closures=()):
             'closures': closures}
 
 
-def _closures_until(reviews, closures):
-    """The ``closures`` the dispatcher recorded while the head was one of those ``reviews``
-    reviewed: those already recorded at a request on the head of the latest of them, since a
-    closure carries the head it was recorded on (``head_sha``). A closure recorded later, on a
-    later head, does not reach back to an earlier request (#536)."""
-    heads = {r.get('head_sha') for r in reviews} - {None}
-    return [c for c in closures if isinstance(c, dict) and c.get('head_sha') in heads]
+def _comment_id(value):
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _closures_before(fixes, closures):
+    """The ``closures`` already recorded when the first ``/devloop fix`` that ``fixes`` answer
+    was asked (#536): those whose comment (``comment``, the id ``_closures`` gives them) comes
+    before the comment of every request, since GitHub's comment ids grow with time. The head a
+    closure was recorded on proves no order: a fix without a commit leaves the head as it was,
+    and a closure may come on a head no review saw. A closure recorded later never reaches back
+    to the request; without the ids of the requests, or of the closure, none counts."""
+    asked = [_comment_id(q.get('comment')) for f in fixes for q in f['requests']]
+    if not asked or None in asked:
+        return []
+    first = min(asked)
+    return [c for c in closures if isinstance(c, dict)
+            and _comment_id(c.get('comment')) is not None and c['comment'] < first]
 
 
 def _requesters(reviews, fixes, number, trusted, closures=()):
@@ -1070,7 +1080,7 @@ def _requesters(reviews, fixes, number, trusted, closures=()):
     the round approved the head they asked on: a complete agent round of the quorum with an
     ``approve`` verdict, every record with a valid policy receipt (without one the quorum is not
     proven), every record on the head (``from``) of every fix that answers it, and no blocking
-    finding left open, with the ``closures`` recorded by then (``_closures_until``). Every fix
+    finding left open, with the ``closures`` recorded by then (``_closures_before``). Every fix
     that answers the round is one asked with the command, and every request of them comes from
     ``trusted``: a fix of the reviewers' findings, or one the supervisor or the coordinator
     asked, gives none. Two fixes that answer one round give none either: the second ran on the
@@ -1086,7 +1096,7 @@ def _requesters(reviews, fixes, number, trusted, closures=()):
             or any(receipt_of(r) is None for r in records) or pending_reviewers(records)
             or round_verdict(records) != 'approve'
             or any(r.get('head_sha') != f.get('from') for r in records for f in answering)
-            or open_findings(earlier, _closures_until(earlier, closures))):
+            or open_findings(earlier, _closures_before(answering, closures))):
         return ()
     by = [request.get('by') for f in answering for request in f['requests']]
     if not all(isinstance(login, str) and login in trusted for login in by):
