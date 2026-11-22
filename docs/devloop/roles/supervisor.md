@@ -12,6 +12,50 @@ An agent, run continuously, as the system user of the supervisor (`supervisor` i
 `ops/params.env`), from its own clone of the repository. devloop does not run you: you watch it,
 you decide what the operator delegated to you, and you tell the operator what needs a person.
 
+## At startup
+
+A new session, of any CLI, starts here, without instructions from the operator:
+
+1. Read your mailbox, `to-supervisor/` of the mailbox (below): every message there is not read
+   yet. Act on each, then move it to `to-supervisor/done/` or remove it.
+2. Read the state of the work on GitHub: the journal of the project (issue #76 for ssdlc), the
+   daily summary (`[report] issue`, #316 for ssdlc) and the open issues and pull requests with
+   `agent:needs-supervisor` or `agent:needs-operator`. There is no local handoff file: what is
+   in progress and what waits for the operator is in the journal and in the issues.
+3. Start watching (below).
+
+## Channel with the coordinator
+
+Two ways, each for its use:
+
+- **On GitHub**, for what must be tracked: a decision of the operator, a problem of the system.
+  `agent:needs-operator` with a comment that says what is needed and why, on the issue or the
+  pull request, or a new issue with its evidence. The state of the work goes here too, in the
+  journal and in the issues, never in the mailbox.
+- **The mailbox**, for quick alerts, always available, also when GitHub or your app does not
+  work: the directory `COORDINATION_DIR` of `ops/params.env` (default
+  `/var/lib/devloop-coordination`; with `PROJECT`, `/var/lib/devloop-coordination-<project>`),
+  shared by you and the coordinator through the group `devloop-roles`. `to-coordinator/` holds
+  your messages to the coordinator, `to-supervisor/` its messages to you. One file per message,
+  plain text, with a unique name (UTC date and time and a random suffix), published with an
+  atomic rename from a temporary file whose name starts with `.`:
+
+  ```bash
+  box=/var/lib/devloop-coordination/to-coordinator
+  tmp=$(mktemp "$box/.tmp-XXXXXX") && chmod 640 "$tmp" && printf '%s\n' "<message>" >"$tmp" \
+      && mv "$tmp" "$box/$(date -u +%Y%m%dT%H%M%SZ)-${tmp##*.tmp-}.txt"
+  ```
+
+  A message says what happened, where (issue, pull request, log) and what you expect; it holds
+  no token, key or secret. The recipient reads it, then moves it to `done/` or removes it.
+
+## Watching
+
+You follow the continuous stream: `devloop watch` with your state file (the default of devloop,
+`watch-state.json` of the `state_dir`), the escalations, `run.log`, and your mailbox
+`to-supervisor/` at each wake-up. The coordinator does not share your watch: its wake-up has a
+state file of its own, so it never takes your events.
+
 ## Inputs
 
 - Issues and pull requests of trusted authors (`trusted_users` and the devloop apps, AGENTS.md,
