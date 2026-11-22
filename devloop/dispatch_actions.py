@@ -26,7 +26,7 @@ from .context import (_cli_state_refused, _failure_text, _format_conflicts, _for
                       docs_diff_section, docs_map_section, docs_review_section, format_ci_summary,
                       format_fix_requests, format_operator_comments, format_operator_decisions,
                       format_previous_rounds, owner_assessments, prompt_values)
-from .github import GitHubError, GitHubUncertain, job_id
+from .github import GitHubError, GitHubUncertain, LogUnreadable, job_id
 from .hoststep import format_step, render_step
 from .hoststep import latest as latest_host_step
 from .ledger import attempt_branch, attempt_marker, fix_register
@@ -297,7 +297,7 @@ class ActionsMixin:
             return self._escalate_level(pr, receipt)
         if self._rerun_unrelated(pr, paths):
             return
-        log_tail = '\n'.join(self.gh.failed_log(run) for run in pr.failed_runs[:2])
+        log_tail = '\n'.join(self._failed_log(run) for run in pr.failed_runs[:2])
         # One head, one round (#352, #359): a failure on the head of a round that asked for
         # changes, or approved, is a ci finding of that round, not a round of its own.
         joined = ci_joins_round(pr)
@@ -350,6 +350,15 @@ class ActionsMixin:
                      + (', voiding its approval' if voided else ''))
         self._apply_round(pr, records, announce=True, reviews=earlier + records)
 
+    def _failed_log(self, run):
+        """The tail of the failed log of run ``run`` for the CI finding, empty, with the reason
+        in the run.log, when `gh` cannot read it (#545)."""
+        try:
+            return self.gh.failed_log(run)
+        except LogUnreadable as exc:
+            self.log(f'  the failed log of run {run} cannot be read: {exc}')
+            return ''
+
     def _rerun_unrelated(self, pr, paths):
         """Re-run once the failed jobs of the head's CI when its failure does not concern the
         PR (#200); whether it did. Only at the first failure of a head (``rerun`` marker), with
@@ -378,8 +387,14 @@ class ActionsMixin:
         modules = set()
         for check in failed:
             job = job_id(check.get('link'))
-            found = None if job is None else failed_modules(
-                self.gh.failed_log(check['run_id'], max_lines=None, job_id=job))
+            try:
+                found = None if job is None else failed_modules(
+                    self.gh.failed_log(check['run_id'], max_lines=None, job_id=job))
+            except LogUnreadable as exc:
+                # Why `gh` could not read it stays in the run.log (#545).
+                self.log(f'  CI rerun: the log of the failed job {check.get("name")} (run '
+                         f'{check["run_id"]}) cannot be read: {exc}; CI round')
+                return False
             if found is None:
                 self.log(f'  CI rerun: the log of the failed job {check.get("name")} (run '
                          f'{check["run_id"]}) does not tell which test modules failed; CI round')

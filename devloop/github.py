@@ -64,6 +64,8 @@ _NOT_SENT = re.compile(r'\bdial tcp\b|\berror connecting to\b|\bTLS handshake\b'
 # The exit codes of coreutils ``timeout`` once it stopped its command (#397): 124 after SIGTERM,
 # 137 (128 + 9) after SIGKILL.
 _TIMED_OUT = (124, 137)
+# The temporary directory of devloop's `gh` (``GitHub.tmp_dir``, #545), in ``state_dir``.
+GH_TMP_DIR = 'gh-tmp'
 
 
 class GitHubError(RuntimeError):
@@ -83,6 +85,12 @@ class GitHubUncertain(GitHubError):
     have taken effect: ``ports.reconcile_comment`` tells whether a comment did, the outbox of
     the publications (``outbox.Outbox``) whether any of them did. Being a ``GitHubError``, it is
     handled as a failed write wherever nothing reconciles it."""
+
+
+class LogUnreadable(GitHubError):
+    """`gh` ran and could not read the failed log asked for (#545): expired, not yet available,
+    a cache it cannot write. The message holds its stderr, cut. Unlike a timeout or no time
+    left, it is an answer: the caller goes on without the log, and logs why."""
 
 
 def _uncertain(stderr):
@@ -135,10 +143,15 @@ class GitHub:
     KILL_AFTER = 5
     WRAPPED_GRACE = KILL_AFTER + 10
 
-    def __init__(self, repo, run=subprocess.run, token=None, time_left=None):
+    def __init__(self, repo, run=subprocess.run, token=None, time_left=None, tmp_dir=None):
         self.repo = repo
         self._run = run
         self._token = token
+        # The temporary directory of each `gh` (``TMPDIR``, #545), created with mode 700 at the
+        # first call, or None for the system's: `gh` keeps there the cache of the logs it
+        # downloads (``gh-cli-cache``), which in a ``/tmp`` shared with other users may be
+        # theirs, and not writable.
+        self.tmp_dir = tmp_dir
         self._local = threading.local()
         self.time_left = time_left
         # The descriptor of the dispatcher lock, set by devloop once it holds it, only with the
@@ -177,6 +190,8 @@ class GitHub:
         if self._token is not None:
             env = {k: v for k, v in os.environ.items() if k not in ('GITHUB_TOKEN', 'GH_TOKEN')}
             kwargs['env'] = dict(env, GH_TOKEN=self._token())
+        if self.tmp_dir is not None:
+            kwargs['env'] = dict(kwargs.get('env', os.environ), TMPDIR=self._tmp(args))
         held = write and self.lock_fd is not None
         if held:
             kwargs['pass_fds'] = tuple(fd for fd in (self.lock_fd, self.repo_lock_fd)
@@ -212,6 +227,17 @@ class GitHub:
                 error = GitHubError
             raise error(f'gh {" ".join(args[:3])}: {stderr.strip()[:500]}')
         return done
+
+    def _tmp(self, args):
+        """``tmp_dir``, created if missing, with mode 700 (#545)."""
+        tmp = os.fspath(self.tmp_dir)
+        try:
+            os.makedirs(tmp, mode=0o700, exist_ok=True)
+            os.chmod(tmp, 0o700)
+        except OSError as exc:
+            raise GitHubError(f'gh {" ".join(args[:3])}: temporary directory {tmp}: '
+                              f'{exc}') from exc
+        return tmp
 
     def _time_left(self, args):
         left = self.time_left() if self.time_left is not None else None
@@ -524,9 +550,13 @@ class GitHub:
 
     def failed_log(self, run_id, max_lines=80, job_id=None):
         """The last ``max_lines`` of the failed steps of run ``run_id`` (all of them with None),
-        or only of its job ``job_id`` when given (#200); empty when `gh` cannot read the log."""
+        or only of its job ``job_id`` when given (#200). When `gh` cannot read the log it raises
+        ``LogUnreadable``, with its stderr (#545)."""
         target = ('--job', str(int(job_id))) if job_id is not None else (str(run_id),)
         done = self._gh('run', 'view', *target, '-R', self.repo, '--log-failed', check=False)
+        if done.returncode != 0:
+            reason = ' '.join((done.stderr or '').split())[:300] or f'exit {done.returncode}'
+            raise LogUnreadable(f'gh run view {" ".join(target)}: {reason}')
         lines = done.stdout.splitlines()
         return '\n'.join(lines if max_lines is None else lines[-max_lines:])
 

@@ -1,12 +1,19 @@
 """Re-run of a CI failure in test modules not pertinent to the PR, without a round (issue #200)."""
 
 import dataclasses
+import os
+import stat
+import sys
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from devloop import config, markdown
+from devloop.apps import DISPATCHER, AppAuth, Identities
 from devloop.dispatcher import Dispatcher
-from devloop.github import GitHub, GitHubError, job_id
+from devloop.github import GH_TMP_DIR, GitHub, GitHubError, LogUnreadable, job_id
 from devloop.localtests import failed_modules
 from devloop.planning import plan
 from devloop.ports import summarize_checks
@@ -205,6 +212,27 @@ class RerunTests(unittest.TestCase):
         self.assertTrue(any('failed job Benchmark A5 (run 42) does not tell' in line
                             for line in self.lines))
 
+    def test_a_log_gh_cannot_read_leaves_its_reason_in_the_run_log(self):
+        # #545: `gh run view --log-failed` fails; the run.log says why, not only that the log
+        # does not tell which modules failed.
+        reason = ('gh run view --job 1: failed to get run log: open /tmp/gh-cli-cache/'
+                  'run-log-42-1.zip: permission denied')
+        gh = CIGH()
+        # The tail of the round reads the whole run, by the id of its link.
+        gh.log_errors = {(RUN, 1): reason, str(RUN): reason.replace('--job 1', '42')}
+        d = self.make(gh)
+        self.assertEqual(self.step(d), ['ci_failed'])
+        self.assertFalse(hasattr(gh, 'reruns'))
+        [round_] = self.reviews()
+        self.assertEqual(round_['source'], 'ci')
+        self.assertEqual(gh.labels[100], {'agent:changes'})
+        [rerun] = [line for line in self.lines if 'CI rerun:' in line]
+        self.assertIn('failed job Unit Tests (Python 3.12) (run 42) cannot be read', rerun)
+        self.assertIn('permission denied', rerun)
+        self.assertTrue(rerun.endswith('; CI round'))
+        [tail] = [line for line in self.lines if 'failed log of run 42 cannot be read' in line]
+        self.assertIn('permission denied', tail)
+
     def test_a_403_on_the_rerun_is_a_round_as_before_with_a_log_line(self):
         gh = CIGH()
         gh.rerun_error = GitHubError('gh api -X POST: Resource not accessible by integration '
@@ -294,10 +322,100 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(self.calls[-1], ['gh', 'run', 'view', str(RUN), '-R', 'o/r',
                                           '--log-failed'])
 
+    def test_a_failed_log_gh_cannot_read_raises_with_its_stderr(self):
+        gh = self.make(1, 'failed to get run log: open /tmp/gh-cli-cache/run-log-42-1.zip: '
+                          'permission denied\n')
+        with self.assertRaises(LogUnreadable) as caught:
+            gh.failed_log(RUN, job_id=1)
+        self.assertEqual(str(caught.exception),
+                         'gh run view --job 1: failed to get run log: open '
+                         '/tmp/gh-cli-cache/run-log-42-1.zip: permission denied')
+        with self.assertRaisesRegex(LogUnreadable, r'^gh run view 42: exit 1$'):
+            self.make(1).failed_log(RUN)
+
     def test_the_job_of_a_check_link(self):
         self.assertEqual(job_id(LINK), 1)
         self.assertIsNone(job_id(f'https://github.com/o/r/actions/runs/{RUN}'))
         self.assertIsNone(job_id(None))
+
+
+# A `gh` that, as the real one, keeps the downloaded log in <TMPDIR>/gh-cli-cache (#545).
+FAKE_GH = '''\
+import os, sys, tempfile
+cache = os.path.join(tempfile.gettempdir(), 'gh-cli-cache')
+path = os.path.join(cache, 'run-log-42-1.zip')
+try:
+    os.makedirs(cache, exist_ok=True)
+    with open(path, 'w') as f:
+        f.write('zip')
+except OSError as exc:
+    sys.exit(f'failed to get run log: open {path}: {exc.strerror.lower()}')
+print('the failed log')
+'''
+
+
+class TmpDirTests(unittest.TestCase):
+    """The `gh` of devloop with a temporary directory of its own (#545)."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        bin_dir = self.root / 'bin'
+        bin_dir.mkdir()
+        gh = bin_dir / 'gh'
+        gh.write_text(f'#!{sys.executable}\n' + FAKE_GH)
+        gh.chmod(0o755)
+        # The shared /tmp, whose gh-cli-cache another user created with mode 755.
+        self.shared = self.root / 'shared-tmp'
+        (self.shared / 'gh-cli-cache').mkdir(parents=True)
+        (self.shared / 'gh-cli-cache').chmod(0o555)
+        self.addCleanup((self.shared / 'gh-cli-cache').chmod, 0o755)
+        env = {'PATH': f'{bin_dir}{os.pathsep}{os.environ.get("PATH", "")}',
+               'TMPDIR': str(self.shared)}
+        patcher = mock.patch.dict(os.environ, env)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    @unittest.skipIf(os.geteuid() == 0, 'root writes in any directory')
+    def test_the_shared_cache_of_another_user_makes_the_log_unreadable(self):
+        with self.assertRaisesRegex(LogUnreadable, 'permission denied'):
+            GitHub('o/r').failed_log(RUN, job_id=1)
+
+    def test_the_failed_log_reads_with_the_tmp_dir_of_devloop(self):
+        state = self.root / 'state'
+        state.mkdir()
+        tmp_dir = state / GH_TMP_DIR
+        for gh in (GitHub('o/r', tmp_dir=tmp_dir),
+                   GitHub('o/r', token=lambda: 'tok', tmp_dir=tmp_dir)):
+            with self.subTest(token=gh._token is not None):
+                self.assertEqual(gh.failed_log(RUN, job_id=1), 'the failed log')
+                self.assertEqual(stat.S_IMODE(tmp_dir.stat().st_mode), 0o700)
+                self.assertTrue((tmp_dir / 'gh-cli-cache' / 'run-log-42-1.zip').is_file())
+        self.assertEqual(list((self.shared / 'gh-cli-cache').iterdir()), [])
+
+    def test_an_existing_tmp_dir_gets_mode_700(self):
+        tmp_dir = self.root / GH_TMP_DIR
+        tmp_dir.mkdir(mode=0o755)
+        tmp_dir.chmod(0o755)
+        GitHub('o/r', tmp_dir=tmp_dir).failed_log(RUN, job_id=1)
+        self.assertEqual(stat.S_IMODE(tmp_dir.stat().st_mode), 0o700)
+
+    def test_a_tmp_dir_that_cannot_be_made_is_a_github_error(self):
+        (self.root / 'file').write_text('')
+        calls = []
+        gh = GitHub('o/r', run=lambda *a, **kw: calls.append(a), tmp_dir=self.root / 'file' / 'x')
+        with self.assertRaisesRegex(GitHubError, 'temporary directory'):
+            gh.failed_log(RUN)
+        self.assertEqual(calls, [])
+
+    def test_every_client_of_the_identities_gets_the_tmp_dir(self):
+        tmp_dir = self.root / GH_TMP_DIR
+        identities = Identities('o/r', {'claude': AppAuth(1, 'slug', None, 'o/r')},
+                                tmp_dir=tmp_dir)
+        self.assertEqual(identities.direct(DISPATCHER).tmp_dir, tmp_dir)  # the ambient login
+        self.assertEqual(identities.direct('claude').tmp_dir, tmp_dir)
+        self.assertIsNone(Identities('o/r', {}).direct(DISPATCHER).tmp_dir)
 
 
 class ConfigTests(unittest.TestCase):
