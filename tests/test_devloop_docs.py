@@ -380,6 +380,33 @@ class DocumentationTests(unittest.TestCase):
         self.assertIn('documentation map](#documentation-map)', text)
 
 
+class Adr0007Tests(unittest.TestCase):
+    """ADR 0007 records the move from ssdlc to devloop, and ADR 0001 points to it (#533)."""
+
+    APPROVAL = 'https://github.com/brushtyler/ssdlc/issues/533#issuecomment-7083511946'
+
+    def read(self, name):
+        return (REPO / 'docs/adr' / name).read_text(encoding='utf-8')
+
+    def test_adr_0007_records_context_decisions_fixed_points_and_plan(self):
+        text = self.read('0007-da-ssdlc-a-devloop.md')
+        status = next(line for line in text.splitlines() if line.startswith('- **Stato:**'))
+        self.assertIn(self.APPROVAL, status)
+        self.assertIn('operator_only_paths', status)
+        headings = [line for line in text.splitlines() if line.startswith('## ')]
+        self.assertEqual(headings, ['## Contesto', '## Decisioni', '## Punti fissati', '## Piano'])
+        for phrase in ('`ssdlc-engine-final`', '`brushtyler/devloop`', '`SOURCE_REPO`',
+                       '(#1, #4, #253)', '#515', '| R1 |', '| R2 |', '| R3 |', '| R4 |'):
+            self.assertIn(phrase, text)
+        self.assertIn('[0007](0007-da-ssdlc-a-devloop.md)', self.read('README.md'))
+
+    def test_adr_0001_status_points_to_adr_0007(self):
+        status = next(line for line in self.read('0001-prodotto-unico-fasi-su-tracker.md').splitlines()
+                      if line.startswith('- **Stato:**'))
+        self.assertIn('Superato per la parte del motore da [ADR 0007](0007-da-ssdlc-a-devloop.md)',
+                      status)
+
+
 class GuideWithoutDuplicatesTests(unittest.TestCase):
     """docs/devloop/guide.md links to ADR 0002 and describes the merge modes once (#243)."""
 
