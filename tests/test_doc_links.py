@@ -11,8 +11,13 @@ The check reads README.md, AGENTS.md and every Markdown page under docs/ and rep
   (``CODE_DIRS``) or name a ``*.py`` file at the root, and do not exist.
 
 External links (any URL scheme, such as ``https:`` or ``mailto:``), fenced code blocks
-and the line after a ``<!-- doc-links: ignore -->`` comment are not checked.
+and the line after a ``<!-- doc-links: ignore -->`` comment are not checked. The ADRs
+(``docs/adr/``) are records of their time: a link or a cited path of theirs that names a
+path of the SSDLC engine, which left ``main`` with ADR 0007, R1 and stays in the tag
+``ssdlc-engine-final`` (``tests/helpers/engine.py``), is history, not a broken reference.
+Anywhere else it is broken, as any other.
 """
+import posixpath
 import re
 import tempfile
 import unicodedata
@@ -21,8 +26,12 @@ from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote
 
+from helpers import engine
+
 ROOT = Path(__file__).resolve().parents[1]
-CODE_DIRS = ('devloop/', 'scripts/', 'schemas/', 'docs/', 'tests/')
+# The records of their time: see the module.
+HISTORY = 'docs/adr/'
+CODE_DIRS = ('devloop/', 'scripts/', 'core/', 'docs/', 'tests/')
 IGNORE = '<!-- doc-links: ignore -->'
 
 # Allow-list of known broken references, each (page, target exactly as written). The
@@ -185,6 +194,22 @@ class Problem:
     def __str__(self):
         return f'{self.page}:{self.line}: {self.target!r}: {self.message}'
 
+    @property
+    def path(self):
+        """The repository path the target names: a cited path as it is, a link resolved from the
+        directory of its page."""
+        if self.message in ('cited path not found', 'no file matches this pattern'):
+            return self.target
+        target = self.target[1:-1] if self.target.startswith('<') else self.target
+        target = unquote(target.partition('#')[0])
+        return posixpath.normpath(posixpath.join(posixpath.dirname(self.page), target))
+
+    @property
+    def engine_history(self):
+        """An ADR naming a path of the SSDLC engine that left ``main`` (see the module)."""
+        return (self.page.startswith(HISTORY) and self.message != 'no heading with this anchor'
+                and engine.is_engine_path(self.path))
+
 
 def _check_link(root, page, target, cache):
     target = target[1:-1] if target.startswith('<') else target
@@ -223,14 +248,11 @@ def broken_references(root):
             spans = [match.group(2).strip() for match in _CODE_SPAN.finditer(line)]
             prose = _CODE_SPAN.sub('', line)
             targets = _inline_links(prose) + _REFERENCE.findall(prose)
-            for target in targets:
-                message = _check_link(root, page, target, cache)
-                if message:
-                    problems.append(Problem(name, number, target, message))
-            for span in spans:
-                message = _check_cited(root, span)
-                if message:
-                    problems.append(Problem(name, number, span, message))
+            found = [Problem(name, number, target, message) for target in targets
+                     if (message := _check_link(root, page, target, cache))]
+            found += [Problem(name, number, span, message) for span in spans
+                      if (message := _check_cited(root, span))]
+            problems += [problem for problem in found if not problem.engine_history]
     return problems
 
 
@@ -300,14 +322,32 @@ class DocLinkCheckTests(unittest.TestCase):
 
     def test_reports_a_missing_cited_path(self):
         self.assertEqual(self.broken({
-            'README.md': 'See `devloop/gone.py`, `schemas/x.json`, `missing.py` and `tests/nope_*.py`.\n',
+            'README.md': 'See `devloop/gone.py`, `core/x.py`, `missing.py` and `tests/nope_*.py`.\n',
             'AGENTS.md': 'Run `scripts/run.py`.\n',
         }), [
             ('README.md', 'devloop/gone.py', 'cited path not found'),
-            ('README.md', 'schemas/x.json', 'cited path not found'),
+            ('README.md', 'core/x.py', 'cited path not found'),
             ('README.md', 'missing.py', 'cited path not found'),
             ('README.md', 'tests/nope_*.py', 'no file matches this pattern'),
             ('AGENTS.md', 'scripts/run.py', 'cited path not found'),
+        ])
+
+    def test_the_adrs_may_name_the_engine_that_left_main(self):
+        # ADR 0007, R1 (#538): in docs/adr/ a path of the engine is history; elsewhere, and any
+        # other missing path or anchor in an ADR, is still broken.
+        adr = ('See `orchestrator.py`, `schemas/`, `tests/test_review_closure.py`, '
+               '[task mode](../task-mode.md#x) and [evidence](../evidence/a.json).\n'
+               'Not history: `devloop/gone.py`, [gone](../gone.md), [anchor](../a.md#nowhere).\n')
+        self.assertEqual(self.broken({
+            'README.md': 'See `orchestrator.py` and [task mode](docs/task-mode.md).\n',
+            'docs/a.md': '# A\n',
+            'docs/adr/0001-x.md': adr,
+        }), [
+            ('README.md', 'docs/task-mode.md', 'file not found'),
+            ('README.md', 'orchestrator.py', 'cited path not found'),
+            ('docs/adr/0001-x.md', '../gone.md', 'file not found'),
+            ('docs/adr/0001-x.md', '../a.md#nowhere', 'no heading with this anchor'),
+            ('docs/adr/0001-x.md', 'devloop/gone.py', 'cited path not found'),
         ])
 
     def test_github_slugs_cover_punctuation_code_and_duplicates(self):
@@ -404,24 +444,23 @@ class RepositoryDocLinksTests(unittest.TestCase):
         architecture = (ROOT / 'docs' / 'architecture.md').read_text(encoding='utf-8')
         self.assertIn('\n## Ports and adapters\n', architecture)
 
-    def test_the_architecture_describes_the_product_before_the_engine(self):
-        # #244 (ADR 0003, I7): components, engine and dispatcher, ports and adapters, the
-        # devloop boundary and the future `core` package, then the local engine.
+    def test_the_architecture_describes_devloop_without_the_engine(self):
+        # #244 (ADR 0003, I7): components, ports and adapters, the devloop boundary and the
+        # `core` package. The sections of the local engine left with it (ADR 0007, R1, #538).
         architecture = (ROOT / 'docs' / 'architecture.md').read_text(encoding='utf-8')
         headings = [line for line in architecture.splitlines() if line.startswith('## ')]
-        product = ['## Components', '## Engine and dispatcher', '## Ports and adapters',
-                   '## The devloop boundary', '## Future `core` package']
-        self.assertEqual(headings[:len(product)], product)
-        self.assertEqual(headings[len(product)], '## Phases')
-        self.assertIn('\n### Task journal: guarantees and threat model\n', architecture)
+        product = ['## Components', '## Ports and adapters', '## The devloop boundary',
+                   '## Future `core` package']
+        self.assertEqual(headings, product)
         sections = {heading: architecture.split(f'\n{heading}\n', 1)[1].split('\n## ', 1)[0]
                     for heading in product}
-        for code in ('`orchestrator.py`', '`ssdlc_*.py`', '`devloop/`'):
+        for code in ('`devloop/`', '`core/`'):
             self.assertIn(code, sections['## Components'])
         self.assertIn('`tests/test_devloop_boundary.py`', sections['## The devloop boundary'])
-        self.assertIn('adr/0001-prodotto-unico-fasi-su-tracker.md', architecture)
-        for phrase in ('`tests/test_devloop_boundary.py`', 'Pure validators only',
-                       '`ssdlc_*`'):
+        for phrase in ('adr/0001-prodotto-unico-fasi-su-tracker.md',
+                       'adr/0007-da-ssdlc-a-devloop.md', '`ssdlc-engine-final`'):
+            self.assertIn(phrase, architecture)
+        for phrase in ('`tests/test_devloop_boundary.py`', 'Pure validators only'):
             self.assertIn(phrase, sections['## Future `core` package'])
 
 

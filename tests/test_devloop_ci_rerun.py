@@ -146,11 +146,11 @@ class RerunTests(unittest.TestCase):
         self.assertIn(('dispatcher', {'actions': 'write'}, 'rerun_failed_jobs'), self.gh.acts)
 
     def test_pertinent_failure_is_a_round_at_once(self):
-        # ssdlc_impact.py makes test_impact*.py pertinent, as with local_tests = "changed".
+        # impact.py makes test_impact*.py pertinent, as with local_tests = "changed".
         gh = CIGH()
         gh.logs[(RUN, 1)] = suite_log('test_devloop_parallel', 'test_impact_more')
         ws = FakeWS()
-        ws.diff = [{'path': 'ssdlc_impact.py', 'links': []}]
+        ws.diff = [{'path': 'impact.py', 'links': []}]
         d = self.make(gh, ws)
         self.assertEqual(self.step(d), ['ci_failed'])
         self.assertFalse(hasattr(self.gh, 'reruns'))

@@ -38,10 +38,9 @@ protected_paths = [".github/"]
 # agents: those are the overlay's.
 [tests]
 # The installation's strategy for the modules tests/test_*.py, each run with
-# `python3 -m unittest discover -s tests -p '<module>'` (issue #169).
+# `python3 -m unittest discover -s tests -p '<module>'` (issue #169). The prefixes of the
+# engine's modules (ssdlc_<name>.py) left with the engine (ADR 0007, R1).
 selection = "python-unittest-modules"
-# A changed ssdlc_<name>.py also selects tests/test_<name>*.py.
-source_prefixes = ["ssdlc_"]
 # The lines scripts/run-tests.py prints: FAILED MODULE, and "Ran N tests in S (… modules, …
 # jobs)" (issues #200 and #300).
 ci_log_format = "run-tests"
@@ -53,23 +52,13 @@ ci_log_format = "run-tests"
 [review_policy]
 # Directory prefixes (ending in "/") or files, relative to the repository root. The code that
 # decides permissions, fencing and authorizations goes to level 2 (issue #171); a listed file
-# that does not exist yet is just a path. The restrictions ssdlc wants guaranteed (devloop/ and
-# schemas/ sensitive, ADR 0006, section 3.2, requirement 5) are here, on the host.
-sensitive_paths = ["devloop/", "AGENTS.md", "CLAUDE.md", ".github/", "schemas/",
-                   # Writer fencing and locks.
-                   "ssdlc_writer_gate.py", "ssdlc_role_fencing.py",
-                   "ssdlc_container_holder.py", "ssdlc_locks.py", "ssdlc_fencing_proof.py",
-                   # Authorized transitions and gates.
-                   "ssdlc_transitions.py", "ssdlc_replay_gate.py", "ssdlc_grader.py",
-                   # Delegations and admissions.
-                   "ssdlc_feedback_delegation.py", "ssdlc_feedback_admission.py",
-                   "ssdlc_usage_admission.py",
+# that does not exist yet is just a path. The restrictions ssdlc wants guaranteed (devloop/
+# sensitive, ADR 0006, section 3.2, requirement 5) are here, on the host. The paths of the SSDLC
+# engine (schemas/, the modules of writer fencing, transitions, gates and admissions) and the
+# list of the replay gate's baseline (sensitive_path_lists) left with the engine (ADR 0007, R1).
+sensitive_paths = ["devloop/", "AGENTS.md", "CLAUDE.md", ".github/",
                    # App tokens.
                    "scripts/agent-token.py", "scripts/supervisor-token.py"]
-# JSON files whose "files" object lists more sensitive paths: facts of the repository, read at
-# startup relative to the root of the running devloop installation (a pinned checkout, which
-# `devloop pin` extracts them into); a missing file stops devloop.
-sensitive_path_lists = ["schemas/recovery-grader-baseline.json"]
 
 # The project's data in the prompts of the installation (ADR 0006, R4): the prompts read as they
 # did before R4. A key left out drops the sentence that names it.
@@ -135,83 +124,8 @@ operator_only_paths = ["docs/adr/", "AGENTS.md", "CLAUDE.md"]
 "devloop/github.py" = ["docs/architecture.md"]
 "scripts/devloop-pinned" = ["docs/devloop/guide.md"]
 "scripts/run-tests.py" = ["docs/development.md"]
-"orchestrator.py" = ["docs/getting-started.md", "docs/architecture.md"]
-"ssdlc_tasks.py" = ["docs/getting-started.md", "docs/architecture.md"]
-"ssdlc_controller.py" = ["docs/getting-started.md", "docs/architecture.md"]
-"setup-ssdlc.sh" = ["docs/getting-started.md", "docs/configuration.md"]
-"ssdlc_writer_gate.py" = ["docs/writer-fencing.md"]
-"ssdlc_role_fencing.py" = ["docs/writer-fencing.md"]
-"ssdlc_container_holder.py" = ["docs/writer-fencing.md"]
-"ssdlc_fencing_proof.py" = ["docs/writer-fencing.md", "docs/recovery.md"]
-"ssdlc_telemetry.py" = ["docs/cost-telemetry.md", "docs/bounded-recovery.md"]
-"ssdlc_quota.py" = ["docs/cost-telemetry.md"]
-"ssdlc_recovery.py" = ["docs/cost-telemetry.md", "docs/bounded-recovery.md"]
-"ssdlc_feedback.py" = ["docs/developer-feedback.md"]
-"ssdlc_feedback_admission.py" = ["docs/developer-feedback.md"]
-"ssdlc_feedback_analysis.py" = ["docs/developer-feedback.md"]
-"ssdlc_feedback_bindings.py" = ["docs/developer-feedback.md"]
-"ssdlc_feedback_delegation.py" = ["docs/developer-feedback.md"]
-"ssdlc_feedback_delivery.py" = ["docs/developer-feedback.md"]
-"ssdlc_feedback_return.py" = ["docs/developer-feedback.md"]
-"ssdlc_feedback_roles.py" = ["docs/developer-feedback.md"]
-"ssdlc_feedback_workflow.py" = ["docs/developer-feedback.md"]
-"ssdlc_scope_amendments.py" = ["docs/scope-amendments.md", "docs/recovery.md"]
-"ssdlc_continuations.py" = ["docs/continuations.md", "docs/historical-reconciliation.md", "docs/recovery.md"]
-"ssdlc_historical.py" = ["docs/continuations.md", "docs/historical-reconciliation.md", "docs/recovery.md"]
-"ssdlc_catalogues.py" = ["docs/configuration.md"]
-# ADR 0003, I10 (#247): the modules and schemas without a document, each checked against the
-# document that describes its behaviour.
+# ADR 0003, I10 (#247): the scripts without a document, each checked against the document that
+# describes its behaviour. The entries of the SSDLC engine (its modules, its setup script and its
+# schemas) left with the engine (ADR 0007, R1).
 "scripts/agent-token.py" = ["AGENTS.md", "docs/devloop/reference.md"]
 "scripts/supervisor-token.py" = ["AGENTS.md", "docs/devloop/reference.md"]
-"ssdlc_reconciliation.py" = ["docs/historical-reconciliation.md", "docs/recovery.md"]
-"ssdlc_transitions.py" = ["docs/recovery.md"]
-"ssdlc_preparations.py" = ["docs/continuations.md", "docs/historical-reconciliation.md", "docs/scope-amendments.md"]
-"ssdlc_supervisor.py" = ["docs/supervision.md", "docs/writer-fencing.md"]
-"ssdlc_bounce.py" = ["docs/bounce-preview.md"]
-"ssdlc_corrective.py" = ["docs/bounce-preview.md", "docs/native-gate-convergence.md"]
-"ssdlc_corrective_owners.py" = ["docs/bounce-preview.md", "docs/developer-feedback.md"]
-"ssdlc_candidates.py" = ["docs/candidate-capture.md"]
-"ssdlc_bootstrap.py" = ["docs/task-mode.md", "docs/native-gate-convergence.md"]
-"ssdlc_design.py" = ["docs/task-mode.md", "docs/bounded-recovery.md"]
-"ssdlc_planning.py" = ["docs/task-mode.md"]
-"ssdlc_requirements.py" = ["docs/task-mode.md"]
-"ssdlc_gate_reports.py" = ["docs/native-gate-convergence.md", "docs/task-mode.md"]
-"ssdlc_findings.py" = ["docs/native-gate-convergence.md", "docs/task-mode.md"]
-"ssdlc_usage_admission.py" = ["docs/bounded-recovery.md", "docs/cost-telemetry.md", "docs/recovery.md"]
-"ssdlc_replay_gate.py" = ["docs/bounded-recovery.md", "docs/development.md"]
-"ssdlc_grader.py" = ["docs/bounded-recovery.md"]
-"ssdlc_owner_revalidation.py" = ["docs/developer-feedback.md", "docs/task-mode.md"]
-"ssdlc_impact.py" = ["docs/developer-feedback.md", "docs/task-mode.md"]
-"ssdlc_operator_recovery.py" = ["docs/developer-feedback.md"]
-"ssdlc_amendments.py" = ["docs/scope-amendments.md"]
-"ssdlc_verification_repair.py" = ["docs/scope-amendments.md", "docs/recovery.md"]
-"ssdlc_deadline_extensions.py" = ["docs/scope-amendments.md"]
-"ssdlc_limit_extensions.py" = ["docs/limit-extensions.md", "docs/recovery.md"]
-"ssdlc_locks.py" = ["docs/writer-fencing.md"]
-# One key per schema, towards the document that uses it: no "schemas/" prefix, since the entries
-# that cover a file add up.
-"schemas/advisory-event.schema.json" = ["docs/task-mode.md"]
-"schemas/advisory-proposals.schema.json" = ["docs/task-mode.md"]
-"schemas/bootstrap-profile.schema.json" = ["docs/task-mode.md"]
-"schemas/candidate-capture.schema.json" = ["docs/candidate-capture.md"]
-"schemas/candidate-evidence.schema.json" = ["docs/native-gate-convergence.md"]
-"schemas/context-disclosure.schema.json" = ["docs/native-gate-convergence.md"]
-"schemas/continuation-proposal.schema.json" = ["docs/continuations.md"]
-"schemas/continuation-snapshot.schema.json" = ["docs/continuations.md"]
-"schemas/convergence-decision.schema.json" = ["docs/native-gate-convergence.md"]
-"schemas/corrective-transaction.schema.json" = ["docs/bounce-preview.md", "docs/native-gate-convergence.md"]
-"schemas/design-review.schema.json" = ["docs/task-mode.md"]
-"schemas/diagnosis-record.schema.json" = ["docs/native-gate-convergence.md"]
-"schemas/gate-findings.schema.json" = ["docs/task-mode.md"]
-"schemas/history-snapshot.schema.json" = ["docs/native-gate-convergence.md"]
-"schemas/limit-extension-authorization.schema.json" = ["docs/limit-extensions.md"]
-"schemas/limit-extension-proposal.schema.json" = ["docs/limit-extensions.md"]
-"schemas/plan.schema.json" = ["docs/task-mode.md"]
-"schemas/quality-contract.schema.json" = ["docs/configuration.md"]
-"schemas/reconciliation-authorization.schema.json" = ["docs/historical-reconciliation.md"]
-"schemas/reconciliation-proposal.schema.json" = ["docs/historical-reconciliation.md"]
-"schemas/reconciliation-request.schema.json" = ["docs/historical-reconciliation.md"]
-"schemas/recovery-grader-baseline.json" = ["docs/bounded-recovery.md", "docs/devloop/reference.md"]
-"schemas/recovery-limits.schema.json" = ["docs/bounded-recovery.md", "docs/historical-reconciliation.md"]
-"schemas/task-manifest.schema.json" = ["docs/task-mode.md"]
-"schemas/task-plan-review.schema.json" = ["docs/task-mode.md"]

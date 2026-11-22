@@ -329,9 +329,9 @@ class EndToEndTests(unittest.TestCase):
         for package in ('devloop', 'core'):
             shutil.copytree(ROOT / package, copy / package,
                             ignore=shutil.ignore_patterns('__pycache__'))
-        # The lists of review_policy.sensitive_path_lists, which a pin extracts with the copy.
-        for name in config.read_toml(ssdlc_project.PROJECT)['review_policy'][
-                'sensitive_path_lists']:
+        # The lists of review_policy.sensitive_path_lists, which a pin extracts with the copy
+        # (none in ssdlc's project file since the engine left, ADR 0007, R1).
+        for name in config.sensitive_lists(config.read_toml(ssdlc_project.PROJECT)):
             (copy / name).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(ROOT / name, copy / name)
         os.symlink(copy.name, self.state / 'current')

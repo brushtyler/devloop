@@ -25,7 +25,7 @@ List every gap that would stop or mislead the implementer, each with one `kind`:
 A gap that touches a decision reserved to the operator by ADR 0001 is **always**
 `operator_decision`, never `default_available`, even when a default looks obvious. The reserved
 decisions are: rollout and activation on real runs, budget and review rounds, credentials and
-permissions, trust rules, the replay gate baseline, the merge mode, the continuous loop and
+permissions, trust rules, the merge mode, the continuous loop and
 automatic pinning, and the approval of ADRs. The same holds for a gap whose resolution needs a
 change to a path reserved to the operator (`operator_only_paths` in `[merge]`: by default
 `docs/adr/`, `AGENTS.md` and `CLAUDE.md`). In merge mode `auto` a supervisor may accept

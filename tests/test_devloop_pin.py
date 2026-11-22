@@ -31,7 +31,11 @@ from test_devloop_zero import changes
 
 REPO = Path(__file__).resolve().parent.parent
 LAUNCHER = REPO / 'scripts' / 'devloop-pinned'
-LIST = 'schemas/recovery-grader-baseline.json'
+# A list of sensitive paths (review_policy.sensitive_path_lists) of the project in the commits of
+# these tests: ssdlc's project file has none since the engine left (ADR 0007, R1), and the pin
+# still extracts the lists a project declares.
+LIST = 'lists/sensitive.json'
+LIST_TEXT = '{"files": {"x.py": "0000"}}\n'
 DATA = ssdlc_project.data()
 # The documents of [docs] map (#203): the commits of these tests hold the map, not the documents.
 DOCUMENTS = list(dict.fromkeys(d for _, docs in config.docs_entries(DATA) for d in docs))
@@ -46,16 +50,20 @@ def load_launcher():
 
 
 def copy_package(dest):
-    """The devloop and core packages and the list file of this checkout into ``dest``: its
-    configuration has a ``[docs] map``, but none of the documents it maps (#210). The
+    """The devloop and core packages of this checkout and a list file (``LIST``) into ``dest``:
+    its configuration has a ``[docs] map``, but none of the documents it maps (#210). The
     configuration is ssdlc's as one file (``ssdlc_project.text``, ADR 0006, R3), so that the
-    copy loads without a project file."""
+    copy loads without a project file, with ``LIST`` in ``sensitive_path_lists``."""
     for package in ('devloop', 'core'):  # devloop imports core since #365
         shutil.copytree(REPO / package, dest / package,
                         ignore=shutil.ignore_patterns('__pycache__'))
-    (dest / 'devloop' / 'config.toml').write_text(ssdlc_project.text(), encoding='utf-8')
+    text = ssdlc_project.text()
+    assert text.count('\n[review_policy]\n') == 1
+    text = text.replace('\n[review_policy]\n',
+                        f'\n[review_policy]\nsensitive_path_lists = ["{LIST}"]\n')
+    (dest / 'devloop' / 'config.toml').write_text(text, encoding='utf-8')
     (dest / LIST).parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy(REPO / LIST, dest / LIST)
+    (dest / LIST).write_text(LIST_TEXT, encoding='utf-8')
 
 
 def git(cwd, *args):
@@ -146,10 +154,10 @@ class PinTests(GitCase):
         self.assertEqual(os.readlink(self.state / 'current'), copy.name)
         # ``core/`` too, which devloop imports since #365.
         self.assertEqual(sorted(p.name for p in copy.iterdir()),
-                         ['core', 'devloop', 'pin.json', 'schemas'])
+                         ['core', 'devloop', 'lists', 'pin.json'])
         self.assertEqual(json.loads((copy / 'pin.json').read_text()),
                          {'commit': self.first, 'files': [LIST]})
-        self.assertEqual((copy / LIST).read_bytes(), (REPO / LIST).read_bytes())
+        self.assertEqual((copy / LIST).read_text(), LIST_TEXT)
         self.assertTrue((copy / 'devloop' / 'dispatcher.py').is_file())
         self.assertTrue((copy / 'core' / 'budget.py').is_file())
         for path in [copy, *copy.rglob('*')]:
@@ -198,7 +206,7 @@ class PinTests(GitCase):
         copy = self.pin('main')
         self.assertEqual(copy, self.state / f'pinned-{second[:12]}')
         self.assertEqual(sorted(p.name for p in copy.iterdir()),
-                         ['core', 'devloop', 'pin.json', 'schemas'])
+                         ['core', 'devloop', 'lists', 'pin.json'])
         self.assertEqual(json.loads((copy / 'pin.json').read_text())['files'], [LIST])
 
     def test_a_malformed_docs_map_still_fails_the_pin(self):
@@ -1167,11 +1175,12 @@ class MergeRequestTests(unittest.TestCase):
     """A merge by devloop requests the pin only with auto = true and a diff touching
     devloop/ or a list file."""
 
-    def merge(self, auto, path):
-        # Not a sensitive path here, so that one level-1 approval suffices for the merge.
+    def merge(self, auto, path, lists=()):
+        # Not a sensitive path here, so that one level-1 approval suffices for the merge. The
+        # pin watches the list files ``lists`` of the project too.
         rp = dataclasses.replace(CFG.review_policy, sensitive_paths=())
         cfg = dataclasses.replace(CFG, merge=MergePolicy(mode='strict'), review_policy=rp,
-                                  pin=PinPolicy(auto=auto, paths=CFG.pin.paths))
+                                  pin=PinPolicy(auto=auto, paths=(*CFG.pin.paths, *lists)))
         record = norm(raw_review(), bound=False)
         record['receipt'] = receipt(files=(path,), cfg=cfg)
         gh = MergeGH()
@@ -1190,7 +1199,7 @@ class MergeRequestTests(unittest.TestCase):
     def test_auto_requests_a_pin_after_a_merge_touching_devloop(self):
         for path in ('devloop/dispatcher.py', LIST):
             with self.subTest(path=path):
-                d, pinner, logs = self.merge(True, path)
+                d, pinner, logs = self.merge(True, path, lists=(LIST,))
                 self.assertEqual(pinner.requests, [(100, SHA1)])
                 self.assertIn('  auto-pin of origin/main requested for the next tick', logs)
                 self.assertEqual(pinner.pins, [])
@@ -1211,14 +1220,23 @@ class PinConfigTests(unittest.TestCase):
     def test_the_distributed_config_is_off(self):
         cfg = ssdlc_project.load()
         # ``core/`` too: devloop imports it since #365.
-        self.assertEqual(cfg.pin, PinPolicy(auto=False, paths=('devloop/', 'core/', LIST)))
+        # ssdlc's project file lists no file of sensitive paths since the engine left (ADR 0007,
+        # R1).
+        self.assertEqual(cfg.pin, PinPolicy(auto=False, paths=('devloop/', 'core/')))
         self.assertEqual(DATA['pin'], {'auto': False, 'restart_max_wait_minutes': 30})
         self.assertEqual(cfg.pin.restart_max_wait_minutes, 30)
         # The lists of the project file are watched too (ADR 0006, R3): the installation's
         # own paths are its directories alone.
         self.assertEqual(PinPolicy().paths, ('devloop/', 'core/'))
         self.assertEqual(config.parse_config({k: v for k, v in DATA.items() if k != 'pin'}).pin,
-                         PinPolicy(paths=('devloop/', 'core/', LIST)))
+                         PinPolicy(paths=('devloop/', 'core/')))
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / LIST).parent.mkdir()
+            (Path(tmp) / LIST).write_text(LIST_TEXT)
+            data = {k: v for k, v in DATA.items() if k not in ('pin', 'docs')}
+            data['review_policy'] = dict(data['review_policy'], sensitive_path_lists=[LIST])
+            self.assertEqual(config.parse_config(data, root=tmp).pin,
+                             PinPolicy(paths=('devloop/', 'core/', LIST)))
 
     def test_the_restart_wait_limit(self):
         # #301: whole minutes, 0 included (the drain at once).

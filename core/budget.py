@@ -1,10 +1,10 @@
 """Pure validation of a limits profile and pure charge and capacity calculations (ADR 0004, P2-1).
 
-These are the rules of the engine's ``LimitsStore`` (``ssdlc_recovery.py``), written without
-I/O, lock or clock: the caller passes the profile, the state of the invocations and the current
-time. The profile has the shape of ``schemas/recovery-limits.schema.json``, which the caller
-reads and passes as data. The engine does not use this module yet (step 6 of ADR 0001);
-``tests/test_core_equivalence.py`` checks that both give the same results.
+These are the rules of the engine's ``LimitsStore`` (in the tag ``ssdlc-engine-final``, ADR 0007),
+written without I/O, lock or clock: the caller passes the profile, the state of the invocations
+and the current time. The profile has the shape of the engine's limits schema
+(``recovery-limits.schema.json``, a fixture of core's tests since ADR 0007, R1), which the caller
+reads and passes as data.
 
 Rules kept from the engine:
 
@@ -52,8 +52,8 @@ class Refused(Exception):
 def validate_profile(policy, profile_schema):
     """Raise ``ValueError`` unless ``policy`` is a valid limits profile; return it.
 
-    ``profile_schema`` is the content of ``schemas/recovery-limits.schema.json``. Beyond the
-    schema, the dollar caps must be finite and the rules for unknown usage valid."""
+    ``profile_schema`` is the content of the limits schema (``recovery-limits.schema.json``).
+    Beyond the schema, the dollar caps must be finite and the rules for unknown usage valid."""
     _schema.validate(profile_schema, policy)
     if not all(math.isfinite(policy[kind]) for kind in COST_KINDS):
         raise ValueError('Nonfinite limit')

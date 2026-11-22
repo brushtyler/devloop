@@ -252,9 +252,10 @@ ammessi.
 ### 3. Ruleset del branch principale
 
 `ops/github/ruleset-main.json` è il ruleset attuale: niente cancellazione né force push; PR
-obbligatoria, con merge `merge`, `squash` o `rebase`; check obbligatori `Unit Tests (Python 3.12)`
-e `Isolated A5 Recovery Benchmark` di GitHub Actions (`integration_id` 15368); bypass solo per il
-ruolo admin (`actor_id` 5); si applica al branch di default (`~DEFAULT_BRANCH`).
+obbligatoria, con merge `merge`, `squash` o `rebase`; check obbligatorio `Unit Tests (Python 3.12)`
+di GitHub Actions (`integration_id` 15368); bypass solo per il ruolo admin (`actor_id` 5); si
+applica al branch di default (`~DEFAULT_BRANCH`). Il check `Isolated A5 Recovery Benchmark`, il
+replay gate del motore SSDLC, è uscito con il motore (ADR 0007, R1).
 
 Lo applica l'operatore, con il proprio login `gh` di amministratore (non con il token del
 supervisore). Per non crearne un doppione, si aggiorna quello che c'è:
@@ -730,8 +731,8 @@ senza, i prompt tolgono le frasi che li citano. I test locali e la lettura della
    - `scripts/devloop-pinned` (il launcher), `scripts/agent-token.py` (le scritture delle
      sessioni con le app del progetto, attraverso `devloop token`) e
      `scripts/supervisor-token.py` (quelle del supervisore con la sua app);
-   - `schemas/`, almeno i file che `review_policy.sensitive_path_lists` elenca: `pin` li estrae e
-     rifiuta una copia in cui mancano;
+   - i file che `review_policy.sensitive_path_lists` elenca, se il progetto ne ha (ssdlc non ne
+     ha più da ADR 0007, R1): `pin` li estrae e rifiuta una copia in cui mancano;
    - `ops/`, per ricreare l'installazione;
    - le istruzioni per gli agent (per esempio un `AGENTS.md`): i prompt di `devloop/prompts/`
      chiedono di leggere quelle elencate in `[prompts]` del file di progetto (ADR 0006, R4),

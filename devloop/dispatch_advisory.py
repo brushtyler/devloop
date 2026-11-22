@@ -72,7 +72,7 @@ def _short(exc, limit=300):
 
 
 def normalize_advisory(raw):
-    """The agent's answer (``schemas/advisory.json``) as the review shows it: texts stripped,
+    """The agent's answer (``devloop/schemas/advisory.json``) as the review shows it: texts stripped,
     lists of non-empty strings, at most ``MAX_POINTS`` each. An opinion outside
     ``ADVISORY_OPINIONS`` raises ``AgentError``: the turn counts as failed."""
     if not isinstance(raw, dict) or raw.get('opinion') not in ADVISORY_OPINIONS:
