@@ -9,7 +9,14 @@ markers written under the old name stay the repository's.
 """
 
 import dataclasses
+import os
+import re
+import shlex
+import shutil
+import subprocess
 import tempfile
+import textwrap
+import tomllib
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -219,6 +226,205 @@ class RecordsTests(unittest.TestCase):
         self.assertEqual(d.ledger.journal.aliases, {OLD: NEW})
         self.assertEqual(d.ledger.journal.repo_name(OLD), NEW)
         self.assertEqual(d.ledger.journal.repo_name('other/repo'), 'other/repo')
+
+
+ROOT = Path(__file__).resolve().parents[1]
+MIGRATE = ROOT / 'ops' / 'host' / 'migrate.md'
+RENAME_STEP = '## Rinomina del repository in devloop (ADR 0007, R3, #540)'
+BASH = shutil.which('bash')
+# An overlay of the host before the rename: ``repo`` among the top-level keys, then a table.
+OVERLAY = f'''# overlay of the host
+repo = "{OLD}"
+trusted_users = ["brushtyler"]
+repo_lock_dir = "/run/devloop/repos"
+
+[report]
+'''
+
+
+def rename_step():
+    """The section of ``migrate.md`` for the rename, up to the next one."""
+    text = MIGRATE.read_text(encoding='utf-8')
+    start = text.index(f'\n{RENAME_STEP}\n')
+    end = text.find('\n## ', start + 1)
+    return text[start:] if end < 0 else text[start:end]
+
+
+def blocks(text):
+    """The shell blocks of ``text``, in order, without the indentation of the list items."""
+    return [textwrap.dedent(b) for b in re.findall(r'```bash\n(.*?)```', text, re.S)]
+
+
+def block_with(text, needle):
+    """The one shell block of ``text`` that contains ``needle``."""
+    found = [b for b in blocks(text) if needle in b]
+    assert len(found) == 1, (needle, found)
+    return found[0]
+
+
+def runnable(block, skip=(), replace=()):
+    """``block`` without the lines that start with one of ``skip`` (those that need the host),
+    with each pair of ``replace`` applied."""
+    lines = [line for line in block.splitlines() if not line.startswith(tuple(skip))]
+    text = '\n'.join(lines) + '\n'
+    for old, new in replace:
+        text = text.replace(old, new)
+    return text
+
+
+@unittest.skipIf(BASH is None, 'bash is not installed')
+class MigrateTests(unittest.TestCase):
+    """The section of ``ops/host/migrate.md`` for the rename: its commands, their order, and the
+    overlay and ``params.env`` its commands and its rollback leave, run on temporary copies."""
+
+    def setUp(self):
+        self.section = rename_step()
+        self.commands = self.section[self.section.index('\n### Comandi\n'):]
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+
+    def run_block(self, text):
+        script = self.tmp / 'step.sh'
+        script.write_text(text, encoding='utf-8')
+        done = subprocess.run([BASH, str(script)], cwd=self.tmp, capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL, timeout=60,
+                              env=dict(os.environ, LC_ALL='C.UTF-8'))
+        self.assertEqual(done.stderr, '')
+        return done.stdout
+
+    def overlay(self):
+        """The overlay of the temporary directory, as devloop reads it."""
+        with open(self.tmp / 'config.local.toml', 'rb') as f:
+            local = tomllib.load(f)
+        return config.parse_config(config.apply_overlay(ssdlc_project.data(), local))
+
+    def params(self):
+        """``REPO``, ``SOURCE_REPO``, ``DEVLOOP_CLONE`` and ``SUPERVISOR_CLONE`` as
+        ``ops_load_params`` of ``ops/lib.sh`` completes them from the temporary params.env."""
+        probe = self.tmp / 'probe.sh'
+        probe.write_text(f'. {shlex.quote(str(ROOT / "ops" / "lib.sh"))}\n'
+                         f'PARAMS_FILE={shlex.quote(str(self.tmp / "params.env"))}\n'
+                         'ops_load_params\n'
+                         'printf "%s\\n" "$REPO" "$SOURCE_REPO" "$DEVLOOP_CLONE" '
+                         '"$SUPERVISOR_CLONE"\n', encoding='utf-8')
+        done = subprocess.run([BASH, str(probe)], capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL, timeout=60)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return done.stdout.splitlines()
+
+    def test_the_commands_in_their_order(self):
+        steps = (
+            'sudo systemctl stop devloop',
+            'sudo -u devloop -H git -C /home/devloop/ssdlc remote set-url origin '
+            'https://github.com/brushtyler/devloop.git',
+            'sudo -u supervisor -H git -C /home/supervisor/ssdlc remote set-url origin '
+            'https://github.com/brushtyler/devloop.git',
+            'sudo -u devloop -H git -C /home/devloop/ssdlc fetch origin',
+            'sudo -u devloop -H git -C /home/devloop/ssdlc checkout --detach origin/main',
+            'sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned pin '
+            'origin/main',
+            'install -o devloop -m 600 config.local.toml config.local.toml.prima-rinomina',
+            'repo_aliases = ["brushtyler/ssdlc"]',
+            'cp -p params.env params.env.prima-rinomina',
+            "sed -i 's|^REPO=brushtyler/ssdlc$|REPO=brushtyler/devloop|' params.env",
+            'sudo bash /root/repos/ssdlc/ops/host/setup-devloop.sh --dry-run',
+            'sudo bash /root/repos/ssdlc/ops/host/setup-coordinator.sh',
+            'sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned apps',
+            'sudo bash /root/repos/ssdlc/ops/host/check-host.sh',
+            'sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned tick '
+            '--dry-run',
+            'sudo systemctl start devloop',
+            '**Rollback.**',
+        )
+        at = [self.commands.find(step) for step in steps]
+        for step, index in zip(steps, at):
+            with self.subTest(step=step):
+                self.assertGreaterEqual(index, 0)
+        # Each in its place: the pin of the copy of #540 before the overlay that only that copy
+        # accepts, the parameters before setup-devloop.sh, the checks before the start.
+        self.assertEqual(at, sorted(at))
+        # The prerequisites: R2 done, the pull request merged.
+        before = self.section[:self.section.index('\n### Comandi\n')]
+        self.assertIn('gh api repos/brushtyler/devloop --jq .full_name', before)
+        self.assertIn('**La PR di #540 mergiata**', before)
+
+    def test_the_rollback_names_its_commands(self):
+        rollback = self.commands[self.commands.index('**Rollback.**'):]
+        for needed in ('repo_aliases = ["brushtyler/devloop"]',
+                       'cp -p /root/repos/ssdlc/ops/params.env.prima-rinomina '
+                       '/root/repos/ssdlc/ops/params.env',
+                       'sudo bash /root/repos/ssdlc/ops/host/setup-devloop.sh',
+                       'sudo -u devloop -H git -C /home/devloop/ssdlc remote set-url origin '
+                       'https://github.com/brushtyler/ssdlc.git',
+                       'sudo -u supervisor -H git -C /home/supervisor/ssdlc remote set-url '
+                       'origin https://github.com/brushtyler/ssdlc.git',
+                       'sudo systemctl start devloop', 'setup-coordinator.sh',
+                       'scripts/devloop-pinned pin <sha12>'):
+            with self.subTest(needed=needed):
+                self.assertIn(needed, rollback)
+
+    def test_the_overlay_step_and_its_rollback(self):
+        (self.tmp / 'config.local.toml').write_text(OVERLAY, encoding='utf-8')
+        before = self.overlay()
+        self.assertEqual((before.repo, before.repo_aliases), (OLD, ()))
+        # Step 4, without the cd to the state_dir of the host and the copy owned by devloop.
+        step = block_with(self.commands, 'config.local.toml.prima-rinomina')
+        out = self.run_block(runnable(step, skip=('cd ', 'install ')))
+        # The two checks print what the step says, then the lines of repo.
+        self.assertEqual(out.splitlines(), [
+            '1', '0', f'2:repo = "{NEW}"', f'3:repo_aliases = ["{OLD}"]',
+            '5:repo_lock_dir = "/run/devloop/repos"'])
+        after = self.overlay()
+        self.assertEqual((after.repo, after.repo_aliases), (NEW, (OLD,)))
+        self.assertFalse((self.tmp / 'config.local.toml.nuovo').exists())
+        # Rerun on the overlay already renamed, the first check no longer prints 1 and the
+        # file stays as it is.
+        renamed_text = (self.tmp / 'config.local.toml').read_text(encoding='utf-8')
+        self.assertEqual(self.run_block(runnable(step, skip=('cd ', 'install '))).splitlines()[:2],
+                         ['0', '1'])
+        self.assertEqual((self.tmp / 'config.local.toml').read_text(encoding='utf-8'),
+                         renamed_text)
+        # The rollback: the old name, with the new one as an alias.
+        (self.tmp / 'params.env.prima-rinomina').write_text('REPO=brushtyler/ssdlc\n')
+        (self.tmp / 'params.env').write_text('REPO=brushtyler/devloop\n')
+        rollback = self.commands[self.commands.index('**Rollback.**'):]
+        out = self.run_block(runnable(block_with(rollback, 'config.local.toml.nuovo'),
+                                      skip=('cd ', 'sudo '),
+                                      replace=(('/root/repos/ssdlc/ops/', ''),)))
+        self.assertEqual(out.splitlines(), [
+            f'2:repo = "{OLD}"', f'3:repo_aliases = ["{NEW}"]',
+            '5:repo_lock_dir = "/run/devloop/repos"'])
+        back = self.overlay()
+        self.assertEqual((back.repo, back.repo_aliases), (OLD, (NEW,)))
+        self.assertEqual((self.tmp / 'params.env').read_text(), 'REPO=brushtyler/ssdlc\n')
+
+    def test_the_params_step(self):
+        shutil.copy(ROOT / 'ops' / 'params.env.example', self.tmp / 'params.env')
+        self.assertEqual(self.params(), [OLD, '', '/home/devloop/ssdlc',
+                                         '/home/supervisor/ssdlc'])
+        # Without DEVLOOP_CLONE and SUPERVISOR_CLONE, the new REPO alone moves the clones.
+        original = (self.tmp / 'params.env').read_text(encoding='utf-8')
+        (self.tmp / 'params.env').write_text(original.replace(f'\nREPO={OLD}\n',
+                                                              f'\nREPO={NEW}\n'))
+        self.assertEqual(self.params()[2:], ['/home/devloop/devloop', '/home/supervisor/devloop'])
+        (self.tmp / 'params.env').write_text(original)
+        # Step 5, without the checkout and the cd of the operator's checkout.
+        step = runnable(block_with(self.commands, 'cp -p params.env params.env.prima-rinomina'),
+                        skip=('git ', 'cd '))
+        out = self.run_block(step)
+        self.assertEqual(out.splitlines(), [
+            f'7:REPO={NEW}', '{}:DEVLOOP_CLONE=/home/devloop/ssdlc'.format(
+                len(original.splitlines()) + 1),
+            '{}:SUPERVISOR_CLONE=/home/supervisor/ssdlc'.format(len(original.splitlines()) + 2)])
+        self.assertEqual(self.params(), [NEW, '', '/home/devloop/ssdlc',
+                                         '/home/supervisor/ssdlc'])
+        self.assertEqual((self.tmp / 'params.env.prima-rinomina').read_text(encoding='utf-8'),
+                         original)
+        # Rerun, nothing changes: the clones already written are not added again.
+        renamed_text = (self.tmp / 'params.env').read_text(encoding='utf-8')
+        self.run_block(step.replace('cp -p params.env params.env.prima-rinomina\n', ''))
+        self.assertEqual((self.tmp / 'params.env').read_text(encoding='utf-8'), renamed_text)
 
 
 if __name__ == '__main__':
