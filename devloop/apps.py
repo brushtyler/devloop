@@ -43,6 +43,10 @@ SUPERVISOR = 'supervisor'
 # The implementer's role app (#407): commits, pushes, PRs and the records of fixes and syncs of
 # every agent that declares it (``app = "implementer"``), whichever does the work.
 IMPLEMENTER = 'implementer'
+# The coordinator's role app (#528): its commands count, within the closed perimeter of the
+# coordinator, only with ``[roles.coordinator]``. devloop reads no key of it and never writes
+# with it.
+COORDINATOR = 'coordinator'
 
 # Permissions of the token minted for each kind of action (metadata: read is always implied).
 IMPLEMENT = {'contents': 'write', 'pull_requests': 'write'}
@@ -140,8 +144,9 @@ def find_key(key_dir, slug):
 
 def used(cfg, actor):
     """Whether devloop acts with the app of ``[apps.<actor>]`` of ``cfg``: never the
-    supervisor's (#408); the implementer's (#407) only when an agent declares it."""
-    if actor == SUPERVISOR:
+    supervisor's (#408) nor the coordinator's (#528); the implementer's (#407) only when an agent
+    declares it."""
+    if actor in (SUPERVISOR, COORDINATOR):
         return False
     return actor != IMPLEMENTER or any(cfg.app_of(key) == IMPLEMENTER for key in cfg.agents)
 
@@ -319,7 +324,7 @@ class Identities:
 
     def agent_logins(self):
         return {app.login for actor, app in self.apps.items()
-                if actor not in (DISPATCHER, MERGER, SUPERVISOR)}
+                if actor not in (DISPATCHER, MERGER, SUPERVISOR, COORDINATOR)}
 
     def merger(self) -> Backend:
         """The client merges run with (#201): the ``merger`` app, with a token limited to

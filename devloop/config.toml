@@ -383,6 +383,20 @@ merge = false
 # provider = "anthropic"
 # model = "claude-opus-5-5"
 #
+# The coordinator (issue #528, ADR 0002, precision of 2026-11-22), off by default: turning it on
+# is the operator's decision (D10). The table is the coordinator actor, not a key of [agents]
+# (devloop does not run it): its name is "<kind>-coordinator", and it signs with the role app of
+# [apps.coordinator], which it needs. Its commands count only inside a closed perimeter fixed in
+# the code: retry, rereview, recheck, fix, hold, release, grant-round within the caps,
+# accept-defaults, decide (never on the trust policy) and its agent:ready count as a trusted
+# user's; approve, merge-budget, grant-budget, capacity, reconcile and trust stay the operator's;
+# any other command, merge included, is refused (docs/devloop/guide.md, "The coordinator").
+# [roles.coordinator]
+# name = "codex-coordinator"
+# kind = "codex"
+# provider = "openai"
+# model = "gpt-6.1-sol"
+#
 # Agent keys by role and the implementer app (ADR 0005, P5-3, issue #407), on since issue #499:
 # a key names agent and role in full and serves that role only: "claude-implementer",
 # "codex-reviewer", "agy-reviewer", "claude-reviewer" (a key such as "claude-reviewer" given as
@@ -557,6 +571,9 @@ review_args = ["--allowedTools", "Bash(git diff *)", "Bash(git log *)", "Bash(gi
 #   [roles.supervisor] as a table. devloop never reads its key, which is in the key_dir of the
 #   supervisor's system user; the supervisor mints its tokens with scripts/supervisor-token.py,
 #   and `devloop token` does not expose it.
+# [apps.coordinator]: the coordinator's role app (issue #528), with issues: write and
+#   pull_requests: write and no contents. It counts as the coordinator only with
+#   [roles.coordinator]. devloop never reads its key, and `devloop token` does not expose it.
 # [apps.implementer]: the implementer's role app (ADR 0005, P5-3, issue #407), with contents:
 #   write, pull_requests: write and issues: write, without workflows. It signs commits, pushes,
 #   PRs and the records of fixes and syncs of every agent that declares app = "implementer", and

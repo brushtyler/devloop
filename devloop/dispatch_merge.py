@@ -1359,7 +1359,8 @@ class MergeMixin:
         held = [c for c in comments[position + 1:]
                 if not carries_record(c.get('body') or '')
                 and (merge_command(c.get('body')) or ('',))[0] == 'hold'
-                and self._may_hold((c.get('author') or {}).get('login'))]
+                and (self._may_hold((c.get('author') or {}).get('login'))
+                     or self._coordinator_may((c.get('author') or {}).get('login'), 'hold'))]
         if held:
             return refuse('un `/devloop hold` scritto dopo il comando lo ha annullato')
         if pr.finding_problems:

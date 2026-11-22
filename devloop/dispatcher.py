@@ -185,7 +185,7 @@ from pathlib import Path
 
 from .agents import (TAIL_LINES, AgentError, ModelsUnavailable, ModelUnavailable, NoOutput,
                      PermissionDenied, TurnCancelled, background_unfinished, denied_retry_note)
-from .apps import DISPATCHER, ISSUE_COMMENT, PR_COMMENT, SUPERVISOR, app_login
+from .apps import COORDINATOR, DISPATCHER, ISSUE_COMMENT, PR_COMMENT, SUPERVISOR, app_login
 from .budget import BUDGET, OUTSIDE, BudgetRefused, extension_text
 from .budget import of_issue as budget_of_issue
 from .budget import reserve as budget_reserve
@@ -224,8 +224,8 @@ from .policy import (BINDING, MAX_LISTED_PATHS, agent_profile, differences, prof
 from .ports import Backend, Tracker, summarize_checks
 from .review import (CI, OPERATOR, UNPROVEN, current_round, finding_commands, finding_key,
                      flow_verdict, open_findings, owner_of, round_verdict, trust_policy_parts)
-from .supervision import (ACCEPT_DEFAULTS, BUDGET_GRANTABLE, DECIDE, RETRY,
-                          ROUND_GRANTABLE, TOOL_FAILURE, UNCERTAIN_TURN, supervisor_command)
+from .supervision import (ACCEPT_DEFAULTS, BUDGET_GRANTABLE, COORDINATOR_DELEGATED, DECIDE,
+                          RETRY, ROUND_GRANTABLE, TOOL_FAILURE, UNCERTAIN_TURN, supervisor_command)
 from .workspace import WorkspaceError
 
 LEVEL_LABEL_STYLE = ('5319e7', 'devloop: la PR richiede una review di livello 2')
@@ -852,14 +852,42 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         supervisor = self._supervisor_login()
         return login in self.cfg.trusted_users or bool(supervisor and login == supervisor)
 
-    def _admitters(self, author):
+    def _coordinator_login(self):
+        """The login of the coordinator's identity (#528), the role app of
+        ``[apps.coordinator]`` known by its slug, or None without ``[roles.coordinator]`` (off
+        by default): devloop reads no key of it."""
+        cfg = self.cfg
+        if cfg.coordinator is None:
+            return None
+        return app_login(cfg.apps[COORDINATOR].slug)
+
+    def _is_coordinator(self, login):
+        """Whether ``login`` is the coordinator's identity (``_coordinator_login``)."""
+        coordinator = self._coordinator_login()
+        return bool(coordinator) and login == coordinator
+
+    def _coordinator_may(self, login, command):
+        """Whether ``login`` is the coordinator's identity and ``command`` one of the commands
+        delegated to it (``COORDINATOR_DELEGATED``, #528), which then counts as a trusted
+        user's."""
+        return self._is_coordinator(login) and command in COORDINATOR_DELEGATED
+
+    def _admitters(self, author, ready=False):
         """The logins whose ``agent:ready`` and priority labels count on an issue opened by
         ``author`` (#178, ``label_admitters``): the supervisor's identity counts only when it
-        has one, and only on issues of trusted users or of devloop's apps."""
+        has one, and only on issues of trusted users or of devloop's apps. ``ready``: the
+        logins whose ``agent:ready`` counts, also the coordinator's identity on the same issues
+        (#528: the resume with the labels); its priority, dependency and implementer labels
+        never count."""
         supervisor = self._supervisor_login()
-        if not supervisor:
-            return set(self.cfg.trusted_users)
-        return label_admitters(author, self.cfg.trusted_users, supervisor, self._devloop_logins())
+        admitters = (label_admitters(author, self.cfg.trusted_users, supervisor,
+                                     self._devloop_logins())
+                     if supervisor else set(self.cfg.trusted_users))
+        coordinator = self._coordinator_login()
+        if ready and coordinator:
+            admitters |= label_admitters(author, self.cfg.trusted_users, coordinator,
+                                         self._devloop_logins())
+        return admitters
 
     def _issue_decisions(self, comments, history, taken=False):
         """``issue_decisions`` of an issue (#472): neither the supervisor's identity nor any
@@ -873,9 +901,10 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         return refused_approvals(comments, self.cfg.trusted_users, self._devloop_logins())
 
     def _untrusted_change(self, history):
-        """``untrusted_change`` of an issue, with the admitters of its author."""
+        """``untrusted_change`` of an issue, with the admitters of its author's
+        ``agent:ready``."""
         return untrusted_change(history, self.cfg.labels.ready, self.cfg.trusted_users,
-                                self._admitters(history['author']))
+                                self._admitters(history['author'], ready=True))
 
     # Supervision (#182) --------------------------------------------------------
     def _accepted(self, comment):
@@ -1202,10 +1231,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             # seniority in the queue (#146).
             admitted = ([e for e in events if e['label'] == lb.ready] or [{}])[-1]
             # Whose labels count depends on who opened the issue (#178).
-            admitters = self._admitters(author_login(raw.get('author')))
+            author = author_login(raw.get('author'))
+            admitters = self._admitters(author)
             issue = {'number': raw['number'], 'title': raw['title'], 'labels': labels,
                      'labeler': admitted.get('by'), 'ready_at': admitted.get('at'),
-                     'admitted': admitted.get('by') in admitters,
+                     'admitted': admitted.get('by') in self._admitters(author, ready=True),
                      'priority': issue_priority(labels, events, admitters,
                                                 self.cfg.priority_labels)}
             if issue['admitted'] and not issue['labels'] & skip and issue['number'] not in pr_issues:
@@ -2009,6 +2039,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         # record a decision of the operator for the reviewers (#472), written before the takeover.
         issue = dict(self.gh.issue(number), title=history['title'], body=history['body'],
                      labeled=history['labeled'], admitters=self._admitters(history['author']),
+                     ready_admitters=self._admitters(history['author'], ready=True),
                      accepted=accepted, request=self._request_hash(history, listed),
                      thread=listed, decisions=self._issue_decisions(listed, history, taken=True))
         return issue, _render_issue_comments(issue.get('comments') or [], self.cfg.trusted_users,

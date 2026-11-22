@@ -72,6 +72,10 @@ table of the supervisor actor (`name`, `kind`, `provider`, `model`), which signs
 a missing or empty value, a `kind` that is not an agent kind, a `name` other than
 `<kind>-supervisor` or equal to a key of `[agents]`, or no `[apps.supervisor]` stops devloop at
 startup.
+`[roles.coordinator]` (#528, off by default) is the table of the coordinator actor (`name`,
+`kind`, `provider`, `model`), which signs with the role app `[apps.coordinator]`
+([The coordinator app](#the-coordinator-app)); the same invalid values, or no
+`[apps.coordinator]`, stop devloop at startup.
 The keys of `[agents]` may name agent and role in full, `<kind>-implementer` or
 `<kind>-reviewer`, with the `app` each signs with, and `[roles.implementers]` maps area labels
 to implementers ([The implementer app and the keys by role](#the-implementer-app-and-the-keys-by-role),
@@ -1424,6 +1428,7 @@ Each agent and the dispatcher can act on GitHub with its own GitHub App (#65), c
 | advisory reviewer (`advisory_reviewer`) | the [advisory review](guide.md#advisory-review-for-the-operator) of a head of a PR in `agent:needs-operator`: always a native review of type `COMMENT`, also from an agent without an app (with the ambient login) and also when it is the PR's implementer; the dispatcher writes its summary and edits the receipt |
 | merger | only the merges of the `strict` and `auto` [merge modes](guide.md#merge-modes) (see [The merger app](#the-merger-app)) |
 | supervisor | not devloop: the supervisor's commands, labels, issues, diary and fix or hold requests, with `[roles.supervisor]` as a table (see [The supervisor app](#the-supervisor-app)) |
+| coordinator | not devloop: the coordinator's commands inside its closed perimeter, and its `agent:ready`, with `[roles.coordinator]` (see [The coordinator app](#the-coordinator-app)) |
 
 Apps are per agent, not per role: GitHub keeps one review state per identity, and it already
 refuses an approval from the author of a PR. Least privilege per role comes from the tokens:
@@ -1760,6 +1765,52 @@ Turning it on is best done with an empty queue: a command or label of the old id
 before the switch, still unapplied, no longer counts afterwards (an issue admitted only by the
 agent's `agent:ready` is no longer admitted, and needs the label again), which stops the flow
 rather than widening it.
+
+### The coordinator app
+
+The coordinator is an agent with a role app of its own (#528, the operator's decision recorded
+in the [precision of ADR 0002 of 2026-11-22](../adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-22-modello-a-quattro-ruoli-524-527)):
+`[apps.coordinator]`, created by the operator with `Issues: Read and write`, `Pull requests:
+Read and write` and `Metadata: Read-only`, and **no** `Contents`. It is distinct from the
+supervisor's app, whose work the coordinator verifies: two actors never share an app. The local
+overlay of the project declares it, and turns it on with `[roles.coordinator]`, off by default
+(D10):
+
+```toml
+[apps.coordinator]
+app_id = ...
+slug = "<prefix>coordinator"
+
+[roles.coordinator]
+name = "codex-coordinator"
+kind = "codex"
+provider = "openai"
+model = "gpt-6.1-sol"
+```
+
+- `[roles.coordinator]` is only a table, with the keys of the supervisor actor (`name`, `kind`,
+  `provider`, `model`). `name` names agent and role in full (`<kind>-coordinator`) and is not a
+  key of `[agents]`: devloop does not run the coordinator, and no agent may be called
+  `coordinator`. A table with another key, a missing or empty value, a `kind` that is not an
+  agent kind, a `name` other than `<kind>-coordinator` or equal to a key of `[agents]`, a value
+  that is not a table, or no `[apps.coordinator]` stops devloop at startup. The table needs a
+  restart, as every key of `[roles]`. The roles have no constraint between them; a model of the
+  coordinator other than the supervisor's is recommended.
+- The coordinator's identity is the login of `[apps.coordinator]` (`<slug>[bot]`). It is never a
+  trusted user, never the supervisor, never one of devloop's apps: an issue it opens is not one
+  of devloop's, and `trusted_users` refuses a bot. Its commands count only inside a **closed
+  perimeter**, a constant of the code (`supervision.COORDINATOR_DELEGATED` and
+  `COORDINATOR_RESERVED`) that no key widens; the guide lists it
+  ([The coordinator](guide.md#the-coordinator)). A delegated command counts as a trusted user's,
+  under the same conditions and caps; a command reserved to the operator, or not listed
+  (`merge` included, until its own part of the plan of #524), never counts.
+- devloop never reads the app's key and never writes with it: `python3 -m devloop apps` does not
+  list it, the watcher does not count it among the writers of devloop's records, and
+  `devloop token` and `scripts/agent-token.py` refuse it (`unknown actor`). How the coordinator
+  gets its tokens, its system user and its read-only sudoers are later parts of the plan of
+  #524.
+- Without the table nothing changes: the app is only declared, and its comments and labels count
+  for no role, as anyone else's.
 
 ### The implementer app and the keys by role
 

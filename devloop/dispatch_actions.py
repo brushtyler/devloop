@@ -164,7 +164,7 @@ class ActionsMixin:
             self.ledger.request(number, title=issue['title'], body=issue.get('body') or '',
                                 implementer=key,
                                 labeled=ready_approval(issue['labeled'], lb.ready,
-                                                       issue['admitters']),
+                                                       issue['ready_admitters']),
                                 comments=_trusted_comments(issue.get('comments') or [],
                                                            cfg.trusted_users)
                                 + issue['accepted'],
