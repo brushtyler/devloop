@@ -173,9 +173,48 @@ NEEDS_TEXT = (DECIDE, ESCALATE, GRANT_ROUND, GRANT_BUDGET, CAPACITY, MERGE, MERG
               REREVIEW)
 # The commands whose text is the rest of the comment, not only the rest of its first line.
 LONG_TEXT = (DECIDE, GRANT_ROUND, GRANT_BUDGET, CAPACITY, MERGE, MERGE_BUDGET, REREVIEW)
+# The closed perimeter of the coordinator's commands (#528, the operator's decision recorded in
+# ADR 0002, precision of 2026-11-22): from the identity of ``[roles.coordinator]`` only the
+# delegated commands count, each as a trusted user's, under the same conditions and caps; the
+# reserved ones are the operator's in person, and any other command, ``merge`` and ``escalate``
+# included, is refused (it fails closed). A constant of the code, like the trust rule: the
+# configuration cannot widen it. ``merge`` stays refused until its own part of the plan (#524,
+# point 3b). The resume with the labels (``agent:ready`` added again) is in
+# ``Dispatcher._admitters``.
+COORDINATOR_DELEGATED = (RETRY, REREVIEW, 'recheck', 'fix', 'hold', 'release', GRANT_ROUND,
+                         ACCEPT_DEFAULTS, DECIDE)
+COORDINATOR_RESERVED = ('approve', MERGE_BUDGET, GRANT_BUDGET, CAPACITY, 'reconcile')
+# The name of a command of the coordinator's identity outside ``COMMANDS`` (#528), such as
+# ``reconcile`` or ``veto``: refused on an escalation, with its name in the record of the
+# refusal, so it is kept to a plain word that fits a code span.
+COMMAND_NAME = re.compile(r'[a-z][a-z0-9-]{0,31}')
 # What a supervision record says happened to a command.
 OUTCOMES = ('applied', 'accepted', 'decided', 'escalated', 'refused', 'limit', 'granted',
             'merged')
+
+
+def coordinator_refusal(command):
+    """``(log, text)`` of why ``command`` of the coordinator's identity does not count (#528),
+    or None for a delegated command (``COORDINATOR_DELEGATED``)."""
+    if command in COORDINATOR_DELEGATED:
+        return None
+    if command in COORDINATOR_RESERVED:
+        return ('reserved to the operator, never the coordinator\'s',
+                f'`/devloop {command}` è riservato all\'operatore di persona, mai al coordinatore')
+    if command == MERGE:
+        return ('the coordinator\'s merge is not active yet',
+                f'`/devloop {MERGE}` del coordinatore non è ancora attivo: il merge resta '
+                'all\'operatore')
+    return ('not delegated to the coordinator',
+            f'`/devloop {command}` non è tra i comandi delegati al coordinatore')
+
+
+def recorded_command(command, outcome):
+    """Whether a ``supervision`` record may carry ``command`` with ``outcome``: a command of
+    ``COMMANDS``, or, refused, any other of the coordinator's identity (``coordinator_command``,
+    #528), so that its refusal spends it."""
+    return command in COMMANDS or (outcome == 'refused' and isinstance(command, str)
+                                   and COMMAND_NAME.fullmatch(command) is not None)
 
 
 def critical(cls):
@@ -245,6 +284,15 @@ def preflight_class(outcome):
     return 'operator_decision'
 
 
+def command_line(body):
+    """The first line of a comment after the attribution header, stripped, or '' (#528): where
+    an agent, such as the coordinator, writes a command."""
+    lines = (body or '').strip().splitlines()
+    while lines and (not lines[0].strip() or lines[0].strip().startswith('>')):
+        lines.pop(0)
+    return lines[0].strip() if lines else ''
+
+
 def supervisor_command(body):
     """The supervisor command of a comment: ``(command, text)`` when the first line after the
     attribution header is ``/devloop retry``, ``/devloop accept-defaults``, ``/devloop decide
@@ -270,6 +318,19 @@ def supervisor_command(body):
     if tokens[1] in NEEDS_TEXT:
         return tokens[1], reason or None
     return tokens[1], reason
+
+
+def coordinator_command(body):
+    """``(command, text)`` of a ``/devloop <command>`` on the first line after the attribution
+    header (``command_line``), whatever ``command`` is, when its name is a plain word
+    (``COMMAND_NAME``); None otherwise. What the escalation reader reads of the coordinator's
+    identity (#528) when ``supervisor_command`` reads nothing: the reserved commands, such as
+    ``reconcile`` or ``approve``, and those not listed, such as ``veto``, refused there. The
+    text is the rest of the first line."""
+    tokens = command_line(body).split(None, 2)
+    if len(tokens) < 2 or tokens[0] != '/devloop' or not COMMAND_NAME.fullmatch(tokens[1]):
+        return None
+    return tokens[1], tokens[2].strip() if len(tokens) > 2 else ''
 
 
 # Far more than any cap or duration of a capacity command needs (#412).

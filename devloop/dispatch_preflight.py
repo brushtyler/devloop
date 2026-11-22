@@ -19,7 +19,8 @@ from .markdown import (carries_record, read_marker, render_approve_refused, rend
                        render_preflight, render_recheck)
 from .planning import (RECHECK_COMMAND, label_names, operator_blocked, preflight_state,
                        repository_bound)
-from .supervision import ACCEPT_DEFAULTS, DECIDE, PREFLIGHT_DEFAULT, describe, preflight_class
+from .supervision import (ACCEPT_DEFAULTS, DECIDE, PREFLIGHT_DEFAULT, command_line, describe,
+                          preflight_class)
 from .workspace import WorkspaceError
 
 # The classes of a failed readiness check (``preflight_class``): a block of one of them, with no
@@ -146,7 +147,9 @@ class PreflightMixin:
     def _recheck_requested(self, number, comments):
         """Whether a trusted user asked in person for a new check with ``RECHECK_COMMAND`` as
         the first line of a comment written after devloop's latest record there: each request
-        starts one check. Requests from anyone else are ignored and logged."""
+        starts one check. So does the coordinator's identity (#528), whose request may follow
+        the attribution header of the agents. Requests from anyone else are ignored and
+        logged."""
         return self._recheck_request(number, comments) is not None
 
     def _recheck_request(self, number, comments, log=True):
@@ -158,10 +161,16 @@ class PreflightMixin:
         asked = None
         for comment in comments[last + 1:]:
             body = comment.get('body') or ''
+            login = (comment.get('author') or {}).get('login')
+            if self._is_coordinator(login):
+                # The coordinator is an agent: its text carries the attribution header (#528).
+                if carries_record(body) or command_line(body) != RECHECK_COMMAND:
+                    continue
+                asked = comment
+                continue
             lines = body.strip().splitlines()
             if devloop_text(body) or not lines or lines[0].strip() != RECHECK_COMMAND:
                 continue
-            login = (comment.get('author') or {}).get('login')
             if login in self.cfg.trusted_users:
                 asked = comment
             elif log:
@@ -352,7 +361,7 @@ class PreflightMixin:
         if not records or records[-1][1]['ready']:
             return None
         approved = ready_approval(history['labeled'], self.cfg.labels.ready,
-                                  self._admitters(history['author']))
+                                  self._admitters(history['author'], ready=True))
         written = comments[records[-1][0]].get('created_at')
         if approved and isinstance(written, str) and approved[1] > written:
             return approved[0], approved[1]

@@ -17,7 +17,7 @@ from .apps import DISPATCHER
 from .budget import BUDGET, extension_text
 from .budget import grantable as budget_grantable
 from .config import same_agent
-from .context import operator_comments, requests_rereview
+from .context import REREVIEW_COMMAND, operator_comments, requests_rereview
 from .github import GitHubError
 from .journal import JournalError
 from .ledger import entries as ledger_entries
@@ -32,8 +32,10 @@ from .supervision import (ACCEPT_DEFAULTS, BUDGET_GRANTABLE, CAPACITY, CAPACITY_
                           MAX_CAPACITY, MAX_MERGE_BUDGET, MAX_RETRIES, MERGE, MERGE_BUDGET,
                           MERGED_ISSUE, PREFLIGHT_DEFAULT, REREVIEW, RETRY, RETRY_STEPS,
                           ROUND_GRANTABLE, SYNC_FAILED, TOOL_FAILURE, capacity_arguments,
-                          changed_input, critical, merge_budget_arguments, preflight_class,
-                          retries_done, supervisor_command)
+                          changed_input, command_line, coordinator_command,
+                          coordinator_refusal, critical,
+                          merge_budget_arguments, preflight_class, retries_done,
+                          supervisor_command)
 from .workspace import WorkspaceError
 
 # Hold and release a merge in ``auto`` mode (#172): the first line of a comment, after the
@@ -342,7 +344,12 @@ class SupervisionMixin:
         operator's escalation) gets an answer. A command from anyone else is ignored and only
         logged. devloop's own records are never commands. A ``/devloop rereview`` counts only
         from the supervisor's identity (#491): a trusted user's is the request of a new review
-        it always was (``requests_rereview``), and is skipped here."""
+        it always was (``requests_rereview``), and is skipped here.
+
+        The coordinator's identity (``[roles.coordinator]``, #528) has a closed perimeter: a
+        command of ``COORDINATOR_DELEGATED`` counts as a trusted user's, its rereview included
+        (skipped here); any other, reserved to the operator or not listed, ``merge`` and
+        ``escalate`` included, is answered as not applicable (``coordinator_refusal``)."""
         if operator:
             start, anchor = self._operator_anchor(comments)
             latest = anchor['record']
@@ -362,27 +369,44 @@ class SupervisionMixin:
         found = refused = supervised = None
         for comment in comments[start + 1:]:
             body = comment.get('body') or ''
+            login = (comment.get('author') or {}).get('login')
             parsed = None if carries_record(body) else supervisor_command(body)
+            if parsed is None and not carries_record(body) and self._is_coordinator(login):
+                # The coordinator's commands no supervisor command names (#528): the reserved
+                # ones, such as ``reconcile``, and those not listed, such as ``veto``, are
+                # refused below; the delegated ones read elsewhere (``recheck``, ``fix``,
+                # ``hold``, ``release``) are none of this reader's.
+                parsed = coordinator_command(body)
+                if parsed is not None and coordinator_refusal(parsed[0]) is None:
+                    continue
             if parsed is None:
                 continue
             ident = comment.get('id')
             if spent is not None and (not isinstance(ident, int) or ident <= spent):
                 continue
             command, reason = parsed
-            login = (comment.get('author') or {}).get('login')
-            if (command == REREVIEW and login in self.cfg.trusted_users
-                    and login != self._supervisor_login()):
+            if command == REREVIEW and (login in self.cfg.trusted_users
+                                        and login != self._supervisor_login()
+                                        or self._coordinator_may(login, REREVIEW)):
                 # A trusted user's rereview is the request of a new review it always was
-                # (``requests_rereview``), never a command of an escalation (#491).
+                # (``requests_rereview``), never a command of an escalation (#491); so is the
+                # coordinator's, which counts as a trusted user's (#528, ``_read_thread``).
                 continue
             item = {'command': command, 'reason': reason, 'by': login, 'comment': ident,
                     'step': latest.get('step'), 'anchor': anchor}
+            # The coordinator's identity (#528): a delegated command counts as a trusted
+            # user's; any other is answered as refused, the closed perimeter.
+            delegated = self._coordinator_may(login, command)
+            outside = (coordinator_refusal(command) if self._is_coordinator(login)
+                       else None)
             # The supervisor's rereview also counts on an escalation to the operator (#491), of
             # a PR whose merge is the operator's: ``_operator_rereview`` decides whether it
             # applies. A trusted user's command waiting there wins over it.
             rereview = (operator and command == REREVIEW and login is not None
                         and login == self._supervisor_login())
-            if operator and command == MERGE:
+            if outside:
+                why, refusal = outside
+            elif operator and command == MERGE:
                 # A delegation of the operator to the supervisor (#486): the supervisor's
                 # identity writes it on an operator merge, and ``_operator_command`` answers a
                 # trusted user's; anyone else's is ignored.
@@ -394,7 +418,7 @@ class SupervisionMixin:
                           '<motivo>`') if reason is None
                     else (None, None))
             elif operator:
-                allowed = login in self.cfg.trusted_users or rereview
+                allowed = login in self.cfg.trusted_users or rereview or delegated
                 why, refusal = (
                     ('the author is not a trusted user', None) if not allowed
                     and not self._may_hold(login)
@@ -408,7 +432,7 @@ class SupervisionMixin:
             else:
                 why, refusal = (
                     ('the author is neither the supervisor nor a trusted user', None)
-                    if not self._may_hold(login)
+                    if not (self._may_hold(login) or delegated)
                     else (f'merge mode is "{self.cfg.merge.mode}", not "auto"',
                           f'la modalità di merge è `{self.cfg.merge.mode}`, non `auto`, quindi '
                           'i comandi del supervisore non valgono')
@@ -614,7 +638,8 @@ class SupervisionMixin:
                              f'del controllo di prontezza. {stays}\n\n'
                              + self._supervisor_resume(escalation, is_pr))
             if name == DECIDE:
-                return self._decide(number, labels, comments, trace, command['reason'])
+                return self._decide(number, labels, comments, trace, command['reason'],
+                                    coordinator=self._is_coordinator(by))
             return self._accept_defaults(number, labels, comments, trace)
         if cls not in (TOOL_FAILURE, SYNC_FAILED):
             return trace('refused', 'rifiutato: vale solo per le escalation `tool_failure` e '
@@ -1676,7 +1701,8 @@ class SupervisionMixin:
                               'suddivisione')
             if name == DECIDE:
                 return self._decide(number, labels, comments, trace, command['reason'],
-                                    operator=how)
+                                    operator=how,
+                                    coordinator=self._is_coordinator(command['by']))
             return self._accept_defaults(number, labels, comments, trace, operator=how)
         if kind == 'preflight':
             return refuse('il controllo di prontezza non si ripete con `/devloop retry`')
@@ -1741,18 +1767,20 @@ class SupervisionMixin:
               f'default.\n\n{listed}', defaults=defaults, hash=record['hash'])
         self.gh.edit_labels(number, remove=self._decided_labels(labels, operator))
 
-    def _decide(self, number, labels, comments, trace, text, operator=False):
+    def _decide(self, number, labels, comments, trace, text, operator=False, coordinator=False):
         """Record the supervisor's decision ``text`` on the gaps of the latest readiness check
         of issue ``number`` (#258), under the conditions of ``_accept_defaults``: the supervisor
         may accept some defaults and replace others. The dispatcher's record carries the text
         and the gaps it answers, and counts as a trusted comment: ``agent:needs-supervisor``
         goes, and the readiness check runs again with the decision as context. The supervisor's
         own comment never reaches a prompt: only this record does. ``operator``: as for
-        ``_accept_defaults`` (#321)."""
+        ``_accept_defaults`` (#321). ``coordinator``: the command is the coordinator's (#528),
+        refused on an issue whose check declares the trust policy touched
+        (``_decidable_check``)."""
         record = self._decidable_check(number, labels, comments, trace,
                                        'Le lacune del controllo di prontezza non possono essere '
                                        'decise dal supervisore', 'la decisione si riferisce',
-                                       operator)
+                                       operator, coordinator)
         if record is None:
             return
         gaps = [{'description': g['description'], 'proposed_default': g['proposed_default']}
@@ -1774,7 +1802,8 @@ class SupervisionMixin:
             return [lb.needs_supervisor]
         return sorted(labels & (lb.operator() | {lb.needs_supervisor}))
 
-    def _decidable_check(self, number, labels, comments, trace, refusal, what, operator=False):
+    def _decidable_check(self, number, labels, comments, trace, refusal, what, operator=False,
+                         coordinator=False):
         """The latest readiness check of issue ``number`` when the supervisor may decide its
         gaps (``accept-defaults`` or ``decide``), else None after the refusal is traced: every
         gap ``default_available`` and no split, no ``phase:design`` label, an issue opened by a
@@ -1784,7 +1813,13 @@ class SupervisionMixin:
         decides and its verb (``'i default si riferiscono'``), for the refusal of a superseded
         check. ``operator``: a command on an escalation to the operator (#321), refused with an
         answer only, the issue staying in ``agent:needs-operator``; a string is how the answer
-        says to resume (``_operator_resume``), ``PREFLIGHT_RESUME`` otherwise."""
+        says to resume (``_operator_resume``), ``PREFLIGHT_RESUME`` otherwise.
+
+        ``coordinator``: a ``decide`` of the coordinator's identity (#528), which decides no gap
+        of the trust policy, of the credentials or of the budget. The last two are never
+        ``default_available`` (the readiness check classifies them as ``operator_decision``,
+        refused above); the first is refused here unless the check declares ``trust_policy``
+        ``none``, and a check that does not declare it is refused too (it fails closed)."""
         history = self.gh.issue_history(number)
         records = self._preflight_records(comments)
         record = records[-1][1] if records else None
@@ -1795,7 +1830,10 @@ class SupervisionMixin:
                    else f'l\'issue ha la label `{DESIGN_LABEL}`' if DESIGN_LABEL in labels
                    else 'l\'issue non è stata aperta da un utente fidato né da un\'app di devloop'
                    if not self._devloop_author(history['author'])
-                   else self._untrusted_change(history))
+                   else self._untrusted_change(history)
+                   or ('il controllo di prontezza dichiara toccata la policy di fiducia, o non '
+                       'dice se la tocca: il coordinatore non la decide, decide l\'operatore'
+                       if coordinator and record.get('trust_policy') != 'none' else None))
         stays = (f'l\'issue resta in `{self.cfg.labels.needs_operator}`.\n\n'
                  + (operator if isinstance(operator, str) else PREFLIGHT_RESUME) if operator
                  else 'l\'escalation resta al supervisore.\n\n'
@@ -1848,7 +1886,7 @@ class SupervisionMixin:
             if self.cfg.merge.mode != 'auto':
                 # Overrides only restrict: without "auto" in [merge] no PR is in "auto".
                 why = f'merge mode is "{self.cfg.merge.mode}", not "auto"'
-            elif not self._may_hold(login):
+            elif not (self._may_hold(login) or self._coordinator_may(login, event)):
                 why = 'the author is neither the supervisor nor a trusted user'
             elif reason is None:
                 why = f'malformed, expected `{HOLD_COMMAND} <reason>`'
@@ -1905,8 +1943,16 @@ class SupervisionMixin:
             # Only what trusted users wrote after the latest verdict can void it.
             since = comments[last + 1:]
             pr.operator_comments = operator_comments(since, self.cfg.trusted_users)
-            # So does the supervisor's rereview the dispatcher applied (#491): its record.
+            # So does the supervisor's rereview the dispatcher applied (#491): its record. And
+            # the coordinator's (#528), as a trusted user's: only its request, its text never
+            # reaches a prompt.
             pr.rereview = (any(requests_rereview(c.get('body')) for c in pr.operator_comments)
+                           or any(self._coordinator_may((c.get('author') or {}).get('login'),
+                                                        REREVIEW)
+                                  and not carries_record(c.get('body') or '')
+                                  and (command_line(c.get('body')).split()[:2]
+                                       == REREVIEW_COMMAND.split())
+                                  for c in since)
                            or any(position > last and r.get('command') == REREVIEW
                                   and r.get('outcome') == 'applied' for position, r
                                   in self._dispatcher_records(comments, 'supervision')))
@@ -1967,7 +2013,7 @@ class SupervisionMixin:
                 continue
             login = (comment.get('author') or {}).get('login')
             why = ('the author is neither the supervisor nor a trusted user'
-                   if not self._may_hold(login)
+                   if not (self._may_hold(login) or self._coordinator_may(login, 'fix'))
                    else f'malformed, expected `{FIX_COMMAND}` followed by the request'
                    if not request
                    else f'a fix asked with `{FIX_COMMAND}` already ran on head '

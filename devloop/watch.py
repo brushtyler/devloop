@@ -54,7 +54,8 @@ import unicodedata
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .apps import DISPATCHER, IMPLEMENTER, MERGER, SUPERVISOR, AppAuth, Identities, used
+from .apps import (COORDINATOR, DISPATCHER, IMPLEMENTER, MERGER, SUPERVISOR, AppAuth,
+                   Identities, used)
 from .dispatch_actions import ready_approval
 from .github import GitHubError, GitHubNotFound, author_login
 from .markdown import read_marker
@@ -128,11 +129,12 @@ class Trust:
         dispatcher derives them (``Identities.login``); not the ``merger``'s, which writes
         nothing, nor the supervisor's role app (#408) unless ``[roles.supervisor]`` is the
         supervisor actor that signs with it, nor the implementer's (#407) unless an agent
-        declares it. Each agent key writes with the app it declares (``Config.app_of``). Only
-        slugs are needed: no private key is read."""
+        declares it, nor the coordinator's (#528), which writes no record of devloop's. Each
+        agent key writes with the app it declares (``Config.app_of``). Only slugs are needed: no
+        private key is read."""
         identities = Identities(cfg.repo, {actor: AppAuth(app.app_id, app.slug, None, cfg.repo)
                                            for actor, app in cfg.apps.items()
-                                           if actor != MERGER and (
+                                           if actor not in (MERGER, COORDINATOR) and (
                                                actor != SUPERVISOR
                                                or cfg.supervisor_actor is not None)
                                            and (actor != IMPLEMENTER or used(cfg, actor))})

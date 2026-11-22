@@ -351,7 +351,9 @@ anyone else, header or not, never touches the attribution. A label already prese
 check failed is never the check's.
 
 On a request of a person (#468), `/devloop recheck` from a trusted user or `agent:ready` added
-again by one of the issue's admitters, the check runs, and owns the block it then records, if the
+again by one of the issue's admitters, the check runs; with `[roles.coordinator]` (#528) the
+coordinator's identity counts for both as a trusted user, its `agent:ready` only on an issue
+opened by a trusted user or by a devloop app ([The coordinator](guide.md#the-coordinator)). The check runs, and owns the block it then records, if the
 block is still the issue's latest: the label has one name only, the latest record is `blocked`
 with `class` `operator_decision` or `preflight_default`, no `notice` of another class (or
 without one) from an identity allowed to write devloop records came after it, and the label
@@ -534,7 +536,10 @@ and of the [escalations to the operator](guide.md#commands-on-escalations-to-the
 command, its author, its reason, the id of the comment that carried it, the class and the outcome
 (`applied`, `accepted`, `decided`, `escalated`, `refused`, `limit`, `granted` or `merged`), with the key
 and the attempt for a retry, the defaults for an acceptance and, for a decision, its text (in
-`reason`) and the gaps it answers. A new round asked by the supervisor with `/devloop rereview
+`reason`) and the gaps it answers. With `[roles.coordinator]` (#528) a command of the
+coordinator's identity outside its perimeter, reserved to the operator or not listed, is answered
+as not applicable and spent by a record whose command may be none of the supervisor's, such as
+`reconcile` or `veto`: a plain lower-case word, and only with the outcome `refused`. A new round asked by the supervisor with `/devloop rereview
 <reason>` (#491) records the round without a verdict it replaces (`round`) and the reviewers of
 its quorum that gave none (`reviewers`); `applied` and written after the latest review record of
 the PR, it voids that round as the `/devloop rereview` of a trusted user does: the next review
@@ -1130,9 +1135,14 @@ counts in a native review only from the identity of the agent of `advisory_revie
 comment only from the dispatcher's app. A `story` record (#363) counts only from the dispatcher's
 app, and only when the [turn journal](#story-identity) confirms it. `trusted_users`
 stays for people: it
-decides who can start work with `agent:ready`, and it cannot contain bots. The only app whose
-labels count is the supervisor's, on the issues described in
-[Labels from the supervisor](guide.md#labels-from-the-supervisor).
+decides who can start work with `agent:ready`, and it cannot contain bots. The only apps whose
+labels count are the supervisor's, on the issues described in
+[Labels from the supervisor](guide.md#labels-from-the-supervisor), and, with
+`[roles.coordinator]` in the local overlay (#528, off by default), the coordinator's: only its
+`agent:ready` added again, and only on the issues opened by a trusted user or by a devloop app,
+never its priority, dependency or implementer labels
+([The coordinator](guide.md#the-coordinator)). Without that table the coordinator's app is
+anyone else's.
 
 For an agent with an app the review record is the body of its native review, which also mirrors
 the verdict for GitHub and branch protection; for an agent without an app it is the review

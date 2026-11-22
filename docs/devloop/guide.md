@@ -1678,6 +1678,36 @@ turns go on. Beyond the limit the journal is not loaded and takes no event: no t
 devloop removes nothing from it and has no compaction of its own: raise the limit in the local
 overlay before it gets there.
 
+### The coordinator
+
+The coordinator is an agent, run periodically and on the alarms, that verifies the work of the
+supervisor, writes the problems of the system as issues and prepares the operator's decisions
+(the [four roles of ADR 0002](../adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-22-modello-a-quattro-ruoli-524-527),
+#524). devloop does not run it: it knows only its identity, the role app `[apps.coordinator]`,
+which counts with `[roles.coordinator]` in the local overlay, **off by default** (#528;
+[The coordinator app](reference.md#the-coordinator-app)). Without that table nothing changes:
+the coordinator's app is anyone else's.
+
+With the table, the commands of the coordinator's identity have a **closed perimeter**, fixed in
+the code:
+
+| Command | From the coordinator |
+|---|---|
+| `retry`, `accept-defaults`, `decide` | Delegated: as a trusted user's, on the escalations to the supervisor (in merge mode `auto`) and on those to the operator ([Commands on escalations to the operator](#commands-on-escalations-to-the-operator)), under the same conditions. `decide` is refused, and the issue stays or goes to the operator, when the readiness check declares the trust policy touched (`trust_policy` other than `none`, or not declared); the gaps of credentials and budget are never `default_available`, so neither `decide` nor `accept-defaults` reaches them |
+| `rereview` | Delegated: as a trusted user's, the request of a new review of the head after the latest verdict ([Resuming after a `needs_operator` verdict](#resuming-after-a-needs_operator-verdict-without-code-changes)), with or without a reason; its text never reaches the reviewers' prompt |
+| `recheck` | Delegated: a new [readiness check](#readiness-check-before-implementation), as a trusted user's |
+| `fix` | Delegated: as a trusted user's ([Fix requested by the operator or the supervisor](#fix-requested-by-the-operator-or-the-supervisor)) |
+| `hold`, `release` | Delegated: as a trusted user's, in merge mode `auto` ([Holding a merge](#holding-a-merge)) |
+| `grant-round` | Delegated: as a trusted user's, so only on a `round_grantable` escalation to the supervisor and within the caps of the delegation ([Granting a review round](#granting-a-review-round)); on an escalation to the operator it is refused, as a trusted user's |
+| resume with the labels | Delegated: its `agent:ready` added again counts, as the supervisor's, only on issues opened by a trusted user or by a devloop app; its priority, dependency and implementer labels never count |
+| `approve`, `merge-budget`, `grant-budget`, `capacity`, `reconcile`, `trusted_users` and the keys of trust | Reserved to the operator in person: never the coordinator's. On an escalation they are answered as not applicable and spent; elsewhere they are ignored and logged, as anyone else's; `trusted_users` and the overlay are the operator's |
+| any other (`merge`, `escalate`, `finding`, `veto`, ...) | Refused: on an escalation answered as not applicable and spent, elsewhere ignored and logged. `merge` stays refused until its own part of the plan of #524 |
+
+The coordinator writes as an agent, with the attribution header of AGENTS.md: its commands are
+read on the first line after the header. Like the supervisor's, its comments never reach a
+prompt as the operator's: only the dispatcher's records of what it applied do, and the request of
+a `/devloop fix`, as the supervisor's.
+
 ### Advisory review for the operator
 
 With `[review_policy] advisory_reviewer` set (#369; empty, and so off, by default: the local
@@ -1753,8 +1783,9 @@ Roles (operator, coordinator, supervisor, dispatcher, preflight, implementer, re
 each one does and does not do, the merge modes and the critical and non-critical decisions are
 defined in [ADR 0002](../adr/0002-ruoli-e-responsabilita.md). The ADR is the only source for
 them, and this guide does not repeat them: it describes how devloop applies them, in
-[Merge modes](#merge-modes), [Labels from the supervisor](#labels-from-the-supervisor) and
-[Escalations to the supervisor](#escalations-to-the-supervisor). Which agent holds each role is
+[Merge modes](#merge-modes), [Labels from the supervisor](#labels-from-the-supervisor),
+[Escalations to the supervisor](#escalations-to-the-supervisor) and
+[The coordinator](#the-coordinator). Which agent holds each role is
 in `[roles]` of the configuration ([reference](reference.md#configuration)).
 
 ## Usage
