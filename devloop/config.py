@@ -586,6 +586,11 @@ class Config:
     # its ``repo`` while it ticks, so that two of them on the same repository never run together
     # whatever their state_dir. '' when it is not set: only the lock of state_dir, as before.
     repo_lock_dir: str = ''
+    # The names the repository had before a rename (#540, ADR 0007), a trust key of the
+    # operator in the overlay: a link to a comment under one of them counts as one under
+    # ``repo`` once the comment is read by id in ``repo`` with the API, and a record of the
+    # journal or a marker written under one of them stays the repository's. Empty by default.
+    repo_aliases: tuple = ()
     # The reviewer pool, in order (``roles.reviewers``; ``roles.reviewer`` is a pool of one).
     reviewers: tuple = ()
     # The implementers of the area labels (``[roles.implementers]``, ADR 0005, D7, #407):
@@ -1962,6 +1967,7 @@ def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
         state_dir=data.get('state_dir', '.ssdlc/devloop'),
         source=_source(data),
         repo_lock_dir=_repo_lock_dir(data),
+        repo_aliases=_repo_aliases(data),
         test_cmd=test_cmd,
         language=data.get('language', 'English'),
         implementer=implementer, implementers=implementers, reviewer=pool[0], reviewers=pool,
@@ -2016,6 +2022,23 @@ def repo_lock_name(repo):
     return f'{match.group(1).lower()}--{match.group(2).lower()}.lock'
 
 
+def _repo_aliases(data):
+    """``repo_aliases`` (#540, ADR 0007): the names ``owner/name`` the repository had before a
+    rename, each once and none equal to ``repo``; () when the key is not set."""
+    aliases = _str_list(data, 'repo_aliases', 'config')
+    repo = data.get('repo')
+    for alias in aliases:
+        match = _REPO.fullmatch(alias)
+        if not match or match.group(2) in ('.', '..'):
+            raise ConfigError(f'repo_aliases: expected owner/name, not {alias!r}')
+        if isinstance(repo, str) and alias.lower() == repo.lower():
+            raise ConfigError(f'repo_aliases: {alias!r} is repo itself: list only the names '
+                              'the repository had before a rename')
+    if len({a.lower() for a in aliases}) != len(aliases):
+        raise ConfigError('repo_aliases: a name is listed twice')
+    return aliases
+
+
 def _repo_lock_dir(data):
     """``repo_lock_dir`` (ADR 0006, R8): an absolute path, or one starting with ``~``, with a
     ``repo`` of the form ``owner/name``; '' when the key is not set."""
@@ -2053,8 +2076,8 @@ _PROMPTS_KEYS = {**dict.fromkeys(('instructions', 'fix_instructions', 'module_te
                                   'module_test_helpers')),
                  'adr': dict.fromkeys(PROMPT_ADR_KEYS)}
 OVERLAY_KEYS = {
-    **dict.fromkeys(('repo', 'base_branch', 'branch_prefix', 'state_dir', 'source',
-                     'repo_lock_dir',
+    **dict.fromkeys(('repo', 'repo_aliases', 'base_branch', 'branch_prefix', 'state_dir',
+                     'source', 'repo_lock_dir',
                      'test_cmd', 'local_tests', 'ci_rerun_unrelated', 'block_uncertain_turns', 'story_identity',
                      'publication_outbox', 'attempt_identity', 'journal_max_mib',
                      'language', 'trusted_users', 'preflight',
@@ -2437,7 +2460,7 @@ def load_config(path=None, local=None, project=None, *, sources=None):
 
 # The trust keys (ADR 0006, K1 and T1): a change of a value under them is recorded, with the
 # value before and after, in the journal of the dispatcher at its start and at each reload.
-TRUST_KEYS = ('repo', 'base_branch', 'state_dir', 'source', 'test_cmd', 'trusted_users',
+TRUST_KEYS = ('repo', 'repo_aliases', 'base_branch', 'state_dir', 'source', 'test_cmd', 'trusted_users',
               'preflight', 'conclave', 'roles', 'agents', 'apps', 'merge', 'review_policy',
               'max_review_rounds', 'max_requested_fix_rounds', 'protected_paths',
               'blocked_labels', 'budget', 'delegations', 'agent_user', 'pin')

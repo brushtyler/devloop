@@ -1513,7 +1513,10 @@ read), the command is refused, the answer says why, and the PR stays with the op
   the link to a comment of this repository
   (`https://github.com/<repo>/issues/<N>#issuecomment-<id>`, or `/pull/<N>`) whose author, read
   now with the API, is in `trusted_users`: the record of a decision of the operator already
-  written on GitHub, never a new one;
+  written on GitHub, never a new one. A link under a former name of the repository
+  (`repo_aliases`, [rename of the repository](reference.md#rename-of-the-repository)) counts
+  the same way, only when that comment is found by id among the comments of issue `<N>` in
+  `repo`: a comment that is not there (a 404) is refused;
 - no `/devloop hold` of the supervisor or of a trusted user was written after the command: a
   trusted user cancels a command still waiting this way;
 - the daily cap of the delegated merges is not reached.

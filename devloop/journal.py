@@ -258,10 +258,17 @@ class TurnJournal:
     ``read_only``: for a process without the dispatcher lock (``status``, ``tick --dry-run``).
     It reads and verifies the journal and changes no file: an incomplete last line is ignored,
     not set aside; the old trace is imported in memory, under ids of its own, and stays on
-    disk; every other record stays in memory. No turn starts from it (``intent``)."""
+    disk; every other record stays in memory. No turn starts from it (``intent``).
 
-    def __init__(self, state_dir=None, clock=time.time, read_only=False, max_bytes=MAX_BYTES):
+    ``aliases`` (#540, ADR 0007): ``{former name: name}`` of a repository renamed, from
+    ``repo_aliases``. A turn, a story or an attempt recorded under a former name reads as one
+    of the repository's current name: the records written before the rename stay valid. The
+    file is never rewritten."""
+
+    def __init__(self, state_dir=None, clock=time.time, read_only=False, max_bytes=MAX_BYTES,
+                 aliases=None):
         self.dir = Path(state_dir) if state_dir is not None else None
+        self.aliases = dict(aliases or {})
         self.read_only = read_only
         self.max_bytes = max_bytes
         self._clock = clock
@@ -284,6 +291,11 @@ class TurnJournal:
 
     def _now(self):
         return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(self._clock()))
+
+    def repo_name(self, repo):
+        """The current name of the repository ``repo`` (``aliases``): ``repo`` itself unless
+        it is a former name."""
+        return self.aliases.get(repo, repo)
 
     def size(self):
         """The size of the journal's file in bytes: 0 without one, or without ``state_dir``."""
@@ -501,9 +513,11 @@ class TurnJournal:
                         'reconciled': None}
                     trace[int(number)] = True
             elif kind == 'linked' and d['turn'] in turns:
-                turns[d['turn']].update(issue=d['issue'], repo=d['repo'])
+                turns[d['turn']].update(issue=d['issue'], repo=self.repo_name(d['repo']))
             elif kind == 'intent':
                 turns[d['turn']] = dict(d, outcome=None, reconciled=None)
+                if 'repo' in d:
+                    turns[d['turn']]['repo'] = self.repo_name(d['repo'])
             elif kind == 'outcome' and d['turn'] in turns:
                 turns[d['turn']]['outcome'] = d['outcome']
                 if 'usage' in d:  # what the CLI reported, with the budget on (#365)
@@ -735,7 +749,7 @@ class TurnJournal:
         for e in self._events:
             kind, d = e['event'], e['data']
             if kind == 'story':
-                stories[d['story']] = {'story': d['story'], 'repo': d['repo'],
+                stories[d['story']] = {'story': d['story'], 'repo': self.repo_name(d['repo']),
                                        'issue': d['issue'], 'hashes': [d['hash']],
                                        'children': [], 'at': d['at']}
             elif kind == 'request' and d['story'] in stories:
@@ -1122,6 +1136,8 @@ class TurnJournal:
             kind, d = e['event'], e['data']
             if kind == 'attempt':
                 attempts[d['attempt']] = dict(d, pr=None, outcome=None, reason=None)
+                if 'repo' in d:
+                    attempts[d['attempt']]['repo'] = self.repo_name(d['repo'])
             elif kind == 'attempt_pr' and d['attempt'] in attempts:
                 attempts[d['attempt']]['pr'] = d['pr']
             elif kind == 'concluded' and d['attempt'] in attempts:
