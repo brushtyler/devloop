@@ -57,6 +57,30 @@ sudo -u supervisor -H tmux attach -t devloop-supervisor   # per entrare nella se
   `agy --model <modello> -i <runbook>`.
 - La sessione si chiama `devloop-<ruolo>`; se esiste già, lo script si ferma e dice come
   entrarci. Serve `tmux` sull'host (`apt-get install tmux`).
+- Per supervisore e coordinatore, prima del runbook, lo script passa i valori dell'installazione
+  per il canale fra i due ruoli (lo `state_dir`, la casella e le sue destinazioni, la sveglia del
+  coordinatore) e chiede di cominciare dalla sezione *At startup* del runbook: una sessione
+  nuova, anche di un'altra CLI, li segue senza istruzioni dell'operatore.
+
+**Canale fra supervisore e coordinatore** (#543). I runbook descrivono come si parlano, come
+sorveglia ciascuno e cosa fa all'avvio:
+
+- **su GitHub**, per ciò che va tracciato: `agent:needs-operator` con un commento, o un'issue con
+  le sue prove. Anche lo stato del lavoro (cosa è in corso, cosa aspetta l'operatore) sta su
+  GitHub, nel diario del progetto (#76 per ssdlc) e nelle issue, mai in un file locale;
+- **la casella**, per gli avvisi rapidi, sempre disponibile anche senza GitHub:
+  `COORDINATION_DIR` (`/var/lib/devloop-coordination`; con `PROJECT`,
+  `/var/lib/devloop-coordination-<progetto>`), con `to-coordinator/` e `to-supervisor/`, ciascuna
+  con `done/`, tutte `root:devloop-roles` (`COORDINATION_GROUP`) 2770. Nel gruppo ci sono solo
+  `supervisor` e `coordinator`, non `devloop` né `devloop-agent`. Un file per messaggio, con un
+  nome univoco (data e ora UTC più un suffisso casuale), pubblicato con una rinomina atomica da
+  un file temporaneo che comincia con `.`; il destinatario lo legge, poi lo sposta in `done/` o
+  lo rimuove. La casella serve solo per gli avvisi, non per lo stato;
+- **la sorveglianza**: il supervisore segue il flusso continuo (`devloop watch` con il suo file di
+  stato), il coordinatore solo i suoi eventi e un controllo periodico, con la sveglia
+  `ops/host/coordinator-wait.sh` (passo 10);
+- **l'avvio**: ogni ruolo rilegge la sua casella, il diario (#76) e il riepilogo (#316), poi
+  riprende a sorvegliare.
 
 **Passi sull'host.** Il `host_step` di una PR nomina una sezione di
 [host/migrate.md](host/migrate.md) o uno script di `ops/host/`, mai comandi liberi, e il reviewer
@@ -78,11 +102,15 @@ ops/
     setup-agent-user.sh      utente degli agent (devloop-agent): home, file e binari delle CLI
                              di root, ACL su state_dir, worktree e sessioni, sudoers dell'avvio
                              degli agent; --unseal per installare e aggiornare le CLI
-    setup-supervisor.sh      utente supervisor, ACL di attraversamento su /home/<devloop>,
+    setup-supervisor.sh      utente supervisor, ACL di attraversamento su /home/<devloop> e di
+                             lettura su overlay e file di progetto, casella fra i ruoli,
                              sudoers, clone, key_dir 700, impostazioni di Claude Code
     setup-coordinator.sh     utente coordinator (facoltativo), ACL di attraversamento su
-                             /home/<devloop> e di lettura sull'overlay, key_dir 700, copia di
-                             root di check-host.sh, sudoers in sola lettura
+                             /home/<devloop> e di lettura sull'overlay, casella fra i ruoli,
+                             key_dir 700, copia di root di check-host.sh e della sveglia,
+                             sudoers in sola lettura
+    coordinator-wait.sh      la sveglia del coordinatore: esce sui suoi eventi, su un messaggio
+                             nella casella o alla fine del periodo
     devloop.service          unità systemd (con segnaposto @NOME@)
     devloop@.service         unità template, per più progetti sullo stesso host (PROJECT)
     devloop-project.conf     drop-in di un progetto per devloop@<progetto> (con segnaposto)
@@ -91,8 +119,8 @@ ops/
     sudoers-supervisor       sudoers minimale del supervisore (con segnaposto @NOME@)
     sudoers-coordinator      sudoers del coordinatore, solo comandi di lettura (con segnaposto)
     config.local.toml.example  overlay di devloop, tutto commentato
-    check-host.sh            verifica utenti, permessi (700/600), chiavi, ACL, sudoers, utente
-                             degli agent, coordinatore, servizio, CLI e `devloop apps`;
+    check-host.sh            verifica utenti, permessi (700/600), chiavi, ACL, sudoers, casella,
+                             utente degli agent, coordinatore, servizio, CLI e `devloop apps`;
                              --read-only per il coordinatore
     start-role.sh            avvia in tmux la sessione di supervisore, coordinatore o agent
                              dell'host, con il suo utente, CLI, modello e runbook
@@ -503,8 +531,23 @@ sudo bash ops/host/setup-supervisor.sh
 
 Crea l'utente `supervisor`, gli dà **solo l'attraversamento** della home di devloop
 (`setfacl -m u:supervisor:--x /home/devloop`: raggiunge i log per percorso, ma non elenca la home,
-e `~/.ghapps`, `~/.claude` e `~/.codex` di devloop restano 700), installa il sudoers minimale dopo
+e `~/.ghapps`, `~/.claude` e `~/.codex` di devloop restano 700), gli dà la **lettura
+dell'overlay e del file di progetto** dello `state_dir` con un'ACL, se manca (`setfacl -m
+u:supervisor:r-- <state_dir>/config.local.toml` e `<state_dir>/project.toml`, #543: i due file
+dell'operatore sono di solito 600, e `scripts/supervisor-token.py` legge l'overlay), prepara la
+**casella fra supervisore e coordinatore** (il gruppo `devloop-roles` con dentro `supervisor`, e
+`/var/lib/devloop-coordination` con `to-coordinator/`, `to-supervisor/` e le loro `done/`, di
+root, del gruppo, 2770; [I quattro ruoli](#i-quattro-ruoli)), installa il sudoers minimale dopo
 averlo validato con `visudo -c`, clona il repository e prepara `key_dir` e `~/.claude` (700).
+Se al posto di `to-coordinator` o `to-supervisor` c'è un file (la casella di prima del #543) lo
+script si ferma: si sposta prima, come in
+[host/migrate.md](host/migrate.md#casella-fra-i-ruoli-e-sveglia-del-coordinatore-543).
+
+**File sostituito.** Un `install -m 600`, un `cp` o un `rsync` che mette un file nuovo al posto
+dell'overlay o del file di progetto ne toglie le ACL: il supervisore non li legge più, e la sua
+app non firma. Dopo ogni sostituzione si riesegue `setup-supervisor.sh` (e
+`setup-coordinator.sh`, se c'è il coordinatore), poi `check-host.sh`
+([host/migrate.md](host/migrate.md#acl-delloverlay-e-del-file-di-progetto-543)).
 
 Il **sudoers** (`ops/host/sudoers-supervisor`) permette:
 
@@ -548,8 +591,13 @@ Verifica gli utenti; `key_dir`, `~/.claude` e `~/.codex` con mode 700 e il propr
 ogni chiave `*.pem` con mode 600 e del suo utente, una chiave per app attesa e, nella `key_dir`
 del supervisore, nessuna chiave in più; l'ACL `user:supervisor:--x` sulla home di devloop e
 nessuna ACL per il supervisore sulle sue directory private; che il supervisore legga `run.log`;
-i due sudoers (440, root, accettati da `visudo`, uguali a quelli generati); che `devloop-agent` non
-legga `key_dir`, lo `state_dir` e l'overlay, non attraversi `key_dir`, non legga né attraversi le
+i due sudoers (440, root, accettati da `visudo`, uguali a quelli generati); l'ACL
+`user:supervisor:r--` sull'overlay e sul file di progetto, e che il supervisore li legga (#543:
+un errore se un file sostituito l'ha persa); la casella (#543: il gruppo `devloop-roles`, con
+dentro `supervisor` e, se c'è, `coordinator`, e senza `devloop` né `devloop-agent`;
+`/var/lib/devloop-coordination`, `to-coordinator/`, `to-supervisor/` e le loro `done/`, di root,
+del gruppo, 2770: un errore se manca); che `devloop-agent` non
+legga `key_dir`, lo `state_dir`, l'overlay e il file di progetto, non attraversi `key_dir`, non legga né attraversi le
 altre voci dello `state_dir`, entri senza scriverle in `worktrees`, `agent-shared`,
 `agent-shared/schemas`, `agent-shared/turns` e `agent-shared/tmp`, non scriva nulla in `.git`,
 esegua git nel primo worktree di `worktrees` (avviato da `devloop` con `sudo -n -E` e il solo
@@ -626,8 +674,10 @@ per percorso l'overlay dello `state_dir`, da cui `scripts/coordinator-token.py` 
 `[apps.coordinator]`, ma non elenca la home, e `~/.ghapps`, `~/.claude` e `~/.codex` di devloop
 restano 700), e la **lettura dell'overlay** con un'ACL, se manca (`setfacl -m u:coordinator:r--
 <state_dir>/config.local.toml`, #554: l'overlay dell'operatore è di solito 600; il file di
-progetto no, `coordinator-token.py` non lo legge), installa la **copia di root** di
-`check-host.sh`, dei file che legge
+progetto no, `coordinator-token.py` non lo legge), lo mette nella **casella fra supervisore e
+coordinatore** (il gruppo `devloop-roles` e le directory di `/var/lib/devloop-coordination`, come
+`setup-supervisor.sh`, #543), installa la **copia di root** di
+`check-host.sh` e della sveglia `coordinator-wait.sh`, dei file che leggono
 (`lib.sh`, i sudoers, le unità e il file di `tmpfiles.d` di `ops/host/`) e dei parametri
 (`params.env`) in `COORDINATOR_OPS_DIR` (`/usr/local/lib/devloop-coordinator`, 755 e 644, di
 root), e il sudoers (`ops/host/sudoers-coordinator`, in `COORDINATOR_SUDOERS_FILE`,
@@ -643,13 +693,17 @@ si riesegue: `check-host.sh` avvisa se la copia è diversa dal checkout.
 Il **sudoers** permette, ciascun comando con i suoi argomenti esatti, senza caratteri jolly:
 
 - come `devloop`: `scripts/devloop-pinned status` (lo stesso comando dell'unità, come per il
-  supervisore) e `/usr/bin/tail -n 200` o `-n 1000` di `<state_dir>/run.log`;
+  supervisore), `/usr/bin/tail -n 200` o `-n 1000` di `<state_dir>/run.log` e, per la sveglia
+  (#543), `scripts/devloop-pinned watch --until-change --interval 60 --timeout 300 --state
+  <state_dir>/coordinator-watch-state.json`: il watch gira come `devloop`, con la sua
+  configurazione, e il coordinatore non vede le chiavi del dispatcher; il file di stato è suo,
+  distinto da quello del supervisore (`watch-state.json`), così non ne consuma gli eventi;
 - come root: `/usr/bin/journalctl --no-pager -n 200` o `-n 1000 -u devloop`,
   `/usr/bin/systemctl status --no-pager devloop` e
   `/usr/bin/bash /usr/local/lib/devloop-coordinator/host/check-host.sh --read-only`.
 
-Niente che modifichi: né `start`, `stop` o `restart` del servizio, né `pin`, `tick` o `watch`, né
-un pager o una shell. Per esempio, come `coordinator`:
+Niente che modifichi: né `start`, `stop` o `restart` del servizio, né `pin` o `tick`, né un altro
+`watch`, né un pager o una shell. Per esempio, come `coordinator`:
 
 ```bash
 sudo -u devloop /usr/bin/python3 /home/devloop/ssdlc/scripts/devloop-pinned status
@@ -664,6 +718,27 @@ sudo /usr/bin/bash /usr/local/lib/devloop-coordinator/host/check-host.sh --read-
 sessioni o nelle cache delle CLI), senza `devloop apps` e senza scrivere nulla; stampa solo righe
 di stato. Delle CLI verifica che ci siano. Gira dalla directory `/` e con Python isolato, così
 nessun file della directory di chi lo lancia entra nelle verifiche.
+
+**La sveglia** (#543). Il coordinatore non segue il flusso continuo, che è del supervisore: la sua
+sessione avvia in background, come utente `coordinator`, la copia di root della sveglia, che usa i
+parametri della copia:
+
+```bash
+bash /usr/local/lib/devloop-coordinator/host/coordinator-wait.sh                # 4 ore
+bash /usr/local/lib/devloop-coordinator/host/coordinator-wait.sh --period 3600  # un'ora
+```
+
+Esce con 0 e una riga per motivo al primo di questi: un messaggio in `to-coordinator/` della
+casella (`casella:`, senza consumarlo), un evento del coordinatore su GitHub (`evento:`:
+`agent:needs-operator` aggiunta, "il merge spetta all'operatore", un commento sull'issue degli
+allarmi `[run].alert_issue`, un errore del watch; gli altri eventi li salta), una riga nuova di
+`run.log` con un `Traceback`, un `ALERT:`, un `401` o il rifiuto dell'avvio (`log:`), il servizio
+non attivo (`servizio:`, una volta per cambio di stato), o la fine del periodo
+(`COORDINATOR_WAIT_PERIOD`, 14400 secondi, o `--period`; `periodo:`). Legge GitHub con il comando
+del sudoers, al più 300 secondi per giro, poi rilegge casella, log e servizio. Esce con 1 se il
+watch non riesce (il sudoers non è aggiornato, devloop non parte). Tiene il suo stato (le righe di
+`run.log` già viste, l'ultimo stato del servizio) in `~/.local/state/devloop-coordinator-wait/`
+del coordinatore.
 
 **App del coordinatore** (#549). Il coordinatore firma comandi, commenti e label con un'app sua,
 `<APP_PREFIX>coordinator`, che l'operatore crea come le altre (passo 2), dal manifest
@@ -707,15 +782,16 @@ contenuti**.
 `check-host.sh` verifica la `key_dir` (700, del coordinatore) e che contenga solo la chiave
 dell'app del coordinatore (600, del coordinatore), l'ACL `user:coordinator:--x` sulla home di
 devloop, nessuna ACL per il coordinatore sulle directory private di devloop, l'ACL
-`user:coordinator:r--` sull'overlay, e che il coordinatore legga l'overlay. Le prove di lettura
+`user:coordinator:r--` sull'overlay, che il coordinatore legga l'overlay, che sia nel gruppo
+della casella, e che la copia della sveglia coincida con il checkout. Le prove di lettura
 come un altro utente usano il `[ -r ]` di bash, che rispetta le ACL, mai `/usr/bin/test`: quello
 di uutils, il default di Ubuntu 26.04, guarda solo i bit del modo (#554).
 
 **Overlay sostituito.** Un `install -m 600`, un `cp` o un `rsync` che mette un file nuovo al posto
-dell'overlay ne toglie le ACL, quella del coordinatore e quella del supervisore, se l'operatore
-gliel'ha data. Dopo ogni sostituzione si riesegue `setup-coordinator.sh`, che rimette solo l'ACL
-del coordinatore, e si verifica con `check-host.sh`
-([host/migrate.md](host/migrate.md#utente-del-coordinatore-530)).
+dell'overlay ne toglie le ACL, quella del coordinatore e quella del supervisore. Dopo ogni
+sostituzione si riesegue `setup-coordinator.sh`, che rimette l'ACL del coordinatore, e
+`setup-supervisor.sh`, che rimette quella del supervisore, e si verifica con `check-host.sh`
+([host/migrate.md](host/migrate.md#acl-delloverlay-e-del-file-di-progetto-543)).
 
 Poi, a mano: la CLI dell'agent del coordinatore e il suo login, come utente `coordinator`, e un
 token di sola lettura per `gh` ([github/tokens.md](github/tokens.md)). Su un host già attivo i
@@ -723,9 +799,10 @@ passi sono in [host/migrate.md](host/migrate.md#utente-del-coordinatore-530).
 
 ## Migrazione su un'altra macchina
 
-Vedi [host/migrate.md](host/migrate.md): cosa copiare dallo `state_dir` e dal supervisore, cosa
-ricreare (copie fissate, login delle CLI, servizio), come trattare le chiavi delle app e in che
-ordine, senza mai due dispatcher attivi sullo stesso repository.
+Vedi [host/migrate.md](host/migrate.md#spostare-linstallazione-su-un-altro-host-543), la
+procedura per l'agent dell'host: utenti, chiavi, `state_dir`, file di progetto e overlay con le
+loro ACL, casella fra i ruoli, ruoli, servizi, login delle CLI e verifica finale, cosa copiare e
+cosa ricreare, in che ordine, senza mai due dispatcher attivi sullo stesso repository.
 
 Un host già attivo prima del #438 fa una volta il passo di
 [host/migrate.md](host/migrate.md#file-delle-cli-di-root-sullutente-degli-agent-438): file e

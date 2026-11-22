@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Verifica l'installazione di devloop e del supervisore: utenti, directory private (700), chiavi
 # delle app (600, del proprietario giusto, solo quelle attese), ACL sulla home di devloop,
-# sudoers, l'utente degli agent (non legge key_dir né state_dir, non scrive .git né le directory
+# sudoers, la lettura dell'overlay e del file di progetto per il supervisore (ACL r--, #543), la
+# casella fra supervisore e coordinatore (gruppo, directory 2770 di root, #543), l'utente degli agent (non legge key_dir né state_dir, non scrive .git né le directory
 # che contengono worktree e turni, è nell'overlay, esegue git nei worktree di devloop, non cambia
 # istruzioni, configurazione e binari delle sue CLI; l'ambiente dei turni gli arriva con sudo -E,
 # che sudo-rs ignora), il lock per repository (directory comune, gruppo, overlay; ADR 0006, R8),
@@ -206,6 +207,75 @@ check_sudoers() {
 step "sudoers del supervisore ($SUDOERS_FILE)"
 check_sudoers "$SUDOERS_FILE" sudoers-supervisor setup-supervisor.sh
 
+# check_read_acl USER FILE SETUP: su FILE l'ACL di sola lettura user:USER:r--, che mette SETUP.
+check_read_acl() {
+    local user=$1 file=$2 setup=$3 entry
+    command -v getfacl >/dev/null && [ -f "$file" ] || return 0
+    # getfacl può aggiungere alla riga un commento #effective.
+    entry=$(getfacl -p --omit-header "$file" 2>/dev/null | grep "^user:$user:" | head -n 1)
+    entry=${entry%%[[:space:]]*}
+    case $entry in
+        "user:$user:r--") ok "ACL $entry su $file" ;;
+        '') fail "manca l'ACL u:$user:r-- su $file ($setup)" ;;
+        *) fail "ACL $entry su $file: deve essere r--, senza scrittura" ;;
+    esac
+}
+
+# L'overlay e il file di progetto dello state_dir (#543): il supervisore li legge con l'ACL che
+# mette setup-supervisor.sh, che una sostituzione del file (install, cp, rsync) cancella; l'utente
+# degli agent no (lo prova il suo passo, qui sotto).
+step "Lettura dell'overlay e del file di progetto per $SUPERVISOR_USER (#543)"
+for file in "$STATE_PATH/config.local.toml" "$STATE_PATH/project.toml"; do
+    if ! [ -f "$file" ] || [ -L "$file" ]; then
+        fail "$file non esiste o è un link"
+        continue
+    fi
+    check_read_acl "$SUPERVISOR_USER" "$file" setup-supervisor.sh
+    check_as "$SUPERVISOR_USER" "$SUPERVISOR_USER legge $file" \
+        /usr/bin/bash -c '[ -r "$1" ]' _ "$file"
+done
+
+# La casella fra supervisore e coordinatore (#543): il gruppo, con dentro i due ruoli e nessun
+# altro utente di devloop, e le directory, di root, del gruppo, 2770.
+step "Casella fra supervisore e coordinatore: $COORDINATION_DIR, gruppo $COORDINATION_GROUP (#543)"
+in_group() { id -nG "$1" 2>/dev/null | tr ' ' '\n' | grep -qxF "$COORDINATION_GROUP"; }
+if getent group "$COORDINATION_GROUP" >/dev/null; then
+    ok "il gruppo $COORDINATION_GROUP esiste"
+else
+    fail "il gruppo $COORDINATION_GROUP non esiste (setup-supervisor.sh)"
+fi
+roles=$SUPERVISOR_USER
+user_exists "$COORDINATOR_USER" && roles="$roles $COORDINATOR_USER"
+for user in $roles; do
+    if in_group "$user"; then
+        ok "$user è nel gruppo $COORDINATION_GROUP"
+    else
+        fail "$user non è nel gruppo $COORDINATION_GROUP (setup-supervisor.sh, setup-coordinator.sh)"
+    fi
+done
+for user in "$DEVLOOP_USER" "$AGENT_USER"; do
+    case " $roles " in *" $user "*) continue ;; esac
+    if in_group "$user"; then
+        fail "$user è nel gruppo $COORDINATION_GROUP: deve restarne fuori"
+    fi
+done
+for dir in "$COORDINATION_DIR" $(for box in $COORDINATION_BOXES; do
+                                     printf '%s\n' "$COORDINATION_DIR/$box" "$COORDINATION_DIR/$box/done"
+                                 done); do
+    if [ -L "$dir" ] || ! [ -d "$dir" ]; then
+        fail "$dir non esiste o non è una directory (setup-supervisor.sh)"
+        continue
+    fi
+    actual=$(stat -c '%a %G' "$dir")
+    if [ "$actual" = "2770 $COORDINATION_GROUP" ]; then
+        ok "$dir: 2770, gruppo $COORDINATION_GROUP"
+    else
+        fail "$dir è $actual, deve essere 2770 del gruppo $COORDINATION_GROUP"
+    fi
+    owner=$(stat -c '%U' "$dir")
+    [ "$owner" = root ] || fail "$dir è di $owner, deve essere di root"
+done
+
 # PATH e ogni directory sopra: di root e non scrivibili dal gruppo né dagli altri, così nessun
 # altro utente cambia ciò che il coordinatore esegue come root.
 check_root_path() {
@@ -245,17 +315,7 @@ else
     if command -v getfacl >/dev/null && [ -d "$DEVLOOP_HOME" ]; then
         check_traverse "$COORDINATOR_USER" setup-coordinator.sh
     fi
-    if command -v getfacl >/dev/null && [ -f "$OVERLAY_FILE" ]; then
-        # getfacl può aggiungere alla riga un commento #effective.
-        entry=$(getfacl -p --omit-header "$OVERLAY_FILE" 2>/dev/null \
-            | grep "^user:$COORDINATOR_USER:" | head -n 1)
-        entry=${entry%%[[:space:]]*}
-        case $entry in
-            "user:$COORDINATOR_USER:r--") ok "ACL $entry su $OVERLAY_FILE" ;;
-            '') fail "manca l'ACL u:$COORDINATOR_USER:r-- su $OVERLAY_FILE (setup-coordinator.sh)" ;;
-            *) fail "ACL $entry su $OVERLAY_FILE: deve essere r--, senza scrittura" ;;
-        esac
-    fi
+    check_read_acl "$COORDINATOR_USER" "$OVERLAY_FILE" setup-coordinator.sh
     check_as "$COORDINATOR_USER" "$COORDINATOR_USER legge $OVERLAY_FILE" \
         /usr/bin/bash -c '[ -r "$1" ]' _ "$OVERLAY_FILE"
     check_sudoers "$COORDINATOR_SUDOERS_FILE" sudoers-coordinator setup-coordinator.sh
@@ -281,7 +341,7 @@ fi
 
 step "Utente degli agent $AGENT_USER (#415)"
 STATE="$STATE_PATH"
-for private in "$DEVLOOP_KEY_DIR" "$STATE" "$STATE/config.local.toml"; do
+for private in "$DEVLOOP_KEY_DIR" "$STATE" "$STATE/config.local.toml" "$STATE/project.toml"; do
     check_as "$AGENT_USER" "$AGENT_USER non legge $private" /usr/bin/bash -c '! [ -r "$1" ]' _ "$private"
 done
 check_as "$AGENT_USER" "$AGENT_USER non attraversa $DEVLOOP_KEY_DIR" /usr/bin/bash -c '! [ -x "$1" ]' _ "$DEVLOOP_KEY_DIR"
