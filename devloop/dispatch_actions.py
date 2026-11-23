@@ -1208,7 +1208,7 @@ class ActionsMixin:
         ``fix``: a fix waits for the sync, and its review is the next one."""
         # The rounds the supervisor granted (#405) raise the limit of this PR only.
         limit = self.cfg.max_review_rounds + pr.granted_rounds
-        what = '`max_review_rounds`' + (f' più {pr.granted_rounds} concessi dal supervisore'
+        what = '`max_review_rounds`' + (f' più {pr.granted_rounds} concessi'
                                          if pr.granted_rounds else '')
         latest = current_round(pr.reviews)
         approved = (bool(latest) and latest[0]['source'] == 'agent'

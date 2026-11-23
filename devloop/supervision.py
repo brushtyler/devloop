@@ -56,8 +56,12 @@ the attribution header:
 
 A trusted user may use the same commands on an escalation to the operator (#321), in any merge
 mode: ``retry`` of a step it records, critical classes included, and ``accept-defaults`` or
-``decide`` on a ``preflight_default`` readiness check. A command that does not apply is always
-answered, with how to resume.
+``decide`` on a ``preflight_default`` readiness check. Since #553 also ``grant-round <reason>`` on
+a ``round_limit`` escalation of a PR, on the head it recorded: one more round for that PR only,
+outside the caps of the delegation and without changing ``max_review_rounds``. The coordinator's
+identity may do the same at most ``MAX_COORDINATOR_OPERATOR_ROUNDS`` times per PR (the
+operator's decision on #553); any further round on that PR stays the operator's. A command that
+does not apply is always answered, with how to resume.
 """
 
 import re
@@ -123,6 +127,15 @@ MAX_RETRIES = 2
 # granted to one PR, and the grants of one UTC day, every delegation together, retries excluded.
 MAX_GRANTED_ROUNDS = 2
 MAX_DAILY_GRANTS = 3
+# The rounds granted on an escalation to the operator (``round_limit``, #553) are outside those
+# caps: a trusted user grants them one at a time, each with its reason. The coordinator's identity
+# may grant at most this many of them on one PR, whoever granted the others (the operator's
+# decision on #553): any further one stays the operator's.
+MAX_COORDINATOR_OPERATOR_ROUNDS = 1
+# What the escalation of a round limit to the operator says of how to grant more rounds (#553).
+OPERATOR_ROUNDS_TEXT = ('Un utente fidato può concedere un round in più a questa sola PR con '
+                        '`/devloop grant-round <motivo>`, sul head di questa escalation; alzando '
+                        '`max_review_rounds` l\'operatore concede invece altri round a tutte le PR.')
 # The tolerance of the budget envelope (#411, ADR 0005, D3): the one extension of a story adds
 # this share of each of its turn caps and of its time, rounded down (``floor``), so that it never
 # goes beyond it. A constant of the code, like the caps above.

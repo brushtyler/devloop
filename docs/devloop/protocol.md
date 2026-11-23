@@ -220,7 +220,10 @@ moved, which also starts beyond the limit (see [Resync after approval](#resync-a
 `max_review_rounds` plus the rounds that did not count. The rounds the supervisor granted to the
 PR with `/devloop grant-round` (#405, [Granting a review round](guide.md#granting-a-review-round))
 raise the limit of that PR only: it is `max_review_rounds` plus the rounds granted, counted from
-the dispatcher's `supervision` records of the PR, plus the rounds that did not count.
+the dispatcher's `supervision` records of the PR, plus the rounds that did not count. So do the
+rounds a trusted user grants with the same command on a `round_limit` escalation to the operator
+(#553, [Granting a review round on an escalation to the operator](guide.md#granting-a-review-round-on-an-escalation-to-the-operator)),
+whose records carry `operator: true`: they count in the limit, not in the caps of the delegation.
 
 **Review after a `/devloop fix` on an approved head** (#536): the review round that answers a
 [`/devloop fix`](guide.md#fix-requested-by-the-operator-or-the-supervisor) of a user in
@@ -263,7 +266,10 @@ resolved, a new review of the same head or of a new one; a round the CI failure 
 joined adds `con la CI fallita dello stesso head`, and `che ne ha fatto decadere l'approvazione`
 when the round had approved), then the rounds that do not count with theirs, among them the
 review after a `/devloop fix` on an approved head with the logins of who asked it (#536; one
-beyond `max_requested_fix_rounds` is among those that count, and says so), and recalls that the operator can grant more rounds by raising `max_review_rounds` (#289).
+beyond `max_requested_fix_rounds` is among those that count, and says so), and recalls that a
+trusted user can grant one more round to that PR with `/devloop grant-round <reason>` and the
+operator more rounds to every PR by raising `max_review_rounds` (#289, #553). It records the
+`head` of the PR, which that grant must still find, and the label it `resume`s from.
 A `round_grantable` escalation (#405) has the same lists and says instead that the supervisor
 may grant one more round with `/devloop grant-round <reason>`. A `budget_grantable` escalation
 (#411) of a turn the budget refused records, besides the step and its key, the `story`, the
@@ -588,7 +594,14 @@ these records are what raises the round limit of the PR. The same figures go in 
 command's comment, and, before both, a `grant` event in the
 [turn journal](#turn-journal), which counts the grants of the day across every PR: the daily cap
 is checked again and the event written in one step, so `daily` is the count with this grant and
-never passes the cap. An extension of the budget envelope granted with `/devloop grant-budget`
+never passes the cap; `granted`, `cap` and `left` count the rounds of the delegation only. A
+round a trusted user grants with the same command on a `round_limit` escalation to the operator
+(#553) has the class `round_limit`, `operator: true`, the `head` it was granted on and the rounds
+granted this way to the PR with this one (`granted`), with no daily figures: it counts against no
+cap of the delegation. From the coordinator's identity it also carries `role: coordinator`, its
+cap per PR (`cap`, 1) and what remains (`left`). Its ledger `event` `delegation_grant` has the
+`delegation` `operator_rounds` and the same figures, and its `grant` event in the turn journal,
+written first, the same delegation. An extension of the budget envelope granted with `/devloop grant-budget`
 (#411) carries the analysis of the causes in `reason`, the `story`, the `extension` (`percent`,
 and the `turns`, `role_turns`, `phase_turns` and `wall_seconds` it adds) and the same daily
 figures; its ledger `event` `delegation_grant` has the `delegation` `budget`, and its `grant`
@@ -1356,7 +1369,10 @@ their format does not change. The journal is append-only, one JSON event per lin
   the PR, the id of the command's comment and its author; written before the grant applies, the
   grants of a UTC day count against the daily cap, which is checked again under the journal's
   lock in the same step as the write: past the cap nothing is written and the grant does not
-  apply ([Granting a review round](guide.md#granting-a-review-round)). The extension of a budget
+  apply ([Granting a review round](guide.md#granting-a-review-round)). A round granted on a
+  `round_limit` escalation to the operator (#553) is a `grant` of the delegation
+  `operator_rounds`, written once per command before it applies, which counts against no daily
+  cap. The extension of a budget
   envelope (#411, `/devloop grant-budget`) is a `grant` of the delegation `budget` that also
   records the `story` and the `extension` it adds; one per story, ever, checked under the lock in
   the same step as the daily cap and the write, and from then on part of the envelope of that

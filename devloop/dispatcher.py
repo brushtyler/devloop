@@ -225,7 +225,8 @@ from .ports import Backend, Tracker, summarize_checks
 from .review import (CI, OPERATOR, UNPROVEN, current_round, finding_commands, finding_key,
                      flow_verdict, open_findings, owner_of, round_verdict, trust_policy_parts)
 from .supervision import (ACCEPT_DEFAULTS, BUDGET_GRANTABLE, COORDINATOR_DELEGATED, DECIDE,
-                          RETRY, ROUND_GRANTABLE, TOOL_FAILURE, UNCERTAIN_TURN, supervisor_command)
+                          OPERATOR_ROUNDS_TEXT, RETRY, ROUND_GRANTABLE, TOOL_FAILURE,
+                          UNCERTAIN_TURN, supervisor_command)
 from .workspace import WorkspaceError
 
 LEVEL_LABEL_STYLE = ('5319e7', 'devloop: la PR richiede una review di livello 2')
@@ -536,7 +537,7 @@ def round_limit_reason(lead, reviews, fixes, syncs, limit, granted=0, grantable=
     round the supervisor may grant."""
     rounds = round_reasons(reviews, fixes, syncs, trusted, cap, closures)
     counted = [(n, why) for n, why, counts in rounds if counts]
-    more = f' più {granted} concessi dal supervisore' if granted else ''
+    more = f' più {granted} concessi' if granted else ''
     text = (lead.rstrip() + f'\n\nRound contati sul limite ({len(counted)} di {limit}, '
             f'`max_review_rounds`{more}):\n\n'
             + ('\n'.join(f'- round {n}: {why}' for n, why in counted) or '- nessuno'))
@@ -547,8 +548,7 @@ def round_limit_reason(lead, reviews, fixes, syncs, limit, granted=0, grantable=
         return text + ('\n\nLe condizioni della delega dei round sono verificate: il supervisore '
                        'può concedere un altro round a questa PR con `/devloop grant-round '
                        '<motivo>`, dove il motivo riporta o cita l\'analisi delle cause.')
-    return text + ('\n\nL\'operatore può concedere altri round alzando `max_review_rounds` '
-                   'prima di riprendere la PR.')
+    return text + '\n\n' + OPERATOR_ROUNDS_TEXT
 
 
 def control_command(body):
@@ -1138,6 +1138,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             return pr.reviews
         comments = self._pr_thread(pr.number)
         pr.granted_rounds = self._granted_rounds(comments)  # its limit, for the line (#405)
+        pr.operator_rounds = self._granted_rounds(comments, operator=True)
         # Its fixes, with the reviews before each request, and finding closures, for the
         # rounds after a /devloop fix that do not count (#536).
         entries = self._marker_entries(pr, comments, 'review')
@@ -3335,7 +3336,10 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                 if why:
                     reason += ('\n\nIn modalità di merge `auto` il supervisore potrebbe concedere '
                                f'un altro round, ma l\'escalation resta all\'operatore: {why}.')
-                self.gh.comment(pr.number, render_escalation(reason, cls='round_limit'))
+                # The head and the label to resume, for a trusted user's grant-round (#553).
+                self.gh.comment(pr.number, render_escalation(
+                    reason, cls='round_limit',
+                    extra={'head': pr.head_sha, 'resume': self._round_resume(pr)}))
             self.gh.edit_labels(pr.number, add=[lb.needs_operator], remove=transient)
         else:
             # A CI failure on a ready PR (#248): the dispatcher's own operator label goes too.
@@ -3501,7 +3505,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             trusted=self.cfg.trusted_users, cap=self.cfg.max_requested_fix_rounds,
             closures=pr.closures),
             remove=[lb.review, lb.changes, lb.ready_to_merge],
-            cls=ROUND_GRANTABLE if route else 'round_limit', supervised=route, why=why)
+            cls=ROUND_GRANTABLE if route else 'round_limit', supervised=route, why=why,
+            # The head and the label to resume, for a trusted user's grant-round (#553).
+            extra=None if route else {'head': pr.head_sha, 'resume': self._round_resume(pr)})
 
     def _do_apply_review(self, pr):
         """Apply the round already recorded. An approval given while the CI was not known

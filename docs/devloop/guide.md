@@ -1312,8 +1312,10 @@ the reviewers.
 **Revocation.** `rounds = false` revokes the delegation. `devloop run` reads `[delegations]` again
 before every tick, as it does `max_review_rounds`: from the next tick a round limit goes to the
 operator, and a `grant-round` on an escalation already with the supervisor is refused and hands
-the PR to the operator. A trusted user's `grant-round` on an escalation to the operator does not
-apply: the operator grants more rounds by raising `max_review_rounds`, as before.
+the PR to the operator. On a `round_limit` escalation to the operator a trusted user grants one
+more round to that PR with the same command, outside the caps of the delegation
+([Granting a review round on an escalation to the operator](#granting-a-review-round-on-an-escalation-to-the-operator), #553);
+raising `max_review_rounds` still grants more rounds to every PR.
 
 #### Extending the budget envelope
 
@@ -1590,6 +1592,10 @@ no command applies, and the answer gives the manual steps. The commands valid th
   comment of a trusted user with the decisions works as well
   ([Readiness check](#readiness-check-before-implementation)): the dispatcher's answers to
   commands leave the block to the check.
+- `/devloop grant-round <reason>`, when that record is a `round_limit` escalation of a PR: one
+  more review round for that PR only, as described in
+  [Granting a review round on an escalation to the operator](#granting-a-review-round-on-an-escalation-to-the-operator)
+  (#553).
 
 `/devloop escalate` never applies: the escalation is already the operator's. A command of the
 supervisor's identity on an escalation to the operator does not apply either, except its
@@ -1693,6 +1699,50 @@ turns go on. Beyond the limit the journal is not loaded and takes no event: no t
 devloop removes nothing from it and has no compaction of its own: raise the limit in the local
 overlay before it gets there.
 
+#### Granting a review round on an escalation to the operator
+
+A decision of the operator on #553: a PR at its round limit with a `round_limit` escalation in
+`agent:needs-operator` gets one more round, for that PR only, when a user in `trusted_users`
+writes, after that escalation:
+
+```text
+/devloop grant-round <reason>
+```
+
+`max_review_rounds` stays the default of every PR and does not change: the round raises the
+limit of this PR only, as a round of the [delegation](#granting-a-review-round) does, and in
+every merge mode, with the delegation on or off. It is **outside the caps of the delegation**,
+which stay apart: it takes neither the rounds the supervisor may grant to the PR
+(`max_rounds_per_pr`) nor the grants of the day (`max_grants_per_day`), and a later round limit
+of the same PR may still go to the supervisor as `round_grantable` when the delegation applies.
+The dispatcher checks, on the PR read then:
+
+- the reason is there, and may go on in the lines below the command: a command without it is
+  answered as malformed and the PR stays where it is;
+- the record that put the PR in `agent:needs-operator` is a `round_limit` escalation: on an
+  escalation of any other class (`supervisor_escalated` included) the command is refused;
+- the head of the PR is the one the escalation recorded: a head moved since, or a `round_limit`
+  escalation written before #553, which records none, refuses the command;
+- the [turn journal](protocol.md#turn-journal) can take the grant: without one nothing is
+  granted.
+
+Each refusal is answered with why, spends the command, and leaves the PR in
+`agent:needs-operator`. Granted, the round is recorded as those of the delegation, with its
+author: a `grant` event in the turn journal (delegation `operator_rounds`, which counts against
+no daily cap), a `supervision` record with outcome `granted`, `operator: true`, the head and the
+rounds granted this way to the PR (`granted`), which raises its limit and spends the command, and
+a ledger `event` `delegation_grant` with the same figures (see
+[Supervision trace](protocol.md#supervision-trace)). The PR goes back to `agent:review` or
+`agent:changes`, where it was, and the operator labels go. Another round needs another command,
+at the next round limit.
+
+The supervisor's identity cannot use the command there, as any command on an escalation to the
+operator. The coordinator's identity may, as a trusted user, at most **one** round per PR
+(`MAX_COORDINATOR_OPERATOR_ROUNDS` in `devloop/supervision.py`), beyond the caps of its
+delegations: once the PR has a round granted on an escalation to the operator, by the coordinator
+or by a trusted user, the coordinator's command there is refused and a further round is the
+operator's. Its record carries `role: coordinator`, the cap and what remains.
+
 ### The coordinator
 
 The coordinator is an agent, run periodically and on the alarms, that verifies the work of the
@@ -1713,7 +1763,7 @@ the code:
 | `recheck` | Delegated: a new [readiness check](#readiness-check-before-implementation), as a trusted user's |
 | `fix` | Delegated: as a trusted user's ([Fix requested by the operator or the supervisor](#fix-requested-by-the-operator-or-the-supervisor)) |
 | `hold`, `release` | Delegated: as a trusted user's, in merge mode `auto` ([Holding a merge](#holding-a-merge)) |
-| `grant-round` | Delegated: as a trusted user's, so only on a `round_grantable` escalation to the supervisor and within the caps of the delegation ([Granting a review round](#granting-a-review-round)); on an escalation to the operator it is refused, as a trusted user's |
+| `grant-round` | Delegated: as a trusted user's, on a `round_grantable` escalation to the supervisor within the caps of the delegation ([Granting a review round](#granting-a-review-round)), and on a `round_limit` escalation to the operator at most **one** round per PR, beyond those caps; a further round on the same PR is the operator's ([Granting a review round on an escalation to the operator](#granting-a-review-round-on-an-escalation-to-the-operator), #553) |
 | resume with the labels | Delegated: its `agent:ready` added again counts, as the supervisor's, only on issues opened by a trusted user or by a devloop app; its priority, dependency and implementer labels never count |
 | `approve`, `merge-budget`, `grant-budget`, `capacity`, `reconcile`, `trusted_users` and the keys of trust | Reserved to the operator in person: never the coordinator's. On an escalation they are answered as not applicable and spent; elsewhere they are ignored and logged, as anyone else's; `trusted_users` and the overlay are the operator's |
 | `merge` | The coordinator's reserved merge (#529): [The reserved merge of the coordinator](#the-reserved-merge-of-the-coordinator) |

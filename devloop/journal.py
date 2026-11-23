@@ -41,7 +41,9 @@ before it (``previous``) and its own (``sha256``), like the journal of the local
   ``grant`` of the delegation ``budget`` that also records the ``story`` and the ``extension``
   (the turns and seconds it adds), with the ``reason`` of the command: one per story, ever, and
   the authority on the envelope of that story (``devloop.budget``). The grant books the
-  extension; the first turn of the story booked after it spends it (#466);
+  extension; the first turn of the story booked after it spends it (#466). A review round
+  granted with ``/devloop grant-round`` on a ``round_limit`` escalation to the operator (#553)
+  is a ``grant`` of the delegation ``operator_rounds``, which counts against no daily cap;
 - ``grant_lapsed``: the extension of a story whose first turn after the grant was refused all
   the same, before any turn used it (#466): its ``story``, the ``comment`` of the command, the
   issue or PR ``number`` and the ``category`` of the refusal. It no longer extends the envelope
@@ -146,6 +148,8 @@ WARN_RATIO = 0.8
 SIZE_WARNING = 'size_warning'  # the event of that warning
 GRANT = 'grant'  # a grant of a delegation to the supervisor (#405), for the daily cap
 BUDGET = 'budget'  # the delegation of the extension of a budget envelope (#411)
+# A review round granted on an escalation to the operator (#553): outside the daily cap.
+OPERATOR_ROUNDS = 'operator_rounds'
 LAPSED = 'grant_lapsed'  # an extension no turn used, its first turn refused all the same (#466)
 DELEGATED_MERGE = 'delegated_merge'  # a merge delegated to the supervisor (#486), for its cap
 COORDINATOR_MERGE = 'coordinator_merge'  # a reserved merge of the coordinator (#529), for its cap
@@ -898,9 +902,37 @@ class TurnJournal:
         lock)."""
         found = {}
         for e in self._events:
-            if e['event'] == GRANT and str(e['data'].get('at', ''))[:10] == day:
+            if (e['event'] == GRANT and str(e['data'].get('at', ''))[:10] == day
+                    and e['data'].get('delegation') != OPERATOR_ROUNDS):
                 found.setdefault(e['data'].get('comment'), e['data'])
         return found
+
+    def operator_grants(self):
+        """The review rounds granted on an escalation to the operator (#553,
+        ``operator_grant``), every day, one per command comment, oldest first: outside the
+        daily cap of the delegations."""
+        with self._lock:
+            self._load()
+            found = {}
+            for e in self._events:
+                if e['event'] == GRANT and e['data'].get('delegation') == OPERATOR_ROUNDS:
+                    found.setdefault(e['data'].get('comment'), e['data'])
+            return list(found.values())
+
+    def operator_grant(self, number, comment, by):
+        """Record a review round granted on PR ``number`` at a ``round_limit`` escalation to
+        the operator (#553), by the command of comment ``comment`` of ``by``, before it
+        applies: a ``grant`` of the delegation ``OPERATOR_ROUNDS``, which counts against no
+        daily cap (``_grants`` skips it). The same comment is recorded once. Raises
+        ``JournalError`` if it cannot be written, and then the round is not granted."""
+        if self.read_only:
+            raise JournalError(f'{self.path}: read-only journal: no grant is recorded in it')
+        with self._lock:
+            self._load()
+            if not any(e['event'] == GRANT and e['data'].get('delegation') == OPERATOR_ROUNDS
+                       and e['data'].get('comment') == comment for e in self._events):
+                self._append(GRANT, {'delegation': OPERATOR_ROUNDS, 'number': number,
+                                     'comment': comment, 'by': by})
 
     def grant(self, delegation, number, comment, by, cap):
         """Record a grant of the delegation ``delegation`` (``rounds``) on issue or PR

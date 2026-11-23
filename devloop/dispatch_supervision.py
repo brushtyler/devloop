@@ -19,7 +19,7 @@ from .budget import grantable as budget_grantable
 from .config import same_agent
 from .context import REREVIEW_COMMAND, operator_comments, requests_rereview
 from .github import GitHubError
-from .journal import JournalError
+from .journal import OPERATOR_ROUNDS, JournalError
 from .ledger import entries as ledger_entries
 from .markdown import (PREFLIGHT_RESUME, RESUME, carries_record, operator_retry_text,
                        read_marker, render_escalation, render_supervision)
@@ -30,8 +30,9 @@ from .policy import ZERO_LEVEL, profile_of
 from .review import current_round, current_verdict, finding_state, owner_of
 from .supervision import (ACCEPT_DEFAULTS, BUDGET_GRANTABLE, CAPACITY, CAPACITY_REFUSED, DECIDE,
                           DESIGN_LABEL, ESCALATE, GRANT_BUDGET, GRANT_ROUND, ISSUE_STEPS,
-                          MAX_CAPACITY, MAX_MERGE_BUDGET, MAX_RETRIES, MERGE, MERGE_BUDGET,
-                          MERGED_ISSUE, PREFLIGHT_DEFAULT, REREVIEW, RETRY, RETRY_STEPS,
+                          MAX_CAPACITY, MAX_COORDINATOR_OPERATOR_ROUNDS, MAX_MERGE_BUDGET,
+                          MAX_RETRIES, MERGE, MERGE_BUDGET, MERGED_ISSUE, OPERATOR_ROUNDS_TEXT,
+                          PREFLIGHT_DEFAULT, REREVIEW, RETRY, RETRY_STEPS,
                           ROUND_GRANTABLE, SYNC_FAILED, TOOL_FAILURE, capacity_arguments,
                           changed_input, command_line, coordinator_command,
                           coordinator_refusal, critical,
@@ -456,12 +457,13 @@ class SupervisionMixin:
             found = item
         return found or supervised or refused
 
-    def _to_operator(self, number, reason, cls, remove=(), retry=None):
+    def _to_operator(self, number, reason, cls, remove=(), retry=None, extra=None):
         """Hand an item in ``agent:needs-supervisor`` to the operator: a critical escalation of
         class ``cls``. ``retry``: the step of the supervisor's escalation, its key and what a
-        retry resumes, recorded again so that the operator may still retry it (#321)."""
+        retry resumes, recorded again so that the operator may still retry it (#321).
+        ``extra``: more fields of its record, such as the head of a ``round_limit`` (#553)."""
         lb = self.cfg.labels
-        self.gh.comment(number, render_escalation(reason, cls=cls, retry=retry))
+        self.gh.comment(number, render_escalation(reason, cls=cls, retry=retry, extra=extra))
         self.gh.edit_labels(number, add=[lb.needs_operator],
                             remove=[lb.needs_supervisor, *remove])
 
@@ -614,7 +616,8 @@ class SupervisionMixin:
             return self._operator_rereview(target, number, labels, fresh if is_pr else None,
                                            comments, command, trace)
         if operator:
-            return self._operator_command(target, number, labels, comments, command, trace)
+            return self._operator_command(target, number, labels, comments, command, trace,
+                                          fresh if is_pr else None)
         if critical(cls) or escalation.get('to') != 'supervisor':
             trace('refused', 'rifiutato. L\'escalation è critica (classe '
                   f'`{cls}`) o non è affidata al supervisore: decide l\'operatore.')
@@ -845,16 +848,32 @@ class SupervisionMixin:
                      reviews=[], fixes=[], syncs=[], closures=[], commands=[],
                      finding_problems=[], policy=[], zero_head=None, zero_problem='',
                      stale_receipt=False, revoked=None, operator_comments=[], rereview=False,
-                     round_comments=[], acceptance=[], hold=None, granted_rounds=0)
+                     round_comments=[], acceptance=[], hold=None, granted_rounds=0,
+                     operator_rounds=0)
         if pr.meta:
             self._read_thread(pr, comments)
         return pr
 
-    def _granted_rounds(self, comments):
-        """How many review rounds the supervisor granted on a PR (#405): the dispatcher's
-        ``supervision`` records of a ``grant-round`` that was granted, in its ``comments``."""
+    def _granted_rounds(self, comments, operator=False):
+        """How many review rounds were granted on a PR (#405): the dispatcher's
+        ``supervision`` records of a ``grant-round`` that was granted, in its ``comments``,
+        the supervisor's and those granted on an escalation to the operator (#553) together.
+        ``operator``: only the latter, outside the caps of the delegation (``operator`` true
+        in the record)."""
         return sum(1 for _, r in self._dispatcher_records(comments, 'supervision')
-                   if r.get('command') == GRANT_ROUND and r.get('outcome') == 'granted')
+                   if r.get('command') == GRANT_ROUND and r.get('outcome') == 'granted'
+                   and (not operator or r.get('operator') is True))
+
+    @staticmethod
+    def _delegated_rounds(pr):
+        """The rounds granted to ``pr`` by the supervisor's delegation (#405): those that count
+        against its cap, without the ones granted on an escalation to the operator (#553)."""
+        return pr.granted_rounds - pr.operator_rounds
+
+    def _round_resume(self, pr):
+        """The label a PR at its round limit goes back to when a round is granted (#405)."""
+        lb = self.cfg.labels
+        return lb.changes if lb.changes in pr.labels else lb.review
 
     def _grants_today(self):
         """The grants of the supervisor's delegations of this UTC day, as the journal of the
@@ -883,7 +902,7 @@ class SupervisionMixin:
         is known, none of them open with ``security`` other than false (a finding that does not
         say counts as one); and the latest counted round a CI failure, or fewer blocking findings
         open than after the round before. Anything that cannot be verified refuses it."""
-        cfg, lb = self.cfg, self.cfg.labels
+        cfg = self.cfg
         rules = cfg.delegations
         if not rules.rounds:
             return None, ''
@@ -894,9 +913,10 @@ class SupervisionMixin:
         today = self._grants_today()
         state = finding_state(reviews, pr.closures)
         security = [f['key'] for f in state.open if f.get('security') is not False]
-        why = (f'a questa PR sono già stati concessi {pr.granted_rounds} round, il massimo della '
+        delegated = self._delegated_rounds(pr)
+        why = (f'a questa PR sono già stati concessi {delegated} round, il massimo della '
                f'delega (`[delegations] max_rounds_per_pr` = {cap})'
-               if pr.granted_rounds >= cap
+               if delegated >= cap
                else 'le concessioni di oggi non sono verificabili: il journal dei turni non è '
                     'disponibile o non è leggibile' if today is None
                else f'oggi sono già state fatte {today} concessioni, il massimo giornaliero '
@@ -913,8 +933,8 @@ class SupervisionMixin:
                else '')
         if why:
             return None, f'la delega dei round non si applica: {why}'
-        resume = lb.changes if lb.changes in pr.labels else lb.review
-        return {'head': pr.head_sha, 'resume': resume, 'granted': pr.granted_rounds}, ''
+        return {'head': pr.head_sha, 'resume': self._round_resume(pr),
+                'granted': delegated}, ''
 
     def _grant_round(self, target, number, fresh, labels, comments, command, escalation, trace):
         """Apply ``/devloop grant-round <reason>`` on PR ``number`` in a ``round_grantable``
@@ -935,18 +955,22 @@ class SupervisionMixin:
         lb = self.cfg.labels
         by = command['by']
         head = fresh.get('headRefOid') or target.head_sha
+        resume = escalation.get('resume')
+        resume = resume if resume in (lb.review, lb.changes) else lb.review
         if head != escalation.get('head'):
             return trace('refused', 'rifiutato: il head della PR è cambiato dopo l\'escalation, '
                          'quindi la concessione si riferisce a un input superato. Il comando è '
                          'speso; l\'escalation resta al supervisore.\n\n'
                          + self._supervisor_resume(escalation, True, superseded=True))
+
         def refuse(why):
             trace('refused', f'rifiutato: {why}.')
+            # The head and the label to resume go with the escalation, so that a trusted user
+            # may grant the round there (#553).
             return self._to_operator(number, 'Il supervisore non può concedere un altro round a '
                                      f'questa PR: {why}. `/devloop {GRANT_ROUND}` di `{by}` è '
-                                     'stato rifiutato.\n\nL\'operatore può concedere altri round '
-                                     'alzando `max_review_rounds` prima di riprendere la PR.',
-                                     'round_limit')
+                                     f'stato rifiutato.\n\n{OPERATOR_ROUNDS_TEXT}',
+                                     'round_limit', extra={'head': head, 'resume': resume})
 
         pr = self._fresh_pr(target, labels, fresh, comments)
         route, why = self._round_grant(pr, pr.reviews)
@@ -962,17 +986,19 @@ class SupervisionMixin:
             return refuse('la delega dei round non si applica: nel frattempo le concessioni di '
                           'oggi hanno raggiunto il massimo giornaliero (`[delegations] '
                           f'max_grants_per_day` = {rules.max_grants_per_day})')
-        granted = pr.granted_rounds + 1
+        # The cap of the delegation counts its own rounds only, not those granted on an
+        # escalation to the operator (#553); the limit of the PR counts both.
+        granted = self._delegated_rounds(pr) + 1
         figures = {'head': head, 'granted': granted, 'cap': rules.max_rounds_per_pr,
                    'left': rules.max_rounds_per_pr - granted, 'daily': daily,
                    'daily_cap': rules.max_grants_per_day,
                    'daily_left': rules.max_grants_per_day - daily}
-        limit = self.cfg.max_review_rounds + granted
-        resume = escalation.get('resume')
-        resume = resume if resume in (lb.review, lb.changes) else lb.review
+        total = pr.granted_rounds + 1
+        limit = self.cfg.max_review_rounds + total
         trace('granted', f'concesso un round in più a questa PR: il suo limite passa a {limit} '
-              f'round (`max_review_rounds` = {self.cfg.max_review_rounds}, più {granted} '
-              f'concessi). Round concessi a questa PR: {granted} di {rules.max_rounds_per_pr}; '
+              f'round (`max_review_rounds` = {self.cfg.max_review_rounds}, più {total} '
+              f'concessi). Round concessi a questa PR dalla delega: {granted} di '
+              f'{rules.max_rounds_per_pr}; '
               f'concessioni di oggi: {daily} di {rules.max_grants_per_day}. La PR torna in '
               f'`{resume}`.\n\n**Motivo e analisi delle cause:**\n\n'
               + '\n'.join(f'> {line}'.rstrip() for line in command['reason'].splitlines()),
@@ -1638,9 +1664,12 @@ class SupervisionMixin:
         if record.get('event') == 'escalation' and is_pr is not None \
                 and self._retryable(record, is_pr):
             return RESUME + '\n\n' + operator_retry_text(record['step'])
+        if (is_pr and record.get('event') == 'escalation'
+                and record.get('class') == 'round_limit' and isinstance(record.get('head'), str)):
+            return RESUME + '\n\n' + OPERATOR_ROUNDS_TEXT  # #553
         return RESUME
 
-    def _operator_command(self, target, number, labels, comments, command, trace):
+    def _operator_command(self, target, number, labels, comments, command, trace, fresh=None):
         """Apply a command of a trusted user on an issue or PR in ``agent:needs-operator``
         (#321), or answer why it does not apply and how to resume; the item stays with the
         operator unless a retry runs.
@@ -1661,8 +1690,9 @@ class SupervisionMixin:
           escalation the supervisor handed to the operator, under the conditions of the
           supervisor's commands (``_accept_defaults``, ``_decide``).
         - ``escalate``: never, the escalation is already the operator's.
-        - ``grant-round`` and ``grant-budget``: never, they are delegations to the supervisor
-          (#405, #411).
+        - ``grant-round``: only on a ``round_limit`` escalation of a PR, on the head it recorded
+          (``_operator_grant_round``, #553): one more round for that PR only.
+        - ``grant-budget``: never, it is a delegation to the supervisor (#411).
         - ``merge``: only from the supervisor's identity, on a PR (``_delegated_merge``, #486),
           or from the coordinator's, its reserved merge (#529); a trusted user's is answered:
           the operator merges by hand."""
@@ -1692,11 +1722,9 @@ class SupervisionMixin:
         if name == ESCALATE:
             return refuse('l\'escalation è già all\'operatore')
         if name == GRANT_ROUND:
-            # A delegation of the operator to the supervisor (#405): the operator grants more
-            # rounds by raising max_review_rounds, as before.
-            return refuse(f'`/devloop {GRANT_ROUND}` è una delega del supervisore, solo su '
-                          f'un\'escalation `{ROUND_GRANTABLE}`; l\'operatore concede altri round '
-                          'alzando `max_review_rounds`')
+            # One more round for this PR only, on a round_limit escalation (#553).
+            return self._operator_grant_round(target, number, labels, fresh, comments, command,
+                                              trace, refuse)
         if name == GRANT_BUDGET:
             # A delegation of the operator to the supervisor (#411): the values of the envelope
             # and the extensions beyond it stay the operator's (ADR 0004, D2).
@@ -1752,6 +1780,81 @@ class SupervisionMixin:
 
         self._apply_retry(number, is_pr, comments, record,
                           sorted(labels & (lb.operator() | {lb.needs_supervisor})), trace, limit)
+
+    def _operator_grant_round(self, target, number, labels, fresh, comments, command, trace,
+                              refuse):
+        """Apply a trusted user's ``/devloop grant-round <reason>`` on PR ``number`` in a
+        ``round_limit`` escalation to the operator (#553, approved by the operator on the
+        issue): one more review round for this PR only, never a change of
+        ``max_review_rounds``, outside the caps of the supervisor's delegation, which it does
+        not touch. The reason is required (``_supervisor_view``). ``refuse(why, resume)``
+        answers why it does not apply, and the PR stays with the operator.
+
+        It applies only when the latest record that put the PR there is a ``round_limit``
+        escalation (any other class, or none, is refused) and only on the head that escalation
+        recorded: a head moved since, or an escalation written before #553 that records none,
+        is refused. From the coordinator's identity (#528) at most
+        ``MAX_COORDINATOR_OPERATOR_ROUNDS`` such rounds per PR, whoever granted the others:
+        any further one stays the operator's.
+
+        Granted, it is recorded as a round of the delegation: a ``grant`` in the journal of the
+        turns first (``operator_grant``, outside the daily cap; without a journal it does not
+        apply), then the ``supervision`` record with outcome ``granted`` and ``operator`` true,
+        which raises the limit of the PR and spends the command, then the ledger ``event``
+        ``delegation_grant`` of the delegation ``operator_rounds``, each with its author; last
+        the labels: the PR goes back to the label the escalation recorded (``agent:review`` or
+        ``agent:changes``)."""
+        lb = self.cfg.labels
+        anchor = command['anchor']
+        record, by = anchor['record'], command['by']
+        if not (isinstance(target, PullRequest) and anchor['kind'] == 'notice'
+                and record.get('event') == 'escalation' and record.get('class') == 'round_limit'):
+            return refuse(f'`/devloop {GRANT_ROUND}` concede un round in più solo a una PR in '
+                          'un\'escalation `round_limit`; su un\'escalation di altra classe non '
+                          'vale')
+        head = (fresh or {}).get('headRefOid') or target.head_sha
+        if not isinstance(record.get('head'), str):
+            return refuse('l\'escalation non registra il head della PR (è precedente a #553), '
+                          'quindi la concessione non è verificabile', RESUME)
+        if head != record['head']:
+            return refuse('il head della PR è cambiato dopo l\'escalation, quindi la '
+                          'concessione si riferisce a un input superato', RESUME)
+        coordinator = self._is_coordinator(by)
+        before = self._granted_rounds(comments, operator=True)
+        if coordinator and before >= MAX_COORDINATOR_OPERATOR_ROUNDS:
+            return refuse(f'a questa PR è già stato concesso {before} round su un\'escalation '
+                          'all\'operatore: il coordinatore ne concede al massimo '
+                          f'{MAX_COORDINATOR_OPERATOR_ROUNDS} per PR, gli altri li concede '
+                          'l\'operatore', RESUME)
+        journal = getattr(self.ledger, 'journal', None)
+        if journal is None:
+            return refuse('il round non si può registrare: il journal dei turni non è '
+                          'disponibile', RESUME)
+        try:
+            journal.operator_grant(number, command['comment'], by)
+        except JournalError as exc:
+            self.log(f'  the grant cannot be recorded: {exc}')
+            return refuse('il round non si può registrare nel journal dei turni', RESUME)
+        granted = before + 1
+        figures = {'head': head, 'granted': granted, 'operator': True}
+        if coordinator:
+            figures.update(role=COORDINATOR, cap=MAX_COORDINATOR_OPERATOR_ROUNDS,
+                           left=MAX_COORDINATOR_OPERATOR_ROUNDS - granted)
+        total = self._granted_rounds(comments) + 1
+        limit = self.cfg.max_review_rounds + total
+        resume = record.get('resume')
+        resume = resume if resume in (lb.review, lb.changes) else lb.review
+        trace('granted', f'concesso un round in più a questa sola PR: il suo limite passa a '
+              f'{limit} round (`max_review_rounds` = {self.cfg.max_review_rounds}, invariato, '
+              f'più {total} concessi). Il round è fuori dai tetti della delega del supervisore; '
+              f'round concessi a questa PR su un\'escalation all\'operatore: {granted}. La PR '
+              f'torna in `{resume}`.\n\n**Motivo:**\n\n'
+              + '\n'.join(f'> {line}'.rstrip() for line in command['reason'].splitlines()),
+              **figures)
+        self.ledger.event(number, 'delegation_grant', delegation=OPERATOR_ROUNDS, by=by,
+                          comment=command['comment'], **figures)
+        self.gh.edit_labels(number, add=[resume],
+                            remove=sorted(labels & (lb.operator() | {lb.needs_supervisor})))
 
     def _accept_defaults(self, number, labels, comments, trace, operator=False):
         """Accept the defaults of the latest readiness check of issue ``number`` (#182): only
@@ -1986,6 +2089,7 @@ class SupervisionMixin:
         policy = self._marker_entries(pr, comments, 'policy')
         pr.policy = [record for _, record in policy]
         pr.granted_rounds = self._granted_rounds(comments)
+        pr.operator_rounds = self._granted_rounds(comments, operator=True)
         if self.ledger is not None:
             pr.ci_recorded = [
                 (r.get('head'), r.get('state'), r.get('round'), r.get('checks'))
