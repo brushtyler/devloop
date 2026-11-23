@@ -1348,6 +1348,11 @@ class DryRunTests(OpsTestCase):
         self.assertNotIn('env -C', out)
         self.assertNotIn('scrivere state_dir', out)
         self.assertNotIn("Sorgente dell'installazione", out)
+        # #573: the state_dir 750 and the overlay 600, read by no other user of the host.
+        state = f'{self.home}/devloop/devloop/.devloop'
+        self.assertIn(f'[dry-run] sudo -u opsdry-nouser -H -- mkdir -p -m 750 {state}\n', out)
+        self.assertIn(f'[dry-run] scriverebbe {state}/config.local.toml (mode 600, proprietario '
+                      'opsdry-nouser)', out)
         self.assertIn('    |   "autoUpdates": false,', out)
         # The CLIs are the agent user's (#415).
         self.assertIn("le CLI e i loro login sono dell'utente devloop-agent (#415): "
@@ -1534,6 +1539,9 @@ class DryRunTests(OpsTestCase):
         done = self.run_script('host/setup-supervisor.sh', '--dry-run', '--params', str(params))
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         out = done.stdout
+        # #573: the state_dir is 750, and the supervisor traverses it without listing it.
+        self.assertIn(f'==> Accesso allo state_dir: ACL u:{FAKE_SUPERVISOR}:--x su {state}\n'
+                      f'  [dry-run] setfacl -m u:{FAKE_SUPERVISOR}:--x {state}\n', out)
         for path in files:
             self.assertIn(f'==> Lettura di {path.name}: ACL u:{FAKE_SUPERVISOR}:r-- su {path}\n'
                           f'  [dry-run] setfacl -m u:{FAKE_SUPERVISOR}:r-- {path}\n', out)
@@ -1551,6 +1559,9 @@ class DryRunTests(OpsTestCase):
         out = done.stdout
         self.assertEqual(out.count(f'  ok: ACL presente: user:{FAKE_SUPERVISOR}:r--\n'), 2)
         self.assertNotIn('setfacl -m u:opsdry-supervisor:r--', out)
+        # On the state_dir an entry other than --x is reduced to --x (#573).
+        self.assertIn(f'  ATTENZIONE: ACL attuale user:{FAKE_SUPERVISOR}:r--: la riduco a --x\n'
+                      f'  [dry-run] setfacl -m u:{FAKE_SUPERVISOR}:--x {state}\n', out)
         for path in dirs:
             self.assertIn(f'  [dry-run] chown root:{GROUP} {path}\n'
                           f'  [dry-run] chmod 2770 {path}\n', out)
@@ -1597,6 +1608,10 @@ class DryRunTests(OpsTestCase):
                 out = done.stdout
                 self.assertIn(f"==> Lettura dell'overlay: ACL u:{FAKE_COORDINATOR}:r-- su "
                               f'{overlay}\n' + expected, out)
+                # #573: the state_dir is 750, and the coordinator traverses it to the overlay.
+                self.assertIn(f'==> Accesso allo state_dir: ACL u:{FAKE_COORDINATOR}:--x su '
+                              f'{state}\n'
+                              f'  [dry-run] setfacl -m u:{FAKE_COORDINATOR}:--x {state}\n', out)
                 self.assertEqual(out.count(f'u:{FAKE_COORDINATOR}:r-- {overlay}'),
                                  1 if give in expected else 0)
                 self.assertNotIn('project.toml', out)
@@ -2232,6 +2247,39 @@ esac''')
         self.assertEqual(sorted(listed), sorted(REQUIRED))
         self.assertEqual(self.mutating_calls(), [])
 
+    def test_create_apps_stops_on_a_name_longer_than_github_takes(self):
+        # #573: GitHub takes app names of at most 34 characters. With the default APPS the
+        # longest role is claude-agent (12): a prefix of 22 fits, one of 23 does not, and the
+        # script stops before the page, with or without --dry-run, naming the apps too long.
+        page = self.tmp / 'page.html'
+        fits, too_long = 'a' * 21 + '-', 'a' * 22 + '-'
+        for args in (('--dry-run',), ()):
+            with self.subTest(args=args):
+                done = self.run_script('github/create-apps.sh', *args, '--params',
+                                       str(self.params(APP_PREFIX=too_long)), '--out', str(page))
+                self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+                self.assertIn(f'  troppo lungo: {too_long}claude-agent (35)\n', done.stdout)
+                # 34 characters, as codex-agent, implementer and coordinator: they fit.
+                self.assertEqual(done.stdout.count('troppo lungo:'), 1, done.stdout)
+                self.assertIn('GitHub accetta per una GitHub App un nome di al più 34 caratteri',
+                              done.stderr)
+                self.assertIn('nessuna pagina scritta', done.stderr)
+                self.assertNotIn('[dry-run] scriverebbe', done.stdout)
+                self.assertFalse(page.exists())
+                done = self.run_script('github/create-apps.sh', *args, '--params',
+                                       str(self.params(APP_PREFIX=fits)), '--out', str(page))
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                self.assertIn(f'  {fits}claude-agent: ', done.stderr)
+                page.unlink(missing_ok=True)
+        # Only the apps of APPS count: without claude-agent the longer prefix fits.
+        done = self.run_script('github/create-apps.sh', '--dry-run', '--params',
+                               str(self.params(APP_PREFIX=too_long,
+                                               APPS='"dispatcher supervisor"')),
+                               '--out', str(page))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn(f'  {too_long}supervisor: ', done.stderr)
+        self.assertEqual(self.mutating_calls(), [])
+
     def test_create_apps_writes_a_page_with_one_form_per_manifest(self):
         page = self.tmp / 'page.html'
         done = self.run_script('github/create-apps.sh', '--params', str(self.params()),
@@ -2337,8 +2385,10 @@ esac''')
         self.assertIn(f'[dry-run] install -d -m 755 -o root -g root {lib}', out)
         self.assertIn(f'[dry-run] installerebbe {lib}/devloop-pinned (mode 755, proprietario '
                       'root): scripts/devloop-pinned del tag v1.2.0 di origin', out)
-        self.assertIn(f'[dry-run] install -d -m 755 -o opsdry-nouser -g opsdry-nouser {state}',
+        # #573: the state_dir 750, the overlay 600.
+        self.assertIn(f'[dry-run] install -d -m 750 -o opsdry-nouser -g opsdry-nouser {state}\n',
                       out)
+        self.assertIn(f'[dry-run] scriverebbe {state}/config.local.toml (mode 600', out)
         command = (f'/usr/bin/env -C {home}/widget /usr/bin/python3 {lib}/devloop-pinned '
                    f'--state-dir {state}')
         self.assertIn(f'    | ExecStart={command} run\n', out)
@@ -2456,6 +2506,53 @@ esac''')
             'COORDINATOR_SUDOERS_FILE': '/etc/sudoers.d/devloop-coordinator-widget',
             'COORDINATOR_OPS_DIR': '/usr/local/lib/devloop-coordinator-widget',
             'COORDINATION_DIR': '/var/lib/devloop-coordination-widget'})
+        self.assertEqual(self.resolved(params, 'LAUNCHER_DIR'),
+                         {'LAUNCHER_DIR': '/usr/local/lib/devloop/widget'})
+
+    def test_two_projects_with_different_tags_have_each_its_launcher(self):
+        # #573: with PROJECT the launcher of the separate source is the project's, from its own
+        # tag, in a directory of its own: the setup of a second project with another tag never
+        # overwrites the launcher that the unit, the sudoers and check-host.sh of the first call.
+        launchers = set()
+        # check-host.sh reads the state of the service: a read, not a change of the host.
+        self.shim('systemctl', 'echo inactive')
+        for project, ref in (('widget', 'v1.2.0'), ('gadget', 'v2.0.0')):
+            with self.subTest(project=project):
+                sudoers = self.tmp / 'sudoers.d'
+                params = self.project_params(
+                    PROJECT=project, REPO=f'acme/{project}',
+                    DEVLOOP_HOME=str(self.home / f'devloop-{project}'),
+                    AGENT_HOME=str(self.home / f'devloop-{project}-agent'),
+                    SUDOERS_FILE=str(sudoers / f'devloop-supervisor-{project}'),
+                    AGENT_SUDOERS_FILE=str(sudoers / f'devloop-agent-{project}'),
+                    COORDINATOR_SUDOERS_FILE=str(sudoers / f'devloop-coordinator-{project}'),
+                    SOURCE_REPO='brushtyler/devloop', SOURCE_REF=ref,
+                    STATE_DIR=str(self.tmp / 'state' / project))
+                p = self.resolved(params, 'LAUNCHER_DIR', 'LAUNCHER', 'LAUNCHER_CMD')
+                launcher = f'/usr/local/lib/devloop/{project}/devloop-pinned'
+                self.assertEqual(p['LAUNCHER_DIR'], f'/usr/local/lib/devloop/{project}')
+                self.assertEqual(p['LAUNCHER'], launcher)
+                self.assertIn(f' {launcher} --state-dir {self.tmp}/state/{project}',
+                              p['LAUNCHER_CMD'])
+                launchers.add(p['LAUNCHER'])
+                done = self.run_script('host/setup-devloop.sh', '--dry-run', '--params',
+                                       str(params))
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                out = done.stdout
+                self.assertIn(f'[dry-run] installerebbe {launcher} (mode 755, proprietario root): '
+                              f'scripts/devloop-pinned del tag {ref} di origin', out)
+                self.assertIn(f'    | ExecStart={p["LAUNCHER_CMD"]} run\n', out)
+                done = self.run_script('host/setup-supervisor.sh', '--dry-run', '--params',
+                                       str(params))
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                self.assertIn(f'    {p["LAUNCHER_CMD"]} tick --dry-run, \\\n', done.stdout)
+                done = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params))
+                self.assertIn(f'==> Avviatore ({launcher})\n', done.stdout)
+        self.assertEqual(len(launchers), 2)
+        # Without PROJECT, the one installation of the host keeps the launcher of before.
+        self.assertEqual(self.resolved(self.source_params(LAUNCHER_DIR=''), 'LAUNCHER'),
+                         {'LAUNCHER': '/usr/local/lib/devloop/devloop-pinned'})
+        self.assertEqual(self.mutating_calls(), [])
 
     def test_a_project_installs_the_template_and_the_drop_in_of_its_instance(self):
         params = self.project_params()
@@ -2863,6 +2960,7 @@ class CheckHostTests(OpsTestCase):
         self.lock_dir(self.locks)
         (state / 'config.local.toml').write_text(f'repo_lock_dir = "{self.locks}"\n'
                                                  '[agent_user]\nname = "root"\n')
+        (state / 'config.local.toml').chmod(0o600)  # as setup-devloop.sh writes it (#573)
         (state / 'project.toml').write_text('')
         # The mailbox between supervisor and coordinator (#543), as setup-supervisor.sh leaves
         # it, owned by the user of the tests instead of root.
@@ -3117,6 +3215,22 @@ class CheckHostTests(OpsTestCase):
         self.assertRegex(out, r'-writable.* _ ' + re.escape(f'{self.devloop}/devloop/.git') + '\n')
         self.assertIn(f'ok: {self.state}/config.local.toml imposta [agent_user] name = "root"',
                       out)
+        self.assertEqual(self.mutating_calls(), [])
+
+    def test_an_overlay_readable_by_everyone_is_a_warning(self):
+        # #573: the overlay names trusted_users, app_id and key_dir; 600, or 640 with the ACL of
+        # a role, it is read by no other user of the host.
+        overlay = self.state / 'config.local.toml'
+        warning = f'  ATTENZIONE: {overlay} è leggibile da tutti (-rw-r--r--)'
+        for mode, warned in ((0o600, False), (0o640, False), (0o644, True)):
+            with self.subTest(mode=oct(mode)):
+                overlay.chmod(mode)
+                done, errors = self.check()
+                self.assertEqual(errors, [], done.stdout)
+                if warned:
+                    self.assertIn(warning, done.stdout)
+                else:
+                    self.assertNotIn(f'{overlay} è leggibile da tutti', done.stdout)
         self.assertEqual(self.mutating_calls(), [])
 
     def test_git_runs_as_the_agent_user_in_a_worktree_with_only_its_safe_directory(self):

@@ -13,6 +13,10 @@
 # key_dir dell'utente coordinator (COORDINATOR_KEY_DIR), e il coordinatore ne conia i token con
 # scripts/coordinator-token.py.
 #
+# GitHub accetta nomi di al più 34 caratteri: se <APP_PREFIX><ruolo> li supera per un'app di
+# APPS, lo script si ferma senza scrivere la pagina (con le app di default, il ruolo più lungo è
+# claude-agent, 12 caratteri: APP_PREFIX ne ha al più 22).
+#
 # Lo script non chiama GitHub, non legge e non scrive segreti: scrive solo la pagina HTML.
 # Idempotente: rieseguito, riscrive la stessa pagina.
 
@@ -47,6 +51,20 @@ step "GitHub App per $REPO (prefisso $APP_PREFIX)"
 for role in $APPS; do
     [ -f "$OPS_DIR/github/apps/$role.json" ] || die "manca il manifest ops/github/apps/$role.json"
 done
+# GitHub accetta per una GitHub App un nome di al più APP_NAME_MAX caratteri (#573): un nome più
+# lungo farebbe fallire il manifest solo nel browser. Ci si ferma prima di scrivere la pagina.
+APP_NAME_MAX=34
+too_long=()
+for role in $APPS; do
+    name=$APP_PREFIX$role
+    [ ${#name} -le $APP_NAME_MAX ] || too_long+=("$name (${#name})")
+done
+if [ ${#too_long[@]} -gt 0 ]; then
+    for name in "${too_long[@]}"; do
+        say "  troppo lungo: $name"
+    done
+    die "GitHub accetta per una GitHub App un nome di al più $APP_NAME_MAX caratteri, e APP_PREFIX ($APP_PREFIX, ${#APP_PREFIX} caratteri) li supera con ${#too_long[@]} app di APPS: accorciarlo; nessuna pagina scritta"
+fi
 
 # La pagina, generata da python3 (JSON e HTML con l'escape giusto).
 PAGE=$(python3 - "$OPS_DIR/github/apps" "$REPO" "$APP_PREFIX" "$GITHUB_OWNER_TYPE" $APPS <<'EOF'
