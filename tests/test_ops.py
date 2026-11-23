@@ -3218,8 +3218,8 @@ class CheckHostTests(OpsTestCase):
         self.shim('systemctl', f'case "$1" in is-active) echo {state} ;; is-enabled) echo enabled ;;'
                                f' show) echo mixed ;; esac')
 
-    def check(self, *args):
-        params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=ME, AGENT_USER='root')
+    def check(self, *args, **overrides):
+        params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=ME, AGENT_USER='root', **overrides)
         done = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params), *args)
         # Outside root the directory of the locks cannot be root's
         # (test_the_directory_of_the_repository_locks_is_roots), nor the agent user's home.
@@ -4083,6 +4083,26 @@ echo "sudo $*" >> "$OPS_TEST_CALLS"''')
         done, errors = self.check()
         self.assertEqual(done.returncode, 1)
         self.assertEqual(errors, [f'  ERRORE: {self.devloop}/.ghapps è 750 {ME}, deve essere 700 {ME}'])
+
+    def test_the_keys_of_a_shared_set_with_its_own_prefix_are_accepted(self):
+        # #570 (ADR 0006, clarification of D3): a set shared between repositories of the same
+        # owner keeps its APP_PREFIX, unrelated to the slug of the project's repository
+        # (brushtyler/devloop here). check-host.sh checks the keys of APP_PREFIX, whatever it is.
+        shared = 'brushtyler-apps-'
+        for home in (self.devloop, self.supervisor):
+            for key in (home / '.ghapps').glob(f'{PREFIX}*.pem'):
+                key.rename(key.with_name(shared + key.name[len(PREFIX):]))
+        done, errors = self.check(APP_PREFIX=shared)
+        self.assertEqual(errors, [])
+        for role in DEVLOOP_KEYS + SUPERVISOR_KEYS:
+            self.assertIn(f'ok: chiave di {shared}{role} presente', done.stdout)
+        self.assertNotIn('chiave non attesa', done.stdout)
+        self.assertNotIn("chiave di un'app non elencata", done.stdout)
+        # The keys follow APP_PREFIX, not the repository: with the repository's prefix they
+        # are missing.
+        done, errors = self.check()
+        self.assertIn(f'  ERRORE: manca la chiave di {PREFIX}dispatcher in '
+                      f'{self.devloop}/.ghapps', errors)
 
     def test_the_supervisor_holds_only_its_keys(self):
         extra = self.key(self.supervisor, 'dispatcher')
