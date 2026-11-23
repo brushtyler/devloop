@@ -13,6 +13,11 @@
 # key_dir dell'utente coordinator (COORDINATOR_KEY_DIR), e il coordinatore ne conia i token con
 # scripts/coordinator-token.py.
 #
+# Con un insieme di app condiviso fra repository dello stesso proprietario sullo stesso host
+# (ADR 0006, precisazione di D3, #570): APP_PREFIX è il prefisso dell'insieme, e APPS elenca solo
+# le app che l'insieme non ha ancora; quelle che ci sono non si ricreano, si installano anche sul
+# repository nuovo (ops/README.md, "Insieme di app per repository o condiviso").
+#
 # GitHub accetta nomi di al più 34 caratteri: se <APP_PREFIX><ruolo> li supera per un'app di
 # APPS, lo script si ferma senza scrivere la pagina (con le app di default, il ruolo più lungo è
 # claude-agent, 12 caratteri: APP_PREFIX ne ha al più 22).

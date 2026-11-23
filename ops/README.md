@@ -922,8 +922,9 @@ solito uno `STATE_DIR` assoluto. `setup-devloop.sh` clona la sorgente in `SOURCE
 unità e sudoers lo chiamano con `--state-dir`. L'overlay nello `state_dir` ha `source`,
 `state_dir` e le chiavi del progetto (`repo`, `trusted_users`, `base_branch`, `[apps]` con la
 `key_dir` del progetto, …; ADR 0006, R6): lo script ricorda `source`, `state_dir` e `repo` finché
-mancano. `[apps]` è l'insieme di app di quel repository, creato con il suo `APP_PREFIX` e
-installato solo lì (D3); le sessioni scrivono con `scripts/agent-token.py --state-dir <state_dir>`
+mancano. `[apps]` è l'insieme di app del progetto: per default quello del repository, creato
+con il suo `APP_PREFIX` e installato solo lì, oppure un insieme condiviso ([Insieme di app per
+repository o condiviso](#insieme-di-app-per-repository-o-condiviso)); le sessioni scrivono con `scripts/agent-token.py --state-dir <state_dir>`
 del clone della sorgente, cioè con `devloop token` della copia fissata. I fatti del progetto (`test_cmd`, `[docs.map]`, …) stanno nel file di
 progetto `project.toml` dello stesso `state_dir` (ADR 0006, R3). Il primo pin si fa dal clone
 della sorgente, con il file di progetto e l'overlay prima del comando:
@@ -965,8 +966,11 @@ senza, i prompt tolgono le frasi che li citano. I test locali e la lettura della
      vale `"full"`. `ci_rerun_unrelated` vuole anche `[tests] ci_log_format = "run-tests"` (le
      righe `FAILED MODULE` di `scripts/run-tests.py`); senza, è spento
      ([docs/devloop/reference.md](../docs/devloop/reference.md#local-tests));
-   - nell'overlay, `[apps]`: `app_id` e `slug` delle app create al passo 2, con un `APP_PREFIX`
-     nuovo, e la `key_dir` del progetto;
+   - nell'overlay, `[apps]`: `app_id` e `slug` delle app del progetto, e la `key_dir` del
+     progetto. Le app sono, a scelta di chi installa, un insieme nuovo creato al passo 2 con un
+     `APP_PREFIX` nuovo (il default), oppure un insieme condiviso con altri repository dello
+     stesso proprietario sullo stesso host, con i limiti di [Insieme di app per repository o
+     condiviso](#insieme-di-app-per-repository-o-condiviso);
    - `[roles]` e `[agents.*]`: implementer, reviewer, supervisore e modelli;
    - `protected_paths`, `review_policy.sensitive_paths` e `sensitive_path_lists`,
      `merge.operator_only_paths` e `[docs.map]`, con i percorsi del progetto;
@@ -975,11 +979,69 @@ senza, i prompt tolgono le frasi che li citano. I test locali e la lettura della
    Sulla stessa macchina di un altro progetto, con `PROJECT` ([Più progetti sullo stesso
    host](#più-progetti-sullo-stesso-host)): ogni dispatcher ha il suo utente, il suo clone, il suo
    `state_dir`, le sue chiavi e il suo servizio.
-4. **GitHub**: app nuove dai manifest (`create-apps.sh`), installate solo sul nuovo repository;
-   un ruleset con i check della sua CI; un token di sola lettura per il suo supervisore.
+4. **GitHub**: app nuove dai manifest (`create-apps.sh`), installate solo sul nuovo repository,
+   oppure le app di un insieme condiviso installate anche lì (sotto); un ruleset con i check
+   della sua CI; un token di sola lettura per il suo supervisore.
 5. **Host**: i passi 4-9 sopra, con quei parametri.
 6. **Label**: devloop lavora sulle issue con `agent:ready` e usa le label descritte nella sua
    guida; crearle sul nuovo repository se mancano.
+
+### Insieme di app per repository o condiviso
+
+L'insieme di GitHub App di un progetto si sceglie per progetto, da chi installa (ADR 0006, D3 e
+la sua precisazione del 2026-11-23, #570):
+
+- **insieme per repository**, il default di questa guida e della guida rapida: app nuove dai
+  manifest con un `APP_PREFIX` proprio, installate solo su quel repository;
+- **insieme condiviso**: lo stesso insieme di app installato su più repository, ammesso solo fra
+  repository dello **stesso proprietario** serviti dallo **stesso host**. Un altro proprietario,
+  o un altro host, vuole un insieme a parte.
+
+Il repository di devloop, sorgente dell'installazione degli altri progetti, ha un insieme suo, non
+condiviso con i progetti che serve; per gli altri repository di un operatore un insieme condiviso
+fra loro è una scelta ragionevole. In entrambi i modi devloop conia ogni token d'installazione
+limitato al solo repository del progetto. I limiti dell'insieme condiviso, da pesare prima di
+sceglierlo:
+
+- **la chiave vale per tutti i repository dell'installazione**: la stessa chiave privata sta
+  nella `key_dir` di ogni progetto che usa l'insieme, e in quelle del supervisore e del
+  coordinatore per le loro app. Chi la legge in un progetto, per un difetto dell'host o di
+  devloop o per un accesso di root, conia token per tutti i repository dove l'app è installata:
+  devloop limita i suoi token al repository del progetto, la chiave non ha limiti;
+- **i permessi sono gli stessi ovunque**: un'app ha un solo insieme di permessi, e non si può
+  dare a un repository meno di quanto serve a un altro con la stessa app;
+- **un limite di richieste condiviso**: GitHub conta il limite orario delle richieste per
+  installazione; più repository serviti dalla stessa installazione consumano lo stesso budget, e
+  con molti progetti attivi il watch e i tick possono avvicinarsi al limite;
+- **rotazione e revoca insieme**: una chiave compromessa si revoca per tutti i repository
+  dell'insieme, e si fermano tutti i progetti finché la chiave nuova non è in ogni `key_dir`;
+- **installazione allargata con un clic**: aggiungere un repository all'installazione dà subito
+  all'app i suoi permessi anche lì, e un errore nella selezione dei repository vale per tutti i
+  progetti dell'insieme;
+- **registri meno distinti**: su GitHub le azioni di tutti i progetti portano lo stesso login
+  (`<slug>[bot]`), e per capire da quale installazione di devloop viene un'azione serve guardare
+  il repository;
+- **mai fra host diversi**: una copia della chiave su un altro host moltiplica i posti da cui può
+  uscire; resta anche "un repository, un host".
+
+Con un insieme condiviso che esiste già:
+
+1. nel file di parametri del progetto `APP_PREFIX` è il prefisso dell'insieme, qualunque sia il
+   nome del repository: `setup-devloop.sh`, `setup-supervisor.sh`, `setup-coordinator.sh` e
+   `check-host.sh` cercano le chiavi di `<APP_PREFIX><ruolo>`;
+2. niente `create-apps.sh` per le app che l'insieme ha già. Se al progetto ne serve una che
+   manca (per esempio `merger`), `APPS` nel file di parametri elenca solo quelle, e
+   `create-apps.sh` genera la pagina con i pulsanti di quelle sole;
+3. ogni app si installa anche sul repository nuovo: nelle impostazioni dell'app su GitHub,
+   l'installazione del proprietario → *Only select repositories* → aggiungere il repository,
+   tenendo gli altri. Mai *All repositories*: `devloop apps` lo segnala con un avviso. `merger`
+   solo sui repository dove il merge di devloop è acceso: con un insieme condiviso si sceglie per
+   app su quali repository installarla;
+4. le chiavi si copiano dalla `key_dir` di un progetto che usa già l'insieme nella `key_dir` del
+   progetto nuovo (e in quelle del supervisore e del coordinatore per le loro app), mode 600, del
+   proprietario giusto, senza stamparle, con `sudo install -o <utente> -g <utente> -m 600`;
+5. nell'overlay, `[apps]` ha gli stessi `app_id` e `slug` degli altri progetti dell'insieme, con
+   la `key_dir` del progetto. Una chiave ruotata va poi in ogni `key_dir` dell'insieme.
 
 ## Più progetti sullo stesso host
 

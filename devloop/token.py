@@ -19,7 +19,8 @@ reviews and labels, not for pushing, merging or changing the repository. content
 other write permission are refused: pushes and merges are operator actions.
 
 Only the actor's key is read, from ``$DEVLOOP_APP_KEY_DIR`` or ``[apps] key_dir`` of the
-project: each repository has its own set of apps and its own key_dir (ADR 0006, D3). The token
+project: each project has its own key_dir, with the keys of its set of apps, one per repository
+or shared between repositories of the same owner on the same host (ADR 0006, D3). The token
 reaches the command through GH_TOKEN only; it is never printed.
 """
 

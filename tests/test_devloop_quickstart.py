@@ -116,10 +116,43 @@ class PageTests(unittest.TestCase):
     def test_it_states_the_rules_of_adr_0006(self):
         page = ' '.join(text().split())
         for phrase in ('One repository, one host.', 'never configure the same repository on '
-                       'two hosts', 'installed on that repository only and never shared',
-                       'The merger app is created only for a repository where devloop merges',
+                       'two hosts', 'with an `APP_PREFIX` of its own and installed on that '
+                       'repository only', 'a set shared between repositories of the same owner '
+                       'served by the same host', "devloop's own repository keeps a set of its "
+                       'own, never shared with the projects it serves',
+                       'The merger app is installed only on a repository where devloop merges',
                        'There is no container for now', 'is the operator\'s (#515)'):
             self.assertIn(phrase, page)
+
+    def test_the_limits_of_a_shared_set_are_listed_where_one_chooses(self):
+        # #570 (ADR 0006, clarification of D3): the quick start, the reference and the ops
+        # guide, where the set of apps is chosen, list every limit of a shared set.
+        english = ('The key is valid on every repository of the installation.',
+                   'The permissions are the same everywhere.', 'A shared rate limit.',
+                   'Rotation and revocation together.', 'An installation widened with a click.',
+                   'Less distinct records.', 'Never across hosts.',
+                   'repositories of the same owner served by the same host')
+        italian = ("la chiave vale per tutti i repository dell'installazione",
+                   'i permessi sono gli stessi ovunque', 'un limite di richieste condiviso',
+                   'rotazione e revoca insieme', 'installazione allargata con un clic',
+                   'registri meno distinti', 'mai fra host diversi',
+                   'repository dello stesso proprietario serviti dallo stesso host')
+        reference = (ROOT / 'docs/devloop/reference.md').read_text(encoding='utf-8')
+        reference = reference.split('### Identities of a project', 1)[1].split('\n### ', 1)[0]
+        ops = (OPS / 'README.md').read_text(encoding='utf-8')
+        ops = ops.split('## Un altro progetto', 1)[1].split('\n## ', 1)[0]
+        for name, page, phrases in (('quickstart', text(), english),
+                                    ('reference', reference, english),
+                                    ('ops/README.md', ops, italian)):
+            page = ' '.join(page.replace('**', '').split())  # emphasis does not count
+            for phrase in phrases:
+                with self.subTest(page=name, phrase=phrase):
+                    self.assertIn(phrase, page)
+        # The default stays a set per repository, and devloop's own keeps its set.
+        self.assertIn('the default of the guides', ' '.join(reference.split()))
+        self.assertIn("devloop's own repository, the source of the installation of the other "
+                      'projects, keeps a set of its own', ' '.join(reference.split()))
+        self.assertIn('il default di questa guida e della guida rapida', ' '.join(ops.split()))
 
 
 class ExampleFileTests(QuickstartTestCase):

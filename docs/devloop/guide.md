@@ -2958,7 +2958,7 @@ ssdlc.
 #### Several projects on one host
 
 One host can run devloop for several projects, each with its own system user (and agent user),
-clone, `state_dir`, `key_dir` with the keys of its own set of apps, and service (ADR 0006, R8,
+clone, `state_dir`, `key_dir` with the keys of its set of apps, and service (ADR 0006, R8,
 decision D6). The [ops guide](../../ops/README.md) does it with one parameters file per project
 and `PROJECT`: the template unit `devloop@.service`, an instance `devloop@<project>` per project
 with its parameters in a drop-in, a sudoers of the supervisor per unit, a clone and a `key_dir`
@@ -3064,9 +3064,12 @@ file, are in [ops/host/migrate.md](../../ops/host/migrate.md#migrazione-di-r3-su
 
 Since ADR 0006, R6 the installation's `config.toml` has no `repo`, `trusted_users` nor `[apps]`
 either: the managed repository, the logins devloop trusts and the project's set of GitHub Apps,
-with its `key_dir`, are the operator's, in the overlay of the project's `state_dir`. Each
-repository has its own set of apps, installed on that repository only and never shared with
-another, and its own `key_dir`; the merger app only where devloop merges (D3,
+with its `key_dir`, are the operator's, in the overlay of the project's `state_dir`. By default
+each repository has its own set of apps, installed on that repository only; whoever installs may
+choose instead a set shared between repositories of the same owner served by the same host, with
+the limits listed in [Identities of a project](reference.md#identities-of-a-project) (D3 and its
+clarification of 2026-11-23, #570). Each project has its own `key_dir` either way, and
+devloop's own repository keeps a set of its own; the merger app only where devloop merges (D3,
 [GitHub identities](reference.md#github-identities)). ssdlc's are in
 [`ops/host/ssdlc/overlay.toml`](../../ops/host/ssdlc/overlay.toml). Without `repo` and
 `trusted_users` in the overlay devloop stops at startup, naming the overlay, and so does the pin

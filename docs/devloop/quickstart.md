@@ -22,10 +22,14 @@ The rules that hold for every project (ADR 0006, sections 3.6 and 3.8, decisions
   repository lock stops a second dispatcher of the same repository on the same host, whatever its
   user or `state_dir`; between two hosts nothing stops it, so never configure the same repository
   on two hosts ([Several projects on one host](guide.md#several-projects-on-one-host)).
-- **A set of apps of its own.** The project's GitHub Apps are created from the manifests of
-  `ops/github/apps/` with an `APP_PREFIX` of its own, installed on that repository only and never
-  shared with another. The merger app is created only for a repository where devloop merges
-  (`[merge] mode` `"strict"` or `"auto"`) ([Identities of a project](reference.md#identities-of-a-project)).
+- **A set of apps per repository, or a shared one.** By default the project's GitHub Apps are
+  created from the manifests of `ops/github/apps/` with an `APP_PREFIX` of its own and installed
+  on that repository only. Whoever installs may choose instead a set shared between repositories
+  of the same owner served by the same host, with its limits
+  ([A shared set of apps](#a-shared-set-of-apps)); devloop's own repository keeps a set of its
+  own, never shared with the projects it serves. The merger app is installed only on a repository
+  where devloop merges (`[merge] mode` `"strict"` or `"auto"`)
+  ([Identities of a project](reference.md#identities-of-a-project)).
 - **Users of its own.** The project has its own system user, agent user, home, clones,
   `state_dir`, `key_dir` and service; on a host that already serves devloop's own repository or another project,
   this is the only way ([Più progetti sullo stesso host](../../ops/README.md#più-progetti-sullo-stesso-host)).
@@ -80,7 +84,8 @@ DEVLOOP_KEYS="dispatcher implementer claude-agent codex-agent agy-agent"
 - `SOURCE_REPO` and `SOURCE_REF`: devloop comes from that tag of `brushtyler/devloop`.
 - `APP_PREFIX`: GitHub takes app names of at most 34 characters, so `<APP_PREFIX><role>` fits
   that for every app of `APPS` (with `claude-agent`, the longest role, the prefix has at most 22);
-  `create-apps.sh` stops before writing its page otherwise.
+  `create-apps.sh` stops before writing its page otherwise. With a
+  [shared set of apps](#a-shared-set-of-apps) it is the set's prefix.
 - `APPS` are the apps `ops/github/create-apps.sh` prepares, `DEVLOOP_KEYS` those whose key goes to
   devloop's `key_dir`: the dispatcher, the implementer (the installation's agents are named by
   role, and `claude-implementer` signs with it) and the reviewers' apps `claude-agent`,
@@ -130,6 +135,54 @@ sudo install -o devloop-widget -g devloop-widget -m 600 <slug>.<date>.private-ke
 Note each `app_id` and `slug`: they go to the overlay (step 4). A ruleset of the base branch, with
 the checks of the project's CI, is optional
 ([3. Ruleset del branch principale](../../ops/README.md#3-ruleset-del-branch-principale)).
+
+### A shared set of apps
+
+Instead of a new set, the project may use a set that already exists on the same host for other
+repositories of the same owner (ADR 0006, clarification of D3, #570). Never for a repository of
+another owner or served by another host, and never the set of devloop's own repository. devloop
+still mints every token for `acme/widget` only, but the choice lowers the project's isolation;
+its limits:
+
+- **The key is valid on every repository of the installation.** The same private key is in the
+  `key_dir` of each project that uses the set, and in the supervisor's and the coordinator's for
+  their apps. Whoever reads it in one project, through a flaw of the host or of devloop or with
+  root access, mints tokens for every repository the app is installed on.
+- **The permissions are the same everywhere.** An app has one set of permissions: a repository
+  cannot get less than another one needs from the same app.
+- **A shared rate limit.** GitHub counts the hourly request limit per installation: with many
+  active projects, the watch and the ticks can come near it.
+- **Rotation and revocation together.** A compromised key is revoked for every repository of the
+  set: every project stops until the new key is in each `key_dir`.
+- **An installation widened with a click.** Adding a repository to the installation gives the app
+  its permissions there at once; a mistake in the selection holds for every project of the set.
+- **Less distinct records.** The actions of every project carry the same login (`<slug>[bot]`):
+  the repository tells which installation of devloop an action comes from.
+- **Never across hosts.** A copy of the key on another host multiplies the places it can leak
+  from; one repository, one host holds too.
+
+With a shared set, steps 1 and 3 change so:
+
+1. in the parameters, `APP_PREFIX` is the set's prefix, whatever the repository is called (for
+   example `APP_PREFIX=acme-devloop-`); `check-host.sh` and the setup scripts look for the keys of
+   `<APP_PREFIX><role>`;
+2. no `create-apps.sh` for the apps the set already has. If the project needs one the set lacks
+   (for example `merger`, for a repository where devloop merges), set `APPS` in the parameters to
+   those roles only and run `create-apps.sh` as above: its page has a button for them alone;
+3. install each app on `acme/widget` too: in the app's settings on GitHub, *Install App* → the
+   owner's installation → *Only select repositories* → add `acme/widget`, keeping the others.
+   Never *All repositories*: `devloop apps` warns about it (step 8). The merger only where devloop
+   merges: with a shared set, choose per app the repositories it is installed on;
+4. copy the keys of the set from the `key_dir` of a project that already uses it, mode `600`,
+   owned by the user that uses them, without printing them: devloop's apps to
+   `/home/devloop-widget/.ghapps`, those of `SUPERVISOR_KEYS` to the supervisor's (step 7):
+
+```bash
+sudo install -o devloop-widget -g devloop-widget -m 600 /home/devloop-other/.ghapps/<slug>.<date>.private-key.pem /home/devloop-widget/.ghapps/
+```
+
+The overlay (step 4) takes the set's `app_id` and `slug`, the same as in the other projects of
+the set. A key rotated later must reach every `key_dir` of the set.
 
 ## 4. Project file and overlay
 
@@ -332,8 +385,9 @@ sudo -u devloop-widget -H /usr/bin/env -C /home/devloop-widget/widget /usr/bin/p
   the repository lock, the unit, the CLIs and `devloop apps`, and the coordinator only if the
   overlay declares it (step 7)
   ([8. Verifica](../../ops/README.md#8-verifica)).
-- `apps` names `acme/widget` and the `key_dir`, then each app with its installation and its
-  permissions ([GitHub identities](reference.md#github-identities)).
+- `apps` names `acme/widget` and the `key_dir`, then each app with its installation, its
+  `repository_selection` (`selected`, or `all` with a warning: the app reaches every repository
+  of the owner) and its permissions ([GitHub identities](reference.md#github-identities)).
 - `tick --dry-run` plans a tick from the pinned copy, without agents, without writes and without
   any lock.
 
