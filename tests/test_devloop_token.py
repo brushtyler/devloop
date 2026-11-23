@@ -208,9 +208,9 @@ class IdentitiesTests(ProjectCase):
         self.assertEqual(identities.apps['claude'].key_path,
                          Path('~/.ghapps-widget/acme-devloop-claude-agent'))
 
-    def apps_lines(self, cfg):
+    def apps_lines(self, cfg, selection='selected'):
         app = mock.Mock(**{'describe.return_value': {
-            'login': 'x[bot]', 'installation': 1, 'repository_selection': 'selected',
+            'login': 'x[bot]', 'installation': 1, 'repository_selection': selection,
             'permissions': {'issues': 'write'}}})
         dispatcher = SimpleNamespace(identities=SimpleNamespace(apps={'dispatcher': app}))
         out = io.StringIO()
@@ -219,6 +219,21 @@ class IdentitiesTests(ProjectCase):
             os.environ.pop('DEVLOOP_APP_KEY_DIR', None)
             cli.main(['apps'])
         return out.getvalue()
+
+    def test_devloop_apps_reports_the_repository_selection(self):
+        # #570: 'selected' is reported, 'all' is reported and warned, without failing (a
+        # SystemExit would escape apps_lines).
+        cfg = cli.load(SimpleNamespace(config=None, local_config=str(self.overlay),
+                                       project_config=str(self.state / 'project.toml')),
+                       self.root)
+        out = self.apps_lines(cfg)
+        self.assertIn('dispatcher: x[bot] installation 1 (selected): issues=write', out)
+        self.assertNotIn('warning', out)
+        out = self.apps_lines(cfg, selection='all')
+        self.assertIn('dispatcher: x[bot] installation 1 (all): issues=write', out)
+        self.assertIn('dispatcher: warning: installation 1 covers all the repositories of acme '
+                      '(repository_selection all)', out)
+        self.assertIn('Only select repositories', out)
 
     def test_devloop_apps_names_the_projects_repository_and_key_dir(self):
         cfg = cli.load(SimpleNamespace(config=None, local_config=str(self.overlay),

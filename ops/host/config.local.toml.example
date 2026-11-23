@@ -79,8 +79,10 @@
 # provider = "anthropic"
 # model = "claude-opus-5-5"
 
-# L'insieme di GitHub App del progetto (ADR 0006, R6 e D3): uno per repository, mai condiviso,
-# installato solo su REPO, con la sua key_dir (DEVLOOP_KEY_DIR di params.env). Una tabella per
+# L'insieme di GitHub App del progetto (ADR 0006, R6 e D3): per default uno per repository,
+# installato solo su REPO; a scelta, uno condiviso fra repository dello stesso proprietario
+# sullo stesso host, con i limiti di ops/README.md ("Insieme di app per repository o condiviso").
+# Sempre con la key_dir del progetto (DEVLOOP_KEY_DIR di params.env). Una tabella per
 # app (dispatcher, claude, codex, agy, merger, supervisor, implementer, coordinator) con app_id
 # e slug (<APP_PREFIX><ruolo>, ops/github/create-apps.sh). merger solo se devloop fa i merge
 # ([merge] mode "strict" o "auto"), coordinator solo se c'è il coordinatore. Gli agent di devloop/config.toml dichiarano le app implementer,

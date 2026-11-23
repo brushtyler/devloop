@@ -1486,7 +1486,12 @@ An app that is configured but whose key is missing (except the
 [supervisor's](#the-supervisor-app), whose key devloop never reads) stops devloop at startup instead of
 silently falling back to the operator's login: remove it from `[apps]` of the overlay to run
 that actor without it. `python3 -m devloop apps` checks each app, its installation and its
-permissions, and names first the project's `repo` and the `key_dir` it reads.
+permissions, and names first the project's `repo` and the `key_dir` it reads. For each app it
+gives the installation's `repository_selection`: `selected` (*Only select repositories*) or
+`all`, which adds a warning line, since the app then has its permissions on every repository of
+the owner, present and future. A warning does not change the exit code. It does not count the
+repositories of the installation: that needs a token not limited to the project's repository,
+which devloop never mints; the installation's settings on GitHub list them.
 
 The apps have no `Workflows` permission, and devloop never pushes changes under
 `protected_paths` (default `.github/`): a workflow or a local action pushed to a branch of this
@@ -1519,14 +1524,51 @@ overlay devloop stops at startup, naming the overlay. The
 [project file](#project-file) cannot hold them either. `Identities`, every token devloop mints
 and `python3 -m devloop apps` act on that `repo`, with the keys of that `key_dir`.
 
-Each repository has **its own set of apps**, never shared with another (ADR 0006, D3): an agent
-of a project could otherwise reach the keys of an app valid on the other repositories. The
-operator creates the set from the manifests of `ops/github/apps/` with an `APP_PREFIX` of its
-own, installs it on that repository only (*Only select repositories*), and puts its keys in a
-`key_dir` of that project, readable only by that project's system user. The merger app is
-created and installed only for a repository where devloop merges (`[merge] mode` `"strict"` or
-`"auto"`, or `[roles.coordinator]` on, whose reserved merge needs it in mode `"off"` too, #529):
-with it configured, the mode `"off"` and no coordinator, `devloop apps` says so. Creating and
+A project's set of apps comes in one of two modes, chosen per project by whoever installs it
+(ADR 0006, D3 and its clarification of 2026-11-23, #570):
+
+- **A set per repository**, the default of the guides: the operator creates the set from the
+  manifests of `ops/github/apps/` with an `APP_PREFIX` of its own and installs it on that
+  repository only (*Only select repositories*).
+- **A shared set**: the same set of apps installed on several repositories, allowed only between
+  repositories of the **same owner** served by the **same host**. Another owner, or another
+  host, needs a set of its own. The project uses the set's `APP_PREFIX` and slugs, whatever its
+  repository is called; the set's existing apps are not created again, only installed on the new
+  repository too.
+
+Either way, the keys of the project's apps go in a `key_dir` of that project, readable only by
+that project's system user (mode `700`, keys `600`), and devloop mints every installation token
+for the project's repository only, so a shared app gives devloop no more access than an app per
+repository. devloop's own repository, the source of the installation of the other projects,
+keeps a set of its own, never shared with the projects it serves; for the other repositories of
+an operator, a set shared between them is a reasonable choice.
+
+The limits of a shared set, to weigh before choosing it:
+
+- **The key is valid on every repository of the installation.** The same private key is in the
+  `key_dir` of each project that uses the set, and in the supervisor's and the coordinator's for
+  their apps. Whoever reads it in one project, through a flaw of the host or of devloop or with
+  root access, mints tokens for every repository the app is installed on: devloop limits its
+  tokens to the project's repository, the key has no such limit.
+- **The permissions are the same everywhere.** An app has one set of permissions: a repository
+  cannot get less than another one needs from the same app.
+- **A shared rate limit.** GitHub counts the hourly request limit per installation: the
+  repositories served by the same installation spend the same budget, and with many active
+  projects the watch and the ticks can come near the limit.
+- **Rotation and revocation together.** A compromised key is revoked for every repository of the
+  set: every project stops until the new key is in each `key_dir`.
+- **An installation widened with a click.** Adding a repository to the installation gives the app
+  its permissions there at once, and a mistake in the selection of repositories holds for every
+  project of the set.
+- **Less distinct records.** On GitHub the actions of every project carry the same login
+  (`<slug>[bot]`): which installation of devloop an action comes from is told by its repository.
+- **Never across hosts.** A copy of the key on another host multiplies the places it can leak
+  from; "one repository, one host" holds too.
+
+The merger app is created and installed only for a repository where devloop merges (`[merge]
+mode` `"strict"` or `"auto"`, or `[roles.coordinator]` on, whose reserved merge needs it in mode
+`"off"` too, #529); with a shared set, choose per app which repositories to install it on. With
+it configured, the mode `"off"` and no coordinator, `devloop apps` says so. Creating and
 installing the apps stay operator actions, since they are credentials.
 
 #### Rename of the repository

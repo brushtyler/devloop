@@ -968,6 +968,14 @@ def main(argv=None):
             perms = ', '.join(f'{k}={v}' for k, v in sorted(info['permissions'].items()))
             log(f'{actor}: {info["login"]} installation {info["installation"]} '
                 f'({info["repository_selection"]}): {perms}')
+            # #570: an installation on all the owner's repositories is a warning, not a
+            # failure. The count of a 'selected' one would need a token not limited to the
+            # project's repository, which devloop never mints.
+            if info['repository_selection'] == 'all':
+                log(f'{actor}: warning: installation {info["installation"]} covers all the '
+                    f'repositories of {cfg.repo.split("/", 1)[0]} (repository_selection all): '
+                    'the app has its permissions on each of them; choose Only select '
+                    'repositories in its settings on GitHub')
         if failed:
             sys.exit(1)
         return
