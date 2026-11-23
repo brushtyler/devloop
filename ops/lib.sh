@@ -240,6 +240,90 @@ sys.exit(3)
 EOF
 }
 
+# agy_trusted_workspaces narrow FILE WORKTREES DEST
+# agy_trusted_workspaces check FILE STATE [HOME...]
+# trustedWorkspaces della configurazione di agy FILE (~/.gemini/antigravity-cli/settings.json,
+# sigillata, #572): le directory di cui agy si fida. L'utente degli agent non ha un clone suo: i
+# turni girano nei worktree dello state_dir, e basta la loro directory.
+# narrow: se trustedWorkspaces manca, o nomina una directory fuori da WORKTREES, scrive in DEST
+# FILE con trustedWorkspaces = [WORKTREES] e torna 3; un valore già dentro WORKTREES (anche una
+# lista vuota) non lo tocca e torna 0. FILE che non esiste vale {}.
+# check: stampa una riga per ogni voce che è o contiene una home (degli utenti del sistema o una
+# di HOME) o che è fuori dallo state_dir STATE, e torna 1 se ce n'è; FILE che non esiste, o senza
+# trustedWorkspaces, torna 0.
+# Torna 1 con il motivo su stdout anche se FILE non si legge o non è un oggetto JSON, o se
+# trustedWorkspaces non è una lista di percorsi. Python isolato, come codex_memories.
+agy_trusted_workspaces() {
+    python3 -I -B - "$@" <<'EOF'
+import json, os, pwd, sys
+mode, path, base, rest = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4:]
+LIMIT = 1 << 20
+KEY = 'trustedWorkspaces'
+
+
+def no(why):
+    print(f'{path} {why}')
+    sys.exit(1)
+
+
+def inside(entry, top):
+    return entry == top or entry.startswith(top.rstrip('/') + '/')
+
+
+def tops(directory):
+    return {os.path.normpath(directory), os.path.realpath(directory)}
+
+
+try:
+    with open(path, 'rb') as fh:
+        raw = fh.read(LIMIT + 1)
+except FileNotFoundError:
+    raw = b''
+except OSError as exc:
+    no(f'non si legge ({exc.strerror})')
+if len(raw) > LIMIT:
+    no(f'supera {LIMIT} byte')
+try:
+    data = json.loads(raw.decode('utf-8')) if raw.strip() else {}
+except (UnicodeDecodeError, ValueError) as exc:
+    no(f'non è un JSON valido ({exc})')
+if not isinstance(data, dict):
+    no('non è un oggetto JSON')
+value = data.get(KEY)
+if value is not None and not (isinstance(value, list)
+                              and all(isinstance(e, str) for e in value)):
+    no(f'imposta {KEY} a un valore che non è una lista di percorsi')
+entries = value or []
+if mode == 'check':
+    state = tops(base)
+    homes = {os.path.normpath(p.pw_dir) for p in pwd.getpwall() if p.pw_dir.startswith('/')}
+    homes |= {os.path.normpath(h) for h in rest if h.startswith('/')}
+    bad = False
+    for entry in entries:
+        n = os.path.normpath(entry) if entry.startswith('/') else None
+        held = sorted(h for h in homes if n is not None and inside(h, n))
+        if n is None:
+            print(f'{path}: {KEY} nomina {entry!r}, che non è un percorso assoluto')
+        elif held:
+            print(f'{path}: {KEY} nomina {entry}, che è o contiene la home {held[0]}')
+        elif not any(inside(n, top) for top in state):
+            print(f'{path}: {KEY} nomina {entry}, fuori dallo state_dir {base}')
+        else:
+            continue
+        bad = True
+    sys.exit(1 if bad else 0)
+worktrees, dest = os.path.normpath(base), rest[0]
+if value is not None and all(e.startswith('/') and any(inside(os.path.normpath(e), top)
+                                                         for top in tops(base))
+                             for e in entries):
+    sys.exit(0)
+data[KEY] = [worktrees]
+with open(dest, 'w', encoding='utf-8') as fh:
+    fh.write(json.dumps(data, indent=2, ensure_ascii=False) + '\n')
+sys.exit(3)
+EOF
+}
+
 say() { printf '%s\n' "$*"; }
 step() { printf '\n==> %s\n' "$*"; }
 ok() { printf '  ok: %s\n' "$*"; }
