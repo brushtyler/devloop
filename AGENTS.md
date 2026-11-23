@@ -1,4 +1,4 @@
-# SSDLC Project Guidelines
+# devloop Project Guidelines
 
 Istruzioni valide per qualsiasi agent che lavora su questo repository (Claude Code, Codex, Antigravity o altri).
 
@@ -78,7 +78,7 @@ Lo script [`scripts/agent-token.py`](scripts/agent-token.py) esegue un comando c
 python3 scripts/agent-token.py <actor> -- gh pr comment <PR> --body-file <FILE>
 python3 scripts/agent-token.py <actor> -- gh issue comment <ISSUE> --body-file <FILE>
 python3 scripts/agent-token.py <actor> --perm pull_requests=write -- \
-    gh api -X POST repos/brushtyler/ssdlc/pulls/<PR>/reviews --input <REVIEW.json>
+    gh api -X POST repos/brushtyler/devloop/pulls/<PR>/reviews --input <REVIEW.json>
 ```
 
 ### Regole

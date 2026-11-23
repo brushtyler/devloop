@@ -187,9 +187,11 @@ CLI](#5-utente-degli-agent-e-cli)).
 
 ## Da una VM vuota a devloop e supervisore attivi
 
-I comandi si eseguono da un clone del repository dell'operatore (per esempio nella sua home), come
-utente con `sudo`. Dove compare `brushtyler/ssdlc`, `devloop` o `supervisor`, valgono i valori di
-`params.env`.
+I comandi si eseguono da un clone di devloop (`brushtyler/devloop`) dell'operatore (per esempio
+nella sua home), come utente con `sudo`. Dove compare `brushtyler/devloop`, `devloop` o
+`supervisor`, valgono i valori di `params.env`. I percorsi `/home/devloop/ssdlc` e
+`/home/supervisor/ssdlc` sono quelli dell'host che sviluppa questo repository, rimasti invariati
+dopo la rinomina da `brushtyler/ssdlc` (ADR 0007).
 
 ### 1. Parametri
 
@@ -293,7 +295,7 @@ Lo applica l'operatore, con il proprio login `gh` di amministratore (non con il 
 supervisore). Per non crearne un doppione, si aggiorna quello che c'è:
 
 ```bash
-REPO=brushtyler/ssdlc
+REPO=brushtyler/devloop
 id=$(gh api "repos/$REPO/rulesets" --jq '.[] | select(.name == "main") | .id')
 if [ -z "$id" ]; then
     gh api -X POST "repos/$REPO/rulesets" --input ops/github/ruleset-main.json
@@ -836,9 +838,9 @@ di file di progetto e di overlay, è nella [guida rapida per un nuovo
 progetto](../docs/devloop/quickstart.md) (ADR 0006, R9).
 
 **Sorgente dell'installazione a parte** (ADR 0006, R1). Il repository gestito non contiene
-devloop: `pin` prende il codice da un clone di ssdlc, a un suo tag
+devloop: `pin` prende il codice da un clone di devloop, a un suo tag
 ([docs/devloop/guide.md](../docs/devloop/guide.md#installation-source)). In `params.env`:
-`REPO` del progetto, `SOURCE_REPO=brushtyler/ssdlc`, `SOURCE_REF` con il tag da fissare, e di
+`REPO` del progetto, `SOURCE_REPO=brushtyler/devloop`, `SOURCE_REF` con il tag da fissare, e di
 solito uno `STATE_DIR` assoluto. `setup-devloop.sh` clona la sorgente in `SOURCE_CLONE`
 (`/home/devloop/devloop-source`) e installa l'avviatore dal tag `SOURCE_REF` in `LAUNCHER_DIR`
 (`/usr/local/lib/devloop/devloop-pinned`, di root), fuori dalla copia fissata e dal clone gestito;
@@ -864,7 +866,7 @@ progetto (ADR 0006, R4, [docs/devloop/reference.md](../docs/devloop/reference.md
 senza, i prompt tolgono le frasi che li citano. I test locali e la lettura della CI seguono
 `[tests]` del file di progetto (R5): vale quanto sotto per `local_tests` e `ci_rerun_unrelated`.
 
-**devloop nel repository gestito**, come ssdlc:
+**devloop nel repository gestito**, come il repository di devloop stesso (il progetto ssdlc):
 
 1. **Portare devloop nel repository** (con una PR, come ogni cambiamento):
    - `devloop/` (con i prompt, `devloop/prompts/`, e gli schemi, `devloop/schemas/`);

@@ -1,4 +1,4 @@
-# Developing SSDLC
+# Developing devloop
 
 This guide is for anyone who changes this repository, people or agents. It covers the test suite,
 the documentation tests, the CI, the rule that keeps documents in step with the code, and how

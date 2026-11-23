@@ -27,6 +27,13 @@ class ReadmeStructureTests(unittest.TestCase):
             'devloop is how this repository is developed, and it is configured for it',
             'Merges are explicit',
             'Cost accounting is partial'])
+        # ADR 0007, R4 (#541): the README is devloop's, with a paragraph on the history.
+        self.assertEqual(README.read_text().splitlines()[0], '# devloop')
+        self.assertNotIn('github.com/brushtyler/ssdlc', README.read_text())
+        for phrase in ('`SOURCE_REPO=brushtyler/devloop`', '**History.**',
+                       'The project started as **ssdlc**',
+                       'renamed from `brushtyler/ssdlc` to `brushtyler/devloop`'):
+            self.assertIn(phrase, intro)
         direction = docs.plan_section('README.md', 'Direction', root=docs.ROOT)
         docs.assert_documented(self, direction, ['ADR 0007', 'R1', 'ssdlc-engine-final',
                                                  'brushtyler/devloop'])
