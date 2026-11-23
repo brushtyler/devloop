@@ -2090,3 +2090,202 @@ rollback `check-host.sh` si esegue dalla copia di root ripristinata
 parametri di prima, non dal checkout dell'operatore su `origin/main`, i cui script hanno già lo
 `state_dir` `.devloop`. Le sessioni ripartono con `start-role.sh` dal checkout dell'operatore
 portato a un commit precedente a #563.
+
+## Spostare una key_dir (#582)
+
+La posizione delle chiavi delle app non è un segreto: le chiavi le proteggono i permessi (600,
+dell'utente del ruolo, in una `key_dir` 700), gli utenti separati e gli agent sigillati. Se però
+la posizione di una `key_dir` finisce in un testo pubblico (un'issue, un commento, l'output di
+`check-host.sh` o un traceback incollati), l'operatore può spostarla con questa sezione, così la
+posizione pubblicata non vale più. **Le chiavi non cambiano**: non è una rotazione, che resta la
+procedura per una chiave compromessa ([ops/README.md](../README.md#2-github-app), punto 4).
+Quando spostare, e quale ruolo, lo decide l'operatore.
+
+Ogni ruolo ha la sua `key_dir`, un parametro di `params.env`, e si sposta da solo:
+
+| Ruolo (`ruolo`) | Utente | Parametro | Anche | Fermo e riavvio |
+|---|---|---|---|---|
+| `devloop` | `devloop` | `DEVLOOP_KEY_DIR` | `key_dir` in `[apps]` dell'overlay | il servizio `devloop@devloop`: la sezione si esegue **a loop fermo** |
+| `supervisor` | `supervisor` | `SUPERVISOR_KEY_DIR` | `DEVLOOP_APP_KEY_DIR` con cui conia i token | la sua sessione, poi `start-role.sh supervisor` |
+| `coordinator` | `coordinator` | `COORDINATOR_KEY_DIR` | la copia di root di `params.env` (`setup-coordinator.sh`) | la sua sessione e la sveglia, poi `start-role.sh coordinator` |
+
+Il passo si fa con l'agent dell'host, come root, dal checkout dell'operatore aggiornato
+(`git -C /root/repos/ssdlc fetch origin` e `git -C /root/repos/ssdlc checkout --detach
+origin/main`), un ruolo alla volta. Il codice di devloop non cambia: nessun pin lo aspetta.
+
+**Il nome nuovo non si pubblica**: né in un'issue, né in un commento, né in una PR, né in un
+output incollato. Lo sceglie il passo 1, a caso e non di default, e sta solo nei file dell'host
+(`params.env`, l'overlay, le copie di sicurezza del passo 3). I comandi qui sotto non lo
+stampano; `check-host.sh`, `setup-*.sh` e `devloop-pinned apps` sì: il loro output resta
+sull'host (#583). Nei resoconti all'operatore si scrive "la `key_dir` nuova", non il percorso.
+
+### Comandi
+
+Come root, in una sola shell, che resta aperta fino alla fine. I valori sono quelli di devloop;
+per gli altri ruoli quelli dei commenti.
+
+1. **I valori del ruolo e il nome nuovo.** La `key_dir` di prima è quella che gli script di
+   `ops/` ricavano da `params.env`, scritta o di default:
+
+   ```bash
+   ruolo=devloop                  # supervisor, coordinator
+   utente=devloop                 # supervisor, coordinator
+   parametro=DEVLOOP_KEY_DIR      # SUPERVISOR_KEY_DIR, COORDINATOR_KEY_DIR
+   ops=/root/repos/ssdlc/ops
+   params=/root/repos/ssdlc/ops/params.env
+   overlay=/home/devloop/devloop/.devloop/config.local.toml
+   copie=/root/keydir-582-$ruolo
+   valore() { bash -c '. "$1/lib.sh" && PARAMS_FILE=$2 && ops_load_params && printf %s "${!3}"' _ "$ops" "$params" "$1"; }
+   vecchia=$(valore "$parametro")
+   nuova=$(dirname "$vecchia")/.$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+   test -d "$vecchia" && test ! -e "$nuova" && test ! -e "$copie" && echo pronto
+   ```
+
+   Il nome nuovo sta accanto a quello di prima, di solito nella home dell'utente del ruolo: un
+   punto e 16 cifre esadecimali casuali. `test` stampa `pronto`; altrimenti ci si ferma. Una
+   `$copie` che esiste già è di uno spostamento di prima: si cancella solo se il suo rollback
+   non serve più.
+
+2. **Fermare il ruolo**: per devloop il loop, per supervisore e coordinatore la loro sessione.
+   Si eseguono solo le righe del ruolo:
+
+   ```bash
+   systemctl stop devloop@devloop                                    # devloop
+   systemctl is-active devloop@devloop                               # devloop: "inactive"
+   sudo -u supervisor -H tmux kill-session -t =devloop-supervisor    # supervisor
+   sudo -u coordinator -H tmux kill-session -t =devloop-coordinator  # coordinator
+   pkill -u coordinator -f coordinator-wait.sh                       # coordinator: la sveglia
+   ```
+
+   Una sessione che non c'è dà `can't find session`: va bene.
+
+3. **Copie di sicurezza**, per il rollback, in una directory di root:
+
+   ```bash
+   install -d -m 700 "$copie"
+   cp -p "$params" "$copie/params.env"
+   printf '%s\n' "$vecchia" > "$copie/vecchia"
+   printf '%s\n' "$nuova" > "$copie/nuova"
+   cp -p "$overlay" "$copie/config.local.toml"
+   ```
+
+   L'overlay si copia per ogni ruolo, ma cambia solo per devloop (passo 6).
+
+4. **La directory nuova e lo spostamento delle chiavi.** La directory nuova è 700 dell'utente del
+   ruolo; le chiavi si **spostano** con `mv`, mai copiate lasciando l'originale. Le due directory
+   hanno la stessa directory padre, quindi lo stesso filesystem: `mv` è un rename, che tiene
+   modo (600) e proprietario. Poi la directory di prima, vuota, si toglie:
+
+   ```bash
+   install -d -m 700 -o "$utente" -g "$(id -gn "$utente")" "$nuova"
+   find "$vecchia" -mindepth 1 -maxdepth 1 -exec mv -n -t "$nuova" -- {} +
+   rmdir "$vecchia"
+   stat -c '%a %U' "$nuova" "$nuova"/*
+   test ! -e "$vecchia" && echo spostata
+   ```
+
+   `stat` stampa `700` e l'utente del ruolo per la directory, `600` e l'utente per ogni chiave;
+   `test` stampa `spostata`. Se `rmdir` fallisce, nella directory di prima è rimasto qualcosa: ci
+   si ferma, senza copiare né cancellare nulla, e si chiede all'operatore.
+
+5. **`params.env`**: il parametro del ruolo con la `key_dir` nuova, al posto di quella di prima.
+
+   ```bash
+   sed -i "/^$parametro=/d" "$params"
+   printf '%s=%s\n' "$parametro" "$nuova" >> "$params"
+   test "$(valore "$parametro")" = "$nuova" && echo params
+   ```
+
+   `test` stampa `params`: gli script di `ops/` leggono la `key_dir` nuova.
+
+6. **L'overlay, solo per devloop**: `key_dir` in `[apps]`, che devloop legge per coniare i token.
+   Il file si riscrive al suo posto (`cat … >`), così proprietario, modo e ACL restano. Senza la
+   riga l'overlay usa il default `~/.ghapps`, e la riga si aggiunge sotto `[apps]`. Un overlay può
+   non avere la riga `[apps]` e dichiarare solo `[apps.<ruolo>]`: allora `[apps]` con la riga si
+   aggiunge in fondo, e le altre tabelle restano come sono:
+
+   ```bash
+   if grep -q '^key_dir *=' "$overlay"; then
+       sed "s|^key_dir *=.*|key_dir = \"$nuova\"|" "$overlay" > "$copie/overlay-dopo"
+   elif grep -Eq '^\[ *apps *\] *(#.*)?$' "$overlay"; then
+       sed -E "/^\[ *apps *\] *(#.*)?$/a key_dir = \"$nuova\"" "$overlay" > "$copie/overlay-dopo"
+   else
+       { cat "$overlay"; printf '\n[apps]\nkey_dir = "%s"\n' "$nuova"; } > "$copie/overlay-dopo"
+   fi
+   cat "$copie/overlay-dopo" > "$overlay"
+   python3 -I -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["apps"]["key_dir"] == sys.argv[2])' "$overlay" "$nuova"
+   ```
+
+   `python3` stampa `True`. Altrimenti l'overlay torna quello di prima
+   (`cat "$copie/config.local.toml" > "$overlay"`) e si chiede all'operatore.
+
+7. **Lo script di setup del ruolo**, prima con `--dry-run`. Con il coordinatore sull'host
+   (`id coordinator`), per ogni ruolo anche `setup-coordinator.sh`: la sua copia di root ha
+   `params.env`, che `check-host.sh --read-only` legge.
+
+   ```bash
+   sudo bash /root/repos/ssdlc/ops/host/setup-$ruolo.sh --dry-run
+   sudo bash /root/repos/ssdlc/ops/host/setup-$ruolo.sh
+   sudo bash /root/repos/ssdlc/ops/host/setup-coordinator.sh     # con il coordinatore sull'host
+   ```
+
+   Il dry run trova la `key_dir` nuova (`ok: … esiste (700, <utente>)`) e ogni chiave (`ok:
+   chiave di … presente`), e non crea la directory di prima.
+
+8. **Verifica**, con il ruolo ancora fermo. Oltre a `check-host.sh`, si esegue solo la riga del
+   ruolo:
+
+   ```bash
+   sudo bash /root/repos/ssdlc/ops/host/check-host.sh --no-apps
+   sudo -u devloop -H python3 /home/devloop/devloop/scripts/devloop-pinned apps     # devloop
+   sudo -u supervisor -H sh -c 'cd ~/devloop && DEVLOOP_APP_KEY_DIR="$1" python3 scripts/supervisor-token.py --state-dir /home/devloop/devloop/.devloop --perm issues=read -- gh api repos/brushtyler/devloop --jq .full_name' _ "$nuova"     # supervisor
+   sudo -u coordinator -H sh -c 'cd ~/devloop && DEVLOOP_APP_KEY_DIR="$1" python3 scripts/coordinator-token.py --state-dir /home/devloop/devloop/.devloop --perm issues=read -- gh api repos/brushtyler/devloop --jq .full_name' _ "$nuova"   # coordinator
+   ```
+
+   `check-host.sh` non dà nessun `ERRORE`: la `key_dir` nuova 700, con le chiavi 600 dell'utente
+   del ruolo, e nessuna chiave del progetto rimasta nella `key_dir` di default (`ERRORE: …,
+   key_dir di default, ha ancora N chiavi di app del progetto, ma <PARAMETRO> indica un'altra
+   key_dir`, #582). Per devloop `apps` trova ogni app con la sua chiave; per supervisore e
+   coordinatore lo script dei token stampa `brushtyler/devloop`. Con un errore, il rollback.
+
+9. **Riavvio.** Per devloop:
+
+   ```bash
+   systemctl start devloop@devloop
+   systemctl is-active devloop@devloop      # "active"
+   ```
+
+   All'avvio il journal di devloop, sull'host, registra il cambio della chiave di fiducia `apps`
+   (`key_dir`), con il valore di prima e quello nuovo. Per supervisore e coordinatore
+   l'operatore riavvia la sessione:
+
+   ```bash
+   sudo bash /root/repos/ssdlc/ops/host/start-role.sh supervisor
+   sudo bash /root/repos/ssdlc/ops/host/start-role.sh coordinator
+   ```
+
+   Il primo messaggio del coordinatore porta la `key_dir` nuova (#565). Il supervisore conia i
+   token con `DEVLOOP_APP_KEY_DIR` sulla sua `key_dir`: il comando con il valore nuovo è quello
+   che `setup-supervisor.sh` stampa alla fine (passo 7), e l'operatore lo dà alla sessione nuova.
+   `$copie` si cancella (`rm -r "$copie"`) quando il ruolo gira con la `key_dir` nuova e il
+   rollback non serve più.
+
+**Rollback.** Con il ruolo fermo come al passo 2, nella shell del passo 1 (o con i suoi valori,
+tranne `vecchia` e `nuova`, che si leggono da `$copie`): le chiavi tornano al loro posto con
+`mv`, `params.env` alla copia del passo 3 e, solo per devloop, anche l'overlay. Un passo non
+ancora fatto si salta.
+
+```bash
+vecchia=$(cat "$copie/vecchia")
+nuova=$(cat "$copie/nuova")
+install -d -m 700 -o "$utente" -g "$(id -gn "$utente")" "$vecchia"
+find "$nuova" -mindepth 1 -maxdepth 1 -exec mv -n -t "$vecchia" -- {} +
+rmdir "$nuova"
+cp -p "$copie/params.env" "$params"
+cat "$copie/config.local.toml" > "$overlay"        # devloop
+test "$(valore "$parametro")" = "$vecchia" && echo params
+```
+
+`test` stampa `params`. Poi i passi 7, 8 e 9: script di setup, verifica e riavvio. La posizione
+di prima è quella pubblicata: il rollback la rimette in uso finché non si riprova lo
+spostamento.
