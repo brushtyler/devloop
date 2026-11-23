@@ -19,7 +19,8 @@ A new session, of any CLI, starts here, without instructions from the operator:
 
 1. Read your mailbox, `to-coordinator/` of the mailbox (below): every message there is not read
    yet. Act on each, then move it to `to-coordinator/done/` or remove it.
-2. Read the state of the work on GitHub: the journal of the project (issue #76 for ssdlc), the
+2. Read the state of the work on GitHub, with the tokens of your app (GitHub): the journal of
+   the project (issue #76 for ssdlc), the
    daily summary (`[report] issue`, #316 for ssdlc) and the open issues and pull requests with
    `agent:needs-operator`. There is no local handoff file: what is in progress and what waits
    for the operator is in the journal and in the issues.
@@ -32,8 +33,8 @@ Two ways, each for its use:
 
 - **On GitHub**, for what must be tracked: a decision of the operator, a problem of the system.
   `agent:needs-operator` with a comment that says what is needed and why, or a new issue with
-  its evidence, when you can write on GitHub (Privileges); otherwise give the operator the
-  text. The state of the work goes here too, in the journal and in the issues, never in the
+  its evidence, written with your app (GitHub); when GitHub or your app does not work, give the
+  operator the text and alert the supervisor in the mailbox. The state of the work goes here too, in the journal and in the issues, never in the
   mailbox.
 - **The mailbox**, for quick alerts, always available, also when GitHub or an app does not work:
   the directory `COORDINATION_DIR` of `ops/params.env` (default `/var/lib/devloop-coordination`;
@@ -81,6 +82,48 @@ default (`periodo:`, `--period <seconds>`). Read its lines, act, then start it a
 `coordinator-watch-state.json` of the `state_dir`: never run `devloop watch` with the
 supervisor's state file, whose events would be lost to the supervisor.
 
+## GitHub
+
+You have no `gh` login of your own: every read and every write on GitHub goes through a token
+of the coordinator's app, `[apps.coordinator]`, that `scripts/coordinator-token.py` mints for
+one command (AGENTS.md, "Identità GitHub degli agent";
+[ops/README.md](../../../ops/README.md#10-coordinatore-facoltativo), step 10). Run it always as
+your user and from your clone, with `DEVLOOP_APP_KEY_DIR` set to your key_dir
+(`COORDINATOR_KEY_DIR` of `ops/params.env`) and `--state-dir` on devloop's `state_dir`: the
+first message of your session gives the three values, which win over the placeholders here.
+Without `DEVLOOP_APP_KEY_DIR` the script looks for the key in devloop's key_dir and does not
+find it.
+
+```bash
+cd <your clone>
+# Reads: ask only the read permissions you need.
+DEVLOOP_APP_KEY_DIR=<key_dir> python3 scripts/coordinator-token.py --state-dir <state_dir> \
+    --perm issues=read --perm pull_requests=read -- gh pr view <PR> --comments
+DEVLOOP_APP_KEY_DIR=<key_dir> python3 scripts/coordinator-token.py --state-dir <state_dir> \
+    --perm actions=read --perm checks=read -- gh run view <RUN> --log-failed
+# Writes: without --perm, issues=write and pull_requests=write.
+DEVLOOP_APP_KEY_DIR=<key_dir> python3 scripts/coordinator-token.py --state-dir <state_dir> \
+    -- gh issue comment <ISSUE> --body-file <FILE>
+```
+
+- **Reads** with the read permissions only: `--perm issues=read`, `--perm pull_requests=read`,
+  and `--perm actions=read`, `checks=read` or `statuses=read` for the diagnosis of the CI.
+- **Writes** (comments, issues, labels, commands) with the default, `issues=write` and
+  `pull_requests=write`. No other permission exists for your app: no `contents`, no push.
+- **The attribution header.** Every text you publish (issue, comment, command) starts with the
+  header of AGENTS.md ("Intestazione di Issue e Pull Request"), with the values of your session:
+  your CLI and its version, your model and your reasoning level.
+- **Commands.** A `/devloop` command is the first line after the header, as in
+  [The coordinator](../guide.md#the-coordinator); write it in a file and publish it with
+  `--body-file`.
+- The token reaches the command only in `GH_TOKEN`: never print it, never export it in an
+  assignment, never pass it to another command. Never use the operator's `gh` login, the
+  supervisor's app or `scripts/agent-token.py`.
+
+When GitHub or the script does not work (an error of the token, a `401`), write nothing on
+GitHub in another way: tell the operator, with the text to publish, and alert the supervisor in
+the mailbox.
+
 ## Inputs
 
 - devloop's summaries (`devloop report`, [Daily summary](../guide.md#daily-summary)), the
@@ -93,10 +136,10 @@ supervisor's state file, whose events would be lost to the supervisor.
 ## Privileges
 
 - On GitHub, only the coordinator's role app `[apps.coordinator]`, counted with
-  `[roles.coordinator]` ([The coordinator app](../reference.md#the-coordinator-app)). Its
-  commands count only inside the closed perimeter of [The coordinator](../guide.md#the-coordinator).
-  How the coordinator gets the tokens of its app is a later part of the plan of #524: until it
-  exists, write nothing on GitHub and give the operator the text to publish.
+  `[roles.coordinator]` ([The coordinator app](../reference.md#the-coordinator-app)), through
+  `scripts/coordinator-token.py` (GitHub): `issues` and `pull_requests`, and `actions`, `checks`
+  and `statuses` in read. Its commands count only inside the closed perimeter of the table of
+  [The coordinator](../guide.md#the-coordinator): any other is refused.
 - On the host, **read only**: the commands of `ops/host/sudoers-coordinator`
   ([ops/README.md](../../../ops/README.md), step 10), that is `devloop-pinned status`, `tail` of
   `run.log`, `journalctl` and `systemctl status` of devloop's service, and
@@ -109,6 +152,20 @@ supervisor's state file, whose events would be lost to the supervisor.
 
 - Verify the work of the supervisor: its decisions on the escalations, its grants within the
   caps, its delegated merges, its labels. Report to the operator what does not convince you.
+- The **reserved merge** (#529): on a ready PR whose merge is the operator's (`agent:ready-to-merge`
+  with the dispatcher's `agent:needs-operator` and its comment "Il merge spetta all'operatore"),
+  `/devloop merge <sha> <reason>`, only when every condition of
+  [The reserved merge of the coordinator](../guide.md#the-reserved-merge-of-the-coordinator)
+  holds, the `/devloop approve` of the operator included when it is needed, and within the daily
+  cap of the guide. The dispatcher verifies them again and refuses the command when one does
+  not hold: the PR stays with the operator.
+- **`grant-round`** on a `round_limit` escalation to the operator, at most one round per PR
+  (#553; [Granting a review round on an escalation to the
+  operator](../guide.md#granting-a-review-round-on-an-escalation-to-the-operator)), with the
+  reason; a further round on the same PR is the operator's.
+- The other delegated commands of the table of [The coordinator](../guide.md#the-coordinator)
+  (`retry`, `accept-defaults`, `decide`, `rereview`, `recheck`, `fix`, `hold`, `release`), under
+  its conditions, each with its reason.
 - Write the problems of the system as issues, each with its evidence.
 - Prepare for the operator the decisions that are theirs, and a periodic summary.
 - When the host needs an intervention, ask the operator for the agent of the host, naming the
@@ -124,5 +181,6 @@ supervisor's state file, whose events would be lost to the supervisor.
   outside the sudoers.
 - Never run a step on the host: that is the agent of the host's, launched by the operator
   ([host runbook](host.md)).
-- Never write with the operator's `gh` login or with the supervisor's app, never push.
+- Never read or write GitHub with the operator's `gh` login, with a personal token or with the
+  supervisor's app, never push.
 - Never print a token, never export one in an assignment.

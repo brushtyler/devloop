@@ -60,7 +60,11 @@ sudo -u supervisor -H tmux attach -t devloop-supervisor   # per entrare nella se
 - Per supervisore e coordinatore, prima del runbook, lo script passa i valori dell'installazione
   per il canale fra i due ruoli (lo `state_dir`, la casella e le sue destinazioni, la sveglia del
   coordinatore) e chiede di cominciare dalla sezione *At startup* del runbook: una sessione
-  nuova, anche di un'altra CLI, li segue senza istruzioni dell'operatore.
+  nuova, anche di un'altra CLI, li segue senza istruzioni dell'operatore. Al coordinatore passa
+  anche i valori dei token della sua app (#565): la sua `key_dir` (`COORDINATOR_KEY_DIR`, per
+  `DEVLOOP_APP_KEY_DIR`) e il clone da cui lancia `scripts/coordinator-token.py`, cioè
+  `COORDINATOR_HOME/<nome del repository>` (`/home/coordinator/devloop` su questo host). Se il
+  clone manca, lo script lo segnala con un `ATTENZIONE` e avvia comunque la sessione.
 
 **Canale fra supervisore e coordinatore** (#543). I runbook descrivono come si parlano, come
 sorveglia ciascuno e cosa fa all'avvio:

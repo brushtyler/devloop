@@ -4201,6 +4201,40 @@ echo "$2:x:1000:"''')
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertNotIn('mailbox between', self.cli_args(self.checkout)[3][-1])
 
+    def test_the_coordinator_gets_the_key_dir_and_the_clone_of_its_tokens(self):
+        # #565: the coordinator's session gets the key_dir of its app and the clone from which it
+        # runs scripts/coordinator-token.py, as the other values of the installation, so that
+        # its runbook holds no path of a host. The supervisor's does not.
+        key_dir = self.tmp / 'keys-coordinator'
+        clone = self.home / 'coordinator' / 'devloop'
+        (clone / '.git').mkdir(parents=True)
+        self.params_file = self.params(SUPERVISOR_USER=FAKE_SUPERVISOR,
+                                       SUPERVISOR_CLONE=str(self.clone),
+                                       STATE_DIR=str(self.state),
+                                       COORDINATOR_KEY_DIR=str(key_dir))
+        done = self.start('coordinator')
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertNotIn('manca il clone del coordinatore', done.stdout)
+        channel = self.cli_args(self.home / 'coordinator')[3][-1].split('\n\n')[1]
+        self.assertIn(f'For the section "GitHub": the key_dir of your app (DEVLOOP_APP_KEY_DIR) '
+                      f'is {key_dir}, and your clone, from which you run '
+                      f'scripts/coordinator-token.py, is {clone}.', channel)
+        self.assertIn('Start now with the section "At startup".', channel)
+        self.assertNotRegex(channel, r'@[A-Z_]+@|\$')
+        done = self.start('supervisor')
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        channel = self.cli_args(self.clone)[3][-1].split('\n\n')[1]
+        self.assertNotIn('coordinator-token.py', channel)
+        self.assertNotIn(str(key_dir), channel)
+
+    def test_a_missing_clone_of_the_coordinator_is_a_warning(self):
+        # The session starts all the same: it reads its mailbox and tells the operator.
+        done = self.start('coordinator')
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn('ATTENZIONE: manca il clone del coordinatore '
+                      f'{self.home}/coordinator/devloop', done.stdout)
+        self.assertEqual(len(self.launches()), 1)
+
     def test_the_sessions_of_the_project_devloop_get_the_paths_of_563(self):
         # #563: PROJECT=devloop with the users of before and the supervisor's clone written. The
         # sessions start in the clone .../devloop, with the state_dir .devloop of devloop's clone,
@@ -4232,6 +4266,12 @@ echo "$2:x:1000:"''')
                               '/usr/local/lib/devloop-coordinator-devloop/host/coordinator-wait.sh'):
                     self.assertIn(value, channel)
                 self.assertNotIn('ssdlc', channel)
+                # #565: the coordinator's key_dir and clone, the defaults of PROJECT.
+                if role == 'coordinator':
+                    self.assertIn(f'the key_dir of your app (DEVLOOP_APP_KEY_DIR) is '
+                                  f'{self.home}/coordinator/.ghapps-devloop, and your clone, '
+                                  'from which you run scripts/coordinator-token.py, is '
+                                  f'{self.home}/coordinator/devloop.', channel)
 
     def test_the_overlay_sets_the_table_over_the_installation(self):
         # The installation's table, with the overlay's model over it.
@@ -4346,6 +4386,44 @@ class RoleRunbookTests(unittest.TestCase):
         host = ' '.join(ROLE_RUNBOOKS['host'].read_text().split())
         self.assertIn('## Channel, watching and startup', host)
         self.assertIn('never read its messages', host)
+
+    def test_the_coordinator_reads_and_writes_github_with_the_tokens_of_its_app(self):
+        # #565: the tokens of the coordinator's app exist (#549): the runbook says how to read and
+        # write with them, with the values of the first message, and no longer that it writes
+        # nothing on GitHub; it cites the reserved merge and grant-round, the table of the guide,
+        # the form of the commands and the attribution header.
+        text = ' '.join(ROLE_RUNBOOKS['coordinator'].read_text().split())
+        self.assertNotIn('write nothing on GitHub and give the operator the text', text)
+        self.assertNotIn('until it exists', text)
+        self.assertNotIn('a later part of the plan of #524', text)
+        github = text.split(' ## GitHub ')[1].split(' ## ')[0]
+        for phrase in ('`scripts/coordinator-token.py`', 'You have no `gh` login of your own',
+                       'every read and every write on GitHub', 'from your clone',
+                       '`DEVLOOP_APP_KEY_DIR` set to your key_dir', '`--state-dir` on devloop\'s '
+                       '`state_dir`', 'the first message of your session gives the three values',
+                       '--perm issues=read --perm pull_requests=read',
+                       '--perm actions=read --perm checks=read',
+                       '`issues=write` and `pull_requests=write`',
+                       'starts with the header of AGENTS.md',
+                       'the first line after the header, as in [The coordinator]'
+                       '(../guide.md#the-coordinator)',
+                       'never print it, never export it in an assignment',
+                       'Never use the operator\'s `gh` login, the supervisor\'s app'):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, github)
+        # No path of a host: the values come from the first message.
+        self.assertNotRegex(github, r'/home/|/var/lib/|\.ghapps')
+        privileges = text.split(' ## Privileges ')[1].split(' ## ')[0]
+        self.assertIn('through `scripts/coordinator-token.py`', privileges)
+        tasks = text.split(' ## Tasks ')[1].split(' ## ')[0]
+        for phrase in ('`/devloop merge <sha> <reason>`',
+                       '(../guide.md#the-reserved-merge-of-the-coordinator)', 'daily cap',
+                       '**`grant-round`** on a `round_limit` escalation to the operator, at most '
+                       'one round per PR', '#553', '#529', '(../guide.md#the-coordinator)'):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, tasks)
+        # The supervisor's runbook does not change: it never mints the coordinator's tokens.
+        self.assertNotIn('coordinator-token.py', ROLE_RUNBOOKS['supervisor'].read_text())
 
     def test_the_mailbox_command_of_the_runbooks_publishes_a_readable_message_atomically(self):
         # #543: the command of the runbooks, run as written (with the box of the tests): one
