@@ -4417,15 +4417,17 @@ state=$(cat {shlex.quote(str(self.service_state))}); echo "$state"
     def test_the_end_of_the_period_wakes_it(self):
         # The first call answers, with events that are not the coordinator's, only after the
         # period is over: the period ends during it whatever the load of the host (#579), and
-        # the next round wakes it without calling watch again. Before that call there is only
-        # the first reading of the mailbox, the log and the service, far shorter than the
-        # period.
+        # the next round wakes it without calling watch again. If the first reading of the
+        # mailbox, the log and the service already outlasts the period, it wakes before calling
+        # watch: the test asks no number of calls in a fixed time, only that there is no call
+        # after the period. That the events of the others do not wake it is
+        # test_it_wakes_on_an_event_of_the_coordinator_and_not_on_the_others.
         self.answer(1, ['PR #5 CI pass @abc1234', 'issue #7 labels +agent:ready'], delay=2.2)
         done = self.wait('--period', '2')
         self.assertEqual((done.returncode, done.stdout),
                          (0, 'periodo: 2s senza eventi del coordinatore: il controllo '
                              'periodico\n'), done.stderr)
-        self.assertEqual(len(self.watch_calls()), 1)
+        self.assertLessEqual(len(self.watch_calls()), 1)
 
     def test_a_new_error_in_the_log_wakes_it_once(self):
         # The lines of run.log at the first run are the base, not events.
