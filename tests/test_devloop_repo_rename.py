@@ -316,14 +316,17 @@ class MigrateTests(unittest.TestCase):
     def test_the_commands_in_their_order(self):
         steps = (
             'sudo systemctl stop devloop',
-            'sudo -u devloop -H git -C /home/devloop/ssdlc remote set-url origin '
-            'https://github.com/brushtyler/devloop.git',
-            'sudo -u supervisor -H git -C /home/supervisor/ssdlc remote set-url origin '
-            'https://github.com/brushtyler/devloop.git',
+            'kill-session -t =devloop-coordinator',
             'sudo -u devloop -H git -C /home/devloop/ssdlc fetch origin',
             'sudo -u devloop -H git -C /home/devloop/ssdlc checkout --detach origin/main',
             'sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned pin '
             'origin/main',
+            'gh api repos/brushtyler/devloop --jq .full_name',
+            'sudo -u devloop -H git -C /home/devloop/ssdlc remote set-url origin '
+            'https://github.com/brushtyler/devloop.git',
+            'sudo -u supervisor -H git -C /home/supervisor/ssdlc remote set-url origin '
+            'https://github.com/brushtyler/devloop.git',
+            'sudo -u supervisor -H git -C /home/supervisor/ssdlc fetch origin',
             'install -o devloop -m 600 config.local.toml config.local.toml.prima-rinomina',
             'repo_aliases = ["brushtyler/ssdlc"]',
             'cp -p params.env params.env.prima-rinomina',
@@ -341,13 +344,41 @@ class MigrateTests(unittest.TestCase):
         for step, index in zip(steps, at):
             with self.subTest(step=step):
                 self.assertGreaterEqual(index, 0)
-        # Each in its place: the pin of the copy of #540 before the overlay that only that copy
-        # accepts, the parameters before setup-devloop.sh, the checks before the start.
+        # Each in its place: the pin of the copy of #540 before the rename and before the overlay
+        # that only that copy accepts, the parameters before setup-devloop.sh, the checks before
+        # the start.
         self.assertEqual(at, sorted(at))
-        # The prerequisites: R2 done, the pull request merged.
+        # The prerequisites: the pull request merged, the repository not renamed yet (#559).
         before = self.section[:self.section.index('\n### Comandi\n')]
-        self.assertIn('gh api repos/brushtyler/devloop --jq .full_name', before)
         self.assertIn('**La PR di #540 mergiata**', before)
+        self.assertIn('**Il repository ancora `brushtyler/ssdlc`**', before)
+        self.assertIn('gh api repos/brushtyler/ssdlc --jq .full_name', before)
+        self.assertNotIn('**R2 fatto**', before)
+        self.assertNotIn('repos/brushtyler/devloop', before)
+
+    def test_the_pin_comes_before_the_rename(self):
+        # #559: after the rename the lookup of the apps' installation under the old name gives
+        # 404, so no app mints a token and the pin's smoke test fails until the overlay names
+        # the new repository. The pin of the copy of #540 runs before the rename, with the loop
+        # stopped, and the overlay changes right after it.
+        steps = re.findall(r'^(\d+)\. \*\*(.+?)\*\*', self.commands, re.M)
+        titles = {title: int(n) for n, title in steps}
+        self.assertEqual([int(n) for n, _ in steps], list(range(1, len(steps) + 1)))
+        stop = titles['Fermare il loop']
+        pin = titles['Clone di devloop e pin']
+        rename = titles['R2, la rinomina']
+        overlay = titles["L'overlay"]
+        self.assertEqual((stop, pin, rename, overlay), (1, 2, 3, 5))
+        # The pin's command is in the pin step, the rename's check in the rename step.
+        items = re.split(r'^\d+\. ', self.commands, flags=re.M)
+        self.assertIn('devloop-pinned pin origin/main', items[pin])
+        self.assertNotIn('devloop-pinned pin', ''.join(items[pin + 1:]).split('**Rollback.**')[0])
+        self.assertIn('gh api repos/brushtyler/devloop --jq .full_name', items[rename])
+        # The introduction no longer says devloop works before the overlay changes.
+        intro = self.section[:self.section.index('\n### Prima\n')]
+        self.assertNotIn('continua a funzionare', intro)
+        self.assertIn('**devloop non funziona**', intro)
+        self.assertIn('404', intro)
 
     def test_the_rollback_names_its_commands(self):
         rollback = self.commands[self.commands.index('**Rollback.**'):]
@@ -360,6 +391,8 @@ class MigrateTests(unittest.TestCase):
                        'sudo -u supervisor -H git -C /home/supervisor/ssdlc remote set-url '
                        'origin https://github.com/brushtyler/ssdlc.git',
                        'sudo systemctl start devloop', 'setup-coordinator.sh',
+                       'gh api repos/brushtyler/ssdlc --jq .full_name',
+                       'cat config.local.toml.prima-rinomina > config.local.toml',
                        'scripts/devloop-pinned pin <sha12>'):
             with self.subTest(needed=needed):
                 self.assertIn(needed, rollback)
@@ -369,7 +402,8 @@ class MigrateTests(unittest.TestCase):
         before = self.overlay()
         self.assertEqual((before.repo, before.repo_aliases), (OLD, ()))
         # Step 4, without the cd to the state_dir of the host and the copy owned by devloop.
-        step = block_with(self.commands, 'config.local.toml.prima-rinomina')
+        step = block_with(self.commands, 'install -o devloop -m 600 config.local.toml '
+                                         'config.local.toml.prima-rinomina')
         out = self.run_block(runnable(step, skip=('cd ', 'install ')))
         # The two checks print what the step says, then the lines of repo.
         self.assertEqual(out.splitlines(), [
@@ -385,19 +419,31 @@ class MigrateTests(unittest.TestCase):
                          ['0', '1'])
         self.assertEqual((self.tmp / 'config.local.toml').read_text(encoding='utf-8'),
                          renamed_text)
-        # The rollback: the old name, with the new one as an alias.
+        # The rollback after a failed step (#559): the copy of before, rewritten in place, and
+        # the params.env of before.
         (self.tmp / 'params.env.prima-rinomina').write_text('REPO=brushtyler/ssdlc\n')
         (self.tmp / 'params.env').write_text('REPO=brushtyler/devloop\n')
         rollback = self.commands[self.commands.index('**Rollback.**'):]
+        # The step skipped the install owned by devloop: the copy of before, made here.
+        (self.tmp / 'config.local.toml.prima-rinomina').write_text(OVERLAY, encoding='utf-8')
+        out = self.run_block(runnable(
+            block_with(rollback, 'cat config.local.toml.prima-rinomina > config.local.toml'),
+            skip=('cd ', 'sudo ', 'gh '), replace=(('/root/repos/ssdlc/ops/', ''),)))
+        self.assertEqual(out.splitlines(), [f'2:repo = "{OLD}"',
+                                            '4:repo_lock_dir = "/run/devloop/repos"'])
+        self.assertEqual((self.tmp / 'config.local.toml').read_text(encoding='utf-8'), OVERLAY)
+        back = self.overlay()
+        self.assertEqual((back.repo, back.repo_aliases), (OLD, ()))
+        self.assertEqual((self.tmp / 'params.env').read_text(), 'REPO=brushtyler/ssdlc\n')
+        # After the loop ran under the new name: the old name, with the new one as an alias.
+        (self.tmp / 'config.local.toml').write_text(renamed_text, encoding='utf-8')
         out = self.run_block(runnable(block_with(rollback, 'config.local.toml.nuovo'),
-                                      skip=('cd ', 'sudo '),
-                                      replace=(('/root/repos/ssdlc/ops/', ''),)))
+                                      skip=('cd ',)))
         self.assertEqual(out.splitlines(), [
             f'2:repo = "{OLD}"', f'3:repo_aliases = ["{NEW}"]',
             '5:repo_lock_dir = "/run/devloop/repos"'])
         back = self.overlay()
         self.assertEqual((back.repo, back.repo_aliases), (OLD, (NEW,)))
-        self.assertEqual((self.tmp / 'params.env').read_text(), 'REPO=brushtyler/ssdlc\n')
 
     def test_the_params_step(self):
         shutil.copy(ROOT / 'ops' / 'params.env.example', self.tmp / 'params.env')
