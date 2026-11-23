@@ -324,6 +324,10 @@ ops_load_params() {
         # La casella fra supervisore e coordinatore (#543) è del progetto, come la sveglia del
         # coordinatore che la legge.
         : "${COORDINATION_DIR:=/var/lib/devloop-coordination-$PROJECT}"
+        # L'avviatore della sorgente a parte, dal tag SOURCE_REF del progetto (#573): una
+        # directory per progetto, così due progetti con tag diversi non si sovrascrivono a
+        # turno lo stesso file.
+        : "${LAUNCHER_DIR:=/usr/local/lib/devloop/$PROJECT}"
         [ "$SERVICE_NAME" = "devloop@$PROJECT" ] \
             || die "con PROJECT il servizio è l'istanza devloop@$PROJECT dell'unità template: '$SERVICE_NAME'"
     fi
@@ -613,6 +617,26 @@ ensure_read_acl() {
     else
         [ -z "$entry" ] || warn "ACL attuale $entry: la riduco a r--"
         run setfacl -m "u:$user:r--" "$file"
+    fi
+}
+
+# ensure_traverse_acl USER DIR: l'ACL di solo attraversamento u:USER:--x sulla directory DIR
+# (#573), se manca; una più ampia la riduce a --x. Serve a raggiungere per percorso i file di uno
+# state_dir 750 (run.log, l'overlay con la sua ACL di sola lettura), senza elencarlo. Una DIR che
+# non esiste, o che è un link, è un avviso: si crea (setup-devloop.sh), poi si riesegue lo script.
+ensure_traverse_acl() {
+    local user=$1 dir=$2 entry
+    if ! [ -d "$dir" ] || [ -L "$dir" ]; then
+        warn "$dir non esiste o è un link: crearlo (setup-devloop.sh), poi rieseguire questo script"
+        return 0
+    fi
+    entry=$(getfacl -p --omit-header "$dir" 2>/dev/null | grep "^user:$user:" | head -n 1 || true)
+    entry=${entry%%[[:space:]]*}
+    if [ "$entry" = "user:$user:--x" ]; then
+        ok "ACL presente: $entry"
+    else
+        [ -z "$entry" ] || warn "ACL attuale $entry: la riduco a --x"
+        run setfacl -m "u:$user:--x" "$dir"
     fi
 }
 
