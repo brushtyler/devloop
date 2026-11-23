@@ -3,7 +3,8 @@
 # supervisore, il coordinatore o l'agent dell'host, ciascuno in una sessione tmux, con l'utente
 # del ruolo, la CLI e il modello del ruolo, e il suo runbook (docs/devloop/roles/<ruolo>.md di
 # questo checkout) come istruzioni iniziali; per supervisore e coordinatore, prima del runbook, i
-# valori dell'installazione per il canale fra i due ruoli e la sveglia del coordinatore (#543).
+# valori dell'installazione per il canale fra i due ruoli e la sveglia del coordinatore (#543) e,
+# per il coordinatore, la key_dir della sua app e il suo clone (#565).
 #
 # - supervisor, coordinator: CLI (kind) e modello dalla tabella [roles.<ruolo>] della
 #   configurazione di devloop: devloop/config.toml di questo checkout con sopra l'overlay
@@ -119,6 +120,10 @@ case $ROLE in
             ROLE_USER=$COORDINATOR_USER
             ROLE_HOME=$COORDINATOR_HOME
             ROLE_DIR=$COORDINATOR_HOME
+            # Il clone del coordinatore, da cui lancia scripts/coordinator-token.py (#565): nella
+            # sua home, con il nome del repository, come i clone di devloop e del supervisore
+            # senza PROJECT (/home/coordinator/devloop su questo host, ADR 0007).
+            TOKEN_CLONE=$COORDINATOR_HOME/${REPO#*/}
         fi
         ;;
     host)
@@ -158,6 +163,9 @@ if [ -z "$ROLE_HOME" ]; then
 fi
 [ -d "$ROLE_DIR" ] || die "manca la directory di lavoro $ROLE_DIR"
 ok "$ROLE_USER, directory di lavoro $ROLE_DIR"
+if [ "$ROLE" = coordinator ] && [ ! -d "$TOKEN_CLONE/.git" ]; then
+    warn "manca il clone del coordinatore $TOKEN_CLONE: senza, non conia i token della sua app (ops/README.md, passo 10)"
+fi
 command -v tmux >/dev/null 2>&1 || die 'manca tmux: installarlo (apt-get install tmux)'
 
 # Il runbook, intero, è il primo messaggio della sessione: le istruzioni del ruolo, valide per
@@ -170,8 +178,13 @@ case $ROLE in
     coordinator) INBOX=to-coordinator OUTBOX=to-supervisor ;;
     host) INBOX='' ;;
 esac
+# Per il coordinatore anche i valori dei token della sua app (#565): la sua key_dir e il clone da
+# cui lancia scripts/coordinator-token.py, così il runbook non contiene percorsi di un host.
+TOKENS=''
+[ "$ROLE" != coordinator ] \
+    || TOKENS=" For the section \"GitHub\": the key_dir of your app (DEVLOOP_APP_KEY_DIR) is $COORDINATOR_KEY_DIR, and your clone, from which you run scripts/coordinator-token.py, is $TOKEN_CLONE."
 if [ -n "$INBOX" ]; then
-    CHANNEL="Values of this installation (ops/params.env), for the sections \"At startup\", \"Channel\" and \"Watching\" of the runbook: the state_dir of devloop is $STATE_PATH; the mailbox between supervisor and coordinator is $COORDINATION_DIR (group $COORDINATION_GROUP): your messages are in $COORDINATION_DIR/$INBOX/, yours to the other role go in $COORDINATION_DIR/$OUTBOX/; the coordinator's wake-up is bash $COORDINATOR_OPS_DIR/host/coordinator-wait.sh. Start now with the section \"At startup\".
+    CHANNEL="Values of this installation (ops/params.env), for the sections \"At startup\", \"Channel\" and \"Watching\" of the runbook: the state_dir of devloop is $STATE_PATH; the mailbox between supervisor and coordinator is $COORDINATION_DIR (group $COORDINATION_GROUP): your messages are in $COORDINATION_DIR/$INBOX/, yours to the other role go in $COORDINATION_DIR/$OUTBOX/; the coordinator's wake-up is bash $COORDINATOR_OPS_DIR/host/coordinator-wait.sh.$TOKENS Start now with the section \"At startup\".
 
 "
 fi
