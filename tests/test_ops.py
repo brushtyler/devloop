@@ -5096,6 +5096,60 @@ class RoleRunbookTests(unittest.TestCase):
         self.assertIn('`grant-budget`, `capacity`, `reconcile` and the keys of trust are the '
                       'operator\'s in person', coordinator_prohibitions)
 
+    def test_no_detail_of_the_host_in_public_texts(self):
+        # #584: AGENTS.md states the rule for every published text, and each runbook recalls it
+        # where its role writes: detection for the supervisor, the periodic check for the
+        # coordinator, the texts meant for an issue for the agent of the host.
+        agents = ' '.join((ROOT / 'AGENTS.md').read_text().split())
+        self.assertIn(" ## Dettagli dell'host nei testi pubblici ", agents)
+        section = agents.split(" ## Dettagli dell'host nei testi pubblici ")[1].split(' ## ')[0]
+        for phrase in ('issue, commenti, PR, review, diario', 'percorsi assoluti dell\'host',
+                       'nomi di file di chiave', 'nomi degli utenti di sistema dei ruoli',
+                       'unità di systemd e file di sudoers', '`$STATE_DIR`, `$DEVLOOP_KEY_DIR`, '
+                       '`$DEVLOOP_HOME`, `$AGENT_HOME`', 'output incollati', 'traceback',
+                       '`check-host.sh`', 'Si puliscono prima di pubblicarli',
+                       'percorsi del repository (come `ops/host/` o `tests/`)','i valori di un\'installazione reale',
+                       'non lo ripubblica né lo cita', 'le revisioni vecchie le cancella '
+                       'l\'operatore', '(docs/devloop/roles/supervisor.md)',
+                       '(docs/devloop/roles/coordinator.md)', '(docs/devloop/roles/host.md)'):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, section)
+        link = '](../../../AGENTS.md#dettagli-dellhost-nei-testi-pubblici)'
+
+        def part(text, heading):
+            return text.split(f' ## {heading} ')[1].split(' ## ')[0]
+
+        supervisor = ' '.join(ROLE_RUNBOOKS['supervisor'].read_text().split())
+        prohibitions = part(supervisor, 'Prohibitions')
+        self.assertIn('Never publish a detail of the host in your texts on GitHub, the journal '
+                      '(#76 for ssdlc) included', prohibitions)
+        self.assertIn(link, prohibitions)
+        tasks = part(supervisor, 'Tasks')
+        for phrase in ('**Detect the details of the host**', link,
+                       'Following the stream of the events', 'of the agents, of the dispatcher, '
+                       'of the operator and of the coordinator', 'alert the operator and the '
+                       'coordinator with a message in the mailbox that names the text',
+                       'without quoting its content', 'correct your own texts'):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, tasks)
+        coordinator = ' '.join(ROLE_RUNBOOKS['coordinator'].read_text().split())
+        github = part(coordinator, 'GitHub')
+        self.assertIn('**No detail of the host.**', github)
+        self.assertIn(link, github)
+        tasks = part(coordinator, 'Tasks')
+        for phrase in ('**The periodic check of the details of the host**', link,
+                       'at each end of the period (`periodo:`), or in the periodic summary',
+                       'since your last check', 'the visible revisions',
+                       'the decoded markers of devloop', 'what its detection missed, together '
+                       'with the miss itself', 'without quoting its content'):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, tasks)
+        host = part(' '.join(ROLE_RUNBOOKS['host'].read_text().split()), 'Tasks')
+        for phrase in ('a text meant for an issue', 'the names of the parameters', link,
+                       'The real values stay in your local report to the operator'):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, host)
+
     def test_the_documents_cite_the_runbooks(self):
         readme = (OPS / 'README.md').read_text()
         guide = (ROOT / 'docs' / 'devloop' / 'guide.md').read_text()

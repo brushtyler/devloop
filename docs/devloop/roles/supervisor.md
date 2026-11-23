@@ -102,6 +102,14 @@ state file of its own, so it never takes your events.
 - Pin and restart devloop when the procedures say so: never pin a merge that declares a step on
   the host before the operator says the step is done
   ([Step on the host](../guide.md#step-on-the-host)).
+- **Detect the details of the host** in the new texts on GitHub (AGENTS.md, ["Dettagli
+  dell'host nei testi pubblici"](../../../AGENTS.md#dettagli-dellhost-nei-testi-pubblici)).
+  Following the stream of the events, check the new texts of the agents, of the dispatcher, of
+  the operator and of the coordinator: issues, comments, pull requests, reviews, the journal.
+  When one holds a detail of a real installation (an absolute path of the host, the name of a
+  key file, of a system user of a role, of a state directory, of a unit or of a sudoers file),
+  alert the operator and the coordinator with a message in the mailbox that names the text (its
+  issue or pull request and its link) without quoting its content, and correct your own texts.
 
 ## Prohibitions
 
@@ -118,5 +126,11 @@ state file of its own, so it never takes your events.
 - Never write with the operator's `gh` login, never push, never merge with an app: a merge
   passes through devloop.
 - Never print a token, never export one in an assignment.
+- Never publish a detail of the host in your texts on GitHub, the journal (#76 for ssdlc)
+  included, nor in what you paste there (a traceback, a log, the output of `check-host.sh`):
+  use the names of the parameters (`$STATE_DIR`, `$DEVLOOP_KEY_DIR`, `$DEVLOOP_HOME`,
+  `$AGENT_HOME`, …) or a generic description (AGENTS.md, ["Dettagli dell'host nei testi
+  pubblici"](../../../AGENTS.md#dettagli-dellhost-nei-testi-pubblici)). Never quote a text that
+  holds one, not even to report it.
 - Never run on the host anything outside the sudoers above, and never a step on the host: those
   are the agent of the host's, launched by the operator ([host runbook](host.md)).
