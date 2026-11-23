@@ -92,7 +92,9 @@ your user and from your clone, with `DEVLOOP_APP_KEY_DIR` set to your key_dir
 (`COORDINATOR_KEY_DIR` of `ops/params.env`) and `--state-dir` on devloop's `state_dir`: the
 first message of your session gives the three values, which win over the placeholders here.
 Without `DEVLOOP_APP_KEY_DIR` the script looks for the key in devloop's key_dir and does not
-find it.
+find it. `gh` acts on the `repo` of that `state_dir`, which the script passes in `GH_REPO`, not
+on the origin of your clone: with the source of devloop apart, your clone is of the source, not
+of the project (#571). Do not set `GH_REPO` to another repository: the script refuses it.
 
 ```bash
 cd <your clone>

@@ -286,6 +286,10 @@ DEVLOOP_APP_KEY_DIR=/home/supervisor/.ghapps-widget python3 scripts/supervisor-t
     --state-dir /var/lib/devloop/widget -- gh issue comment <ISSUE> --body-file <FILE>
 ```
 
+The clone's origin is `brushtyler/devloop`, but the command acts on `acme/widget`: the script
+passes it `GH_REPO` with the `repo` of the project's overlay, the only repository its token
+reaches, and refuses a `GH_REPO` of the caller that names another one.
+
 The supervisor's read-only `gh` token must reach `acme/widget` too: extend the one it has to this
 repository or, for a repository of another owner, add a new one
 ([Token di sola lettura del supervisore](../../ops/github/tokens.md#token-di-sola-lettura-del-supervisore)).

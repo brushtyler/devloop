@@ -573,7 +573,10 @@ gestito non contiene `scripts/supervisor-token.py`: lo script clona anche la sor
 `supervisor`, in `SUPERVISOR_SOURCE_CLONE` (`/home/supervisor/devloop-source`; con `PROJECT`,
 `~/devloop-source-<progetto>`) e la porta al tag `SOURCE_REF`, a ogni esecuzione (#571). Alla
 fine stampa il comando con cui il supervisore conia i token della sua app, dal clone giusto, con
-la sua `key_dir` (`DEVLOOP_APP_KEY_DIR`) e lo `state_dir` del progetto (`--state-dir`).
+la sua `key_dir` (`DEVLOOP_APP_KEY_DIR`) e lo `state_dir` del progetto (`--state-dir`). Il
+comando agisce sul `repo` dell'overlay di quello `state_dir`, che lo script gli passa in
+`GH_REPO`, non sull'origin del clone (la sorgente); un `GH_REPO` del chiamante che indica un
+altro repository è rifiutato.
 Se al posto di `to-coordinator` o `to-supervisor` c'è un file (la casella di prima del #543) lo
 script si ferma: si sposta prima, come in
 [host/migrate.md](host/migrate.md#casella-fra-i-ruoli-e-sveglia-del-coordinatore-543).
@@ -809,7 +812,8 @@ contenuti**.
    conia i token con
    `scripts/coordinator-token.py`, che legge `repo` e `[apps.coordinator]` dall'overlay dello
    `state_dir` di `--state-dir` e solo la propria chiave dalla `key_dir` di
-   `DEVLOOP_APP_KEY_DIR`; il token arriva al comando solo in `GH_TOKEN`, mai stampato.
+   `DEVLOOP_APP_KEY_DIR`; il token arriva al comando solo in `GH_TOKEN`, mai stampato, e il
+   comando agisce sul `repo` dell'overlay, in `GH_REPO`, non sull'origin del clone (#571).
    **`DEVLOOP_APP_KEY_DIR` va sempre impostata** al valore di `COORDINATOR_KEY_DIR`
    (`/home/coordinator/.ghapps`; con `PROJECT`, `/home/coordinator/.ghapps-<progetto>`): senza,
    lo script cerca la chiave in `key_dir` di `[apps]` dell'overlay, che è quella di devloop

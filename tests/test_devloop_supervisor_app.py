@@ -268,6 +268,11 @@ class SupervisorTokenTests(unittest.TestCase):
         self.state = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.state)
         shutil.copy(ssdlc_project.OVERLAY, self.state / 'config.local.toml')
+        # A GH_REPO of the environment running the tests would change what the script refuses.
+        environ = mock.patch.dict(os.environ)
+        environ.start()
+        self.addCleanup(environ.stop)
+        os.environ.pop('GH_REPO', None)
 
     def test_permissions(self):
         state = self.script.STATE
@@ -318,6 +323,45 @@ class SupervisorTokenTests(unittest.TestCase):
         cfg = self.script.load_config(self.state)
         self.assertEqual(cfg.repo, 'brushtyler/widget')
         self.assertEqual(cfg.apps[apps.SUPERVISOR].slug, 'brushtyler-devloop-supervisor')
+
+    def test_gh_acts_on_the_projects_repository_not_on_the_clones(self):
+        # #571: with the source apart, the supervisor runs the script from its clone of the
+        # source, whose origin is not the project's repository; gh would pick the origin.
+        overlay = self.state / 'config.local.toml'
+        overlay.write_text(overlay.read_text(encoding='utf-8').replace(
+            'repo = "brushtyler/ssdlc"', 'repo = "acme/widget"'), encoding='utf-8')
+        with tempfile.TemporaryDirectory() as tmp:
+            key = Path(tmp) / 'brushtyler-devloop-supervisor.2026-11-18.private-key.pem'
+            key.write_text('k')
+            key.chmod(0o600)
+            for given in (None, 'acme/widget', 'ACME/Widget', 'github.com/acme/widget'):
+                seen = {}
+
+                def fake_run(command, env):
+                    seen['repo'] = env.get('GH_REPO')
+                    return SimpleNamespace(returncode=0)
+                environ = {'DEVLOOP_APP_KEY_DIR': tmp}
+                if given:
+                    environ['GH_REPO'] = given
+                with self.subTest(given=given), mock.patch.dict(os.environ, environ), \
+                        mock.patch.object(self.script.AppAuth, 'token', return_value='sup-tok'), \
+                        mock.patch.object(self.script.subprocess, 'run', fake_run):
+                    self.assertEqual(self.script.main(['--state-dir', str(self.state), '--',
+                                                       'gh', 'issue', 'view', '1']), 0)
+                    self.assertEqual(seen, {'repo': 'acme/widget'})
+            # A GH_REPO naming another repository, the source's for example, is refused before
+            # any key is read: the token would not reach it.
+            with mock.patch.dict(os.environ, {'DEVLOOP_APP_KEY_DIR': tmp,
+                                              'GH_REPO': 'brushtyler/devloop'}), \
+                    mock.patch.object(self.script, 'find_key') as find, \
+                    mock.patch.object(self.script.AppAuth, 'token') as mint, \
+                    mock.patch.object(self.script.subprocess, 'run') as run:
+                with self.assertRaisesRegex(SystemExit, 'GH_REPO=brushtyler/devloop is not the '
+                                            "project's repository acme/widget"):
+                    self.script.main(['--state-dir', str(self.state), '--', 'gh', 'x'])
+                find.assert_not_called()
+                mint.assert_not_called()
+                run.assert_not_called()
 
     def test_no_key_in_an_agents_environment(self):
         # devloop's agents run with a key directory without keys: they cannot mint it.
