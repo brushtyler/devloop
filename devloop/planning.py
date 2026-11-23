@@ -99,8 +99,11 @@ class PullRequest:
     ci_recorded: list = field(default_factory=list)
     # The review rounds the supervisor granted to this PR beyond ``max_review_rounds`` (#405,
     # ``/devloop grant-round``), as the dispatcher's ``supervision`` records say: its limit is
-    # ``max_review_rounds`` plus these, besides the rounds that do not count.
+    # ``max_review_rounds`` plus these, besides the rounds that do not count. They include the
+    # rounds a trusted user granted on a ``round_limit`` escalation to the operator (#553), which
+    # ``operator_rounds`` counts apart: those are outside the caps of the delegation.
     granted_rounds: int = 0
+    operator_rounds: int = 0
     # With a ledger, every check of the head from the read that gave ``checks`` (#133): the CI
     # a review round saw, recorded whatever its verdict. None when not read.
     check_details: list = None

@@ -339,7 +339,10 @@ class GrantRoundTests(GrantCase):
                          {'by': COORDINATOR, 'outcome': 'granted', 'granted': 1, 'cap': 2,
                           'daily': 1, 'daily_cap': 3})
 
-    def test_beyond_the_cap_of_the_pr_the_round_limit_is_the_operators(self):
+    def test_beyond_the_cap_of_the_pr_one_round_then_the_operators(self):
+        # On a round_limit to the operator the coordinator grants at most one round per PR,
+        # beyond the caps of its delegations (the operator's decision on #553); a second one on
+        # the same PR stays the operator's.
         d = self.make(coordinated(ON))
         self.gh.say(100, 'brushtyler', granted_record(1))
         self.gh.say(100, 'brushtyler', granted_record(2))
@@ -348,8 +351,31 @@ class GrantRoundTests(GrantCase):
         self.gh.command(100, '/devloop grant-round ' + REASON, login=COORDINATOR)
         self.assertEqual(self.tick(d), [('supervise', 100)])
         decision = self.decisions(100)[-1]
+        self.assertEqual({k: decision.get(k) for k in ('by', 'outcome', 'class', 'operator',
+                                                       'role', 'granted', 'cap', 'left')},
+                         {'by': COORDINATOR, 'outcome': 'granted', 'class': 'round_limit',
+                          'operator': True, 'role': 'coordinator', 'granted': 1, 'cap': 1,
+                          'left': 0})
+        self.assertEqual(self.gh.labels[100], {REVIEW})
+        self.assertEqual(self.snapshot_pr(d).granted_rounds, 3)
+        # The next limit: the delegation's caps are spent, the coordinator's round too.
+        record = self.at_limit(d, ci_round(4))
+        self.assertEqual((record['class'], record['to']), ('round_limit', 'operator'))
+        self.gh.command(100, '/devloop grant-round ' + REASON, login=COORDINATOR)
+        self.assertEqual(self.tick(d), [('supervise', 100)])
+        decision = self.decisions(100)[-1]
         self.assertEqual((decision['by'], decision['outcome']), (COORDINATOR, 'refused'))
+        self.assertIn('il coordinatore ne concede al massimo 1 per PR', self.gh.threads[100][-1]
+                      ['body'])
         self.assertEqual(self.gh.labels[100], {HUMAN})
+        # The operator's own grant still applies.
+        self.gh.command(100, '/devloop grant-round ' + REASON, login='brushtyler')
+        self.assertEqual(self.tick(d), [('supervise', 100)])
+        decision = self.decisions(100)[-1]
+        self.assertEqual((decision['by'], decision['outcome'], decision['granted']),
+                         ('brushtyler', 'granted', 2))
+        self.assertNotIn('role', decision)
+        self.assertEqual(self.gh.labels[100], {REVIEW})
 
     def test_off_the_delegation_nothing_is_granted(self):
         off = dataclasses.replace(ON, delegations=DelegationPolicy())

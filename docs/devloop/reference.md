@@ -157,7 +157,12 @@ only lower; 0 makes every such round count, as before #536.
 with its revocation key and off by default: `rounds` (true or false, default false) lets the
 supervisor [grant a review round](guide.md#granting-a-review-round) to a PR at the round limit;
 `max_rounds_per_pr` (default 2) and `max_grants_per_day` (default 3) may only lower the caps of
-the code, `MAX_GRANTED_ROUNDS` and `MAX_DAILY_GRANTS` in `devloop/supervision.py`;
+the code, `MAX_GRANTED_ROUNDS` and `MAX_DAILY_GRANTS` in `devloop/supervision.py`. With the
+delegation on or off, `max_review_rounds` stays the default of every PR: a trusted user grants
+one more round to a single PR at its round limit with `/devloop grant-round <reason>` on its
+`round_limit` escalation (#553, [Granting a review round on an escalation to the operator](guide.md#granting-a-review-round-on-an-escalation-to-the-operator)),
+outside these caps and with no key of its own; the coordinator at most
+`MAX_COORDINATOR_OPERATOR_ROUNDS` (1) per PR;
 `retry_own_prs` (true or false, default false, #406) has no effect since #527, and is still
 accepted so that an overlay that sets it keeps loading: the supervisor decides the escalations
 of process on the PRs of its own agent too, whatever its value
