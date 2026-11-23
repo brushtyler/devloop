@@ -77,7 +77,8 @@ when, it does one of these five things (a closed list):
    the merge depends on), `[merge] mode`, `[merge.levels]`, the levels and paths of
    `[review_policy]` (`sensitive_paths`, `sensitive_path_lists`, `zero`, `advisory_reviewer`),
    `[roles]` (`implementer`, `reviewers`, `supervisor`), `conclave` (which moves the decision on
-   a block from the operator to three agents), `max_review_rounds`, `[pin] auto`, `[apps]`, or
+   a block from the operator to three agents), `max_review_rounds`, `max_requested_fix_rounds`,
+   `[pin] auto`, `[apps]`, or
    `write_args`, `review_args` and the other permissions of the agents;
 2. it changes the constants that cap the delegations and the retries, such as `MAX_RETRIES`;
 3. it changes who is believed: the filter of the trusted authors of the comments, the check of
@@ -327,7 +328,11 @@ Add the fakes that came with the merge to the conformance test.
   review. In `agent:changes` the fix also answers every finding still open. Every rule of a
   fix holds: [local tests](reference.md#local-tests), `protected_paths`, push with the implementer's
   identity, back to `agent:review`. The fix writes no review record, so it does not count
-  against `max_review_rounds`; the review that follows is a new round as usual.
+  against `max_review_rounds`; the review that follows is a new round as usual. That review
+  does not count either, and starts also at the limit, when the command came from a user in
+  `trusted_users` on a head the quorum had approved with no finding open, at most
+  `max_requested_fix_rounds` times per PR (2, which the overlay may only lower); otherwise,
+  and beyond that, it counts (see [Rounds](protocol.md#rounds), #536).
 - **One fix per head.** Every command written before the fix runs is answered by that one fix.
   A command on a head where a requested fix already ran (for example one that changed nothing)
   is ignored and logged until a new commit reaches the PR, so that commands cannot loop.

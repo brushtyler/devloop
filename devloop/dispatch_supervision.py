@@ -24,7 +24,8 @@ from .ledger import entries as ledger_entries
 from .markdown import (PREFLIGHT_RESUME, RESUME, carries_record, operator_retry_text,
                        read_marker, render_escalation, render_supervision)
 from .planning import (FIX_COMMAND, Action, PullRequest, closed_by_first, findings_decreasing,
-                       label_names, last_counted_ci, missing_verdicts, operator_blocked)
+                       label_names, last_counted_ci, missing_verdicts, operator_blocked,
+                       waiver)
 from .policy import ZERO_LEVEL, profile_of
 from .review import current_round, current_verdict, finding_state, owner_of
 from .supervision import (ACCEPT_DEFAULTS, BUDGET_GRANTABLE, CAPACITY, CAPACITY_REFUSED, DECIDE,
@@ -907,7 +908,8 @@ class SupervisionMixin:
                     + ', '.join(f'`{k}`' for k in security) if security
                else 'l\'ultimo round contato non è una CI fallita e i finding bloccanti aperti '
                     'non sono meno di quelli del round precedente'
-               if not (last_counted_ci(reviews) or findings_decreasing(reviews, pr.closures))
+               if not (last_counted_ci(reviews, **waiver(cfg, pr.fixes, pr.closures))
+                       or findings_decreasing(reviews, pr.closures))
                else '')
         if why:
             return None, f'la delega dei round non si applica: {why}'
@@ -1912,6 +1914,59 @@ class SupervisionMixin:
             found = {'event': event, 'by': login, 'reason': reason, 'comment': number}
         return found
 
+    def _closures(self, pr, comments):
+        """The finding closures the dispatcher recorded in ``comments`` (``finding`` markers),
+        oldest first, each with the id of the comment that records it (``comment``, only in
+        memory): GitHub's comment ids grow with time, so the id tells whether a closure came
+        before a ``/devloop fix`` (#536). A comment without an id leaves it None."""
+        found = []
+        for position, record in self._marker_entries(pr, comments, 'finding'):
+            ident = comments[position].get('id')
+            found += [dict(c, comment=ident if isinstance(ident, int)
+                           and not isinstance(ident, bool) else None)
+                      for c in record['closed']]
+        return found
+
+    def _fixes(self, pr, comments, entries):
+        """The fix records of ``comments`` (``_markers``), each request of a ``/devloop fix``
+        with the review records of ``entries`` (``(position in comments, record)``, as
+        ``_marker_entries`` gives them) published before its comment (``after``, ``(round,
+        owner)`` pairs, only in memory): the quorum approved the head the fix ran on only if
+        its approval came before the request (#536). A review comment comes before when it
+        precedes the request in the conversation; a native review, placed among the comments
+        by its time (``with_native_reviews``), only when its time is earlier than the time of
+        the request, not equal. A request whose comment is not in ``comments`` has none."""
+        where = {c.get('id'): n for n, c in enumerate(comments)
+                 if isinstance(c.get('id'), int) and not isinstance(c.get('id'), bool)
+                 and not c.get('native')}
+        found = []
+        for record in self._markers(pr, comments, 'fix'):
+            if isinstance(record.get('requests'), list):
+                record = dict(record, requests=[
+                    dict(q, after=self._reviewed_before(comments, entries, where.get(
+                        q.get('comment')))) if isinstance(q, dict) else q
+                    for q in record['requests']])
+            found.append(record)
+        return found
+
+    @staticmethod
+    def _reviewed_before(comments, entries, asked):
+        """The ``(round, owner)`` of the review records of ``entries`` published before the
+        comment at position ``asked`` of ``comments`` (``_fixes``); ``[]`` when it is None."""
+        if asked is None:
+            return []
+        at = _epoch(comments[asked].get('created_at'))
+        before = []
+        for position, record in entries:
+            if position >= asked:
+                continue
+            if comments[position].get('native'):
+                time = _epoch(comments[position].get('created_at'))
+                if time is None or at is None or time >= at:
+                    continue
+            before.append((record['round'], owner_of(record)))
+        return before
+
     def _read_thread(self, pr, comments):
         """Fill ``pr`` with what its conversation records, from the identities allowed to write
         it: reviews, fixes, syncs, finding closures and commands, policy records, and the hold
@@ -1921,11 +1976,10 @@ class SupervisionMixin:
         entries = sorted(self._marker_entries(pr, comments, 'review', problems),
                          key=lambda e: (e[1]['round'], e[0]))
         pr.reviews = [record for _, record in entries]
-        pr.fixes = self._markers(pr, comments, 'fix')
+        pr.fixes = self._fixes(pr, comments, entries)
         pr.syncs = self._markers(pr, comments, 'sync')
         pr.reruns = self._markers(pr, comments, 'rerun')
-        pr.closures =[c for record in self._markers(pr, comments, 'finding')
-                       for c in record['closed']]
+        pr.closures = self._closures(pr, comments)
         state = finding_state(pr.reviews, pr.closures)
         pr.finding_problems = problems + state.problems
         pr.commands = self._finding_commands(pr, comments, state)

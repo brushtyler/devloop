@@ -62,6 +62,10 @@ MERGE_MODES = ('off', 'strict', 'auto')
 DEFAULT_OPERATOR_ONLY = ('docs/adr/', 'AGENTS.md', 'CLAUDE.md')
 DEFAULT_PROTECTED = ('.github/',)
 DEFAULT_BLOCKED = ('bloccata',)
+# At most this many review rounds of a PR that answer a ``/devloop fix`` of a trusted user on a
+# head the quorum approved do not count against ``max_review_rounds`` (#536): beyond them they
+# count. The configuration and the overlay may only lower it (``max_requested_fix_rounds``).
+MAX_REQUESTED_FIX_ROUNDS = 2
 
 
 @dataclass(frozen=True)
@@ -603,6 +607,9 @@ class Config:
     # slots of max_open_prs, and once this many are open only priority:high issues start (#274).
     max_parked_prs: int = 3
     max_review_rounds: int = 3
+    # The rounds after a ``/devloop fix`` of a trusted user on an approved head that do not
+    # count against ``max_review_rounds`` (#536), from 0 to ``MAX_REQUESTED_FIX_ROUNDS``.
+    max_requested_fix_rounds: int = MAX_REQUESTED_FIX_ROUNDS
     max_actions_per_tick: int = 3
     # Actions of one tick on different issues and PRs that may run at once (#176); 1 runs them
     # one at a time, in plan order.
@@ -1884,6 +1891,14 @@ def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
             if value < (0 if key == 'implement_test_retries' else 1):
                 raise ConfigError(f'{key}: out of range')
             ints[key] = value
+    if 'max_requested_fix_rounds' in data:
+        value = data['max_requested_fix_rounds']
+        if (not isinstance(value, int) or isinstance(value, bool)
+                or not 0 <= value <= MAX_REQUESTED_FIX_ROUNDS):
+            raise ConfigError('max_requested_fix_rounds: expected a whole number from 0 to '
+                              f'{MAX_REQUESTED_FIX_ROUNDS}, the cap of the code, which the '
+                              'configuration may only lower')
+        ints['max_requested_fix_rounds'] = value
     if (ints.get('agent_command_timeout_seconds', Config.agent_command_timeout_seconds)
             > ints.get('test_timeout_seconds', Config.test_timeout_seconds)):
         raise ConfigError('agent_command_timeout_seconds: must not exceed test_timeout_seconds')
@@ -2067,7 +2082,8 @@ OVERLAY_KEYS = {
                      'publication_outbox', 'attempt_identity', 'journal_max_mib',
                      'language', 'trusted_users', 'preflight',
                      'conclave', 'max_open_prs',
-                     'max_parked_prs', 'max_review_rounds', 'max_actions_per_tick',
+                     'max_parked_prs', 'max_review_rounds', 'max_requested_fix_rounds',
+                     'max_actions_per_tick',
                      'max_parallel_actions', 'implement_test_retries', 'agent_timeout_seconds',
                      'test_timeout_seconds',
                      'agent_command_timeout_seconds', 'agent_stall_seconds',
@@ -2446,8 +2462,8 @@ def load_config(path=None, local=None, project=None, *, sources=None):
 # value before and after, in the journal of the dispatcher at its start and at each reload.
 TRUST_KEYS = ('repo', 'repo_aliases', 'base_branch', 'state_dir', 'source', 'test_cmd', 'trusted_users',
               'preflight', 'conclave', 'roles', 'agents', 'apps', 'merge', 'review_policy',
-              'max_review_rounds', 'protected_paths', 'blocked_labels', 'budget', 'delegations',
-              'agent_user', 'pin')
+              'max_review_rounds', 'max_requested_fix_rounds', 'protected_paths',
+              'blocked_labels', 'budget', 'delegations', 'agent_user', 'pin')
 
 
 def _plain(value):

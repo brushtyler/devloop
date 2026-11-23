@@ -18,7 +18,7 @@ R3's: it updates the frozen ``config.toml`` and ``effective.json`` with it, sayi
 ``updated`` lists those made so far: the implementer app of #407 and the capacity delegation of
 #412, merged beside R3; the keys by role of #499, which change the policy version too; the
 ``second_reviewer`` of #521, ``parallel`` by default; the coordinator actor of #528, off by
-default). A change of ssdlc's own values updates it the same way, saying so: the restrictions, the
+default; ``max_requested_fix_rounds`` of #536, the cap of the code by default). A change of ssdlc's own values updates it the same way, saying so: the restrictions, the
 test prefix and the documentation map of the SSDLC engine, removed with it (ADR 0007, R1, #538),
 which change the policy version too.
 

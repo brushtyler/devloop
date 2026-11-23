@@ -222,6 +222,35 @@ PR with `/devloop grant-round` (#405, [Granting a review round](guide.md#grantin
 raise the limit of that PR only: it is `max_review_rounds` plus the rounds granted, counted from
 the dispatcher's `supervision` records of the PR, plus the rounds that did not count.
 
+**Review after a `/devloop fix` on an approved head** (#536): the review round that answers a
+[`/devloop fix`](guide.md#fix-requested-by-the-operator-or-the-supervisor) of a user in
+`trusted_users` does not count against `max_review_rounds`, and starts also at the limit, when the
+round the fix answers approved the head the fix ran on: a complete agent round of the quorum
+with an `approve` verdict, every review of it with a valid policy receipt and on the `from` head
+of every fix record that answers the round, no blocking finding left open. The quorum must have
+approved before the request: every review of the round is published before the comment of every
+`/devloop fix` the fix answers, a review comment earlier in the conversation, a native review
+(#325) at a time earlier than the command's, not the same second. A command written while the
+round was still under review, whose approval came after it, gives no exemption even when the fix
+runs after the approval. The findings closed
+count with the dispatcher's closures (`finding` records) already recorded at the request: those
+whose comment comes before the comment of every `/devloop fix` the fix answers, since GitHub's
+comment ids grow with time, on whatever head they were recorded. A closure recorded after the
+request never reaches back to it, even on the same head (a fix without a commit leaves it as it
+was); without the comment ids no closure counts. Every fix that answers that round must be one asked with the
+command, and every request of it must come from a trusted user: two `/devloop fix` before a new
+review answer one round, and the second ran on a head no review approved. The round's own
+verdict does not matter. At most
+`max_requested_fix_rounds` such rounds per PR do not count (2, a cap of the code the configuration
+may only lower, [Configuration](reference.md#configuration)); beyond them they count. The round
+still counts after a fix of the reviewers' findings, after a `/devloop fix` on a head with a
+request for changes, open findings, a CI failure that voided its approval, a reviewer still
+pending or a review without a receipt, after a fix on a head other than the approved one (a sync
+in between, or a second `/devloop fix` before the review), and when the
+command came from the supervisor's or the coordinator's identity. A CI failure of the corrected
+head is a round of its own and counts, as before. A round that replaces such a review because the
+base advanced (#160) does not count either, and the cap counts it once.
+
 **One head, one round** (#352, #359): a CI failure on a head that already has a review round,
 not yet answered by a fix, does not open a round of its own when that round asked for changes or
 approved; it joins that round as a `ci` finding (see [Approval and CI](#approval-and-ci)). A
@@ -232,7 +261,9 @@ A `round_limit` escalation lists the rounds that count, each with its reason (th
 a CI failure, a review after a fix, a review after a sync whose conflicts the implementer
 resolved, a new review of the same head or of a new one; a round the CI failure of its head
 joined adds `con la CI fallita dello stesso head`, and `che ne ha fatto decadere l'approvazione`
-when the round had approved), then the rounds that do not count with theirs, and recalls that the operator can grant more rounds by raising `max_review_rounds` (#289).
+when the round had approved), then the rounds that do not count with theirs, among them the
+review after a `/devloop fix` on an approved head with the logins of who asked it (#536; one
+beyond `max_requested_fix_rounds` is among those that count, and says so), and recalls that the operator can grant more rounds by raising `max_review_rounds` (#289).
 A `round_grantable` escalation (#405) has the same lists and says instead that the supervisor
 may grant one more round with `/devloop grant-round <reason>`. A `budget_grantable` escalation
 (#411) of a turn the budget refused records, besides the step and its key, the `story`, the
