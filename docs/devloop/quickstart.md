@@ -1,7 +1,7 @@
 # devloop: quick start for a new project
 
-This page takes devloop from nothing to a running service for a repository that is not ssdlc and
-does not contain devloop, here `acme/widget`, on a host of the operator (ADR 0006, R9). Each step
+This page takes devloop from nothing to a running service for a repository that is not devloop's
+own and does not contain devloop, here `acme/widget`, on a host of the operator (ADR 0006, R9). Each step
 is short and links the page that explains it: the [ops guide](../../ops/README.md) for the scripts,
 the [guide](guide.md#run-from-a-pinned-installation) and the [reference](reference.md) for devloop.
 
@@ -27,7 +27,7 @@ The rules that hold for every project (ADR 0006, sections 3.6 and 3.8, decisions
   shared with another. The merger app is created only for a repository where devloop merges
   (`[merge] mode` `"strict"` or `"auto"`) ([Identities of a project](reference.md#identities-of-a-project)).
 - **Users of its own.** The project has its own system user, agent user, home, clones,
-  `state_dir`, `key_dir` and service; on a host that already serves ssdlc or another project,
+  `state_dir`, `key_dir` and service; on a host that already serves devloop's own repository or another project,
   this is the only way ([Più progetti sullo stesso host](../../ops/README.md#più-progetti-sullo-stesso-host)).
   Its agent user has its own logins of the CLIs.
 - **The operator's acts.** Creating and installing the apps (they are credentials), the logins
@@ -37,10 +37,10 @@ What you need:
 
 - a host like the verified one (Ubuntu with `apt` and `systemd`, sudo 1.9 and not sudo-rs:
   [Piattaforma verificata](../../ops/README.md#piattaforma-verificata)), and `sudo` on it;
-- a checkout of ssdlc of the operator on the host, from which every command of this page runs:
-  `ops/` is there;
+- a checkout of devloop (`brushtyler/devloop`) of the operator on the host, from which every
+  command of this page runs: `ops/` is there;
 - admin rights on `acme/widget`, to install the apps;
-- a tag of ssdlc to pin: the installation comes from that tag (the
+- a tag of devloop to pin: the installation comes from that tag (the
   [installation's source](guide.md#installation-source)), not from the managed repository.
 
 The examples use `PROJECT=widget`, from which the scripts derive every name:
@@ -49,7 +49,7 @@ The examples use `PROJECT=widget`, from which the scripts derive every name:
 |---|---|
 | devloop's user and its agent user | `devloop-widget`, `devloop-widget-agent` |
 | clone of the managed repository | `/home/devloop-widget/widget` |
-| clone of ssdlc, the installation's source | `/home/devloop-widget/devloop-source` |
+| clone of devloop, the installation's source | `/home/devloop-widget/devloop-source` |
 | `state_dir`, with the project file, the overlay, the pinned copies and `run.log` | `/var/lib/devloop/widget` |
 | `key_dir` of devloop's user | `/home/devloop-widget/.ghapps` |
 | launcher, installed from the tag | `/usr/local/lib/devloop/devloop-pinned` |
@@ -57,7 +57,7 @@ The examples use `PROJECT=widget`, from which the scripts derive every name:
 
 ## 1. Parameters
 
-One parameters file for the project, in the checkout of ssdlc (git ignores it; no secret goes
+One parameters file for the project, in the checkout of devloop (git ignores it; no secret goes
 there). Every other value is derived from these
 ([Regole degli script](../../ops/README.md#regole-degli-script), `ops/params.env.example`):
 
@@ -69,7 +69,7 @@ DEFAULT_BRANCH=main
 GITHUB_OWNER_TYPE=org
 APP_PREFIX=acme-widget-devloop-
 PROJECT=widget
-SOURCE_REPO=brushtyler/ssdlc
+SOURCE_REPO=brushtyler/devloop
 SOURCE_REF=v1.2.0
 STATE_DIR=/var/lib/devloop/widget
 # No merger: devloop does not merge here ([merge] mode stays "off").
@@ -77,7 +77,7 @@ APPS="dispatcher implementer claude-agent codex-agent agy-agent supervisor"
 DEVLOOP_KEYS="dispatcher implementer claude-agent codex-agent agy-agent"
 ```
 
-- `SOURCE_REPO` and `SOURCE_REF`: devloop comes from that tag of ssdlc.
+- `SOURCE_REPO` and `SOURCE_REF`: devloop comes from that tag of `brushtyler/devloop`.
 - `APPS` are the apps `ops/github/create-apps.sh` prepares, `DEVLOOP_KEYS` those whose key goes to
   devloop's `key_dir`: the dispatcher, the implementer (the installation's agents are named by
   role, and `claude-implementer` signs with it) and the reviewers' apps `claude-agent`,
@@ -94,7 +94,7 @@ sudo bash ops/host/setup-devloop.sh --params ops/params-widget.env
 ```
 
 It installs the missing packages and creates `devloop-widget`, the clone of `acme/widget`, the
-clone of ssdlc, the launcher from the tag `SOURCE_REF`, the `state_dir` with `run.log` and a fully
+clone of devloop, the launcher from the tag `SOURCE_REF`, the `state_dir` with `run.log` and a fully
 commented overlay, the `key_dir`, the template unit `devloop@.service` with the drop-in of
 `devloop@widget`, and the directory and group of the repository locks. It does not start the
 service, and it lists what is left to do by hand
@@ -173,7 +173,7 @@ For example, with the `app_id` and `slug` of step 3:
 # The managed repository and the logins whose labels and markers count.
 repo = "acme/widget"
 trusted_users = ["acme-operator"]
-# The state_dir the launcher gets with --state-dir, and the clone of ssdlc pins come from.
+# The state_dir the launcher gets with --state-dir, and the clone of devloop pins come from.
 state_dir = "/var/lib/devloop/widget"
 source = "/home/devloop-widget/devloop-source"
 # The directory of the repository locks, the same for every project of the host.
@@ -244,7 +244,7 @@ and [Agent CLIs](guide.md#agent-clis).
 
 ## 6. First pin
 
-The first pin runs devloop of the clone of ssdlc, in the clone of the managed repository, with the
+The first pin runs devloop of the clone of devloop, in the clone of the managed repository, with the
 project file and the overlay before the command; it ends with the smoke test (`tick --dry-run` and
 one round of `watch` from the new copy) ([Pin](guide.md#pin)):
 
@@ -308,7 +308,7 @@ devloop works on the issues of `acme/widget` that a user of `trusted_users` labe
 
 ## Later
 
-- **A new version of devloop** is a new tag of ssdlc, pinned by hand: the pin after a merge is
+- **A new version of devloop** is a new tag of `brushtyler/devloop`, pinned by hand: the pin after a merge is
   off when the installation has its own source. Pin with the launcher (`pin <tag>` instead of
   `apps` in the commands of step 8), then restart the service
   ([Installation source](guide.md#installation-source), [Rollback](guide.md#rollback)).

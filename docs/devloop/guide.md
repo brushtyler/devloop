@@ -2410,7 +2410,7 @@ the CPU signal counts: a long silence of the model alone is reported as a stall.
 
 devloop works on this repository, including on its own code, so it runs from a pinned,
 read-only copy of one commit of `origin`, never from the checkout it is changing (#174). This is
-the same rule as the pinned controller SSDLC uses to develop itself. The configuration, schemas
+the same rule as the pinned controller this repository uses to develop itself. The configuration, schemas
 and prompts come from the pinned copy; GitHub state and worktrees come from the clone.
 
 #### Installation as a dedicated user
@@ -2440,8 +2440,11 @@ From the beginning to the end, as root or with `sudo`:
 
    ```bash
    sudo useradd --create-home devloop
-   sudo -u devloop -H git clone https://github.com/brushtyler/ssdlc.git /home/devloop/ssdlc
+   sudo -u devloop -H git clone https://github.com/brushtyler/devloop.git /home/devloop/ssdlc
    ```
+
+   The clone keeps the path `/home/devloop/ssdlc` of before the rename of the repository
+   (ADR 0007), like the rest of the host.
 
 2. **Keys.** The apps are the repository's own set, created once by the operator from the
    manifests of [`ops/github/apps/`](../../ops/github/apps/) and never shared with another
@@ -2856,8 +2859,9 @@ the test commands do not get that variable. Without `--state-dir` nothing change
 
 The **installation's source** is the clone `devloop pin` takes the code from; the **managed
 repository** is the one of the worktrees, the issues and the PRs, whose main checkout is the
-directory devloop runs in (ADR 0006, R1). For ssdlc they are the same clone, and nothing above
-changes. For a project that does not contain devloop, the overlay names a clone of ssdlc in
+directory devloop runs in (ADR 0006, R1). For devloop's own repository (the project ssdlc) they
+are the same clone, and nothing above changes. For a project that does not contain devloop, the
+overlay names a clone of devloop (`brushtyler/devloop`) in
 `source` (absolute, with `~`, or relative to the managed checkout; it must be the top of a git
 checkout, else the configuration is refused), and usually a `state_dir` of the host:
 
@@ -2867,7 +2871,7 @@ state_dir = "/var/lib/devloop/widget"
 ```
 
 - `devloop pin <ref>` resolves and extracts `<ref>` from the source and its `origin`, with the
-  same checks as above: a tag of ssdlc, so that an update is an explicit act. The smoke test runs
+  same checks as above: a tag of devloop, so that an update is an explicit act. The smoke test runs
   in the managed repository, with the copy and the overlay. The managed repository is not fetched
   by a pin.
 - The [pin after a merge](#pin-after-a-merge) is off: a merge in the managed repository never
@@ -2949,7 +2953,8 @@ reports an overlay without it as an error.
 operator overrides**, for example:
 
 ```toml
-repo = "brushtyler/ssdlc"
+repo = "brushtyler/devloop"
+repo_aliases = ["brushtyler/ssdlc"]
 trusted_users = ["brushtyler"]
 preflight = "codex-reviewer"
 max_open_prs = 3
@@ -3268,10 +3273,10 @@ without them, degraded; add them to the project file`, and the dispatcher commen
 starts.
 
 devloop may import only the Python standard library, itself and the `core` package, and a test
-enforces this (`tests/test_devloop_boundary.py`). [ADR 0001](../adr/0001-prodotto-unico-fasi-su-tracker.md) keeps
-devloop and ssdlc in one repository and allows reuse of ssdlc code only through `core`, pure
-functions that import no engine module ([Architecture](../architecture.md#future-core-package)).
-devloop does not import `core` yet, so the pinned copy does not need it.
+enforces this (`tests/test_devloop_boundary.py`). [ADR 0001](../adr/0001-prodotto-unico-fasi-su-tracker.md) kept
+devloop and the SSDLC engine in one repository and allowed reuse of the engine's code only through
+`core`, pure functions that import no engine module ([Architecture](../architecture.md#future-core-package));
+the engine left `main` with [ADR 0007](../adr/0007-da-ssdlc-a-devloop.md), and `core` stayed.
 
 ## Limits
 

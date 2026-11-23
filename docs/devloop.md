@@ -18,7 +18,7 @@ split into three pages, plus a quick start:
   directives, structured review and findings, attribution, evidence and telemetry, and the
   receipt of a PR promoted to `agent:ready-to-merge`).
 - [Quick start for a new project](devloop/quickstart.md): devloop for a repository other than
-  ssdlc on a host, step by step, from its set of apps to the running service (ADR 0006, R9).
+  its own on a host, step by step, from its set of apps to the running service (ADR 0006, R9).
 
 Ports and adapters are in [Pipeline and architecture](architecture.md#ports-and-adapters); roles
 and merge modes in [ADR 0002](adr/0002-ruoli-e-responsabilita.md), their runbooks in [the guide](devloop/guide.md#who-does-what).

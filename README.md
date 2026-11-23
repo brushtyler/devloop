@@ -1,8 +1,10 @@
-# SSDLC
+# devloop
 
 **devloop** develops software with AI agents under the explicit authority of an operator: it dispatches the GitHub issues and PRs of a repository to an implementer agent and independent reviewers, through fix rounds and recorded evidence, and approvals, limit extensions and merges are operator decisions. The agents are built on **Claude Code (`claude`)**, **OpenAI Codex (`codex`)**, **Antigravity (`agy`)** and **OpenRouter**.
 
-The local SSDLC engine, developed in this repository beside devloop until 2026-11-22, is frozen and no longer on `main` ([ADR 0007](docs/adr/0007-da-ssdlc-a-devloop.md)): it stays in the Git history and in the tag `ssdlc-engine-final`.
+This repository is devloop's source: an installation on another repository pins one of its tags (`SOURCE_REPO=brushtyler/devloop`, see the [quick start for a new project](docs/devloop/quickstart.md)).
+
+**History.** The project started as **ssdlc**, a local engine for a secure development lifecycle ([ADR 0001](docs/adr/0001-prodotto-unico-fasi-su-tracker.md)), and devloop grew beside it to develop this repository with agents. On 2026-11-22 the operator chose devloop as the product ([ADR 0007](docs/adr/0007-da-ssdlc-a-devloop.md)): the local SSDLC engine is frozen and no longer on `main`, it stays in the Git history and in the tag `ssdlc-engine-final`, and the repository was renamed from `brushtyler/ssdlc` to `brushtyler/devloop`. The host that develops this repository still names its project `ssdlc`, in its paths (`/home/devloop/ssdlc`, `.ssdlc/devloop`) and in its project file, as ADR 0007 decided.
 
 ## Components
 
@@ -17,19 +19,21 @@ What exists today, stated explicitly so that this page does not promise more tha
 
 - **devloop is how this repository is developed, and it is configured for it**: the facts and restrictions of this repository are in its project file on the host, of which `ops/host/ssdlc/project.toml` is the example. Its use on other repositories is planned in [ADR 0006](docs/adr/0006-devloop-su-altri-repository.md).
 - **Merges are explicit.** devloop leaves the merge to a human unless the operator enables a [merge mode](docs/devloop/guide.md#merge-modes).
-- **Cost accounting is partial.** Claude reports CLI estimates and OpenRouter reports metered usage. Subscription CLIs such as Codex do not report a cost; see [#43](https://github.com/brushtyler/ssdlc/issues/43) and [#14](https://github.com/brushtyler/ssdlc/issues/14).
+- **Cost accounting is partial.** Claude reports CLI estimates and OpenRouter reports metered usage. Subscription CLIs such as Codex do not report a cost; see [#43](https://github.com/brushtyler/devloop/issues/43) and [#14](https://github.com/brushtyler/devloop/issues/14).
 - **devloop runs on a single Linux host.** It is not a distributed scheduler.
 
-Open work is tracked in the [GitHub issues](https://github.com/brushtyler/ssdlc/issues).
+Open work is tracked in the [GitHub issues](https://github.com/brushtyler/devloop/issues).
 
 ## Direction
 
 The plan of [ADR 0007](docs/adr/0007-da-ssdlc-a-devloop.md), in order:
 
-1. **R1**, the engine and its constraints leave `main`, after the tag `ssdlc-engine-final`.
-2. **R2**, the repository is renamed `brushtyler/devloop`.
-3. **R3**, the host follows the rename.
+1. **R1**, the engine and its constraints left `main`, after the tag `ssdlc-engine-final`.
+2. **R2**, the repository was renamed `brushtyler/devloop`.
+3. **R3**, the host followed the rename.
 4. **R4**, documentation and names follow it.
+
+Next, devloop on repositories other than its own ([ADR 0006](docs/adr/0006-devloop-su-altri-repository.md)), from the [quick start for a new project](docs/devloop/quickstart.md).
 
 ## Documentation
 

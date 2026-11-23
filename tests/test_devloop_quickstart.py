@@ -97,6 +97,21 @@ class PageTests(unittest.TestCase):
         self.assertIn('(quickstart.md)', (ROOT / 'docs/devloop/guide.md').read_text())
         self.assertIn('(../docs/devloop/quickstart.md)', (OPS / 'README.md').read_text())
 
+    def test_no_installation_example_takes_devloop_from_the_old_name(self):
+        # ADR 0007, R4 (#541): the repository is brushtyler/devloop, and the examples of an
+        # installation take devloop from it, never from brushtyler/ssdlc.
+        self.assertIn('SOURCE_REPO=brushtyler/devloop\n', example('params'))
+        pages = {'docs/devloop/quickstart.md', 'docs/devloop/guide.md', 'docs/devloop/reference.md',
+                 'ops/README.md', 'ops/params.env.example', 'README.md'}
+        for name in sorted(pages):
+            page = (ROOT / name).read_text(encoding='utf-8')
+            with self.subTest(page=name):
+                self.assertNotIn('SOURCE_REPO=brushtyler/ssdlc', page)
+                self.assertNotIn('github.com/brushtyler/ssdlc.git', page)
+        self.assertIn('# SOURCE_REPO=brushtyler/devloop\n',
+                      (OPS / 'params.env.example').read_text(encoding='utf-8'))
+        self.assertIn('`SOURCE_REPO=brushtyler/devloop`', (OPS / 'README.md').read_text())
+
     def test_it_states_the_rules_of_adr_0006(self):
         page = ' '.join(text().split())
         for phrase in ('One repository, one host.', 'never configure the same repository on '
