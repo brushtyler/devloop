@@ -51,10 +51,8 @@ FAKE_SUPERVISOR = 'opsdry-supervisor'
 FAKE_COORDINATOR = 'opsdry-coordinator'
 # What the fakes of the CLIs print, as a model would: check-host.sh never shows it (#530).
 MODEL_TEXT = 'MODEL-TEXT-4c1d9e'
-# A COORDINATOR_OPS_DIR for setup-coordinator.sh --dry-run, which refuses one under directories
-# not root's (#530, R1-1): the temporary directories of the tests are the user's. It need not
-# exist: the directories above it that exist (/usr, /usr/local) are root's on any host.
-ROOT_COPY = '/usr/local/lib/devloop-coordinator-opstest'
+# The real stat, which the fake of ``OpsTestCase.root_copy`` calls for any other path.
+STAT = shutil.which('stat') or '/usr/bin/stat'
 # How check-host.sh --dry-run prints a reading check as another user (#554): bash's [ -r ], which
 # honours the ACLs, followed by the path; never /usr/bin/test.
 READS = r'/usr/bin/bash -c \[\ -r\ \"\$1\"\ \] _ '
@@ -171,6 +169,22 @@ case "$2" in {groups}) echo "$2:x:1000:" ;; *) exit 2 ;; esac''')
     echo {shlex.quote(SUDO_FLAVORS[sudo])}; exit 0
 fi
 echo "sudo $*" >> "$OPS_TEST_CALLS"''')
+
+    def root_copy(self):
+        """A COORDINATOR_OPS_DIR for setup-coordinator.sh --dry-run, which refuses one under
+        directories not root's or that others can write (#530, R1-1). It lies under the
+        temporary directory, which is the user's, and does not exist (#566): nothing of the
+        host decides what the script prints. A fake ``stat`` in the PATH of the scripts shows
+        the directories above it as root's, 755; any other path is the real stat's."""
+        copy = self.tmp.resolve() / 'usr-local-lib' / 'devloop-coordinator-opstest'
+        above = '|'.join(shlex.quote(str(path)) for path in copy.parents)
+        self.shim('stat', f'''if [ "$1" = -c ] && [ $# -eq 3 ]; then
+    case "$3" in {above})
+        printf '%s\\n' "$2" | sed 's/%U/root/g; s/%G/root/g; s/%a/755/g'; exit 0 ;;
+    esac
+fi
+exec {shlex.quote(STAT)} "$@"''')
+        return str(copy)
 
     def params(self, **overrides):
         values = {
@@ -1436,9 +1450,9 @@ class DryRunTests(OpsTestCase):
         # #530: the coordinator's user, the root copy of check-host.sh with the files it reads
         # and the parameters, and the sudoers with reading commands only.
         (self.home / 'devloop').mkdir(parents=True)
+        copy = self.root_copy()
         params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=FAKE_SUPERVISOR,
-                             AGENT_USER=FAKE_AGENT, COORDINATOR_OPS_DIR=ROOT_COPY)
-        copy = ROOT_COPY
+                             AGENT_USER=FAKE_AGENT, COORDINATOR_OPS_DIR=copy)
         before = self.tree()
         for sudo in SUDO_FLAVORS:
             with self.subTest(sudo):
@@ -1561,7 +1575,7 @@ class DryRunTests(OpsTestCase):
         overlay.chmod(0o600)
         (state / 'project.toml').write_text('')
         params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=FAKE_SUPERVISOR,
-                             AGENT_USER=FAKE_AGENT, COORDINATOR_OPS_DIR=ROOT_COPY)
+                             AGENT_USER=FAKE_AGENT, COORDINATOR_OPS_DIR=self.root_copy())
         self.fake_host('classic sudo', users=(FAKE_AGENT, FAKE_SUPERVISOR))
         give = f'  [dry-run] setfacl -m u:{FAKE_COORDINATOR}:r-- {overlay}\n'
         for entry, expected in (
@@ -1589,16 +1603,18 @@ class DryRunTests(OpsTestCase):
         self.assertEqual(self.mutating_calls(), [])
 
     def test_the_coordinator_of_a_project_has_its_sudoers_and_its_copy(self):
-        params = self.project_params(COORDINATOR_SUDOERS_FILE='', COORDINATOR_OPS_DIR='')
+        # The sudoers and the copy are those of the test (#566): their defaults of PROJECT are
+        # checked by test_a_project_gets_the_paths_of_its_name.
+        copy = self.root_copy()
+        params = self.project_params(COORDINATOR_OPS_DIR=copy)
         done = self.run_script('host/setup-coordinator.sh', '--dry-run', '--params', str(params))
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         out = done.stdout
-        self.assertIn('scriverebbe /etc/sudoers.d/devloop-coordinator-widget (mode 440', out)
-        self.assertIn('install -d -m 755 -o root -g root /usr/local/lib/devloop-coordinator-widget\n',
+        self.assertIn(f'scriverebbe {self.tmp}/sudoers.d/devloop-coordinator-widget (mode 440',
                       out)
+        self.assertIn(f'install -d -m 755 -o root -g root {copy}\n', out)
         self.assertIn('    /usr/bin/journalctl --no-pager -n 200 -u devloop@widget, \\\n', out)
-        self.assertIn('    /usr/bin/bash /usr/local/lib/devloop-coordinator-widget/host/check-host.sh'
-                      ' --read-only\n', out)
+        self.assertIn(f'    /usr/bin/bash {copy}/host/check-host.sh --read-only\n', out)
         # One coordinator per host: the key_dir of its app is the project's (#549).
         self.assertIn(f'-o {FAKE_COORDINATOR} -g {FAKE_COORDINATOR} '
                       f'{self.home}/coordinator/.ghapps-widget\n', out)
@@ -1648,8 +1664,10 @@ class DryRunTests(OpsTestCase):
         (shared / 'ops').mkdir()
         (shared / 'ops').chmod(0o555)
         self.addCleanup((shared / 'ops').chmod, 0o755)
-        (self.tmp / 'link').symlink_to('/usr/local/lib')
-        (self.tmp / 'copy-link').symlink_to(ROOT_COPY)
+        # The links lead under the temporary directory: what they lead to is not read (#566).
+        (self.tmp / 'lib-target').mkdir()
+        (self.tmp / 'link').symlink_to(self.tmp / 'lib-target')
+        (self.tmp / 'copy-link').symlink_to(self.tmp / 'lib-target')
         for path, message in (
                 (shared / 'ops', f'{shared} è 777 {ME}: COORDINATOR_OPS_DIR deve stare sotto '
                                  'directory di root non scrivibili dal gruppo né dagli altri; '
@@ -1681,7 +1699,7 @@ class DryRunTests(OpsTestCase):
                                         f'coordinator ALL=({user}) NOPASSWD: \\\n'
                                         '    /usr/bin/true\n')
         params = self.params(DEVLOOP_USER='opsdry-nouser', COORDINATOR_USER='coordinator',
-                             COORDINATOR_OPS_DIR=ROOT_COPY)
+                             COORDINATOR_OPS_DIR=self.root_copy())
         for script in ('host/setup-devloop.sh', 'host/setup-coordinator.sh'):
             with self.subTest(script=script):
                 done = self.run_script(script, '--dry-run', '--params', str(params))
@@ -2396,13 +2414,48 @@ esac''')
 
     def project_params(self, **overrides):
         """A project of a host with several (ADR 0006, R8): the defaults of PROJECT for the
-        users, the service and the sudoers."""
+        users and the service. Its sudoers lie under the temporary directory, with the names
+        of PROJECT: the dry runs read them, and the host may have them (#566); their defaults
+        are checked by test_a_project_gets_the_paths_of_its_name."""
+        sudoers = self.tmp / 'sudoers.d'
         values = dict(PROJECT='widget', REPO='acme/widget', APP_PREFIX='acme-devloop-',
                       DEVLOOP_HOME=str(self.home / 'devloop-widget'),
                       AGENT_HOME=str(self.home / 'devloop-widget-agent'),
-                      SUDOERS_FILE='', AGENT_SUDOERS_FILE='')
+                      SUDOERS_FILE=str(sudoers / 'devloop-supervisor-widget'),
+                      AGENT_SUDOERS_FILE=str(sudoers / 'devloop-agent-widget'),
+                      COORDINATOR_SUDOERS_FILE=str(sudoers / 'devloop-coordinator-widget'))
         values.update(overrides)
         return self.params(**values)
+
+    def resolved(self, params, *names):
+        """The values of ``names`` as ops_load_params resolves them from ``params``, without the
+        check of the other installations, which reads the host's units and sudoers (#566)."""
+        done = subprocess.run(
+            [BASH, '-c', f'. {OPS / "lib.sh"}; ops_check_host_users() {{ :; }}; '
+                         'PARAMS_FILE=$1; shift; ops_load_params; '
+                         'for name; do printf "%s=%s\\n" "$name" "${!name}"; done',
+             '_', str(params), *names],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=60)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        return dict(line.split('=', 1) for line in done.stdout.splitlines())
+
+    def test_a_project_gets_the_paths_of_its_name(self):
+        # ADR 0006, R8; #566: the paths params.env leaves unset are those of PROJECT, whether
+        # they exist on the host or not.
+        params = self.project_params(SUDOERS_FILE='', AGENT_SUDOERS_FILE='',
+                                     COORDINATOR_SUDOERS_FILE='', COORDINATOR_OPS_DIR='',
+                                     COORDINATION_DIR='')
+        self.assertEqual(self.resolved(params, 'SERVICE_NAME', 'DEVLOOP_USER', 'AGENT_USER',
+                                       'SUDOERS_FILE', 'AGENT_SUDOERS_FILE',
+                                       'COORDINATOR_SUDOERS_FILE', 'COORDINATOR_OPS_DIR',
+                                       'COORDINATION_DIR'), {
+            'SERVICE_NAME': 'devloop@widget', 'DEVLOOP_USER': 'devloop-widget',
+            'AGENT_USER': 'devloop-widget-agent',
+            'SUDOERS_FILE': '/etc/sudoers.d/devloop-supervisor-widget',
+            'AGENT_SUDOERS_FILE': '/etc/sudoers.d/devloop-agent-widget',
+            'COORDINATOR_SUDOERS_FILE': '/etc/sudoers.d/devloop-coordinator-widget',
+            'COORDINATOR_OPS_DIR': '/usr/local/lib/devloop-coordinator-widget',
+            'COORDINATION_DIR': '/var/lib/devloop-coordination-widget'})
 
     def test_a_project_installs_the_template_and_the_drop_in_of_its_instance(self):
         params = self.project_params()
@@ -2433,7 +2486,8 @@ esac''')
         done = self.run_script('host/setup-supervisor.sh', '--dry-run', '--params', str(params))
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         out = done.stdout
-        self.assertIn('scriverebbe /etc/sudoers.d/devloop-supervisor-widget (mode 440', out)
+        self.assertIn(f'scriverebbe {self.tmp}/sudoers.d/devloop-supervisor-widget (mode 440',
+                      out)
         self.assertIn('    | supervisor ALL=(devloop-widget) NOPASSWD:', out)
         self.assertIn('    /usr/bin/systemctl restart devloop@widget, \\\n', out)
         self.assertIn('    /usr/bin/systemctl status devloop@widget *\n', out)
@@ -2441,7 +2495,8 @@ esac''')
         # The agent user of the project.
         done = self.run_script('host/setup-agent-user.sh', '--dry-run', '--params', str(params))
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-        self.assertIn('scriverebbe /etc/sudoers.d/devloop-agent-widget (mode 440', done.stdout)
+        self.assertIn(f'scriverebbe {self.tmp}/sudoers.d/devloop-agent-widget (mode 440',
+                      done.stdout)
         self.assertIn('    | devloop-widget ALL=(devloop-widget-agent) NOPASSWD:SETENV:',
                       done.stdout)
         self.assertEqual(self.mutating_calls(), [])
@@ -2497,11 +2552,6 @@ esac''')
             + '\n    /usr/bin/true\n\nsupervisor ALL=(root) NOPASSWD: \\\n'
               '    /usr/bin/systemctl start devloop@gadget\n')
 
-    def widget_params(self):
-        return self.project_params(
-            SUDOERS_FILE=str(self.tmp / 'sudoers.d/devloop-supervisor-widget'),
-            AGENT_SUDOERS_FILE=str(self.tmp / 'sudoers.d/devloop-agent-widget'))
-
     def test_the_users_of_a_project_are_of_no_other_installation_of_the_host(self):
         # R1-1: the scripts refuse a user that another installation of the host already has,
         # in the same role or in another; the supervisor alone is the same in every project.
@@ -2510,7 +2560,7 @@ esac''')
                        'host/setup-agent-user.sh'):
             with self.subTest(script=script):
                 done = self.run_script(script, '--dry-run', '--params',
-                                       str(self.widget_params()))
+                                       str(self.project_params()))
                 self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         sudoers = self.tmp / 'sudoers.d'
         for kwargs, message in (
@@ -2532,7 +2582,7 @@ esac''')
                 self.other_project(**kwargs)
                 for script in ('host/setup-devloop.sh', 'host/check-host.sh'):
                     done = self.run_script(script, '--dry-run', '--params',
-                                           str(self.widget_params()))
+                                           str(self.project_params()))
                     self.assertNotEqual(done.returncode, 0)
                     self.assertIn(message, done.stderr)
         self.assertEqual(self.mutating_calls(), [])
@@ -2588,8 +2638,10 @@ esac''')
 
         The paths that are the defaults of PROJECT on the host (sudoers, mailbox, root's copy
         of the coordinator) are those of ``params`` under the temporary directory, and
-        ROOT_COPY for the copy, unless ``paths`` sets them (PROJECT_DEFAULTS): the dry runs
+        ``root_copy`` for the copy, unless ``paths`` sets them (PROJECT_DEFAULTS): the dry runs
         read them, and on the operator's host they exist (#566)."""
+        if 'COORDINATOR_OPS_DIR' not in paths:
+            paths['COORDINATOR_OPS_DIR'] = self.root_copy()
         home = self.home
         for clone in (home / 'devloop/devloop', home / 'supervisor/devloop'):
             (clone / '.git').mkdir(parents=True)
@@ -2610,24 +2662,17 @@ esac''')
             DEVLOOP_KEY_DIR=str(home / 'devloop/.ghapps'),
             SUPERVISOR_KEY_DIR=str(home / 'supervisor/.ghapps'),
             COORDINATOR_KEY_DIR=str(home / 'coordinator/.ghapps'),
-            **{'COORDINATOR_OPS_DIR': ROOT_COPY, **paths})
+            **paths)
 
     def test_the_project_devloop_gets_the_paths_of_the_host_of_its_project(self):
         # #563, #566: the paths params.env leaves unset are those of PROJECT, as ops/lib.sh
         # resolves them, whether they exist on the host or not. The check of the other
         # installations, which reads the host's units and sudoers, is not part of it.
         params = self.devloop_project(**self.PROJECT_DEFAULTS)
-        names = ('SERVICE_NAME', 'DEVLOOP_USER', 'AGENT_USER', 'SUDOERS_FILE',
-                 'AGENT_SUDOERS_FILE', 'COORDINATOR_SUDOERS_FILE', 'COORDINATOR_OPS_DIR',
-                 'COORDINATION_DIR')
-        done = subprocess.run(
-            [BASH, '-c', f'. {OPS / "lib.sh"}; ops_check_host_users() {{ :; }}; '
-                         'PARAMS_FILE=$1; shift; ops_load_params; '
-                         'for name; do printf "%s=%s\\n" "$name" "${!name}"; done',
-             '_', str(params), *names],
-            capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=60)
-        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-        self.assertEqual(dict(line.split('=', 1) for line in done.stdout.splitlines()), {
+        self.assertEqual(self.resolved(params, 'SERVICE_NAME', 'DEVLOOP_USER', 'AGENT_USER',
+                                       'SUDOERS_FILE', 'AGENT_SUDOERS_FILE',
+                                       'COORDINATOR_SUDOERS_FILE', 'COORDINATOR_OPS_DIR',
+                                       'COORDINATION_DIR'), {
             'SERVICE_NAME': 'devloop@devloop', 'DEVLOOP_USER': 'devloop',
             'AGENT_USER': 'devloop-agent',
             'SUDOERS_FILE': '/etc/sudoers.d/devloop-supervisor-devloop',
@@ -2689,7 +2734,7 @@ esac''')
         out = outs['setup-coordinator.sh']
         self.assertIn("ok: l'utente coordinator esiste\n", out)
         self.assertIn(f'scriverebbe {sudoers}/devloop-coordinator (mode 440', out)
-        self.assertIn(f'install -d -m 755 -o root -g root {ROOT_COPY}\n', out)
+        self.assertIn(f'install -d -m 755 -o root -g root {self.root_copy()}\n', out)
         self.assertIn('    /usr/bin/journalctl --no-pager -n 200 -u devloop@devloop, \\\n', out)
         self.assertIn(f'    /usr/bin/tail -n 200 {state}/run.log, \\\n', out)
         self.assertIn(f'  DEVLOOP_APP_KEY_DIR={home}/coordinator/.ghapps python3 '
