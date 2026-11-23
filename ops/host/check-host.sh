@@ -92,9 +92,10 @@ check_dir() {
 }
 
 # Le chiavi di KEY_DIR: ogni file .pem è 600 e di OWNER, c'è una chiave per ogni ruolo atteso;
-# STRICT=1: una chiave di un'app non attesa è un errore, altrimenti un avviso.
+# STRICT=1: una chiave di un'app non attesa è un errore, altrimenti un avviso. I ruoli di OPTIONAL
+# sono riconosciuti, ma la loro chiave non è richiesta (l'implementer senza [apps.implementer], #569).
 check_keys() {
-    local dir=$1 owner=$2 expected=$3 strict=$4 key name slug role found actual
+    local dir=$1 owner=$2 expected=$3 strict=$4 optional=${5:-} key name slug role found actual
     [ -d "$dir" ] || return
     if ! [ -r "$dir" ] || ! [ -x "$dir" ]; then
         fail "$dir non è leggibile da $(id -un): eseguire come root"
@@ -111,14 +112,14 @@ check_keys() {
         name=$(basename "$key")
         slug=${name%%.*}
         found=0
-        for role in $expected; do
+        for role in $expected $optional; do
             [ "$slug" = "$APP_PREFIX$role" ] && found=1
         done
         if [ "$found" = 0 ]; then
             if [ "$strict" = 1 ]; then
-                fail "$key: chiave non attesa in $dir (attese: $expected)"
+                fail "$key: chiave non attesa in $dir (attese: $expected${optional:+ $optional})"
             else
-                warn "$key: chiave di un'app non elencata ($expected)"
+                warn "$key: chiave di un'app non elencata ($expected${optional:+ $optional})"
             fi
         fi
     done
@@ -127,6 +128,13 @@ check_keys() {
             ok "chiave di $APP_PREFIX$role presente"
         else
             fail "manca la chiave di $APP_PREFIX$role in $dir"
+        fi
+    done
+    for role in $optional; do
+        if compgen -G "$dir/$APP_PREFIX$role.*.private-key.pem" >/dev/null; then
+            ok "chiave di $APP_PREFIX$role presente"
+        else
+            ok "nessuna chiave di $APP_PREFIX$role: l'overlay non dichiara [apps.$role]"
         fi
     done
 }
@@ -144,7 +152,8 @@ check_dir "$SUPERVISOR_KEY_DIR" 700 "$SUPERVISOR_USER"
 check_dir "$SUPERVISOR_HOME/.claude" 700 "$SUPERVISOR_USER"
 
 step 'Chiavi delle GitHub App (600)'
-check_keys "$DEVLOOP_KEY_DIR" "$DEVLOOP_USER" "$DEVLOOP_KEYS" 0
+ops_devloop_keys "$STATE_PATH/config.local.toml"
+check_keys "$DEVLOOP_KEY_DIR" "$DEVLOOP_USER" "$DEVLOOP_KEYS_REQUIRED" 0 "$DEVLOOP_KEYS_OPTIONAL"
 check_keys "$SUPERVISOR_KEY_DIR" "$SUPERVISOR_USER" "$SUPERVISOR_KEYS" 1
 
 # check_traverse USER SETUP: USER attraversa soltanto la home di devloop (ACL --x, che mette lo

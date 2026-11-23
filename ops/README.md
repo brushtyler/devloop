@@ -297,8 +297,9 @@ proprietario del repository (`GITHUB_OWNER_TYPE=org` per un'organizzazione). Per
    `[apps.supervisor]` (ADR 0005, P5-4): devloop non ne legge la
    chiave, che sta solo nella `key_dir` del supervisore. L'app `coordinator` è in
    `[apps.coordinator]` (#528): devloop non ne legge la chiave, che sta solo nella `key_dir` del
-   coordinatore (passo 10). L'app `implementer` non è ancora in `[apps]`: si crea quando serve
-   (ADR 0005, P5-3).
+   coordinatore (passo 10). L'app `implementer` è in `[apps.implementer]` (ADR 0005, P5-3): la
+   sua chiave sta nella `key_dir` di `devloop` (passo 4), che la legge quando una chiave
+   `<agent>-implementer` di `[agents]` la dichiara.
 
 Se una regola del branch principale limita chi può fare push o merge, aggiungere `merger` fra gli
 ammessi.
@@ -377,7 +378,12 @@ Su un host già in servizio l'ordine conta: vedi [Migrazione di R3 su un host
 attivo](host/migrate.md#migrazione-di-r3-su-un-host-attivo).
 
 Poi le **chiavi**: in `key_dir` di `devloop` (`/home/devloop/.ghapps`) quelle delle app che usa il
-dispatcher (`DEVLOOP_KEYS`: `dispatcher`, `merger`, `claude-agent`, `codex-agent`, `agy-agent`):
+dispatcher (`DEVLOOP_KEYS`: `dispatcher`, `merger`, `claude-agent`, `codex-agent`, `agy-agent`,
+`implementer`). Con il default di `DEVLOOP_KEYS`, la chiave di `implementer` è richiesta da
+`setup-devloop.sh` e `check-host.sh` solo se l'overlay del progetto dichiara `[apps.implementer]`;
+senza quella tabella è soltanto riconosciuta, e la sua assenza non è un errore (#569). Un
+`DEVLOOP_KEYS` scritto in `params.env` è autorevole: ogni chiave che elenca è richiesta. Ogni
+chiave si installa così:
 
 ```bash
 sudo install -o devloop -g devloop -m 600 <slug>.<data>.private-key.pem /home/devloop/.ghapps/
