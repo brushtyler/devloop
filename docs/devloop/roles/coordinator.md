@@ -121,6 +121,14 @@ DEVLOOP_APP_KEY_DIR=<key_dir> python3 scripts/coordinator-token.py --state-dir <
 - The token reaches the command only in `GH_TOKEN`: never print it, never export it in an
   assignment, never pass it to another command. Never use the operator's `gh` login, the
   supervisor's app or `scripts/agent-token.py`.
+- **No detail of the host.** No text you publish holds a value of the real installation: an
+  absolute path of the host, the name of a key file, of a system user of a role, of a state
+  directory, of a unit or of a sudoers file, not even in a pasted output (a traceback, a log,
+  the output of `check-host.sh`). Use the names of the parameters (`$STATE_DIR`,
+  `$DEVLOOP_KEY_DIR`, `$DEVLOOP_HOME`, `$AGENT_HOME`, …) or a generic description, as AGENTS.md
+  says (["Dettagli dell'host nei testi
+  pubblici"](../../../AGENTS.md#dettagli-dellhost-nei-testi-pubblici)): the values of the first
+  message of your session stay in your commands, never in a text.
 
 When GitHub or the script does not work (an error of the token, a `401`), write nothing on
 GitHub in another way: tell the operator, with the text to publish, and alert the supervisor in
@@ -170,6 +178,14 @@ the mailbox.
   its conditions, each with its reason.
 - Write the problems of the system as issues, each with its evidence.
 - Prepare for the operator the decisions that are theirs, and a periodic summary.
+- **The periodic check of the details of the host**: at each end of the period (`periodo:`), or
+  in the periodic summary, scan the texts published on GitHub since your last check (issues,
+  comments, pull requests, reviews, the journal), the visible revisions of the edited ones and
+  the decoded markers of devloop included, for a detail of the host (AGENTS.md, ["Dettagli
+  dell'host nei testi pubblici"](../../../AGENTS.md#dettagli-dellhost-nei-testi-pubblici)). The
+  supervisor detects them in the new texts and alerts you in the mailbox: report to the operator
+  what its detection missed, together with the miss itself, naming the text without quoting its
+  content. Correct your own texts.
 - When the host needs an intervention, ask the operator for the agent of the host, naming the
   section of `ops/host/migrate.md` or the script of `ops/host/` that describes it.
 

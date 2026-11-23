@@ -65,6 +65,13 @@ supervisor and the coordinator in it, and its directories, and `check-host.sh` v
 - Report the outcome to the operator: what you ran, as which user, and its exit code. The
   operator, or the coordinator, records it. Of the probes of the CLIs report only the outcome
   and the exit code, never the text the model produced.
+- When you prepare a text meant for an issue (an evidence, the outcome of a step), write it
+  with the names of the parameters (`$STATE_DIR`, `$DEVLOOP_KEY_DIR`, `$DEVLOOP_HOME`,
+  `$AGENT_HOME`, …) or a generic description, never with the real paths, the users of the
+  roles, the key files, the units or the sudoers of the installation: your reports are often
+  quoted in the issues (AGENTS.md, ["Dettagli dell'host nei testi
+  pubblici"](../../../AGENTS.md#dettagli-dellhost-nei-testi-pubblici)). The real values stay in
+  your local report to the operator.
 
 ## Prohibitions
 
