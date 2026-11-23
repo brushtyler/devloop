@@ -215,6 +215,11 @@ cp ops/params.env.example ops/params.env
 $EDITOR ops/params.env               # REPO, APP_PREFIX, utenti e percorsi
 ```
 
+GitHub accetta per una GitHub App un nome di al più 34 caratteri: `<APP_PREFIX><ruolo>` non li
+supera per nessuna app di `APPS`. Con le app di default il ruolo più lungo è `claude-agent` (12
+caratteri), quindi `APP_PREFIX` ne ha al più 22; `create-apps.sh`, anche con `--dry-run`, si ferma
+prima di scrivere la pagina e nomina le app troppo lunghe (#573).
+
 ### 2. GitHub App
 
 Ogni app ha un manifest in `ops/github/apps/`. Per tutte: `metadata: read`, webhook spento,
@@ -343,10 +348,16 @@ sudo bash ops/host/setup-devloop.sh
 ```
 
 Installa i pacchetti che mancano (`python3`, `git`, `gh`, `openssl`, `acl`, `nodejs`, `npm`, …),
-crea l'utente `devloop` e il suo clone, `state_dir` con `run.log`, l'overlay d'esempio (solo se non
-esiste), `~/.ghapps`, `~/.claude` e `~/.codex` con mode 700, `~/.claude/settings.json` con gli
+crea l'utente `devloop` e il suo clone, `state_dir` (750) con `run.log`, l'overlay d'esempio (600,
+solo se non esiste), `~/.ghapps`, `~/.claude` e `~/.codex` con mode 700, `~/.claude/settings.json` con gli
 aggiornamenti automatici spenti (solo se non esiste), e l'unità `devloop.service`. Non avvia il
 servizio. Le CLI degli agent non sono di `devloop`: le prepara il passo 5.
+
+Lo `state_dir` 750 e l'overlay 600 (#573) non sono leggibili dagli altri utenti dell'host
+(l'overlay nomina `trusted_users`, `app_id` e `key_dir`): i ruoli che li usano li raggiungono con le
+loro ACL, l'utente degli agent dal passo 5, il supervisore dal passo 7 e il coordinatore dal passo
+10. Lo script non cambia uno `state_dir` o un overlay che esistono già; `check-host.sh` avvisa se
+l'overlay è leggibile da tutti.
 
 Prepara anche il **lock per repository** (ADR 0006, R8): il gruppo `REPO_LOCK_GROUP`
 (`devloop-repos`), con dentro l'utente `devloop`, e la directory comune `REPO_LOCK_DIR`
@@ -548,7 +559,8 @@ sudo bash ops/host/setup-supervisor.sh
 
 Crea l'utente `supervisor`, gli dà **solo l'attraversamento** della home di devloop
 (`setfacl -m u:supervisor:--x /home/devloop`: raggiunge i log per percorso, ma non elenca la home,
-e `~/.ghapps`, `~/.claude` e `~/.codex` di devloop restano 700), gli dà la **lettura
+e `~/.ghapps`, `~/.claude` e `~/.codex` di devloop restano 700) e dello `state_dir`, 750
+(`setfacl -m u:supervisor:--x <state_dir>`, #573), gli dà la **lettura
 dell'overlay e del file di progetto** dello `state_dir` con un'ACL, se manca (`setfacl -m
 u:supervisor:r-- <state_dir>/config.local.toml` e `<state_dir>/project.toml`, #543: i due file
 dell'operatore sono di solito 600, e `scripts/supervisor-token.py` legge l'overlay), prepara la
@@ -704,7 +716,8 @@ Lo script crea l'utente e la sua `key_dir` (`COORDINATOR_KEY_DIR`, `/home/coordi
 della home di devloop (`setfacl -m u:coordinator:--x /home/devloop`, come al supervisore: raggiunge
 per percorso l'overlay dello `state_dir`, da cui `scripts/coordinator-token.py` legge `repo` e
 `[apps.coordinator]`, ma non elenca la home, e `~/.ghapps`, `~/.claude` e `~/.codex` di devloop
-restano 700), e la **lettura dell'overlay** con un'ACL, se manca (`setfacl -m u:coordinator:r--
+restano 700), quello dello `state_dir`, 750 (`setfacl -m u:coordinator:--x <state_dir>`, #573),
+e la **lettura dell'overlay** con un'ACL, se manca (`setfacl -m u:coordinator:r--
 <state_dir>/config.local.toml`, #554: l'overlay dell'operatore è di solito 600; il file di
 progetto no, `coordinator-token.py` non lo legge), lo mette nella **casella fra supervisore e
 coordinatore** (il gruppo `devloop-roles` e le directory di `/var/lib/devloop-coordination`, come
@@ -876,7 +889,8 @@ devloop: `pin` prende il codice da un clone di devloop, a un suo tag
 `REPO` del progetto, `SOURCE_REPO=brushtyler/devloop`, `SOURCE_REF` con il tag da fissare, e di
 solito uno `STATE_DIR` assoluto. `setup-devloop.sh` clona la sorgente in `SOURCE_CLONE`
 (`/home/devloop/devloop-source`) e installa l'avviatore dal tag `SOURCE_REF` in `LAUNCHER_DIR`
-(`/usr/local/lib/devloop/devloop-pinned`, di root), fuori dalla copia fissata e dal clone gestito;
+(`/usr/local/lib/devloop/devloop-pinned`, di root; con `PROJECT`
+`/usr/local/lib/devloop/<progetto>/devloop-pinned`), fuori dalla copia fissata e dal clone gestito;
 unità e sudoers lo chiamano con `--state-dir`. L'overlay nello `state_dir` ha `source`,
 `state_dir` e le chiavi del progetto (`repo`, `trusted_users`, `base_branch`, `[apps]` con la
 `key_dir` del progetto, …; ADR 0006, R6): lo script ricorda `source`, `state_dir` e `repo` finché
@@ -968,10 +982,20 @@ progetto:
 | `SUPERVISOR_CLONE` | `/home/supervisor/devloop-widget`: il clone del supervisore per il progetto |
 | `COORDINATOR_SUDOERS_FILE`, `COORDINATOR_OPS_DIR` | `/etc/sudoers.d/devloop-coordinator-widget`, `/usr/local/lib/devloop-coordinator-widget` |
 | `SUPERVISOR_SOURCE_CLONE`, `COORDINATOR_SOURCE_CLONE` | con `SOURCE_REPO`, `/home/supervisor/devloop-source-widget` e `/home/coordinator/devloop-source-widget`: i clone della sorgente da cui i due ruoli coniano i token delle loro app (#571) |
+| `LAUNCHER_DIR` | `/usr/local/lib/devloop/widget`: l'avviatore del tag `SOURCE_REF` del progetto, che nessun altro progetto sovrascrive (#573) |
 
 `SUPERVISOR_USER`, `COORDINATOR_USER`, `REPO_LOCK_DIR`, `REPO_LOCK_GROUP` e `TMPFILES_FILE` sono
 gli stessi per tutti i progetti dell'host. Un `params.env` senza `PROJECT` continua a installare
 `devloop.service` come prima.
+
+**Avviatore.** Con `SOURCE_REPO`, ogni progetto ha il suo avviatore, dal suo `SOURCE_REF`, in
+`/usr/local/lib/devloop/<progetto>` (#573): prima era `/usr/local/lib/devloop` per tutti, e
+l'ultimo `setup-devloop.sh` decideva l'avviatore di ogni progetto. Un progetto installato prima
+tiene il percorso di prima scrivendo `LAUNCHER_DIR=/usr/local/lib/devloop` nei suoi parametri;
+altrimenti, a servizio fermo, si rieseguono `setup-devloop.sh`, `setup-supervisor.sh`,
+`setup-coordinator.sh` (se c'è il coordinatore) e `check-host.sh` con i suoi parametri, che
+installano l'avviatore nel nuovo percorso e vi portano unità e sudoers. L'host che sviluppa questo
+repository non ha `SOURCE_REPO`: il suo avviatore resta quello del clone.
 
 **Valori scritti.** Ogni parametro scritto in `params.env` vale anche con `PROJECT`, al posto del
 suo default. Così l'host che sviluppa questo repository è passato all'istanza `devloop@devloop`

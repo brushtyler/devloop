@@ -234,6 +234,12 @@ for file in "$STATE_PATH/config.local.toml" "$STATE_PATH/project.toml"; do
     check_as "$SUPERVISOR_USER" "$SUPERVISOR_USER legge $file" \
         /usr/bin/bash -c '[ -r "$1" ]' _ "$file"
 done
+# L'overlay è dell'operatore e dei ruoli che lo leggono con le loro ACL (#573): 600, o 640 con
+# un'ACL; leggibile da tutti, ogni utente dell'host vi trova trusted_users, app_id e key_dir.
+OVERLAY_MODE=$(stat -c '%A' "$STATE_PATH/config.local.toml" 2>/dev/null || true)
+if [ "${OVERLAY_MODE:7:1}" = r ]; then
+    warn "$STATE_PATH/config.local.toml è leggibile da tutti ($OVERLAY_MODE): chmod o-rwx, come lo crea setup-devloop.sh (600)"
+fi
 
 # La casella fra supervisore e coordinatore (#543): il gruppo, con dentro i due ruoli e nessun
 # altro utente di devloop, e le directory, di root, del gruppo, 2770.

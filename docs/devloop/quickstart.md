@@ -52,7 +52,7 @@ The examples use `PROJECT=widget`, from which the scripts derive every name:
 | clone of devloop, the installation's source | `/home/devloop-widget/devloop-source` |
 | `state_dir`, with the project file, the overlay, the pinned copies and `run.log` | `/var/lib/devloop/widget` |
 | `key_dir` of devloop's user | `/home/devloop-widget/.ghapps` |
-| launcher, installed from the tag | `/usr/local/lib/devloop/devloop-pinned` |
+| launcher, installed from the project's tag | `/usr/local/lib/devloop/widget/devloop-pinned` |
 | service | `devloop@widget` |
 
 ## 1. Parameters
@@ -78,6 +78,9 @@ DEVLOOP_KEYS="dispatcher implementer claude-agent codex-agent agy-agent"
 ```
 
 - `SOURCE_REPO` and `SOURCE_REF`: devloop comes from that tag of `brushtyler/devloop`.
+- `APP_PREFIX`: GitHub takes app names of at most 34 characters, so `<APP_PREFIX><role>` fits
+  that for every app of `APPS` (with `claude-agent`, the longest role, the prefix has at most 22);
+  `create-apps.sh` stops before writing its page otherwise.
 - `APPS` are the apps `ops/github/create-apps.sh` prepares, `DEVLOOP_KEYS` those whose key goes to
   devloop's `key_dir`: the dispatcher, the implementer (the installation's agents are named by
   role, and `claude-implementer` signs with it) and the reviewers' apps `claude-agent`,
@@ -94,8 +97,10 @@ sudo bash ops/host/setup-devloop.sh --params ops/params-widget.env
 ```
 
 It installs the missing packages and creates `devloop-widget`, the clone of `acme/widget`, the
-clone of devloop, the launcher from the tag `SOURCE_REF`, the `state_dir` with `run.log` and a fully
-commented overlay, the `key_dir`, the template unit `devloop@.service` with the drop-in of
+clone of devloop, the launcher from the tag `SOURCE_REF` (one per project, so projects with
+different tags do not overwrite each other's), the `state_dir` (mode `750`) with `run.log` and a
+fully commented overlay (mode `600`; the supervisor and the coordinator read it through the ACLs
+their scripts add), the `key_dir`, the template unit `devloop@.service` with the drop-in of
 `devloop@widget`, and the directory and group of the repository locks. It does not start the
 service, and it lists what is left to do by hand
 ([4. Host di devloop](../../ops/README.md#4-host-di-devloop),
@@ -297,8 +302,8 @@ clone of the source for `scripts/coordinator-token.py`
 
 ```bash
 sudo bash ops/host/check-host.sh --params ops/params-widget.env
-sudo -u devloop-widget -H /usr/bin/env -C /home/devloop-widget/widget /usr/bin/python3 /usr/local/lib/devloop/devloop-pinned --state-dir /var/lib/devloop/widget apps
-sudo -u devloop-widget -H /usr/bin/env -C /home/devloop-widget/widget /usr/bin/python3 /usr/local/lib/devloop/devloop-pinned --state-dir /var/lib/devloop/widget tick --dry-run
+sudo -u devloop-widget -H /usr/bin/env -C /home/devloop-widget/widget /usr/bin/python3 /usr/local/lib/devloop/widget/devloop-pinned --state-dir /var/lib/devloop/widget apps
+sudo -u devloop-widget -H /usr/bin/env -C /home/devloop-widget/widget /usr/bin/python3 /usr/local/lib/devloop/widget/devloop-pinned --state-dir /var/lib/devloop/widget tick --dry-run
 ```
 
 - `check-host.sh` exits with 1 on an error: users, modes, keys, ACLs, sudoers, the agent user,
@@ -313,7 +318,7 @@ sudo -u devloop-widget -H /usr/bin/env -C /home/devloop-widget/widget /usr/bin/p
 Then the labels devloop uses: `setup` creates them on the repository, with the dispatcher's app.
 
 ```bash
-sudo -u devloop-widget -H /usr/bin/env -C /home/devloop-widget/widget /usr/bin/python3 /usr/local/lib/devloop/devloop-pinned --state-dir /var/lib/devloop/widget setup
+sudo -u devloop-widget -H /usr/bin/env -C /home/devloop-widget/widget /usr/bin/python3 /usr/local/lib/devloop/widget/devloop-pinned --state-dir /var/lib/devloop/widget setup
 ```
 
 ## 9. Start

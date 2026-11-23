@@ -117,14 +117,17 @@ fi
 
 step 'state_dir, log e overlay'
 STATE=$STATE_PATH
+# Lo state_dir è 750 e l'overlay 600 (#573): nessun altro utente dell'host li legge. I ruoli che
+# li usano li raggiungono con le loro ACL: l'utente degli agent (setup-agent-user.sh), il
+# supervisore (setup-supervisor.sh) e il coordinatore (setup-coordinator.sh).
 if [ -d "$STATE" ]; then
     ok "$STATE esiste"
 elif [[ $STATE_DIR == /* ]]; then
     # Fuori dal clone: le directory intermedie restano di root, lo state_dir è di devloop.
-    ensure_dir "$STATE" 755 "$DEVLOOP_USER"
+    ensure_dir "$STATE" 750 "$DEVLOOP_USER"
 else
-    # mkdir -p come utente devloop: anche le directory intermedie sono sue.
-    as_user "$DEVLOOP_USER" mkdir -p "$STATE"
+    # mkdir -p come utente devloop: anche le directory intermedie sono sue; -m vale per l'ultima.
+    as_user "$DEVLOOP_USER" mkdir -p -m 750 "$STATE"
 fi
 if [ -f "$STATE/run.log" ]; then
     ok "$STATE/run.log esiste"
@@ -135,7 +138,7 @@ fi
 if [ -f "$STATE/config.local.toml" ]; then
     ok "$STATE/config.local.toml esiste: è dell'operatore, non lo tocca"
 else
-    put_file "$STATE/config.local.toml" 644 "$DEVLOOP_USER" "$(<"$OPS_DIR/host/config.local.toml.example")" || true
+    put_file "$STATE/config.local.toml" 600 "$DEVLOOP_USER" "$(<"$OPS_DIR/host/config.local.toml.example")" || true
 fi
 # Con l'avviatore che riceve lo state_dir (LAUNCHER_ARGS), devloop si ferma se l'overlay ne
 # nomina un altro; con la sorgente a parte, l'overlay dice dove è il suo clone. Sempre, l'overlay

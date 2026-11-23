@@ -85,6 +85,10 @@ done
 # [apps.supervisor] dall'overlay, e il supervisore legge la configurazione del progetto. Sono
 # dell'operatore, 600: il supervisore li legge con un'ACL di sola lettura, che si aggiunge se
 # manca. Un file sostituito (install, cp, rsync) perde l'ACL: si riesegue questo script.
+# Lo state_dir è 750 (#573): il supervisore lo attraversa, senza elencarlo, per raggiungere
+# run.log e i due file.
+step "Accesso allo state_dir: ACL u:$SUPERVISOR_USER:--x su $STATE_PATH"
+ensure_traverse_acl "$SUPERVISOR_USER" "$STATE_PATH"
 for file in "$STATE_PATH/config.local.toml" "$STATE_PATH/project.toml"; do
     step "Lettura di $(basename "$file"): ACL u:$SUPERVISOR_USER:r-- su $file"
     ensure_read_acl "$SUPERVISOR_USER" "$file"

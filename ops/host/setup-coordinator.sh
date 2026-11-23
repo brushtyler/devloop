@@ -123,6 +123,9 @@ done
 # coordinator-token.py non lo legge. Un overlay sostituito (install, cp, rsync) perde l'ACL: si
 # riesegue questo script.
 OVERLAY="$STATE_PATH/config.local.toml"
+# Lo state_dir è 750 (#573): il coordinatore lo attraversa, senza elencarlo.
+step "Accesso allo state_dir: ACL u:$COORDINATOR_USER:--x su $STATE_PATH"
+ensure_traverse_acl "$COORDINATOR_USER" "$STATE_PATH"
 step "Lettura dell'overlay: ACL u:$COORDINATOR_USER:r-- su $OVERLAY"
 ensure_read_acl "$COORDINATOR_USER" "$OVERLAY"
 
