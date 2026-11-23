@@ -97,9 +97,14 @@ repository's main checkout. Unset, the source is the managed repository, as for 
 that is not a non-empty string stops devloop at startup, and one that is not the top of a git
 checkout stops every command that needs it (the pin and the dispatcher's commands); with a
 source other than the managed repository the pin after a merge is off. `state_dir` (default
-`.ssdlc/devloop`) is relative to the managed repository's main checkout, or absolute: a directory
+`.devloop`, #563) is relative to the managed repository's main checkout, or absolute: a directory
 of the host. When the [launcher](guide.md#launcher) is given `--state-dir`, the configuration's
-`state_dir` must be that directory, or devloop stops. Both apply at the next start.
+`state_dir` must be that directory, or devloop stops. Both apply at the next start. The default
+was `.ssdlc/devloop` before #563, inside `.ssdlc/`, the state directory of the old SSDLC engine,
+which devloop neither reads nor writes: a clone that still has `.ssdlc/devloop` and no
+`.devloop` stops the launcher, which names the section of
+[ops/host/migrate.md](../../ops/host/migrate.md#percorsi-devloop-e-istanza-devloopdevloop-563)
+that moves it, with no fallback.
 `repo_lock_dir` (unset by default, a key of the host's overlay) is the host's directory of the
 [repository locks](guide.md#several-projects-on-one-host) (ADR 0006, R8), common to every devloop
 user of the host: `tick` and `run` hold `<repo_lock_dir>/<owner>--<name>.lock` of `repo` (owner
@@ -1560,9 +1565,10 @@ installation's `config.toml`, the project file and the overlay, as the [launcher
 passes them), never with the `config.toml` beside a checkout: `repo` and `[apps.<actor>]` come
 from the overlay, and only the actor's key is read, from `$DEVLOOP_APP_KEY_DIR` or the project's
 `key_dir`. `scripts/agent-token.py` is a thin wrapper: it runs `scripts/devloop-pinned
---state-dir <DIR> token ...`, with `DIR` by default `.ssdlc/devloop` of the main checkout of its
+--state-dir <DIR> token ...`, with `DIR` by default `.devloop` of the main checkout of its
 clone (found through git's common directory, also from a linked worktree), and imports nothing
-from the clone. Run either from the checkout of the managed repository or one of its
+from the clone. Like the launcher, it stops when that directory is missing and the clone still
+has the `state_dir` of before #563, `.ssdlc/devloop`. Run either from the checkout of the managed repository or one of its
 worktrees; the command runs in the current directory, and everything after `--` is the
 command's. The actors are `claude`, `codex` and `agy`: the dispatcher's, the merger's and the
 implementer's apps are reserved to devloop, and the supervisor's is not exposed (it uses
@@ -1797,7 +1803,7 @@ model = "claude-opus-5-5"
   The script reads `repo` and `[apps.supervisor]` from the configuration of the project (ADR
   0006, R6): the local overlay of that `state_dir` (`config.local.toml`, readable by the
   supervisor, with no secret) over `devloop/config.toml` of its clone; without `--state-dir`,
-  `.ssdlc/devloop` of its clone, and without an overlay there it stops, saying so. It does not
+  `.devloop` of its clone, and without an overlay there it stops, saying so. It does not
   read the project file, which cannot hold those keys. It reads only the supervisor's key, from
   `$DEVLOOP_APP_KEY_DIR` or `key_dir`: with a `key_dir` of devloop's user in the overlay, the
   supervisor sets `$DEVLOOP_APP_KEY_DIR` to its own. Without `--perm` the token gets `issues=write` and

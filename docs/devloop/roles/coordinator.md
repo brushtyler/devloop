@@ -37,7 +37,10 @@ Two ways, each for its use:
   mailbox.
 - **The mailbox**, for quick alerts, always available, also when GitHub or an app does not work:
   the directory `COORDINATION_DIR` of `ops/params.env` (default `/var/lib/devloop-coordination`;
-  with `PROJECT`, `/var/lib/devloop-coordination-<project>`), shared by you and the supervisor
+  with `PROJECT`, `/var/lib/devloop-coordination-<project>`, on the host of this repository
+  `/var/lib/devloop-coordination-devloop` since #563; the first message of your session gives
+  the values of your installation, which win over the examples here), shared by you and the
+  supervisor
   through the group `devloop-roles`. `to-supervisor/` holds your messages to the supervisor,
   `to-coordinator/` its messages to you. One file per message, plain text, with a unique name
   (UTC date and time and a random suffix), published with an atomic rename from a temporary file
@@ -62,6 +65,10 @@ periodic check. Run the wake-up as a background command (for Claude Code, a Bash
 ```bash
 bash /usr/local/lib/devloop-coordinator/host/coordinator-wait.sh   # COORDINATOR_OPS_DIR
 ```
+
+On the host of this repository (`PROJECT=devloop`, #563) the copy is
+`/usr/local/lib/devloop-coordinator-devloop`: use the command of the first message of your
+session.
 
 It ends at the first of: a message in `to-coordinator/` (`casella:`, which it reports without
 consuming it), an event of yours on GitHub (`evento:`: `agent:needs-operator` added, "il merge

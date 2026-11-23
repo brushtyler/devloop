@@ -326,7 +326,11 @@ class Adr0007Tests(unittest.TestCase):
         self.assertIn(self.APPROVAL, status)
         self.assertIn('operator_only_paths', status)
         headings = [line for line in text.splitlines() if line.startswith('## ')]
-        self.assertEqual(headings, ['## Contesto', '## Decisioni', '## Punti fissati', '## Piano'])
+        self.assertEqual(headings, ['## Contesto', '## Decisioni', '## Punti fissati', '## Piano',
+                                    "## Precisazione del 2026-11-23: i percorsi sull'host (#563)"])
+        # The precision cites the operator's decision with its permalink.
+        self.assertIn('(https://github.com/brushtyler/devloop/issues/563#issuecomment-7090267453)',
+                      text)
         for phrase in ('`ssdlc-engine-final`', '`brushtyler/devloop`', '`SOURCE_REPO`',
                        '(#1, #4, #253)', '#515', '| R1 |', '| R2 |', '| R3 |', '| R4 |'):
             self.assertIn(phrase, text)

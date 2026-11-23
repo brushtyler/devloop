@@ -69,7 +69,8 @@ class EngineRemovedTests(unittest.TestCase):
         left = []
         for directory, subdirs, names in os.walk(ROOT):
             subdirs[:] = sorted(d for d in subdirs
-                                if d not in ('.git', '__pycache__', '.ssdlc', '.tools'))
+                                if d not in ('.git', '__pycache__', '.devloop', '.ssdlc',
+                                             '.tools'))
             left += [path for name in sorted(names)
                      if engine.is_engine_path(
                          path := (Path(directory) / name).relative_to(ROOT).as_posix())]
@@ -95,7 +96,10 @@ class EngineRemovedTests(unittest.TestCase):
         # else: the rest of the guide is searched as any other file.
         name, heading = REMOVAL_STEP
         text = (ROOT / name).read_text(encoding='utf-8')
-        section = text[text.index(heading):]
+        start = text.index(heading)
+        end = text.find('\n## ', start + len(heading))
+        # The section alone: a later section (#563) may name the tag too.
+        section = text[start:] if end < 0 else text[start:end]
         for phrase in ('`ssdlc-engine-final`', 'git tag -a ssdlc-engine-final',
                        '`sensitive_path_lists`', '`source_prefixes`', '`[docs.map]`',
                        'Isolated A5 Recovery Benchmark', '**Rollback.**'):

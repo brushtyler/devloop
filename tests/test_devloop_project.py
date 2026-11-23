@@ -367,7 +367,7 @@ class CommandTests(FilesCase):
         os.environ.pop(cli.STATE_ENV, None)
         self.root = self.tmp / 'clone'
         git(self.tmp, 'init', '--quiet', '-b', 'main', str(self.root))
-        self.state = self.root / '.ssdlc' / 'devloop'
+        self.state = self.root / '.devloop'
         self.state.mkdir(parents=True)
         self.project = self.state / 'project.toml'
 
@@ -624,7 +624,7 @@ class LauncherTests(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
         self.root = self.tmp / 'clone'
-        self.state = self.root / '.ssdlc' / 'devloop'
+        self.state = self.root / '.devloop'
         copy = self.state / 'pinned-0123456789ab'
         (copy / 'devloop').mkdir(parents=True)
         (copy / 'devloop' / '__main__.py').write_text('')

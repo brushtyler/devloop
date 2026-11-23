@@ -31,7 +31,7 @@ L'operatore ha accettato il default proposto per ogni punto.
 |---|---|
 | Il codice del motore | **Si toglie dall'albero** di `main`, dopo un tag `ssdlc-engine-final` sull'ultimo commit che lo contiene. Resta nella storia e nel tag, senza un repository a parte. Si tolgono anche i vincoli che porta: test del motore, percorsi sensibili del motore, replay gate e baseline, `setup-ssdlc.sh`, la documentazione del motore e i `PLAN_*.md`. |
 | L'ADR 0001 | Resta nella storia, con lo stato "superato per la parte del motore da ADR 0007". I principi che devloop eredita (tracciabilità su GitHub, decisioni riservate) restano validi tramite gli ADR 0002-0006. |
-| I percorsi sull'host | **Invariati** (`/home/devloop/ssdlc`, `.ssdlc/devloop`), per non toccare un'installazione che funziona. Si aggiornano `repo` nell'overlay, i remote dei clone e il nome del progetto nei parametri. La rinomina dei percorsi, se servirà, è un passo a parte. |
+| I percorsi sull'host | **Invariati** (`/home/devloop/ssdlc`, `.ssdlc/devloop`), per non toccare un'installazione che funziona. Si aggiornano `repo` nell'overlay, i remote dei clone e il nome del progetto nei parametri. La rinomina dei percorsi, se servirà, è un passo a parte. Cambiati poi con #563: vedi la precisazione del 2026-11-23 qui sotto. |
 | L'ordine | Prima la rimozione del motore, poi la rinomina su GitHub, poi l'aggiornamento dell'host (agent dell'host), poi la documentazione (README, `AGENTS.md`, riferimenti a "ssdlc"). Tutto **prima** del primo progetto esterno (#515), così `SOURCE_REPO` è `devloop` fin dall'inizio. |
 | La rinomina su GitHub | È un atto dell'operatore (impostazioni del repository), oppure dell'agent con il suo permesso esplicito. |
 
@@ -45,3 +45,12 @@ Le issue nascono dopo il merge di questo ADR e citano la sua sezione su `main`.
 | R2 | Rinomina su GitHub (operatore) | R1 |
 | R3 | Host: `repo` nell'overlay, remote dei clone, parametri, verifica con `apps` e `check-host` (agent dell'host, da una sezione di [`ops/host/migrate.md`](../../ops/host/migrate.md)) | R2 |
 | R4 | Documentazione e nomi: README, `AGENTS.md`, `docs/`, prefisso dei messaggi, esempi `SOURCE_REPO` | R2 |
+
+## Precisazione del 2026-11-23: i percorsi sull'host (#563)
+
+Decisione dell'operatore nel [`/devloop approve` su #563](https://github.com/brushtyler/devloop/issues/563#issuecomment-7090267453), presa dopo R1-R4. Il punto "I percorsi sull'host" sopra li lasciava invariati; l'operatore ha deciso di cambiarli adesso, prima del primo progetto esterno (#515), e di passare questo host all'unità template `devloop@.service` dell'[ADR 0006](0006-devloop-su-altri-repository.md), R8.
+
+- **Perché.** `.ssdlc/` è la directory di stato del vecchio motore SSDLC, che l'operatore usa ancora in altri repository: il default di devloop `.ssdlc/devloop` metteva lo stato di devloop dentro quella del motore, ed aveva senso solo finché motore e devloop stavano nello stesso repository. Con `devloop.service` c'è una sola istanza per host; con `devloop@<progetto>` ogni progetto ha la sua. E dopo la rinomina `ssdlc` restava solo nei percorsi.
+- **Cosa cambia.** Lo `state_dir` di default è `.devloop`, senza ripiego su `.ssdlc/devloop`: il launcher si ferma se trova solo quello. Questo host passa a `PROJECT=devloop` con l'istanza `devloop@devloop`, con gli utenti di prima (`devloop`, `devloop-agent`, `supervisor`, `coordinator`) e le `key_dir` di prima (`~/.ghapps`, quindi nessuna chiave di fiducia cambia). I clone diventano `/home/devloop/devloop`, `/home/supervisor/devloop` e `/home/coordinator/devloop`; sudoers, casella e copia di root del coordinatore prendono i default di `PROJECT`. Il checkout dell'operatore `/root/repos/ssdlc` resta com'è.
+- **Cosa non cambia.** Il tag `ssdlc-engine-final` e le directory `.ssdlc/` del vecchio motore negli altri repository: devloop non le legge né le scrive. Il nome del file di progetto di ssdlc e il resto di questo ADR.
+- **Il passo sull'host** è la sezione [Percorsi devloop e istanza devloop@devloop](../../ops/host/migrate.md#percorsi-devloop-e-istanza-devloopdevloop-563) di `ops/host/migrate.md`, a loop fermo, dopo il merge della PR di #563.

@@ -7,9 +7,9 @@ The suite is ``unittest.defaultTestLoader.discover('tests')``, the same as
 ``python3 -m unittest discover -s tests``: packages, ``load_tests`` hooks and modules with the same
 name in different packages are handled by unittest itself. Its top-level children (one per module)
 are split across N worker processes, slowest first, using the durations of the previous local run
-(``.ssdlc/test-durations.json``, ignored by git) and, for the modules it does not list, those of the
-versioned ``tests/durations.json``, written from a full run: a fresh checkout, as in CI, has no
-local history. A module whose duration is above SPLIT_SECONDS is split by test class when ``units``
+(``.devloop/test-durations.json``, ignored by git, #563) and, for the modules it does not list,
+those of the versioned ``tests/durations.json``, written from a full run: a fresh checkout, as
+in CI, has no local history. A module whose duration is above SPLIT_SECONDS is split by test class when ``units``
 allows it, so its classes run in different workers. A module with no duration in either file stays
 whole, since each class would repeat the imports and fixtures of the module, and is estimated at
 0.5 seconds per test. Each worker repeats the same discover and runs only its parts. The summary at the end gives the total, the slowest modules and the output of every
@@ -233,7 +233,7 @@ def main(argv):
             return {}
         return found if isinstance(found, dict) else {}
 
-    durations = Path(ROOT) / '.ssdlc' / 'test-durations.json'
+    durations = Path(ROOT) / '.devloop' / 'test-durations.json'
     refresh_index()
     children = discover()
     labels = [label(c) or f'#{i}' for i, c in enumerate(children)]

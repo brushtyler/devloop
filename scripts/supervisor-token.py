@@ -6,13 +6,13 @@ Usage:
         <command> [args...]
 
 Examples:
-    python3 scripts/supervisor-token.py --state-dir /home/devloop/ssdlc/.ssdlc/devloop -- \\
+    python3 scripts/supervisor-token.py --state-dir /home/devloop/devloop/.devloop -- \\
         gh issue comment 76 --body-file diary.md
-    python3 scripts/supervisor-token.py --state-dir /home/devloop/ssdlc/.ssdlc/devloop -- \\
+    python3 scripts/supervisor-token.py --state-dir /home/devloop/devloop/.devloop -- \\
         gh issue edit 408 --add-label agent:ready
 
 The supervisor's role app (ADR 0005, P5-4) of the project whose state_dir is DIR (default:
-.ssdlc/devloop of this clone): ``repo`` and ``[apps.supervisor]`` of the local overlay of that
+.devloop of this clone): ``repo`` and ``[apps.supervisor]`` of the local overlay of that
 state_dir, ``config.local.toml``, where the project's identities are since ADR 0006, R6, set over
 ``devloop/config.toml`` of this clone. The project file cannot hold them (its schema is closed),
 so it is not read. It signs the supervisor's commands, labels, issues and diary; devloop
@@ -45,7 +45,7 @@ DEFAULT = {'issues': 'write', 'pull_requests': 'write'}
 ALLOWED = {'issues': {'read', 'write'}, 'pull_requests': {'read', 'write'},
            'metadata': {'read'}}
 # The launcher's default state_dir, of this clone.
-STATE = REPO_ROOT / '.ssdlc' / 'devloop'
+STATE = REPO_ROOT / '.devloop'
 LOCAL_CONFIG = 'config.local.toml'
 STATE_DIR = '--state-dir'
 

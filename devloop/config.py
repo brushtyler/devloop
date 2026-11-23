@@ -1964,7 +1964,7 @@ def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
         repo=_require(data, 'repo', str, 'config'),
         base_branch=data.get('base_branch', 'main'),
         branch_prefix=data.get('branch_prefix', 'agent/issue-'),
-        state_dir=data.get('state_dir', '.ssdlc/devloop'),
+        state_dir=data.get('state_dir', '.devloop'),
         source=_source(data),
         repo_lock_dir=_repo_lock_dir(data),
         repo_aliases=_repo_aliases(data),

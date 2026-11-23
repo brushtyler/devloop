@@ -23,8 +23,9 @@ VERIFIED_ID=ubuntu
 VERIFIED_VERSION=26.04
 VERIFIED_ARCH=aarch64
 
-# Lo state_dir di devloop, relativo al clone, che scripts/devloop-pinned usa senza --state-dir.
-OPS_STATE_DIR=.ssdlc/devloop
+# Lo state_dir di devloop, relativo al clone, che scripts/devloop-pinned usa senza --state-dir
+# (.devloop dal #563; mai sotto .ssdlc/, la directory del vecchio motore SSDLC).
+OPS_STATE_DIR=.devloop
 
 # I segnaposto @NOME@ che `render` sostituisce nei file dichiarativi (unità, sudoers).
 OPS_TEMPLATE_VARS='REPO DEVLOOP_USER SUPERVISOR_USER AGENT_USER COORDINATOR_USER DEVLOOP_HOME AGENT_HOME DEVLOOP_CLONE STATE_DIR STATE_PATH LAUNCHER_CMD DEVLOOP_PATH AGENT_PATH SERVICE_NAME REPO_LOCK_DIR REPO_LOCK_GROUP COORDINATOR_OPS_DIR'
@@ -293,7 +294,9 @@ ops_load_params() {
     : "${APP_PREFIX:?APP_PREFIX non impostato in $PARAMS_FILE}"
     # Più progetti sullo stesso host (ADR 0006, R8): con PROJECT i default sono del progetto,
     # con un utente di sistema per progetto (D6) e l'istanza devloop@<progetto> dell'unità
-    # template. Senza, un solo progetto con devloop.service, come prima.
+    # template. Senza, un solo progetto con devloop.service, come prima. Ogni valore scritto in
+    # params.env vale anche con PROJECT: un host che passa all'istanza tiene così i suoi utenti,
+    # i suoi clone e le sue key_dir (#563).
     : "${PROJECT:=}"
     if [ -n "$PROJECT" ]; then
         [[ $PROJECT =~ ^[a-z0-9]([a-z0-9-]{0,14}[a-z0-9])?$ ]] \

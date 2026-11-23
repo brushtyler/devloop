@@ -92,7 +92,7 @@ class GitCase(unittest.TestCase):
         (self.root / 'NOTES.md').write_text('not pinned\n')
         self.first = self.commit('devloop')
         git(self.root, 'push', '--quiet', 'origin', 'main')
-        self.state = self.root / '.ssdlc' / 'devloop'
+        self.state = self.root / '.devloop'
         self.logs = []
         self.smoked = []
 
@@ -1318,7 +1318,7 @@ class LauncherTests(unittest.TestCase):
         shutil.copy(LAUNCHER, self.root / 'scripts' / 'devloop-pinned')
         self.write(self.root / 'devloop' / '__main__.py', 'raise SystemExit("the checkout ran")\n')
         self.write(self.root / 'devloop' / '__init__.py', '')
-        self.state = self.root / '.ssdlc' / 'devloop'
+        self.state = self.root / '.devloop'
         self.copy = self.state / 'pinned-0123456789ab'
 
     @staticmethod
@@ -1450,14 +1450,14 @@ class LauncherTests(unittest.TestCase):
         # Run by the clone's devloop, it passes the project file and the overlay itself: the
         # installation has no test_cmd since ADR 0006, R3.
         self.assertEqual(command, 'python3 -m devloop --project-config '
-                                  '.ssdlc/devloop/project.toml --local-config '
-                                  '.ssdlc/devloop/config.local.toml pin origin/main')
+                                  '.devloop/project.toml --local-config '
+                                  '.devloop/config.local.toml pin origin/main')
         section = self.subsection('Installation as a dedicated user')
         # The continuation lines of the block, as one (subsection joins the lines with spaces).
-        self.assertIn(f"sudo -u devloop -H sh -c 'cd ~/ssdlc && {command}'",
+        self.assertIn(f"sudo -u devloop -H sh -c 'cd ~/devloop && {command}'",
                       section.replace(' \\ ', ' '))
         # Every later command runs the pinned copy as the devloop user, never as root.
-        self.assertIn('sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned',
+        self.assertIn('sudo -u devloop -H python3 /home/devloop/devloop/scripts/devloop-pinned',
                       section)
         self.assertNotIn('--allow-root', self.installation())
 
@@ -1476,8 +1476,8 @@ class LauncherTests(unittest.TestCase):
     def test_starting_and_stopping_the_loop_is_documented(self):
         section = self.subsection('Starting and stopping the loop')
         for needle in ('PYTHONUNBUFFERED=1 nohup python3 scripts/devloop-pinned run',
-                       '**Unbuffered log.**', 'touch /home/devloop/ssdlc/.ssdlc/devloop/STOP',
-                       'rm /home/devloop/ssdlc/.ssdlc/devloop/STOP', '**`[pin] auto`.**',
+                       '**Unbuffered log.**', 'touch /home/devloop/devloop/.devloop/STOP',
+                       'rm /home/devloop/devloop/.devloop/STOP', '**`[pin] auto`.**',
                        '**`[run] alert_issue`.**', 'exit code 4'):
             with self.subTest(needle=needle):
                 self.assertIn(needle, section)
@@ -1503,10 +1503,10 @@ class LauncherTests(unittest.TestCase):
         # The documented command, in the foreground, for a home of its own and with the PATH
         # of a sudo that leaves out ~/.local/bin.
         home = self.tmp / 'home'
-        root = home / 'ssdlc'
+        root = home / 'devloop'
         (root / 'scripts').mkdir(parents=True)
         shutil.copy(LAUNCHER, root / 'scripts' / 'devloop-pinned')
-        state = root / '.ssdlc' / 'devloop'
+        state = root / '.devloop'
         copy = state / 'pinned-0123456789ab'
         self.write(copy / 'devloop' / '__init__.py', '')
         self.write(copy / 'devloop' / '__main__.py', (
@@ -1572,7 +1572,7 @@ class RestartTests(unittest.TestCase):
                     cli.main(['tick'])
 
     def test_no_smoke_reaches_the_pin(self):
-        cfg = SimpleNamespace(state_dir='.ssdlc/devloop', source='', gc=config.GCPolicy())
+        cfg = SimpleNamespace(state_dir='.devloop', source='', gc=config.GCPolicy())
         with mock.patch.object(cli, 'load_config', return_value=cfg), \
                 mock.patch.object(cli, 'main_checkout', return_value=self.tmp), \
                 mock.patch.object(cli.pin, 'pin') as pinned:
@@ -1690,7 +1690,7 @@ class DryRunTests(GitCase):
                                         cwd=self.root, capture_output=True).returncode, 1)
 
     def test_merge_tree_writes_out_of_the_repository_and_writing_commands_are_refused(self):
-        ws = Workspace(self.root, '.ssdlc/devloop', 'main')
+        ws = Workspace(self.root, '.devloop', 'main')
         (self.root / 'NOTES.md').write_text('main moved on\n')
         base = self.commit('main')  # the merged tree is new: git has to write it
         before = self.files()
@@ -1713,7 +1713,7 @@ class DryRunTests(GitCase):
 class DocsTests(unittest.TestCase):
     def test_the_installation_is_documented(self):
         text = (REPO / 'docs' / 'devloop' / 'guide.md').read_text()
-        for needle in ('--local-config .ssdlc/devloop/config.local.toml pin origin/main',
+        for needle in ('--local-config .devloop/config.local.toml pin origin/main',
                        'scripts/devloop-pinned', '--allow-root',
                        'config.local.toml', 'sudo -u devloop -H', 'Rollback', '[pin]'):
             with self.subTest(needle=needle):
@@ -1726,7 +1726,7 @@ class DocsTests(unittest.TestCase):
         section = ' '.join(text[start:text.index('#### Launcher', start)].split())
         for needle in ('runs the **smoke test** of a new copy', '`python3 -m devloop tick '
                        '--dry-run`', 'one round of `python3 -m devloop watch`',
-                       'at most 30 seconds', '`.ssdlc/devloop/rejected-<sha12>`',
+                       'at most 30 seconds', '`.devloop/rejected-<sha12>`',
                        'runs once more before the copy is refused', '`pin --no-smoke <ref>`',
                        'smoke test of <sha12> skipped (--no-smoke)'):
             with self.subTest(needle=needle):

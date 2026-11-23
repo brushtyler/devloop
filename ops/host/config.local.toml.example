@@ -1,5 +1,5 @@
 # Overlay locale di devloop: <state_dir>/config.local.toml (per default
-# <clone>/.ssdlc/devloop/config.local.toml), dell'utente devloop.
+# <clone>/.devloop/config.local.toml), dell'utente devloop.
 # setup-devloop.sh lo copia da qui solo se non esiste; poi è dell'operatore.
 #
 # Contiene SOLO le chiavi che l'operatore sovrascrive: devloop lo applica sopra
@@ -11,7 +11,7 @@
 
 # Il repository gestito e chi può avviare il lavoro (ADR 0006, R6): stanno solo qui, non in
 # devloop/config.toml. Senza repo e trusted_users devloop non parte. repo è REPO di params.env.
-# repo = "brushtyler/ssdlc"
+# repo = "brushtyler/devloop"
 # trusted_users = ["brushtyler"]
 # Solo dopo una rinomina del repository su GitHub (#540, ADR 0007): i nomi di prima, perché i
 # link ai commenti, i record del journal e i marker scritti con quei nomi restino validi.

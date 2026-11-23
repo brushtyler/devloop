@@ -33,7 +33,8 @@ turns, their logs, their sessions), not even to find the step: the operator give
 You are not on the channel between the supervisor and the coordinator and you watch nothing: the
 operator launches you for a task and the session ends with it. At startup you read only the
 checkout of `main` and the operator's instruction (below). The mailbox of the roles
-(`COORDINATION_DIR` of `ops/params.env`, default `/var/lib/devloop-coordination`) holds output
+(`COORDINATION_DIR` of `ops/params.env`, default `/var/lib/devloop-coordination`, on the host of
+this repository `/var/lib/devloop-coordination-devloop` since #563) holds output
 of agents: never read its messages. You prepare it only through the procedures:
 `setup-supervisor.sh` and `setup-coordinator.sh` make the group `devloop-roles`, with the
 supervisor and the coordinator in it, and its directories, and `check-host.sh` verifies them.

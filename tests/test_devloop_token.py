@@ -30,7 +30,7 @@ from helpers import ssdlc_project
 ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER = ROOT / 'scripts' / 'devloop-pinned'
 WRAPPER = ROOT / 'scripts' / 'agent-token.py'
-STATE = Path('.ssdlc') / 'devloop'
+STATE = Path('.devloop')
 
 
 def git(cwd, *args):
@@ -253,13 +253,34 @@ class WrapperTests(unittest.TestCase):
         self.script = wrapper()
 
     def test_it_calls_devloop_token_through_the_launcher(self):
-        argv = self.script.command(['claude', '--perm', 'issues=read', '--', 'gh', 'x'],
-                                   python='py')
-        # The main checkout of this clone, also when the tests run from a linked worktree.
-        common = Path(git(ROOT, 'rev-parse', '--path-format=absolute', '--git-common-dir'))
-        self.assertEqual(argv, ['py', str(LAUNCHER), '--state-dir',
-                                str(common.parent / '.ssdlc' / 'devloop'), 'token', 'claude',
-                                '--perm', 'issues=read', '--', 'gh', 'x'])
+        # The main checkout of this clone (main_checkout: the test below), whatever state_dir
+        # the host running the tests has.
+        main = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, main)
+        with mock.patch.object(self.script, 'main_checkout', return_value=main):
+            argv = self.script.command(['claude', '--perm', 'issues=read', '--', 'gh', 'x'],
+                                       python='py')
+        self.assertEqual(argv, ['py', str(LAUNCHER), '--state-dir', str(main / '.devloop'),
+                                'token', 'claude', '--perm', 'issues=read', '--', 'gh', 'x'])
+
+    def test_it_stops_on_the_state_dir_of_before_563(self):
+        # #563: the clone still has .ssdlc/devloop and no .devloop: no fallback, the migration
+        # named.
+        main = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, main)
+        (main / '.ssdlc' / 'devloop').mkdir(parents=True)
+        with mock.patch.object(self.script, 'main_checkout', return_value=main), \
+                self.assertRaises(SystemExit) as raised:
+            self.script.command(['claude', '--', 'gh', 'x'], python='py')
+        message = str(raised.exception)
+        self.assertIn(f'{main}/.ssdlc/devloop is the state_dir of before #563', message)
+        self.assertIn('ops/host/migrate.md', message)
+        self.assertIn('"Percorsi devloop e istanza devloop@devloop"', message)
+        # With both, .devloop is the state_dir: .ssdlc/ is never read.
+        (main / '.devloop').mkdir()
+        with mock.patch.object(self.script, 'main_checkout', return_value=main):
+            argv = self.script.command(['claude', '--', 'gh', 'x'], python='py')
+        self.assertEqual(argv[3], str(main / '.devloop'))
 
     def test_the_default_state_dir_is_the_main_checkouts(self):
         tmp = Path(tempfile.mkdtemp()).resolve()
@@ -294,8 +315,12 @@ class WrapperTests(unittest.TestCase):
 
     def test_main_replaces_itself_with_the_launcher(self):
         calls = []
-        self.script.main(['claude', '--', 'gh', 'x'], execv=lambda path, args: calls.append(args))
-        self.assertEqual(calls, [self.script.command(['claude', '--', 'gh', 'x'])])
+        main = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, main)
+        with mock.patch.object(self.script, 'main_checkout', return_value=main):
+            self.script.main(['claude', '--', 'gh', 'x'],
+                             execv=lambda path, args: calls.append(args))
+            self.assertEqual(calls, [self.script.command(['claude', '--', 'gh', 'x'])])
 
     def test_it_imports_nothing_from_the_clone(self):
         text = WRAPPER.read_text(encoding='utf-8')

@@ -8,6 +8,7 @@ import getpass
 import grp
 import html
 import importlib.util
+import inspect
 import itertools
 import json
 import os
@@ -299,8 +300,8 @@ class LayoutTests(unittest.TestCase):
         migrate = (OPS / 'host/migrate.md').read_text()
         for phrase in ('ledger-open-turns.json', 'model-unavailability.json', 'activity.json',
                        'config.local.toml', 'turn-journal.jsonl', '~/supervisor',
-                       'memory', '--project-config .ssdlc/devloop/project.toml',
-                       '--local-config .ssdlc/devloop/config.local.toml pin origin/main',
+                       'memory', '--project-config .devloop/project.toml',
+                       '--local-config .devloop/config.local.toml pin origin/main',
                        'mai due dispatcher attivi', 'systemctl stop'):
             self.assertIn(phrase, migrate)
 
@@ -517,6 +518,239 @@ class R3MigrationGuideTests(unittest.TestCase):
             self.assertIn(source, devloop)
 
 
+class DevloopPathsGuideTests(unittest.TestCase):
+    """ops/host/migrate.md, "Percorsi devloop e istanza devloop@devloop (#563)": the step on the
+    host that moves the clones and the state_dir to their names of devloop and turns the host
+    into the instance devloop@devloop, with the order the pin needs, every point of the issue,
+    the checks and the rollback."""
+
+    HEADING = '## Percorsi devloop e istanza devloop@devloop (#563)'
+    ANCHOR = 'host/migrate.md#percorsi-devloop-e-istanza-devloopdevloop-563'
+    OLD, NEW = '/home/devloop/ssdlc', '/home/devloop/devloop'
+    OPERATOR = '/root/repos/ssdlc'
+
+    def section(self):
+        return RootStepsGuideTests().section(self.HEADING)
+
+    def commands(self, text=None):
+        return RootStepsGuideTests.commands(self.section() if text is None else text, inline=False)
+
+    def rollback(self):
+        section = self.section()
+        return section[section.index('**Rollback.**'):]
+
+    def index(self, commands, command):
+        self.assertIn(command, commands)
+        return commands.index(command)
+
+    def test_the_guides_link_it_and_it_has_its_parts(self):
+        for path in ('README.md', 'ops/README.md', 'docs/devloop/guide.md',
+                     'docs/devloop/reference.md', 'docs/adr/0007-da-ssdlc-a-devloop.md'):
+            with self.subTest(path=path):
+                self.assertIn('migrate.md#percorsi-devloop-e-istanza-devloopdevloop-563',
+                              (ROOT / path).read_text(encoding='utf-8'))
+        section = ' '.join(self.section().split())
+        for phrase in ('### Prima', '### Comandi', '**Rollback.**', '**L\'ordine.**',
+                       '**Non cambiano:**', '**Il vecchio motore non si tocca:**',
+                       '`host_step`', 'a loop fermo', 'come root'):
+            self.assertIn(phrase, section)
+        # The launcher's message names this section.
+        launcher = (ROOT / 'scripts/devloop-pinned').read_text(encoding='utf-8')
+        self.assertIn('section "Percorsi devloop e istanza devloop@devloop"', launcher)
+        self.assertIn('Percorsi devloop e istanza devloop@devloop', self.HEADING)
+
+    def test_everything_stops_first_and_the_pin_comes_before_the_move(self):
+        commands = self.commands()
+        stop = self.index(commands, 'systemctl stop devloop')
+        for session in ('sudo -u supervisor -H tmux kill-session -t =devloop-supervisor',
+                        'sudo -u coordinator -H tmux kill-session -t =devloop-coordinator',
+                        'pgrep -u coordinator -af coordinator-wait.sh'):
+            self.assertLess(stop, self.index(commands, session))
+        # The pin with the state_dir of before, from the launcher of the clone not updated yet,
+        # with the line of the state_dir of before at the top of the overlay for its time.
+        line = 'printf \'state_dir = ".ssdlc/devloop"\\n\' | cat - config.local.toml > ' \
+               '/root/devloop-563-prima/overlay-pin'
+        fetch = self.index(commands, f'sudo -u devloop -H git -C {self.OLD} fetch origin')
+        pin = self.index(commands, f'sudo -u devloop -H python3 {self.OLD}/scripts/devloop-pinned '
+                                   'pin origin/main')
+        self.assertLess(stop, self.index(commands, line))
+        self.assertLess(self.index(commands, line), pin)
+        self.assertLess(fetch, pin)
+        self.assertIn('grep -x \'state_dir = ".devloop"\' '
+                      f'{self.OLD}/.ssdlc/devloop/current/devloop/config.toml', commands)
+        move = self.index(commands, f'mv {self.OLD} {self.NEW}')
+        self.assertLess(pin, move)
+        # The clone moves to origin/main, with the new launcher, only after the move; never
+        # before the pin.
+        detach = self.index(commands, f'sudo -u devloop -H git -C {self.NEW} checkout --detach '
+                                      'origin/main')
+        self.assertLess(move, detach)
+        self.assertNotIn(f'sudo -u devloop -H git -C {self.OLD} checkout --detach origin/main',
+                         commands[:move])
+        # The line goes away after the move: the overlay is the one of before.
+        remove = self.index(commands, 'grep -vx \'state_dir = ".ssdlc/devloop"\' config.local.toml'
+                                      ' > /root/devloop-563-prima/overlay-dopo')
+        self.assertLess(move, remove)
+        self.assertLess(remove, detach)
+        self.assertIn('cmp config.local.toml /root/devloop-563-prima/config.local.toml && echo '
+                      'uguale', commands)
+        # The new copy refuses the state_dir of before without the line, as the guide says.
+        from devloop import __main__ as cli
+        self.assertIn('is not {expected}', inspect.getsource(cli.check_project))
+        self.assertIn('`project file: … is not …/.devloop/project.toml`',
+                      ' '.join(self.section().split()))
+
+    def test_the_moves_keep_owners_and_acls_and_are_checked_after(self):
+        commands = self.commands()
+        moves = [f'mv {self.OLD} {self.NEW}',
+                 f'mv {self.NEW}/.ssdlc/devloop {self.NEW}/.devloop',
+                 'mv /home/supervisor/ssdlc /home/supervisor/devloop',
+                 'mv /home/coordinator/ssdlc /home/coordinator/devloop',
+                 'mv /var/lib/devloop-coordination /var/lib/devloop-coordination-devloop']
+        at = [self.index(commands, move) for move in moves]
+        self.assertEqual(at, sorted(at))
+        # Same filesystem: checked before, with stat; the ACLs checked after the moves.
+        self.assertTrue(any(c.startswith("stat -c '%d %n' /home/devloop ") for c in commands))
+        acl = self.index(commands, f'getfacl -p /home/devloop {self.NEW}/.devloop '
+                                   f'{self.NEW}/.devloop/config.local.toml '
+                                   f'{self.NEW}/.devloop/project.toml')
+        self.assertLess(at[-1], acl)
+        section = ' '.join(self.section().split())
+        for entry in ('`user:supervisor:r--`', '`user:coordinator:r--`',
+                      '`user:devloop-agent:---`', '`user:devloop-agent:--x`',
+                      '`default:user:devloop-agent:---`', '`user:supervisor:--x`',
+                      '`user:coordinator:--x`'):
+            self.assertIn(entry, section)
+        # The worktrees: listed before, repaired after the move when there are any.
+        self.assertIn(f'sudo -u devloop -H git -C {self.NEW} worktree repair '
+                      f'{self.NEW}/.devloop/worktrees/*', commands)
+        self.assertLess(at[1], self.index(commands, f'sudo -u devloop -H git -C {self.NEW} '
+                                                    'worktree list'))
+        # The state_dir: the relative link and no absolute path in the state files.
+        self.assertIn('readlink current', commands)
+        self.assertTrue(any(c.startswith(f'grep -rlF {self.OLD} . --exclude-dir=worktrees')
+                            for c in commands))
+        self.assertIn('`pin-base.json`', section)
+        # The keys do not move.
+        self.assertNotRegex(self.section(), r'\bmv\b[^\n]*\.ghapps')
+        self.assertIn('Le chiavi non si spostano.', section)
+
+    def test_the_agent_users_clis_are_rewritten_by_root(self):
+        commands = self.commands()
+        path = '/home/devloop-agent/.gemini/antigravity-cli/settings.json'
+        self.assertIn(f'f={path}', commands)
+        self.assertIn('cat /root/devloop-563-prima/agy-settings-dopo > "$f"', commands)
+        self.assertIn('python3 -I -m json.tool /root/devloop-563-prima/agy-settings-dopo > '
+                      '/dev/null && echo json', commands)
+        # A sealed file of the agent user (#438): root writes it, in place.
+        self.assertIn('.gemini/antigravity-cli/settings.json', agentuser.CLI_SEALED)
+        section = ' '.join(self.section().split())
+        for phrase in ('`trustedWorkspaces`', 'lo riscrive root, al suo posto',
+                       "l'utente degli agent non lo scrive",
+                       'Le cache di agy (`~/.gemini/antigravity-cli/cache/`) e le sessioni non si '
+                       'riscrivono'):
+            self.assertIn(phrase, section)
+        others = [c for c in commands if c.startswith(f'grep -lF {self.OLD} ')]
+        self.assertEqual(len(others), 1, others)
+        for name in ('/home/devloop-agent/.claude.json', '/home/devloop-agent/.codex/config.toml',
+                     '/home/devloop/.codex/config.toml'):
+            self.assertIn(name, others[0])
+
+    def test_params_keep_the_users_and_the_key_dirs_with_project(self):
+        block = re.search(r"cat >> params\.env <<'EOF'\n(.*?)\n\s*EOF", self.section(), re.S)
+        lines = [line.strip() for line in block.group(1).splitlines()]
+        values = dict(line.split('=', 1) for line in lines if not line.startswith('#'))
+        self.assertEqual(values, {
+            'PROJECT': 'devloop', 'DEVLOOP_USER': 'devloop', 'AGENT_USER': 'devloop-agent',
+            'SUPERVISOR_USER': 'supervisor', 'COORDINATOR_USER': 'coordinator',
+            'SUPERVISOR_CLONE': '/home/supervisor/devloop',
+            'DEVLOOP_KEY_DIR': '/home/devloop/.ghapps',
+            'SUPERVISOR_KEY_DIR': '/home/supervisor/.ghapps',
+            'COORDINATOR_KEY_DIR': '/home/coordinator/.ghapps'})
+        # The same values as the example's, and those of the dry runs of the setup scripts.
+        example = (OPS / 'params.env.example').read_text(encoding='utf-8')
+        for name, value in values.items():
+            self.assertIn(f'#   {name}={value}\n', example)
+        self.assertEqual({k: v for k, v in values.items() if k.endswith('_USER')},
+                         DryRunTests.HOST_USERS)
+        # The values that must take the defaults of PROJECT go away first.
+        removed = [c for c in self.commands() if c.startswith("sed -i -E '/^(PROJECT|")]
+        self.assertEqual(len(removed), 1, removed)
+        for name in ('DEVLOOP_CLONE', 'SUPERVISOR_CLONE', 'SERVICE_NAME', 'SUDOERS_FILE',
+                     'AGENT_SUDOERS_FILE', 'COORDINATOR_SUDOERS_FILE', 'COORDINATOR_OPS_DIR',
+                     'COORDINATION_DIR', 'STATE_DIR'):
+            self.assertIn(f'|{name}|' if name != 'STATE_DIR' else f'|{name})=', removed[0])
+
+    def test_the_units_of_before_go_before_the_scripts_and_the_checks_follow(self):
+        commands = self.commands()
+        removals = ['rm /etc/systemd/system/devloop.service',
+                    'rm -f /etc/sudoers.d/devloop-supervisor /etc/sudoers.d/devloop-agent '
+                    '/etc/sudoers.d/devloop-coordinator',
+                    'rm -rf /usr/local/lib/devloop-coordinator']
+        last = max(self.index(commands, c) for c in removals)
+        # Backed up first.
+        self.assertLess(self.index(commands, 'cp -p /etc/systemd/system/devloop.service .'),
+                        last)
+        scripts = []
+        for script in ('setup-devloop.sh', 'setup-agent-user.sh', 'setup-supervisor.sh',
+                       'setup-coordinator.sh'):
+            dry = self.index(commands, f'sudo bash {self.OPERATOR}/ops/host/{script} --dry-run')
+            real = self.index(commands, f'sudo bash {self.OPERATOR}/ops/host/{script}')
+            self.assertLess(last, dry)
+            self.assertLess(dry, real)
+            scripts.append(real)
+        self.assertEqual(scripts, sorted(scripts))
+        checks = [f'sudo bash {self.OPERATOR}/ops/host/check-host.sh',
+                  f'sudo -u devloop -H python3 {self.NEW}/scripts/devloop-pinned apps',
+                  f'sudo -u devloop -H python3 {self.NEW}/scripts/devloop-pinned tick --dry-run']
+        for check in checks:
+            self.assertLess(scripts[-1], self.index(commands, check))
+        tokens = [c for c in commands if 'scripts/supervisor-token.py --state-dir '
+                  f'{self.NEW}/.devloop' in c or 'scripts/coordinator-token.py --state-dir '
+                  f'{self.NEW}/.devloop' in c]
+        self.assertEqual(len(tokens), 2, tokens)
+        start = self.index(commands, 'systemctl start devloop@devloop')
+        self.assertLess(max(self.index(commands, c) for c in checks), start)
+        for role in ('supervisor', 'coordinator'):
+            self.assertLess(start, self.index(
+                commands, f'sudo bash {self.OPERATOR}/ops/host/start-role.sh {role}'))
+        # No script of ops/host runs from devloop's clone, old or new.
+        for command in commands:
+            self.assertNotIn(f'{self.OLD}/ops/', command)
+            self.assertNotIn(f'{self.NEW}/ops/', command)
+
+    def test_the_rollback_undoes_every_step(self):
+        commands = self.commands(self.rollback())
+        for command in (
+                'systemctl disable devloop@devloop',
+                'rm -r /etc/systemd/system/devloop@devloop.service.d',
+                'rm -f /etc/sudoers.d/devloop-supervisor-devloop '
+                '/etc/sudoers.d/devloop-agent-devloop /etc/sudoers.d/devloop-coordinator-devloop',
+                'rm -rf /usr/local/lib/devloop-coordinator-devloop',
+                'cp -p devloop.service /etc/systemd/system/devloop.service',
+                'cp -p params.env /root/repos/ssdlc/ops/params.env',
+                'cat agy-settings.json > /home/devloop-agent/.gemini/antigravity-cli/settings.json',
+                'mv /var/lib/devloop-coordination-devloop /var/lib/devloop-coordination',
+                'mv /home/coordinator/devloop /home/coordinator/ssdlc',
+                'mv /home/supervisor/devloop /home/supervisor/ssdlc',
+                f'mv {self.NEW}/.devloop {self.NEW}/.ssdlc/devloop',
+                f'mv {self.NEW} {self.OLD}',
+                f'sudo -u devloop -H git -C {self.OLD} checkout --detach "$(cat clone-head)"',
+                'cat /root/devloop-563-prima/overlay-pin > config.local.toml',
+                'cat /root/devloop-563-prima/config.local.toml > config.local.toml',
+                'systemctl start devloop'):
+            self.assertIn(command, commands)
+        pin = [c for c in commands if c.startswith(f'sudo -u devloop -H python3 {self.OLD}/'
+                                                    'scripts/devloop-pinned pin ')]
+        self.assertEqual(len(pin), 1, pin)
+        self.assertLess(commands.index('cat /root/devloop-563-prima/overlay-pin > '
+                                       'config.local.toml'), commands.index(pin[0]))
+        self.assertLess(commands.index(pin[0]), commands.index(
+            'cat /root/devloop-563-prima/config.local.toml > config.local.toml'))
+        # The tag of the old engine is never touched, nor removed.
+        self.assertNotIn('ssdlc-engine-final', ' '.join(self.commands()))
+
+
 class RootStepsGuideTests(unittest.TestCase):
     """ops/host/migrate.md (#490): the scripts of ops/host run as root from the operator's
     checkout, never from devloop's clone, which devloop can write; devloop's clone, in detached
@@ -719,8 +953,8 @@ class CoordinatorGuideTests(unittest.TestCase):
 
     OPERATOR = '/root/repos/ssdlc'
     VALUES = {'DEVLOOP_USER': 'devloop', 'COORDINATOR_USER': 'coordinator',
-              'LAUNCHER_CMD': '/usr/bin/python3 /home/devloop/ssdlc/scripts/devloop-pinned',
-              'STATE_PATH': '/home/devloop/ssdlc/.ssdlc/devloop', 'SERVICE_NAME': 'devloop',
+              'LAUNCHER_CMD': '/usr/bin/python3 /home/devloop/devloop/scripts/devloop-pinned',
+              'STATE_PATH': '/home/devloop/devloop/.devloop', 'SERVICE_NAME': 'devloop',
               'COORDINATOR_OPS_DIR': '/usr/local/lib/devloop-coordinator'}
 
     def sudoers(self):
@@ -740,7 +974,7 @@ class CoordinatorGuideTests(unittest.TestCase):
         # through sudo, always with its own key_dir: [apps] key_dir of the overlay is devloop's.
         token = [c for c in commands if 'scripts/coordinator-token.py' in c]
         mint = ('DEVLOOP_APP_KEY_DIR=/home/coordinator/.ghapps python3 '
-                'scripts/coordinator-token.py --state-dir /home/devloop/ssdlc/.ssdlc/devloop ')
+                'scripts/coordinator-token.py --state-dir /home/devloop/devloop/.devloop ')
         self.assertEqual(token, [
             mint + '-- gh issue comment <ISSUE> --body-file <FILE>',
             mint + '--perm actions=read -- gh run view <RUN> --log-failed'])
@@ -1073,7 +1307,7 @@ class DeclarativeFileTests(unittest.TestCase):
             overlay.write_text(active + '\n')
             # With ssdlc's project file, as on its host (ADR 0006, R3).
             cfg = load_config(ROOT / 'devloop/config.toml', overlay, ssdlc_project.PROJECT)
-        self.assertEqual(cfg.repo, 'brushtyler/ssdlc')
+        self.assertEqual(cfg.repo, 'brushtyler/devloop')
 
 
 class DryRunTests(OpsTestCase):
@@ -1086,16 +1320,16 @@ class DryRunTests(OpsTestCase):
         self.assertIn('piattaforma verificata', out)
         self.assertIn(f'[dry-run] useradd --create-home --home-dir {self.home}/devloop', out)
         self.assertIn('[dry-run] sudo -u opsdry-nouser -H -- git clone '
-                      f'https://github.com/brushtyler/ssdlc.git {self.home}/devloop/ssdlc', out)
+                      f'https://github.com/brushtyler/devloop.git {self.home}/devloop/devloop', out)
         self.assertIn(f'[dry-run] install -d -m 700 -o opsdry-nouser -g opsdry-nouser '
                       f'{self.home}/devloop/.ghapps', out)
         self.assertIn(f'scriverebbe {self.tmp}/systemd/devloop.service', out)
         self.assertIn('    | User=opsdry-nouser\n', out)
-        self.assertIn(f'    | StandardOutput=append:{self.home}/devloop/ssdlc/.ssdlc/devloop/run.log',
+        self.assertIn(f'    | StandardOutput=append:{self.home}/devloop/devloop/.devloop/run.log',
                       out)
         # Without SOURCE_REPO and with the default state_dir, the launcher of the clone without
         # parameters, as before ADR 0006, R1.
-        self.assertIn(f'    | ExecStart=/usr/bin/python3 {self.home}/devloop/ssdlc/scripts/'
+        self.assertIn(f'    | ExecStart=/usr/bin/python3 {self.home}/devloop/devloop/scripts/'
                       'devloop-pinned run\n', out)
         self.assertNotIn('env -C', out)
         self.assertNotIn('scrivere state_dir', out)
@@ -1112,14 +1346,14 @@ class DryRunTests(OpsTestCase):
     def test_setup_devloop_dry_run_does_nothing_already_done(self):
         # The state of an installation already in place: a rerun has nothing left to do.
         devloop = self.home / 'devloop'
-        clone = devloop / 'ssdlc'
-        state = clone / '.ssdlc/devloop'
+        clone = devloop / 'devloop'
+        state = clone / '.devloop'
         (clone / '.git').mkdir(parents=True)
         state.mkdir(parents=True)
         (state / 'run.log').touch()
         locks = self.tmp / 'locks/repos'
         # The repository is the overlay's since ADR 0006, R6.
-        (state / 'config.local.toml').write_text('repo = "brushtyler/ssdlc"\n'
+        (state / 'config.local.toml').write_text('repo = "brushtyler/devloop"\n'
                                                  f'repo_lock_dir = "{locks}"\n'
                                                  '[merge]\nmode = "off"\n')
         self.lock_dir(locks)
@@ -1138,9 +1372,9 @@ class DryRunTests(OpsTestCase):
             key.chmod(0o600)
         (self.tmp / 'systemd').mkdir()
         (self.tmp / 'systemd/devloop.service').write_text(render('host/devloop.service', {
-            'REPO': 'brushtyler/ssdlc', 'DEVLOOP_USER': ME, 'DEVLOOP_CLONE': str(clone),
+            'REPO': 'brushtyler/devloop', 'DEVLOOP_USER': ME, 'DEVLOOP_CLONE': str(clone),
             'LAUNCHER_CMD': f'/usr/bin/python3 {clone}/scripts/devloop-pinned',
-            'STATE_PATH': f'{clone}/.ssdlc/devloop',
+            'STATE_PATH': f'{clone}/.devloop',
             'DEVLOOP_PATH': f'{devloop}/.local/bin:/usr/local/bin:/usr/bin:/bin'}))
         # #497: the host is simulated (fake_host): the user of the tests is devloop's, the agent
         # user and the supervisor are other users, and sudo is sudo-rs or the classic one.
@@ -1188,7 +1422,7 @@ class DryRunTests(OpsTestCase):
         self.assertIn(f'    | Defaults>{ME} always_set_home, secure_path="{self.home}/devloop/'
                       '.local/bin:/usr/local/bin:/usr/bin:/bin"', out)
         self.assertIn(f'    | opsdry-nosup ALL=({ME}) NOPASSWD:', out)
-        self.assertIn(f'/usr/bin/python3 {self.home}/devloop/ssdlc/scripts/devloop-pinned '
+        self.assertIn(f'/usr/bin/python3 {self.home}/devloop/devloop/scripts/devloop-pinned '
                       'tick --dry-run', out)
         self.assertIn('/usr/bin/systemctl restart devloop', out)
         self.assertIn(f'install -d -m 700 -o opsdry-nosup -g opsdry-nosup '
@@ -1226,8 +1460,8 @@ class DryRunTests(OpsTestCase):
                               f'{copy}/params.env\n', out)
                 self.assertIn(f'scriverebbe {self.tmp}/sudoers.d/devloop-coordinator (mode 440, '
                               'proprietario root)', out)
-                launcher = f'/usr/bin/python3 {self.home}/devloop/ssdlc/scripts/devloop-pinned'
-                state = f'{self.home}/devloop/ssdlc/.ssdlc/devloop'
+                launcher = f'/usr/bin/python3 {self.home}/devloop/devloop/scripts/devloop-pinned'
+                state = f'{self.home}/devloop/devloop/.devloop'
                 for line in (f'{FAKE_COORDINATOR} ALL=({ME}) NOPASSWD: \\',
                              f'    {launcher} status, \\',
                              f'    /usr/bin/tail -n 200 {state}/run.log, \\',
@@ -1271,7 +1505,7 @@ class DryRunTests(OpsTestCase):
         # the script adds when missing (a file replaced with install loses it), and the mailbox
         # between supervisor and coordinator is made: the group, the supervisor in it, the
         # directories root's, 2770.
-        state = self.home / 'devloop/ssdlc/.ssdlc/devloop'
+        state = self.home / 'devloop/devloop/.devloop'
         state.mkdir(parents=True)
         files = [state / 'config.local.toml', state / 'project.toml']
         for path in files:
@@ -1320,10 +1554,10 @@ class DryRunTests(OpsTestCase):
         # #554: the overlay is the operator's, 600: the coordinator reads it through an ACL
         # u:coordinator:r--, which the script adds only when it is missing, and reduces to r--
         # when it is more. The project file is not touched: coordinator-token.py does not read it.
-        state = self.home / 'devloop/ssdlc/.ssdlc/devloop'
+        state = self.home / 'devloop/devloop/.devloop'
         state.mkdir(parents=True)
         overlay = state / 'config.local.toml'
-        overlay.write_text('repo = "brushtyler/ssdlc"\n')
+        overlay.write_text('repo = "brushtyler/devloop"\n')
         overlay.chmod(0o600)
         (state / 'project.toml').write_text('')
         params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=FAKE_SUPERVISOR,
@@ -1376,7 +1610,7 @@ class DryRunTests(OpsTestCase):
                       f'{self.home}/devloop-widget\n', out)
         self.assertIn(f'  DEVLOOP_APP_KEY_DIR={self.home}/coordinator/.ghapps-widget python3 '
                       f'scripts/coordinator-token.py --state-dir '
-                      f'{self.home}/devloop-widget/widget/.ssdlc/devloop -- <comando>\n', out)
+                      f'{self.home}/devloop-widget/widget/.devloop -- <comando>\n', out)
         self.assertEqual(self.mutating_calls(), [])
 
     def test_the_coordinator_has_a_user_of_its_own_and_a_copy_out_of_reach(self):
@@ -1466,11 +1700,11 @@ class DryRunTests(OpsTestCase):
         # worktrees and in the directories of its turns and tests, never in .git, and has no
         # access to any other entry of state_dir.
         devloop = self.home / 'devloop'
-        state = devloop / 'ssdlc/.ssdlc/devloop'
+        state = devloop / 'devloop/.devloop'
         (state / 'logs').mkdir(parents=True)
         (state / 'turn-journal.jsonl').write_text('')
         (state / 'config.local.toml').write_text('[merge]\nmode = "off"\n')
-        git_worktrees = devloop / 'ssdlc/.git/worktrees'
+        git_worktrees = devloop / 'devloop/.git/worktrees'
         git_worktrees.mkdir(parents=True)
         # The ACL an earlier version gave the agent user on .git/worktrees, nothing elsewhere.
         self.shim('getfacl', f'for a in "$@"; do last=$a; done\n'
@@ -1992,7 +2226,7 @@ esac''')
         for value in forms:
             data = json.loads(html.unescape(value))
             names.append(data['name'])
-            self.assertEqual(data['url'], 'https://github.com/brushtyler/ssdlc')
+            self.assertEqual(data['url'], 'https://github.com/brushtyler/devloop')
             self.assertEqual(data['default_permissions'],
                              manifest(data['name'][len(PREFIX):])['default_permissions'])
         self.assertEqual(sorted(names), sorted(PREFIX + role for role in REQUIRED))
@@ -2040,7 +2274,7 @@ esac''')
     def test_another_state_dir_reaches_the_launcher_as_a_parameter(self):
         # ADR 0006, R1: the state_dir of the host, absolute or relative to the clone, is passed
         # to the launcher, which then runs in the managed clone.
-        clone = f'{self.home}/devloop/ssdlc'
+        clone = f'{self.home}/devloop/devloop'
         for value, path in (('/var/lib/devloop/ssdlc', '/var/lib/devloop/ssdlc'),
                             ('custom-state', f'{clone}/custom-state')):
             with self.subTest(value=value):
@@ -2127,10 +2361,10 @@ esac''')
         self.assertIn(f'    | d {locks} 3770 root opsdry-nogroup -\n', out)
         self.assertIn(f'[dry-run] systemd-tmpfiles --create {tmpfiles}\n', out)
         self.assertIn(f'da fare a mano: scrivere repo_lock_dir = "{locks}" in {self.home}/devloop/'
-                      'ssdlc/.ssdlc/devloop/config.local.toml', out)
+                      'devloop/.devloop/config.local.toml', out)
         # ADR 0006, R6: the repository is the overlay's, devloop/config.toml has none.
-        self.assertIn(f'da fare a mano: scrivere repo = "brushtyler/ssdlc" in {self.home}/'
-                      'devloop/ssdlc/.ssdlc/devloop/config.local.toml', out)
+        self.assertIn(f'da fare a mano: scrivere repo = "brushtyler/devloop" in {self.home}/'
+                      'devloop/devloop/.devloop/config.local.toml', out)
         self.assertEqual(self.mutating_calls(), [])
         self.assertEqual(self.tree(), before)
 
@@ -2192,7 +2426,7 @@ esac''')
         self.assertIn(f'    | WorkingDirectory={home}/widget\n', out)
         self.assertIn(f'    | ExecStart=/usr/bin/python3 {home}/widget/scripts/devloop-pinned run\n',
                       out)
-        self.assertIn(f'    | StandardOutput=append:{home}/widget/.ssdlc/devloop/run.log\n', out)
+        self.assertIn(f'    | StandardOutput=append:{home}/widget/.devloop/run.log\n', out)
         self.assertNotIn(f'{systemd}/devloop.service', out)
         self.assertNotRegex(out, r'@[A-Z_]+@')
         # The supervisor: one sudoers per unit, the key_dir of the project.
@@ -2314,8 +2548,8 @@ esac''')
         # Without PROJECT, the clone of before.
         done = self.run_script('host/setup-supervisor.sh', '--dry-run', '--params',
                                str(self.params()))
-        self.assertIn(f'git clone https://github.com/brushtyler/ssdlc.git '
-                      f'{self.home}/supervisor/ssdlc\n', done.stdout)
+        self.assertIn(f'git clone https://github.com/brushtyler/devloop.git '
+                      f'{self.home}/supervisor/devloop\n', done.stdout)
         # A clone already there of another repository is another project's: never shared.
         (clone / '.git').mkdir(parents=True)
         config = clone / '.git/config'
@@ -2334,6 +2568,118 @@ esac''')
                 else:
                     self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
                     self.assertIn(f'ok: {clone} è già un clone di acme/widget', done.stdout)
+        self.assertEqual(self.mutating_calls(), [])
+
+    # The users of the host of this repository (#563): written in params.env beside PROJECT.
+    HOST_USERS = {'DEVLOOP_USER': 'devloop', 'AGENT_USER': 'devloop-agent',
+                  'SUPERVISOR_USER': 'supervisor', 'COORDINATOR_USER': 'coordinator'}
+
+    def devloop_project(self):
+        """The host of this repository after #563, with the moves of ops/host/migrate.md done:
+        ``params.env`` as at its step 10 (PROJECT=devloop with the users, the supervisor's clone
+        and the key_dirs of before written; the other paths the defaults of PROJECT), the clones
+        and the state_dir at their new paths, and the users already there (fake_host)."""
+        home = self.home
+        for clone in (home / 'devloop/devloop', home / 'supervisor/devloop'):
+            (clone / '.git').mkdir(parents=True)
+            (clone / '.git/config').write_text(
+                '[remote "origin"]\n\turl = https://github.com/brushtyler/devloop.git\n')
+        state = home / 'devloop/devloop/.devloop'
+        state.mkdir()
+        (state / 'run.log').touch()
+        (state / 'config.local.toml').write_text(
+            f'repo = "brushtyler/devloop"\nrepo_lock_dir = "{self.tmp / "locks/repos"}"\n')
+        (state / 'project.toml').write_text('')
+        self.fake_host('classic sudo', users=tuple(self.HOST_USERS.values()))
+        return self.params(
+            PROJECT='devloop', REPO='brushtyler/devloop', **self.HOST_USERS,
+            DEVLOOP_HOME=str(home / 'devloop'), AGENT_HOME=str(home / 'devloop-agent'),
+            SUPERVISOR_HOME=str(home / 'supervisor'), COORDINATOR_HOME=str(home / 'coordinator'),
+            SUPERVISOR_CLONE=str(home / 'supervisor/devloop'),
+            DEVLOOP_KEY_DIR=str(home / 'devloop/.ghapps'),
+            SUPERVISOR_KEY_DIR=str(home / 'supervisor/.ghapps'),
+            COORDINATOR_KEY_DIR=str(home / 'coordinator/.ghapps'),
+            # The defaults of PROJECT: empty is unset for ops/lib.sh.
+            SUDOERS_FILE='', AGENT_SUDOERS_FILE='', COORDINATOR_SUDOERS_FILE='',
+            COORDINATOR_OPS_DIR='', COORDINATION_DIR='')
+
+    def test_this_host_as_the_project_devloop_keeps_its_users(self):
+        # #563: PROJECT=devloop with the users of today gives the instance devloop@devloop, the
+        # clones .../devloop and no new user, nor a key_dir or a supervisor's clone of PROJECT.
+        params = self.devloop_project()
+        home, systemd = self.home, self.tmp / 'systemd'
+        clone, state = home / 'devloop/devloop', home / 'devloop/devloop/.devloop'
+        before = self.tree()
+        outs = {}
+        for script in ('setup-devloop.sh', 'setup-agent-user.sh', 'setup-supervisor.sh',
+                       'setup-coordinator.sh'):
+            with self.subTest(script=script):
+                done = self.run_script(f'host/{script}', '--dry-run', '--params', str(params))
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                outs[script] = out = done.stdout
+                self.assertNotIn('useradd', out)
+                self.assertNotIn('.ghapps-devloop', out)
+                self.assertNotIn('devloop-devloop', out)
+                for old in ('devloop/ssdlc', 'supervisor/ssdlc', 'coordinator/ssdlc'):
+                    self.assertNotIn(f'{home}/{old}', out)
+                self.assertNotRegex(out, r'@[A-Z_]+@')
+        out = outs['setup-devloop.sh']
+        self.assertIn("ok: l'utente devloop esiste\n", out)
+        self.assertIn(f'ok: {clone} è già un clone', out)
+        self.assertIn(f'ok: {state} esiste\n', out)
+        self.assertIn(f'scriverebbe {systemd}/devloop@.service (mode 644', out)
+        self.assertIn(f'scriverebbe {systemd}/devloop@devloop.service.d/project.conf (mode 644',
+                      out)
+        for line in ('Description=devloop continuous loop (brushtyler/devloop)', 'User=devloop',
+                     f'WorkingDirectory={clone}',
+                     f'ExecStart=/usr/bin/python3 {clone}/scripts/devloop-pinned run',
+                     f'StandardOutput=append:{state}/run.log'):
+            self.assertIn(f'    | {line}\n', out)
+        self.assertIn(f'install -d -m 700 -o devloop -g devloop {home}/devloop/.ghapps\n', out)
+        self.assertNotIn(f'{systemd}/devloop.service', out)
+        out = outs['setup-agent-user.sh']
+        self.assertIn('scriverebbe /etc/sudoers.d/devloop-agent-devloop (mode 440', out)
+        self.assertIn('    | devloop ALL=(devloop-agent) NOPASSWD:SETENV:', out)
+        out = outs['setup-supervisor.sh']
+        self.assertIn("ok: l'utente supervisor esiste\n", out)
+        self.assertIn('scriverebbe /etc/sudoers.d/devloop-supervisor-devloop (mode 440', out)
+        self.assertIn('    | supervisor ALL=(devloop) NOPASSWD:', out)
+        self.assertIn('    /usr/bin/systemctl restart devloop@devloop, \\\n', out)
+        self.assertIn(f'    /usr/bin/python3 {clone}/scripts/devloop-pinned tick --dry-run, \\\n',
+                      out)
+        self.assertIn(f'ok: {home}/supervisor/devloop è già un clone di brushtyler/devloop', out)
+        self.assertIn(f'-o supervisor -g supervisor {home}/supervisor/.ghapps\n', out)
+        self.assertIn('install -d -m 2770 -o root -g '
+                      f'{GROUP} /var/lib/devloop-coordination-devloop\n', out)
+        out = outs['setup-coordinator.sh']
+        self.assertIn("ok: l'utente coordinator esiste\n", out)
+        self.assertIn('scriverebbe /etc/sudoers.d/devloop-coordinator-devloop (mode 440', out)
+        self.assertIn('install -d -m 755 -o root -g root /usr/local/lib/devloop-coordinator-devloop\n',
+                      out)
+        self.assertIn('    /usr/bin/journalctl --no-pager -n 200 -u devloop@devloop, \\\n', out)
+        self.assertIn(f'    /usr/bin/tail -n 200 {state}/run.log, \\\n', out)
+        self.assertIn(f'  DEVLOOP_APP_KEY_DIR={home}/coordinator/.ghapps python3 '
+                      f'scripts/coordinator-token.py --state-dir {state} -- <comando>\n', out)
+        self.assertEqual(self.mutating_calls(), [])
+        self.assertEqual(self.tree(), before)
+
+    def test_the_units_of_before_stop_the_scripts_until_they_are_removed(self):
+        # #563: devloop.service of before names the same user: with PROJECT it is another
+        # installation's, so the scripts stop until migrate.md removes it (step 11).
+        params = self.devloop_project()
+        (self.tmp / 'systemd').mkdir()
+        unit = self.tmp / 'systemd/devloop.service'
+        unit.write_text('[Service]\nUser=devloop\n')
+        done = self.run_script('host/setup-devloop.sh', '--dry-run', '--params', str(params))
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("DEVLOOP_USER 'devloop' è già l'utente devloop di un'altra installazione di "
+                      f'devloop dell\'host ({unit})', done.stderr)
+        migrate = ' '.join((OPS / 'host/migrate.md').read_text(encoding='utf-8').split())
+        self.assertIn("(`DEVLOOP_USER 'devloop' è già l'utente devloop di un'altra installazione "
+                      "di devloop dell'host`)", migrate)
+        unit.unlink()
+        done = self.run_script('host/setup-devloop.sh', '--dry-run', '--params', str(params))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertEqual(self.mutating_calls(), [])
 
     def test_a_missing_params_file_is_explained(self):
@@ -2429,7 +2775,7 @@ class CheckHostTests(OpsTestCase):
         # The memories of codex off (request of the operator on PR #523).
         (self.agent / '.codex/config.toml').write_text('[features]\nmemories = false\n')
         self.exe(self.supervisor / '.local/bin/claude')
-        self.state = state = self.devloop / 'ssdlc/.ssdlc/devloop'
+        self.state = state = self.devloop / 'devloop/.devloop'
         (state / 'current').mkdir(parents=True)
         (state / 'run.log').touch()
         # The agent user of the checks (#415): an existing user other than devloop's. The
@@ -2448,9 +2794,9 @@ class CheckHostTests(OpsTestCase):
             path.chmod(0o2770)
         (self.tmp / 'systemd').mkdir()
         (self.tmp / 'systemd/devloop.service').write_text(render('host/devloop.service', {
-            'REPO': 'brushtyler/ssdlc', 'DEVLOOP_USER': ME,
-            'DEVLOOP_CLONE': str(self.devloop / 'ssdlc'),
-            'LAUNCHER_CMD': f'/usr/bin/python3 {self.devloop}/ssdlc/scripts/devloop-pinned',
+            'REPO': 'brushtyler/devloop', 'DEVLOOP_USER': ME,
+            'DEVLOOP_CLONE': str(self.devloop / 'devloop'),
+            'LAUNCHER_CMD': f'/usr/bin/python3 {self.devloop}/devloop/scripts/devloop-pinned',
             'STATE_PATH': str(state),
             'DEVLOOP_PATH': f'{self.devloop}/.local/bin:/usr/local/bin:/usr/bin:/bin'}))
         self.acl(f'user:{ME}:--x')
@@ -2669,7 +3015,7 @@ class CheckHostTests(OpsTestCase):
         self.assertIn(f'ok: ACL user:{ME}:--x su {self.devloop}', out)
         self.assertIn('ok: devloop è attivo', out)
         # The checks through sudo or the network are only printed.
-        self.assertIn(f'[dry-run] sudo -u {ME} -H -- {READS}{self.devloop}/ssdlc/.ssdlc/devloop/'
+        self.assertIn(f'[dry-run] sudo -u {ME} -H -- {READS}{self.devloop}/devloop/.devloop/'
                       'run.log\n', out)
         self.assertIn(f'[dry-run] sudo -u root -H -- {self.agent}/.local/bin/claude --version',
                       out)
@@ -2689,7 +3035,7 @@ class CheckHostTests(OpsTestCase):
                      'agent-shared/schemas'):
             self.assertRegex(out, r'\[dry-run\] sudo -u root -H -- /usr/bin/bash -c .*\\!\\ '
                                   r'\\\[\\ -w.* _ ' + re.escape(f'{self.state}/{name}') + '\n')
-        self.assertRegex(out, r'-writable.* _ ' + re.escape(f'{self.devloop}/ssdlc/.git') + '\n')
+        self.assertRegex(out, r'-writable.* _ ' + re.escape(f'{self.devloop}/devloop/.git') + '\n')
         self.assertIn(f'ok: {self.state}/config.local.toml imposta [agent_user] name = "root"',
                       out)
         self.assertEqual(self.mutating_calls(), [])
@@ -2896,7 +3242,7 @@ exec "$@"''')
         sudoers.write_text(render('host/sudoers-coordinator', {
             'DEVLOOP_USER': ME, 'COORDINATOR_USER': FAKE_COORDINATOR,
             'DEVLOOP_PATH': f'{self.devloop}/.local/bin:/usr/local/bin:/usr/bin:/bin',
-            'LAUNCHER_CMD': f'/usr/bin/python3 {self.devloop}/ssdlc/scripts/devloop-pinned',
+            'LAUNCHER_CMD': f'/usr/bin/python3 {self.devloop}/devloop/scripts/devloop-pinned',
             'STATE_PATH': str(self.state), 'SERVICE_NAME': 'devloop',
             'COORDINATOR_OPS_DIR': str(copy)}))
         sudoers.chmod(0o440)
@@ -3318,7 +3664,7 @@ echo "sudo $*" >> "$OPS_TEST_CALLS"''')
         # on the same repository is an error.
         systemd = self.tmp / 'systemd'
         clone = self.devloop / 'widget'
-        state = clone / '.ssdlc/devloop'
+        state = clone / '.devloop'
         (state / 'current').mkdir(parents=True)
         (state / 'run.log').touch()
         (state / 'config.local.toml').write_text(f'repo_lock_dir = "{self.locks}"\n'
@@ -3369,7 +3715,7 @@ echo "sudo $*" >> "$OPS_TEST_CALLS"''')
         # unprivileged, is devloop's and the supervisor, the agent user another one, and sudo is
         # sudo-rs or the classic one.
         params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=ME, AGENT_USER=FAKE_AGENT,
-                             REPO='acme/widget', DEVLOOP_CLONE=str(self.devloop / 'ssdlc'),
+                             REPO='acme/widget', DEVLOOP_CLONE=str(self.devloop / 'devloop'),
                              SOURCE_REPO='brushtyler/ssdlc', SOURCE_REF='v1.2.0',
                              STATE_DIR=str(state), LAUNCHER_DIR=str(lib))
         for sudo in SUDO_FLAVORS:
@@ -3387,7 +3733,7 @@ echo "sudo $*" >> "$OPS_TEST_CALLS"''')
                       'v1.2.0)', out)
         self.assertIn(f'ok: {self.devloop}/devloop-source è un clone della sorgente', out)
         self.assertIn(f'[dry-run] sudo -u {ME} -H -- {READS}{state}/run.log\n', out)
-        self.assertIn(f'[dry-run] sudo -u {ME} -H -- env -C {self.devloop}/ssdlc /usr/bin/python3 '
+        self.assertIn(f'[dry-run] sudo -u {ME} -H -- env -C {self.devloop}/devloop /usr/bin/python3 '
                       f'{lib}/devloop-pinned --state-dir {state} apps', out)
         self.assertEqual(self.mutating_calls(), [])
 
@@ -3507,7 +3853,7 @@ state=$(cat {shlex.quote(str(self.service_state))}); echo "$state"
                              '-agent:review\n'),
                          done.stderr)
         # The command of its sudoers, with its own state file: never the supervisor's.
-        clone = f'{self.home}/devloop/ssdlc'
+        clone = f'{self.home}/devloop/devloop'
         launcher = (f'/usr/bin/env -C {clone} /usr/bin/python3 {clone}/scripts/devloop-pinned '
                     f'--state-dir {self.state}')
         command = WAIT_WATCH.replace('@LAUNCHER_CMD@', launcher).replace('@STATE_PATH@',
@@ -3678,7 +4024,7 @@ echo "$2:x:1000:"''')
         self.state.mkdir()
         self.overlay = self.state / 'config.local.toml'
         self.overlay.write_text(self.OVERLAY)
-        self.clone = self.home / 'supervisor' / 'ssdlc'
+        self.clone = self.home / 'supervisor' / 'devloop'
         self.clone.mkdir(parents=True)
         (self.home / 'coordinator').mkdir()
         for home in (self.home / 'supervisor', self.home / 'coordinator', self.operator):
@@ -3712,7 +4058,7 @@ echo "$2:x:1000:"''')
 
     def assert_prompt(self, prompt, role):
         self.assertTrue(prompt.startswith(f'You hold the role "{role}" of devloop for '
-                                          'brushtyler/ssdlc. Your instructions are the runbook '
+                                          'brushtyler/devloop. Your instructions are the runbook '
                                           f'below (docs/devloop/roles/{role}.md'), prompt[:200])
         self.assertTrue(prompt.endswith(ROLE_RUNBOOKS[role].read_text().rstrip('\n')))
 
@@ -3775,6 +4121,37 @@ echo "$2:x:1000:"''')
         done = self.start('host', '--cli', 'claude', '--model', 'm', sudo_user=FAKE_OPERATOR)
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertNotIn('mailbox between', self.cli_args(self.checkout)[3][-1])
+
+    def test_the_sessions_of_the_project_devloop_get_the_paths_of_563(self):
+        # #563: PROJECT=devloop with the users of before and the supervisor's clone written. The
+        # sessions start in the clone .../devloop, with the state_dir .devloop of devloop's clone,
+        # the mailbox and the wake-up of the project, the defaults of PROJECT.
+        devloop = self.home / 'devloop'
+        state = devloop / 'devloop' / '.devloop'
+        state.mkdir(parents=True)
+        (state / 'config.local.toml').write_text(self.OVERLAY)
+        self.params_file = self.params(
+            PROJECT='devloop', REPO='brushtyler/devloop', DEVLOOP_USER='devloop',
+            AGENT_USER='devloop-agent', SUPERVISOR_USER=FAKE_SUPERVISOR,
+            COORDINATOR_USER=FAKE_COORDINATOR, DEVLOOP_HOME=str(devloop),
+            SUPERVISOR_CLONE=str(self.clone), SUDOERS_FILE='', AGENT_SUDOERS_FILE='',
+            COORDINATOR_SUDOERS_FILE='', COORDINATOR_OPS_DIR='', COORDINATION_DIR='')
+        self.assertEqual(self.clone, self.home / 'supervisor' / 'devloop')
+        box = '/var/lib/devloop-coordination-devloop'
+        for role, directory in (('supervisor', self.clone),
+                                ('coordinator', self.home / 'coordinator')):
+            with self.subTest(role=role):
+                done = self.start(role)
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                self.assertIn(f'tmux new-session -d -s devloop-{role} -c {directory} env',
+                              [c.rstrip() for c in self.mutating_calls()])
+                channel = self.cli_args(directory)[3][-1].split('\n\n')[1]
+                for value in (f'the state_dir of devloop is {state};',
+                              f'the mailbox between supervisor and coordinator is {box} ',
+                              'the coordinator\'s wake-up is bash '
+                              '/usr/local/lib/devloop-coordinator-devloop/host/coordinator-wait.sh'):
+                    self.assertIn(value, channel)
+                self.assertNotIn('ssdlc', channel)
 
     def test_the_overlay_sets_the_table_over_the_installation(self):
         # The installation's table, with the overlay's model over it.

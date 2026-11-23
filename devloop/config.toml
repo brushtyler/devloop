@@ -19,8 +19,9 @@
 
 base_branch = "main"
 branch_prefix = "agent/issue-"
-# Worktrees, logs and the lock live here, relative to the main checkout (ignored by git).
-state_dir = ".ssdlc/devloop"
+# Worktrees, logs and the lock live here, relative to the main checkout (ignored by git). Never
+# under .ssdlc/, the state directory of the old SSDLC engine (#563).
+state_dir = ".devloop"
 # A first CI failure on a head whose failed test modules (the `FAILED MODULE` lines of
 # scripts/run-tests.py) are not pertinent to the PR's diff, with the same correspondence as
 # local_tests = "changed", is re-run once instead of becoming a round (issue #200). It needs

@@ -7,13 +7,13 @@ Usage:
 
 Examples:
     DEVLOOP_APP_KEY_DIR=/home/coordinator/.ghapps python3 scripts/coordinator-token.py \\
-        --state-dir /home/devloop/ssdlc/.ssdlc/devloop -- gh issue comment 76 --body-file x.md
+        --state-dir /home/devloop/devloop/.devloop -- gh issue comment 76 --body-file x.md
     DEVLOOP_APP_KEY_DIR=/home/coordinator/.ghapps python3 scripts/coordinator-token.py \\
-        --state-dir /home/devloop/ssdlc/.ssdlc/devloop --perm actions=read -- \\
+        --state-dir /home/devloop/devloop/.devloop --perm actions=read -- \\
         gh run view 123 --log-failed
 
 The coordinator's role app (#528, #549; ADR 0002, precision of 2026-11-22) of the project whose
-state_dir is DIR (default: .ssdlc/devloop of this clone): ``repo`` and ``[apps.coordinator]`` of
+state_dir is DIR (default: .devloop of this clone): ``repo`` and ``[apps.coordinator]`` of
 the local overlay of that state_dir, ``config.local.toml``, set over ``devloop/config.toml`` of
 this clone (ADR 0006, R6). The project file cannot hold them (its schema is closed), so it is not
 read. It signs the coordinator's commands, comments and labels; devloop counts them, within the
@@ -50,7 +50,7 @@ ALLOWED = {'issues': {'read', 'write'}, 'pull_requests': {'read', 'write'},
            'actions': {'read'}, 'checks': {'read'}, 'statuses': {'read'},
            'metadata': {'read'}}
 # The launcher's default state_dir, of this clone.
-STATE = REPO_ROOT / '.ssdlc' / 'devloop'
+STATE = REPO_ROOT / '.devloop'
 LOCAL_CONFIG = 'config.local.toml'
 STATE_DIR = '--state-dir'
 # The credentials of the caller, never passed on beside the app's token.

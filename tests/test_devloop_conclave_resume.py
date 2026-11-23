@@ -473,9 +473,9 @@ class CommandTests(unittest.TestCase):
 
     def test_the_evidence_goes_to_the_dispatcher_logs(self):
         with tempfile.TemporaryDirectory() as root:
-            ws = Workspace(root, '.ssdlc/devloop', 'main')
+            ws = Workspace(root, '.devloop', 'main')
             path = ws.save_evidence('conclave-issue-7-1.diff', DIFF)
-            self.assertEqual(path, Path(root) / '.ssdlc/devloop/logs/conclave-issue-7-1.diff')
+            self.assertEqual(path, Path(root) / '.devloop/logs/conclave-issue-7-1.diff')
             self.assertEqual(path.read_text(encoding='utf-8'), DIFF)
 
 

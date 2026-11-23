@@ -23,7 +23,7 @@ python3 scripts/run-tests.py -j 4     # with 4 worker processes
 `scripts/run-tests.py` runs exactly the tests of `python3 -m unittest discover -s tests`, split
 across parallel worker processes. `-j N` sets how many (default: the number of CPUs). The modules
 are split slowest first, using the durations of the previous run, kept in
-`.ssdlc/test-durations.json` (ignored by git). A module that took more than 60 seconds in the
+`.devloop/test-durations.json` (ignored by git, like the whole `.devloop/`, #563). A module that took more than 60 seconds in the
 previous local run or, when that file has no entry for it, in the versioned `tests/durations.json`
 (module and seconds from a full run; a fresh checkout such as CI has only this one) is split by test
 class across the processes; a module in neither file stays whole; a module with

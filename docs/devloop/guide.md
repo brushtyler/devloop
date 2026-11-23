@@ -1929,7 +1929,7 @@ the role's user, with the CLI and the model of `[roles.supervisor]` or `[roles.c
 ```bash
 # Run directly, devloop needs the project file and the overlay of the state_dir, before the
 # command (the launcher, scripts/devloop-pinned, passes them itself):
-devloop="python3 -m devloop --project-config .ssdlc/devloop/project.toml --local-config .ssdlc/devloop/config.local.toml"
+devloop="python3 -m devloop --project-config .devloop/project.toml --local-config .devloop/config.local.toml"
 $devloop setup            # create the agent:* labels, the priority:* labels and the review level labels (reviews:0 only when level 0 is on)
 $devloop status           # running action, devloop PRs (with rounds counted on max_review_rounds, merge state and conflicts), ready issues in start order with their priority, planned actions; with [budget] on, the budget of the stories in progress; a pinned copy behind origin/main in the files of the installation
 $devloop apps             # check the GitHub App of each actor, on the project's repo and with its key_dir
@@ -1947,7 +1947,7 @@ $devloop token claude -- gh pr comment 70 --body-file reply.md  # run a command 
 ```
 
 Run it from any checkout of this repository. Worktrees, agent prompts and logs, and the lock that
-prevents two dispatchers from running at once live under `state_dir` (default `.ssdlc/devloop`)
+prevents two dispatchers from running at once live under `state_dir` (default `.devloop`)
 in the main checkout. `tick --dry-run` writes nothing and does not take that lock, so the
 [smoke test of a pin](#pin) runs it while `run` is active. Like `status`, it reads the
 [turn journal](protocol.md#turn-journal) without writing it: the running dispatcher alone does.
@@ -2006,7 +2006,7 @@ of the log that starts with `gc:`; a cleanup that fails is logged and never stop
   read its files stay, and when the ledger cannot be read every file of an issue or PR stays.
 
 ```toml
-# .ssdlc/devloop/config.local.toml
+# .devloop/config.local.toml
 [gc]
 logs = true
 log_days = 30
@@ -2195,7 +2195,7 @@ alias of `--idle-timeout`: it still works, with a warning in the log, and the tw
 refused.
 
 **Clean stop.** `SIGTERM` or `SIGINT` (Ctrl-C), or the file `state_dir/STOP`
-(`.ssdlc/devloop/STOP` of the main checkout), stop the loop: the tick in progress ends, no other
+(`.devloop/STOP` of the main checkout), stop the loop: the tick in progress ends, no other
 starts, and a wait in progress ends at once (after the read of GitHub in progress, if any: no
 other read starts). A stop requested during a tick that ends with a new
 [pin after a merge](#pin-after-a-merge) ends the loop too, without the restart from the new copy;
@@ -2234,7 +2234,7 @@ on the same repository with another `state_dir` does not start
 **Activation is the operator's.** The loop runs unsupervised and spends the agents' quotas, so
 devloop installs no service. An example unit, `devloop.service`, for the
 [installation as a dedicated user](#installation-as-a-dedicated-user), running the
-[launcher](#launcher) of the pinned copy, which applies `.ssdlc/devloop/config.local.toml` when
+[launcher](#launcher) of the pinned copy, which applies `.devloop/config.local.toml` when
 it exists ([local overlay](#local-config-as-an-overlay)):
 
 ```ini
@@ -2247,11 +2247,11 @@ After=network-online.target
 Type=simple
 User=devloop
 Group=devloop
-WorkingDirectory=/home/devloop/ssdlc
+WorkingDirectory=/home/devloop/devloop
 # Where the agent CLIs, gh and git are found for the devloop user.
 Environment=PATH=/home/devloop/.local/bin:/usr/local/bin:/usr/bin:/bin
-# The launcher adds --local-config .ssdlc/devloop/config.local.toml when that file exists.
-ExecStart=/usr/bin/python3 /home/devloop/ssdlc/scripts/devloop-pinned run --idle-timeout 900
+# The launcher adds --local-config .devloop/config.local.toml when that file exists.
+ExecStart=/usr/bin/python3 /home/devloop/devloop/scripts/devloop-pinned run --idle-timeout 900
 # SIGTERM to devloop only: the tick in progress ends, its agent turns and tests are not killed.
 # The default KillMode=control-group would send SIGTERM to them too.
 KillMode=mixed
@@ -2275,12 +2275,16 @@ sudo systemctl start devloop      # start the loop now
 sudo systemctl enable devloop     # and at every boot (optional)
 journalctl -u devloop -f          # follow its log
 sudo systemctl stop devloop       # SIGTERM: the tick in progress ends, then the loop exits
-sudo -u devloop touch /home/devloop/ssdlc/.ssdlc/devloop/STOP  # stop after the tick, and stay stopped
-sudo -u devloop rm /home/devloop/ssdlc/.ssdlc/devloop/STOP     # then `systemctl start devloop`
+sudo -u devloop touch /home/devloop/devloop/.devloop/STOP  # stop after the tick, and stay stopped
+sudo -u devloop rm /home/devloop/devloop/.devloop/STOP     # then `systemctl start devloop`
 ```
 
 After an alert (exit code 4) the unit stays stopped: remove the cause, then
 `systemctl start devloop`.
+
+The host that develops this repository runs, since #563, the instance `devloop@devloop` of the
+template unit of [`ops/`](../../ops/README.md) (`PROJECT=devloop`), with the same users: there the
+commands name `devloop@devloop` instead of `devloop`.
 
 ### Continuous mode
 
@@ -2470,8 +2474,8 @@ with the supervisor's user, its sudoers and the GitHub Apps, or to reuse it for 
 see the [ops guide](../../ops/README.md) (#402): parametric scripts, the systemd unit, the app
 manifests, a host check and the migration steps.
 
-- an unprivileged system user `devloop`, with a clone of its own (`/home/devloop/ssdlc`);
-- state, pinned copies and the local config in `.ssdlc/devloop` of that clone;
+- an unprivileged system user `devloop`, with a clone of its own (`/home/devloop/devloop`);
+- state, pinned copies and the local config in `.devloop` of that clone;
 - the GitHub App keys in `~/.ghapps` of that user (each key mode `600`), and no `gh` login:
   devloop acts with its apps. A [merge mode](#merge-modes) other than `off` merges with the
   [merger app](reference.md#the-merger-app), whose key is there too; without that app it would
@@ -2490,11 +2494,12 @@ From the beginning to the end, as root or with `sudo`:
 
    ```bash
    sudo useradd --create-home devloop
-   sudo -u devloop -H git clone https://github.com/brushtyler/devloop.git /home/devloop/ssdlc
+   sudo -u devloop -H git clone https://github.com/brushtyler/devloop.git /home/devloop/devloop
    ```
 
-   The clone keeps the path `/home/devloop/ssdlc` of before the rename of the repository
-   (ADR 0007), like the rest of the host.
+   Until #563 the clone kept the path of before the rename of the repository (ADR 0007), like
+   the rest of the host; the host moved to these paths with
+   [ops/host/migrate.md](../../ops/host/migrate.md#percorsi-devloop-e-istanza-devloopdevloop-563).
 
 2. **Keys.** The apps are the repository's own set, created once by the operator from the
    manifests of [`ops/github/apps/`](../../ops/github/apps/) and never shared with another
@@ -2516,7 +2521,7 @@ From the beginning to the end, as root or with `sudo`:
    codex and agy as that user and log in to each one with its logins, as described in
    [Agent CLIs](#agent-clis), and run `setup-agent-user.sh` again without `--unseal`.
 
-4. **Overlay.** Write `/home/devloop/ssdlc/.ssdlc/devloop/config.local.toml`, owned by
+4. **Overlay.** Write `/home/devloop/devloop/.devloop/config.local.toml`, owned by
    `devloop` ([Local config as an overlay](#local-config-as-an-overlay)). It is required: since
    ADR 0006, R6 it holds the project's `repo`, `trusted_users` and `[apps]`, with its `key_dir`
    (step 2), and for ssdlc the agy commands too, all from
@@ -2536,18 +2541,18 @@ From the beginning to the end, as root or with `sudo`:
    R3): the clone's devloop gets it and the overlay before the command, as the launcher would.
 
    ```bash
-   sudo -u devloop -H sh -c 'cd ~/ssdlc && python3 -m devloop \
-       --project-config .ssdlc/devloop/project.toml \
-       --local-config .ssdlc/devloop/config.local.toml pin origin/main'
+   sudo -u devloop -H sh -c 'cd ~/devloop && python3 -m devloop \
+       --project-config .devloop/project.toml \
+       --local-config .devloop/config.local.toml pin origin/main'
    ```
 
 6. **Checks.** From the pinned copy, as the `devloop` user: every app, its installation and its
    permissions, then the state and the plan, without changing anything.
 
    ```bash
-   sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned apps
-   sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned status
-   sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned tick --dry-run
+   sudo -u devloop -H python3 /home/devloop/devloop/scripts/devloop-pinned apps
+   sudo -u devloop -H python3 /home/devloop/devloop/scripts/devloop-pinned status
+   sudo -u devloop -H python3 /home/devloop/devloop/scripts/devloop-pinned tick --dry-run
    ```
 
 7. **Start.** `devloop run` in the background, with an unbuffered log
@@ -2773,8 +2778,8 @@ To go back, install the earlier version the same way, again with the loop stoppe
 user, started through the [launcher](#launcher) from the clone:
 
 ```bash
-sudo -u devloop -H sh -c 'cd ~/ssdlc && PATH=/home/devloop/.local/bin:/usr/local/bin:/usr/bin:/bin PYTHONUNBUFFERED=1 nohup python3 scripts/devloop-pinned run --idle-timeout 900 < /dev/null >> .ssdlc/devloop/run.log 2>&1 &'
-sudo -u devloop -H tail -f /home/devloop/ssdlc/.ssdlc/devloop/run.log   # follow the log
+sudo -u devloop -H sh -c 'cd ~/devloop && PATH=/home/devloop/.local/bin:/usr/local/bin:/usr/bin:/bin PYTHONUNBUFFERED=1 nohup python3 scripts/devloop-pinned run --idle-timeout 900 < /dev/null >> .devloop/run.log 2>&1 &'
+sudo -u devloop -H tail -f /home/devloop/devloop/.devloop/run.log   # follow the log
 ```
 
 - **`PATH`.** The command sets the same `PATH` as the [unit](#continuous-loop), with
@@ -2791,9 +2796,9 @@ sudo -u devloop -H tail -f /home/devloop/ssdlc/.ssdlc/devloop/run.log   # follow
   `pgrep` no longer finds it. Remove `STOP` to start again.
 
   ```bash
-  sudo -u devloop -H touch /home/devloop/ssdlc/.ssdlc/devloop/STOP   # stop after the tick
+  sudo -u devloop -H touch /home/devloop/devloop/.devloop/STOP   # stop after the tick
   pgrep -u devloop -af 'm devloop'                                    # nothing: it has exited
-  sudo -u devloop -H rm /home/devloop/ssdlc/.ssdlc/devloop/STOP      # then start it again
+  sudo -u devloop -H rm /home/devloop/devloop/.devloop/STOP      # then start it again
   ```
 
 - **`[pin] auto`.** With `auto = true` in the overlay, a merge, by devloop or by the operator, that touches
@@ -2835,7 +2840,7 @@ unless `source` names another:
    not taken: they belong to the repository, not to the installation;
 3. extracts `devloop/`, `core/` when the commit has it (devloop imports it for the
    [budget envelope](reference.md#budget-envelope), #365), and those files into
-   `.ssdlc/devloop/pinned-<sha12>`, with a `pin.json` naming the commit, and makes the copy
+   `.devloop/pinned-<sha12>`, with a `pin.json` naming the commit, and makes the copy
    read-only;
 4. checks the copy: in a Python with only the copy on its module path, the package imports, and
    its configuration, with the overlay, loads (a `[docs] map` of the wrong shape fails here) and
@@ -2845,10 +2850,10 @@ unless `source` names another:
    without agents and without writes, not even to the repository) and one round of `python3 -m devloop watch`, on a state
    file of its own, at most 30 seconds. Step 4 has already loaded the configuration with the
    overlay;
-6. points `.ssdlc/devloop/current` at the copy, with an atomic rename of a symlink.
+6. points `.devloop/current` at the copy, with an atomic rename of a symlink.
 
 A failure at any step leaves `current` as it was, and leaves no new copy behind, with one
-exception: a copy that fails the smoke test stays in `.ssdlc/devloop/rejected-<sha12>` (replacing
+exception: a copy that fails the smoke test stays in `.devloop/rejected-<sha12>` (replacing
 an earlier one of the same commit), for the analysis, and the pin fails with `smoke test of
 <sha12> failed at <step>: <error>`. A rejected copy is never reused: a later pin of the same
 commit extracts and tests it again. A step that fails with a transient error (a network error,
@@ -2862,7 +2867,7 @@ without a smoke test, but checked again against the current overlay: if a file i
 missing, the pin fails. Earlier copies stay for the rollback, up to `[gc] keep_pins` (default
 5) besides `current`: after a successful pin the older ones that no process uses are removed
 ([Cleanup of the state directory](#cleanup-of-the-state-directory)). `pin` uses the
-overlay given with `--local-config`, or `.ssdlc/devloop/config.local.toml` when it exists, and
+overlay given with `--local-config`, or `.devloop/config.local.toml` when it exists, and
 the [project file](reference.md#project-file) of the `state_dir` when it exists: the lists it
 adds are extracted, and a copy that cannot read it is refused. A
 `run` already started keeps the code it started with: restart it after a pin by hand (a pin
@@ -2873,17 +2878,17 @@ copies beyond `[gc] keep_pins`.
 #### Launcher
 
 `scripts/devloop-pinned [--allow-root] <devloop arguments>` runs devloop from the copy that
-`.ssdlc/devloop/current` points at:
+`.devloop/current` points at:
 
 ```bash
 python3 scripts/devloop-pinned status
 python3 scripts/devloop-pinned run --idle-timeout 900
-sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned tick --dry-run
+sudo -u devloop -H python3 /home/devloop/devloop/scripts/devloop-pinned tick --dry-run
 ```
 
 It runs `python3 -P -m devloop` from the root of its clone, with `PYTHONPATH` on the copy only
-and, when `.ssdlc/devloop/config.local.toml` exists, `--local-config` on it; when
-`.ssdlc/devloop/project.toml` exists, `--project-config` on it (the
+and, when `.devloop/config.local.toml` exists, `--local-config` on it; when
+`.devloop/project.toml` exists, `--project-config` on it (the
 [project file](reference.md#project-file), ADR 0006, R2). It imports nothing
 from the clone, and works both run directly by the `devloop` user and through `sudo -u devloop
 -H`. Without a pin it stops and says so. It refuses to run as root, unless `--allow-root` is its
@@ -2895,7 +2900,7 @@ itself while devloop runs it; a value already in the environment (the operator's
 
 With `--state-dir DIR` (ADR 0006, R1), an absolute path, the launcher takes the copy, the
 overlay and the project file from `DIR/current`, `DIR/config.local.toml` and `DIR/project.toml`
-instead of `.ssdlc/devloop` of its clone,
+instead of `.devloop` of its clone,
 so it can live anywhere, for example installed on the host as
 `/usr/local/lib/devloop/devloop-pinned` (see [Installation source](#installation-source)). It then
 runs devloop in the current directory, which must be in the checkout of the managed repository
@@ -2959,7 +2964,10 @@ and `PROJECT`: the template unit `devloop@.service`, an instance `devloop@<proje
 with its parameters in a drop-in, a sudoers of the supervisor per unit, a clone and a `key_dir`
 of the supervisor per project, and `check-host.sh` run once per project. The scripts refuse a
 user that another installation of devloop on the host already has, in any role: only the
-supervisor is the same for every project.
+supervisor is the same for every project. A value written in `params.env` stands with `PROJECT`
+too: the host of this repository became the instance `devloop@devloop` keeping its users, its
+`key_dir`s and its supervisor's clone written there (#563,
+[ops/host/migrate.md](../../ops/host/migrate.md#percorsi-devloop-e-istanza-devloopdevloop-563)).
 
 **One repository, one host.** A repository is served by exactly one dispatcher, on one host.
 The lock of `state_dir` (`state_dir/dispatcher.lock`) excludes only the dispatchers of the same
@@ -2999,7 +3007,7 @@ reports an overlay without it as an error.
 
 #### Local config as an overlay
 
-`.ssdlc/devloop/config.local.toml` holds the project's identities and trust and **the keys the
+`.devloop/config.local.toml` holds the project's identities and trust and **the keys the
 operator overrides**, for example:
 
 ```toml
@@ -3034,7 +3042,7 @@ the one of the copy. A new pin therefore needs no realignment of the config by h
 any value the copy's config would refuse. An overlay cannot remove a key of the copy, only
 replace it.
 
-Beside it, `.ssdlc/devloop/project.toml` is the [project file](reference.md#project-file)
+Beside it, `.devloop/project.toml` is the [project file](reference.md#project-file)
 (ADR 0006, R2), with the same permissions: the facts of the managed repository (`test_cmd`,
 `local_tests`, `[tests]`, `language`, `priority_labels`, `[docs.map]`) and the restrictions it adds
 (`protected_paths`, `blocked_labels`, sensitive paths and lists, level-0 checks,
@@ -3128,13 +3136,13 @@ configuration at each run, as before.
 
 Pin the earlier commit again: its copy is reused, checked against the current overlay, and
 `current` points back at it, with no fetch needed. The pinned copies are the directories
-`.ssdlc/devloop/pinned-<sha12>`: `current` and the `[gc] keep_pins` (default 5) pinned most
+`.devloop/pinned-<sha12>`: `current` and the `[gc] keep_pins` (default 5) pinned most
 recently ([Cleanup of the state directory](#cleanup-of-the-state-directory)). A commit whose
 copy was removed is pinned again from `origin`, with a new copy and its smoke test.
 
 ```bash
-sudo -u devloop -H ls /home/devloop/ssdlc/.ssdlc/devloop/                  # the pinned-<sha12> copies
-sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned pin 1a2b3c4d5e6f   # an earlier sha12
+sudo -u devloop -H ls /home/devloop/devloop/.devloop/                  # the pinned-<sha12> copies
+sudo -u devloop -H python3 /home/devloop/devloop/scripts/devloop-pinned pin 1a2b3c4d5e6f   # an earlier sha12
 ```
 
 Any pin, by hand or after a merge, also drops a pin requested by a merge and not yet done, so a
@@ -3150,7 +3158,7 @@ With `[pin] auto = true` (default `false`: the operator's decision), after a mer
 devloop ([merge modes](#merge-modes)) whose diff touches `devloop/`, `core/` (which devloop
 imports since #365) or a file of
 `sensitive_path_lists` (those of the running configuration), devloop records the request in
-`.ssdlc/devloop/pin-pending.json` (only when the [installation's source](#installation-source) is
+`.devloop/pin-pending.json` (only when the [installation's source](#installation-source) is
 the managed repository: with `source` set the pin after a merge is off). The next tick, before
 planning, runs `pin origin/main` (the
 `base_branch` of `origin`). If the pin succeeds, `run` and `tick` start again from the new copy
@@ -3166,7 +3174,7 @@ requests nothing, and a request left from before is ignored.
 A merge devloop did not make (#430), such as a PR of `operator_only_paths` or one the operator
 merges by hand, requests the pin too. At each tick, before reading the request (not in
 `tick --dry-run`), devloop fetches `origin/main` and compares its head with the head the last
-tick saw, recorded in `.ssdlc/devloop/pin-base.json` (the first time, with the commit of
+tick saw, recorded in `.devloop/pin-base.json` (the first time, with the commit of
 `current`). When it advanced with changes to the same paths, the log says `auto-pin:
 origin/main advanced to <sha12> with <N> changed files of the installation (<files>): pin
 requested`, and the pin follows with the same rules as above (`auto-pin of origin/main after the
@@ -3210,7 +3218,7 @@ stays on the previous copy, the log says `auto-pin of origin/main refused, the p
 unchanged and the request is dropped: <reason>`, and the tick plans and runs its actions from
 the running copy, so `run` goes on. With `[run].alert_issue` the dispatcher comments on that
 issue once per refused commit (its commit and failed step; the error stays in the local log),
-recorded in `.ssdlc/devloop/pin-alerted.json`; a comment that cannot be published is only
+recorded in `.devloop/pin-alerted.json`; a comment that cannot be published is only
 logged. The next merge that requests a pin, or the next advance of `origin/main` that touches
 the installation, tries again, on the new `origin/main`.
 
@@ -3239,7 +3247,7 @@ again from the new copy. A request that could not be removed makes the next tick
 commit again, reusing its copy.
 
 The last auto-pin refused by the checks or by the smoke test is recorded in
-`.ssdlc/devloop/pin-failed.json`, and `devloop status` shows it next to the line of the copy
+`.devloop/pin-failed.json`, and `devloop status` shows it next to the line of the copy
 behind `origin/main`: `auto-pin failed at <time>: origin/main at <sha12> is not pinned, the running
 copy stays: <reason>; a new commit of origin/main or a pin by hand (devloop pin) tries again`.
 Any successful pin, automatic or by hand, removes it.
@@ -3265,7 +3273,7 @@ declaration holds: the PR's, or that of its latest fix.
 
 devloop merges such a PR as any other: the queue does not stop. With `[pin] auto = true`,
 though, the merge does not request the pin. Before merging, devloop records a hold of the
-auto-pin in `.ssdlc/devloop/pin-held.json` (a hold that cannot be recorded stops the merge), and
+auto-pin in `.devloop/pin-held.json` (a hold that cannot be recorded stops the merge), and
 after the merge it comments on `[run].alert_issue` with the step and adds `agent:needs-operator`
 to the issue the PR closes; with `[pin] auto = false` only the alert and the label. A merge that
 fails may still have happened (a timeout of `gh pr merge` loses GitHub's answer): its hold stays,
@@ -3299,7 +3307,7 @@ A merge devloop did not make (#473), such as the operator's merge on GitHub of a
 `agent:needs-operator`, holds the auto-pin too. At each tick, after it has looked at
 `origin/main` (`observe`), and again once an auto-pin has resolved its commit, devloop reads on
 GitHub the PRs merged by each commit of the first-parent line of `origin/main` that neither the
-pinned copy nor its last look contains (`.ssdlc/devloop/pin-scanned.json`; with neither, it
+pinned copy nor its last look contains (`.devloop/pin-scanned.json`; with neither, it
 starts from the head it sees). A devloop PR, recognised by its branch and its marker, whose
 latest declaration (of the marker or of a fix its implementer recorded) is not empty gets a hold
 with the merge commit GitHub reports for the PR (for a rebase, its last commit, even when the
@@ -3319,7 +3327,7 @@ of them and neither the project file nor the overlay sets it, the log says `conf
 reads [prompts], [tests] from the project file, and the configuration has none: devloop runs
 without them, degraded; add them to the project file`, and the dispatcher comments once on
 `[run].alert_issue` for each set of missing tables (recorded in
-`.ssdlc/devloop/project-tables-alerted.json`, forgotten once none is missing). The copy still
+`.devloop/project-tables-alerted.json`, forgotten once none is missing). The copy still
 starts.
 
 devloop may import only the Python standard library, itself and the `core` package, and a test

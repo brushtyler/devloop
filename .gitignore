@@ -11,4 +11,9 @@ __pycache__/
 *.env
 .env*
 .sessions/
+
+# devloop's state_dir (#563) and the local test durations of scripts/run-tests.py
+.devloop/
+# The state directory of the old SSDLC engine, that devloop neither reads nor writes: an old
+# checkout keeps it out of git
 .ssdlc/
