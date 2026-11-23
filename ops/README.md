@@ -142,7 +142,10 @@ ops/
 - **Parametri.** Leggono `ops/params.env` (o il file di `--params`). I valori finiscono in un
   sudoers e in un'unità systemd, quindi gli script accettano solo forme note (nomi utente, percorsi
   assoluti senza spazi, `owner/nome`) e si fermano su un valore diverso. `STATE_DIR` è
-  `.ssdlc/devloop` del clone per default; può essere un altro percorso relativo al clone o un
+  `.devloop` del clone per default (dal #563; prima `.ssdlc/devloop`, dentro `.ssdlc/`, la
+  directory di stato del vecchio motore SSDLC, che devloop non legge né scrive: un clone che ha
+  ancora solo quella ferma il launcher, e si sposta con
+  [host/migrate.md](host/migrate.md#percorsi-devloop-e-istanza-devloopdevloop-563)); può essere un altro percorso relativo al clone o un
   percorso assoluto dell'host (per esempio `/var/lib/devloop/<progetto>`). Con un valore diverso
   dal default, o con `SOURCE_REPO`, unità, sudoers e verifiche chiamano il launcher con
   `--state-dir <percorso>` e con `env -C <clone>`, perché giri nel clone gestito, e l'overlay deve
@@ -189,9 +192,17 @@ CLI](#5-utente-degli-agent-e-cli)).
 
 I comandi si eseguono da un clone di devloop (`brushtyler/devloop`) dell'operatore (per esempio
 nella sua home), come utente con `sudo`. Dove compare `brushtyler/devloop`, `devloop` o
-`supervisor`, valgono i valori di `params.env`. I percorsi `/home/devloop/ssdlc` e
-`/home/supervisor/ssdlc` sono quelli dell'host che sviluppa questo repository, rimasti invariati
-dopo la rinomina da `brushtyler/ssdlc` (ADR 0007).
+`supervisor`, valgono i valori di `params.env`. I percorsi `/home/devloop/devloop` e
+`/home/supervisor/devloop` sono quelli dell'host che sviluppa questo repository dal #563, che vi
+ha spostato i clone e lo `state_dir` e ha portato l'host all'istanza `devloop@devloop`
+(`PROJECT=devloop` con gli utenti di prima, [host/migrate.md](host/migrate.md#percorsi-devloop-e-istanza-devloopdevloop-563)).
+Gli esempi di questa guida restano quelli di un'installazione senza `PROJECT`
+(`devloop.service`): su quell'host il servizio è `devloop@devloop`, e sudoers, casella e copia di
+root del coordinatore hanno il suffisso `-devloop`.
+
+**Il vecchio motore SSDLC.** Il tag `ssdlc-engine-final` e le directory `.ssdlc/` del vecchio
+motore negli altri repository dell'operatore non c'entrano con questi script né con devloop:
+nessuno script e nessun passo li tocca, e devloop non legge né scrive `.ssdlc/` (#563).
 
 ### 1. Parametri
 
@@ -509,19 +520,19 @@ launcher esporta `DISABLE_AUTOUPDATER=1`. Le CLI si aggiornano a mano con il loo
 
 ### 6. Overlay e primo pin
 
-L'overlay `/home/devloop/ssdlc/.ssdlc/devloop/config.local.toml` contiene solo le chiavi che
+L'overlay `/home/devloop/devloop/.devloop/config.local.toml` contiene solo le chiavi che
 l'operatore sovrascrive (merge mode, `[pin] auto`, `[run] alert_issue`, …); quello d'esempio è
 tutto commentato. Su questo host ha anche `repo_lock_dir = "/run/devloop/repos"`. Accanto, il
-file di progetto `/home/devloop/ssdlc/.ssdlc/devloop/project.toml`, copiato da
+file di progetto `/home/devloop/devloop/.devloop/project.toml`, copiato da
 [`ssdlc/project.toml`](host/ssdlc/project.toml), e nell'overlay le chiavi di
 [`ssdlc/overlay.toml`](host/ssdlc/overlay.toml) (vedi sopra). Poi il primo pin, che fa anche lo
 smoke test. Lo esegue il devloop del clone, non il launcher: file di progetto e overlay si passano
 a mano, prima del comando, perché dall'ADR 0006, R3 `devloop/config.toml` non ha `test_cmd`:
 
 ```bash
-sudo -u devloop -H sh -c 'cd ~/ssdlc && python3 -m devloop \
-    --project-config .ssdlc/devloop/project.toml \
-    --local-config .ssdlc/devloop/config.local.toml pin origin/main'
+sudo -u devloop -H sh -c 'cd ~/devloop && python3 -m devloop \
+    --project-config .devloop/project.toml \
+    --local-config .devloop/config.local.toml pin origin/main'
 ```
 
 ### 7. Host del supervisore
@@ -562,9 +573,9 @@ Il **sudoers** (`ops/host/sudoers-supervisor`) permette:
 Nessun comando scrive sull'overlay di devloop. Per esempio:
 
 ```bash
-sudo -u devloop /usr/bin/python3 /home/devloop/ssdlc/scripts/devloop-pinned status
+sudo -u devloop /usr/bin/python3 /home/devloop/devloop/scripts/devloop-pinned status
 sudo /usr/bin/systemctl restart devloop
-tail -f /home/devloop/ssdlc/.ssdlc/devloop/run.log
+tail -f /home/devloop/devloop/.devloop/run.log
 ```
 
 Poi, a mano:
@@ -574,7 +585,7 @@ Poi, a mano:
   nell'overlay di devloop), le scritture del supervisore passano da
   `scripts/supervisor-token.py`, che conia un token dell'app `supervisor` con i soli permessi
   dell'azione (solo `issues` e `pull_requests`), con `--state-dir` sullo `state_dir` di devloop
-  (`/home/devloop/ssdlc/.ssdlc/devloop`), dal cui overlay legge `repo` e `[apps.supervisor]`
+  (`/home/devloop/devloop/.devloop`), dal cui overlay legge `repo` e `[apps.supervisor]`
   (ADR 0006, R6); prima passano da `scripts/agent-token.py`, con
   l'attore `claude`, che non espone l'app `supervisor`;
 - **token di sola lettura** per `gh` ([github/tokens.md](github/tokens.md));
@@ -635,8 +646,8 @@ Se il coordinatore è installato (passo 10) verifica anche il suo sudoers e la c
 Poi, come in [docs/devloop/guide.md](../docs/devloop/guide.md#installation-as-a-dedicated-user):
 
 ```bash
-sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned status
-sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned tick --dry-run
+sudo -u devloop -H python3 /home/devloop/devloop/scripts/devloop-pinned status
+sudo -u devloop -H python3 /home/devloop/devloop/scripts/devloop-pinned tick --dry-run
 ```
 
 ### 9. Avvio
@@ -646,10 +657,12 @@ L'attivazione è dell'operatore: il loop spende le quote degli agent.
 ```bash
 sudo systemctl start devloop
 sudo systemctl enable devloop       # se deve ripartire al boot
-sudo -u devloop -H tail -f /home/devloop/ssdlc/.ssdlc/devloop/run.log
+sudo -u devloop -H tail -f /home/devloop/devloop/.devloop/run.log
 ```
 
-L'unità (`ops/host/devloop.service`) è quella dell'installazione attuale: utente `devloop`,
+L'unità (`ops/host/devloop.service`, o con `PROJECT` l'istanza dell'unità template
+`ops/host/devloop@.service` con la drop-in del progetto, come `devloop@devloop` sull'host di
+questo repository dal #563) ha: utente `devloop`,
 `WorkingDirectory` sul clone, `PYTHONUNBUFFERED=1`, il `PATH` con `~/.local/bin` prima,
 `ExecStart` sul launcher della copia fissata, stdout e stderr in append su `<state_dir>/run.log`,
 `KillMode=mixed` (SIGTERM solo al processo principale: devloop smette di pianificare e aspetta le
@@ -708,8 +721,8 @@ Niente che modifichi: né `start`, `stop` o `restart` del servizio, né `pin` o 
 `watch`, né un pager o una shell. Per esempio, come `coordinator`:
 
 ```bash
-sudo -u devloop /usr/bin/python3 /home/devloop/ssdlc/scripts/devloop-pinned status
-sudo -u devloop /usr/bin/tail -n 200 /home/devloop/ssdlc/.ssdlc/devloop/run.log
+sudo -u devloop /usr/bin/python3 /home/devloop/devloop/scripts/devloop-pinned status
+sudo -u devloop /usr/bin/tail -n 200 /home/devloop/devloop/.devloop/run.log
 sudo /usr/bin/journalctl --no-pager -n 200 -u devloop
 sudo /usr/bin/systemctl status --no-pager devloop
 sudo /usr/bin/bash /usr/local/lib/devloop-coordinator/host/check-host.sh --read-only
@@ -775,9 +788,9 @@ contenuti**.
 
    ```bash
    DEVLOOP_APP_KEY_DIR=/home/coordinator/.ghapps python3 scripts/coordinator-token.py \
-       --state-dir /home/devloop/ssdlc/.ssdlc/devloop -- gh issue comment <ISSUE> --body-file <FILE>
+       --state-dir /home/devloop/devloop/.devloop -- gh issue comment <ISSUE> --body-file <FILE>
    DEVLOOP_APP_KEY_DIR=/home/coordinator/.ghapps python3 scripts/coordinator-token.py \
-       --state-dir /home/devloop/ssdlc/.ssdlc/devloop --perm actions=read -- \
+       --state-dir /home/devloop/devloop/.devloop --perm actions=read -- \
        gh run view <RUN> --log-failed
    ```
 
@@ -936,8 +949,17 @@ progetto:
 | `COORDINATOR_SUDOERS_FILE`, `COORDINATOR_OPS_DIR` | `/etc/sudoers.d/devloop-coordinator-widget`, `/usr/local/lib/devloop-coordinator-widget` |
 
 `SUPERVISOR_USER`, `COORDINATOR_USER`, `REPO_LOCK_DIR`, `REPO_LOCK_GROUP` e `TMPFILES_FILE` sono
-gli stessi per tutti i progetti dell'host. Un `params.env` senza `PROJECT`, come quello di ssdlc, continua a installare
+gli stessi per tutti i progetti dell'host. Un `params.env` senza `PROJECT` continua a installare
 `devloop.service` come prima.
+
+**Valori scritti.** Ogni parametro scritto in `params.env` vale anche con `PROJECT`, al posto del
+suo default. Così l'host che sviluppa questo repository è passato all'istanza `devloop@devloop`
+(#563) tenendo i suoi utenti (`DEVLOOP_USER=devloop`, `AGENT_USER=devloop-agent`,
+`SUPERVISOR_USER=supervisor`, `COORDINATOR_USER=coordinator`, senza nuovi login delle CLI) e le
+sue `key_dir` (`~/.ghapps` di `devloop`, `supervisor` e `coordinator`), con
+`SUPERVISOR_CLONE=/home/supervisor/devloop`; il clone di devloop è il default,
+`/home/devloop/devloop`, e sudoers, casella e copia di root del coordinatore hanno i default di
+`PROJECT` (l'esempio è in [params.env.example](params.env.example)).
 
 **Utenti distinti.** I nomi derivati da `PROJECT` non coincidono mai con l'utente di un altro
 ruolo o di un altro progetto. Ogni script lo verifica anche sull'host: legge gli utenti delle altre

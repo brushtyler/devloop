@@ -1,8 +1,19 @@
 # Migrazione su un'altra macchina
 
 Spostare devloop e il supervisore da una VM vecchia a una nuova. I percorsi sono quelli di
-`params.env` (qui con i valori dell'installazione attuale: utenti `devloop` e `supervisor`,
-clone in `/home/devloop/ssdlc`, `state_dir` = `.ssdlc/devloop`).
+`params.env` (qui con i valori dell'installazione attuale, dal #563: `PROJECT=devloop`, utenti
+`devloop`, `devloop-agent`, `supervisor` e `coordinator`, clone in `/home/devloop/devloop`,
+`state_dir` = `.devloop`, servizio `devloop@devloop`).
+
+**Percorsi delle sezioni di prima.** Le sezioni dei passi già fatti su questo host, da
+[Configurazione di ssdlc nel suo file di progetto](#configurazione-di-ssdlc-nel-suo-file-di-progetto)
+a [Rinomina del repository in devloop](#rinomina-del-repository-in-devloop-adr-0007-r3-540),
+sono la storia di quei passi e citano i percorsi del loro tempo. Dopo [Percorsi devloop e istanza
+devloop@devloop](#percorsi-devloop-e-istanza-devloopdevloop-563) valgono: `/home/devloop/devloop`
+al posto di `/home/devloop/ssdlc`, `.devloop` al posto di `.ssdlc/devloop`,
+`/home/supervisor/devloop` al posto di `/home/supervisor/ssdlc`, il servizio `devloop@devloop` al
+posto di `devloop`, e i nomi con il suffisso `-devloop` per sudoers, casella e copia di root del
+coordinatore. Il checkout dell'operatore resta `/root/repos/ssdlc`.
 
 **Regola:** mai due dispatcher attivi sullo stesso repository. Il dispatcher nuovo parte solo
 quando quello vecchio è fermo e non ripartirà.
@@ -29,7 +40,7 @@ glieli chiede.
    lettura `u:supervisor:r--`) e, se c'è il coordinatore, `setup-coordinator.sh` (`u:coordinator:r--`
    sull'overlay), come in [ACL dell'overlay e del file di
    progetto](#acl-delloverlay-e-del-file-di-progetto-543).
-6. **La casella** (`COORDINATION_DIR`, `/var/lib/devloop-coordination`): la ricreano vuota
+6. **La casella** (`COORDINATION_DIR`, `/var/lib/devloop-coordination-devloop`): la ricreano vuota
    `setup-supervisor.sh` e `setup-coordinator.sh`. I messaggi non letti della macchina vecchia
    li legge il loro destinatario prima dello spostamento; lo stato del lavoro è su GitHub (il
    diario #76 e le issue), e non si copia.
@@ -44,7 +55,7 @@ glieli chiede.
     gruppo, il coordinatore e la sua copia), poi `devloop-pinned status` e `tick --dry-run` come
     `devloop` ([ops/README.md](../README.md#8-verifica)). L'agent riporta all'operatore cosa ha
     eseguito, come quale utente, e il codice di uscita.
-11. **Avvio**, dell'operatore: il servizio (`systemctl start devloop`, ed `enable`), poi le
+11. **Avvio**, dell'operatore: il servizio (`systemctl start devloop@devloop`, ed `enable`), poi le
     sessioni dei ruoli con `ops/host/start-role.sh supervisor` e `coordinator`
     ([ops/README.md](../README.md#i-quattro-ruoli)): ciascuna parte dalla sezione *At startup*
     del suo runbook, rilegge la sua casella, il diario (#76) e il riepilogo (#316), e riprende a
@@ -63,9 +74,9 @@ glieli chiede.
 2. **Fermare devloop sulla macchina vecchia** e attendere la fine delle azioni in corso:
 
    ```bash
-   sudo systemctl stop devloop        # SIGTERM al solo processo principale (KillMode=mixed)
-   systemctl is-active devloop        # "inactive": il loop è uscito
-   sudo systemctl disable devloop     # non deve ripartire a un riavvio della VM vecchia
+   sudo systemctl stop devloop@devloop      # SIGTERM al solo processo principale (KillMode=mixed)
+   systemctl is-active devloop@devloop      # "inactive": il loop è uscito
+   sudo systemctl disable devloop@devloop   # non deve ripartire a un riavvio della VM vecchia
    ```
 
    `stop` ritorna quando il loop è uscito: devloop smette di pianificare e aspetta le azioni in
@@ -75,11 +86,11 @@ glieli chiede.
 3. **Copiare** i file elencati sotto, conservando proprietario e permessi.
 4. **Ricreare** quello che non si copia (sotto).
 5. **Verificare** con `sudo bash ops/host/check-host.sh` e `devloop-pinned status`, poi **avviare** sulla
-   macchina nuova: `sudo systemctl start devloop` (e `enable`, se deve ripartire al boot).
+   macchina nuova: `sudo systemctl start devloop@devloop` (e `enable`, se deve ripartire al boot).
 
 ### Da copiare
 
-Dallo `state_dir` di devloop (`/home/devloop/ssdlc/.ssdlc/devloop`), come utente `devloop`:
+Dallo `state_dir` di devloop (`/home/devloop/devloop/.devloop`), come utente `devloop`:
 
 | File | Cos'è |
 |---|---|
@@ -94,8 +105,8 @@ Per esempio, dalla macchina nuova:
 
 ```bash
 sudo -u devloop -H rsync -a --chmod=F600 \
-    vecchia:/home/devloop/ssdlc/.ssdlc/devloop/{turn-journal.jsonl,turn-journal-state.json,ledger-open-turns.json,model-unavailability.json,activity.json,config.local.toml,project.toml} \
-    /home/devloop/ssdlc/.ssdlc/devloop/
+    vecchia:/home/devloop/devloop/.devloop/{turn-journal.jsonl,turn-journal-state.json,ledger-open-turns.json,model-unavailability.json,activity.json,config.local.toml,project.toml} \
+    /home/devloop/devloop/.devloop/
 ```
 
 Un file che sulla macchina vecchia non c'è non va creato.
@@ -112,7 +123,7 @@ Dal supervisore, come utente `supervisor`:
   corso, cosa aspetta l'operatore) non sta lì né in un `HANDOFF.md` locale, ma su GitHub, nel
   diario #76 e nelle issue (#543);
 - la memoria di Claude Code, `~/.claude/projects/<progetto>/memory`. `<progetto>` è il percorso
-  del clone del supervisore con `/` sostituito da `-` (per esempio `-home-supervisor-ssdlc`): se il
+  del clone del supervisore con `/` sostituito da `-` (per esempio `-home-supervisor-devloop`): se il
   clone nuovo ha lo stesso percorso il nome resta valido, altrimenti va rinominata.
 
 ### Da ricreare
@@ -123,9 +134,9 @@ Dal supervisore, come utente `supervisor`:
   il launcher (senza file di progetto devloop non parte, ADR 0006, R3):
 
   ```bash
-  sudo -u devloop -H sh -c 'cd ~/ssdlc && python3 -m devloop \
-      --project-config .ssdlc/devloop/project.toml \
-      --local-config .ssdlc/devloop/config.local.toml pin origin/main'
+  sudo -u devloop -H sh -c 'cd ~/devloop && python3 -m devloop \
+      --project-config .devloop/project.toml \
+      --local-config .devloop/config.local.toml pin origin/main'
   ```
 
 - **I worktree** (`worktrees/`): non si copiano; devloop li ricrea dai branch su GitHub quando
@@ -139,11 +150,12 @@ Dal supervisore, come utente `supervisor`:
   senza, che rende di root istruzioni, configurazione e binari delle CLI (#438).
 - **Il token di sola lettura del supervisore**: uno nuovo
   ([ops/github/tokens.md](../github/tokens.md)), e si revoca quello della macchina vecchia.
-- **Il servizio**: lo installa `setup-devloop.sh` da `ops/host/devloop.service`; non si copia
+- **Il servizio**: lo installa `setup-devloop.sh`, con `PROJECT` l'unità template
+  `ops/host/devloop@.service` e la drop-in della sua istanza (`devloop@devloop`); non si copia
   l'unità della macchina vecchia.
 - **Il sudoers del supervisore**: lo installa `setup-supervisor.sh`.
 - **La casella fra supervisore e coordinatore** (#543): il gruppo `devloop-roles` e
-  `/var/lib/devloop-coordination` con `to-coordinator/`, `to-supervisor/` e le loro `done/`, di
+  `COORDINATION_DIR` (`/var/lib/devloop-coordination-devloop`) con `to-coordinator/`, `to-supervisor/` e le loro `done/`, di
   root, del gruppo, 2770; la creano `setup-supervisor.sh` e `setup-coordinator.sh`. Non si copia.
 - **Il coordinatore**, se c'è (#530): utente, copia di root di `check-host.sh` e della sveglia
   `coordinator-wait.sh`, e sudoers in sola lettura li installa `setup-coordinator.sh`
@@ -1694,3 +1706,387 @@ il nome `brushtyler/ssdlc`. Tornare a una copia precedente a #540
 (`scripts/devloop-pinned pin <sha12>`) richiede prima di togliere `repo_aliases` dall'overlay,
 che quella copia rifiuta; senza l'alias, i record scritti con il nome nuovo non sono più del
 repository.
+
+## Percorsi devloop e istanza devloop@devloop (#563)
+
+Con #563 (decisione dell'operatore, [precisazione dell'ADR
+0007](../../docs/adr/0007-da-ssdlc-a-devloop.md#precisazione-del-2026-11-23-i-percorsi-sullhost-563))
+lo `state_dir` di default di devloop diventa `.devloop`, fuori da `.ssdlc/`, la directory di stato
+del vecchio motore SSDLC, e questo host passa all'istanza `devloop@devloop` dell'unità template
+(ADR 0006, R8). Cambiano:
+
+| Prima | Dopo |
+|---|---|
+| clone di devloop `/home/devloop/ssdlc` | `/home/devloop/devloop` (il default con `REPO=brushtyler/devloop`) |
+| `state_dir` `/home/devloop/ssdlc/.ssdlc/devloop` | `/home/devloop/devloop/.devloop` |
+| clone del supervisore `/home/supervisor/ssdlc` | `/home/supervisor/devloop` (`SUPERVISOR_CLONE` scritto) |
+| clone del coordinatore `/home/coordinator/ssdlc` | `/home/coordinator/devloop` |
+| `devloop.service` | `devloop@devloop`: `devloop@.service` e la drop-in `devloop@devloop.service.d/project.conf` |
+| sudoers `devloop-supervisor`, `devloop-agent`, `devloop-coordinator` | gli stessi con il suffisso `-devloop` |
+| casella `/var/lib/devloop-coordination` | `/var/lib/devloop-coordination-devloop` |
+| copia di root `/usr/local/lib/devloop-coordinator` | `/usr/local/lib/devloop-coordinator-devloop` |
+
+**Non cambiano:** gli utenti (`devloop`, `devloop-agent`, `supervisor`, `coordinator`), scritti in
+`params.env` accanto a `PROJECT=devloop`, quindi nessun utente nuovo e nessun nuovo login delle
+CLI; le `key_dir` (`~/.ghapps` di `devloop`, `supervisor` e `coordinator`), scritte in
+`params.env`, quindi nessuna chiave si sposta e `apps.key_dir` dell'overlay resta com'è; il
+checkout dell'operatore `/root/repos/ssdlc`, che si sposta con la migrazione del coordinatore fuori
+da root; il gruppo `devloop-roles`, la directory dei lock e il file di progetto. **Il vecchio
+motore non si tocca:** il tag `ssdlc-engine-final` resta com'è, e nessun passo legge o scrive le
+directory `.ssdlc/` del vecchio motore negli altri repository. Qui si sposta solo
+`.ssdlc/devloop` del clone di devloop, che era lo `state_dir`.
+
+**L'ordine.** Il launcher è quello del clone (`scripts/devloop-pinned`), non della copia fissata:
+dal #563 cerca `.devloop`, e si ferma se trova solo `.ssdlc/devloop`. La copia di #563, invece,
+ha `.devloop` come `state_dir` di default, e con lo `state_dir` di prima il suo smoke test
+rifiuterebbe il file di progetto (`project file: … is not …/.devloop/project.toml`). Per questo:
+
+1. il pin della copia nuova si fa **prima** dello spostamento, con lo `state_dir` di prima, dal
+   launcher del clone **non ancora aggiornato**, e con `state_dir = ".ssdlc/devloop"` scritto per
+   il tempo del pin in cima all'overlay: la copia di prima e quella nuova lo accettano entrambe
+   (la chiave esiste da sempre), e la copia nuova trova il file di progetto dove è;
+2. poi lo spostamento, e la riga si toglie: l'overlay torna quello di prima;
+3. solo dopo il clone passa a `origin/main`, con il launcher nuovo, che trova `.devloop`.
+
+Il passo si fa con l'agent dell'host, a loop fermo, come root. La PR di #563 lo dichiara
+(`host_step`): con `[pin] auto = true` devloop non fa il pin automatico finché non lo fa
+l'operatore ([Ogni cambio con un passo sull'host](#ogni-cambio-con-un-passo-sullhost)).
+
+### Prima
+
+- **La PR di #563 mergiata** su `main`, e la copia in uso precedente a #563.
+- **I fatti dell'host** su cui si basa la procedura (verificati il 2026-11-23): lo `state_dir` è
+  sullo stesso filesystem dei clone, quindi ogni spostamento è un `mv` (un rename) che tiene
+  proprietari, modi e ACL; il link `current` è relativo (`pinned-<sha12>`); il clone di devloop non
+  ha worktree attivi. Si riverificano al passo 2.
+- **Nessun percorso nuovo esiste già** e nessun'altra istanza di `devloop@` gira sull'host:
+
+  ```bash
+  ls -d /home/devloop/devloop /home/supervisor/devloop /home/coordinator/devloop /var/lib/devloop-coordination-devloop
+  ls /etc/systemd/system/ | grep '^devloop'
+  ```
+
+  `ls -d` dice `No such file or directory` per tutti e quattro; il secondo stampa solo
+  `devloop.service`. Altrimenti ci si ferma e si chiede all'operatore.
+- **L'operatore presente** per il riavvio delle sessioni dei ruoli (passo 13).
+
+### Comandi
+
+Come root, dal checkout dell'operatore aggiornato (`git -C /root/repos/ssdlc fetch origin` e
+`git -C /root/repos/ssdlc checkout --detach origin/main`), che deve avere `ops/params.env`
+(`test -f /root/repos/ssdlc/ops/params.env`). Gli script di `ops/host` girano sempre da lì, mai
+dal clone di devloop.
+
+1. **Fermare tutto**: il loop, la sessione del supervisore e quella del coordinatore, con la sua
+   sveglia. Durante il fermo nessuno legge la casella né lo `state_dir`.
+
+   ```bash
+   systemctl is-enabled devloop > /root/devloop-563-enabled || true
+   systemctl stop devloop
+   systemctl is-active devloop        # "inactive"
+   sudo -u supervisor -H tmux kill-session -t =devloop-supervisor
+   sudo -u coordinator -H tmux kill-session -t =devloop-coordinator
+   pgrep -u devloop -af 'm devloop'
+   pgrep -u coordinator -af coordinator-wait.sh
+   ```
+
+   I due `pgrep` non stampano nulla; una sveglia rimasta si ferma con
+   `pkill -u coordinator -f coordinator-wait.sh`. Una sessione che non c'è dà `can't find
+   session`: va bene.
+
+2. **Copie di sicurezza e fatti**, in una directory di root:
+
+   ```bash
+   install -d -m 700 /root/devloop-563-prima
+   cd /root/devloop-563-prima
+   mv /root/devloop-563-enabled enabled
+   cp -p /etc/systemd/system/devloop.service .
+   for f in devloop-supervisor devloop-agent devloop-coordinator; do test -e /etc/sudoers.d/$f && cp -p /etc/sudoers.d/$f sudoers-$f; done
+   test -d /usr/local/lib/devloop-coordinator && cp -a /usr/local/lib/devloop-coordinator coordinator-ops
+   cp -p /root/repos/ssdlc/ops/params.env params.env
+   cp -p /home/devloop/ssdlc/.ssdlc/devloop/config.local.toml config.local.toml
+   cp -p /home/devloop-agent/.gemini/antigravity-cli/settings.json agy-settings.json
+   readlink /home/devloop/ssdlc/.ssdlc/devloop/current > current
+   sudo -u devloop -H git -C /home/devloop/ssdlc rev-parse HEAD > clone-head
+   getfacl -p /home/devloop /home/devloop/ssdlc/.ssdlc/devloop /home/devloop/ssdlc/.ssdlc/devloop/config.local.toml /home/devloop/ssdlc/.ssdlc/devloop/project.toml > acl-prima
+   cat current
+   for c in /home/devloop/ssdlc /home/supervisor/ssdlc /home/coordinator/ssdlc; do echo "$c"; sudo -u "$(stat -c %U "$c")" -H git -C "$c" worktree list; done
+   stat -c '%d %n' /home/devloop /home/devloop/ssdlc /home/devloop/ssdlc/.ssdlc/devloop /home/supervisor /home/supervisor/ssdlc /home/coordinator /home/coordinator/ssdlc /var/lib /var/lib/devloop-coordination
+   ```
+
+   `cat current` stampa `pinned-<sha12>`, relativo: dopo lo spostamento resta valido. Ogni
+   `worktree list` deve stampare solo il clone: un worktree in più si ripara al passo 6. Lo
+   `stat` dà lo stesso numero di dispositivo per ogni percorso e la sua directory padre (lo
+   `state_dir` e il suo clone, ogni clone e la sua home, la casella e `/var/lib`): un `mv` nello
+   stesso filesystem è un rename, che tiene proprietari, modi e ACL. Con un numero diverso ci si
+   ferma.
+
+3. **Il pin della copia nuova**, prima dello spostamento, con lo `state_dir` di prima. La riga
+   `state_dir` va **in cima** all'overlay (una chiave di primo livello, prima di ogni tabella), e
+   il file si riscrive al suo posto (`cat … >`), così proprietario, modo e ACL restano. Il clone
+   si aggiorna con `fetch` soltanto: il suo launcher resta quello di prima, che cerca ancora
+   `.ssdlc/devloop`.
+
+   ```bash
+   cd /home/devloop/ssdlc/.ssdlc/devloop
+   grep -c '^state_dir' config.local.toml                       # 0
+   printf 'state_dir = ".ssdlc/devloop"\n' | cat - config.local.toml > /root/devloop-563-prima/overlay-pin
+   cat /root/devloop-563-prima/overlay-pin > config.local.toml
+   sudo -u devloop -H git -C /home/devloop/ssdlc fetch origin
+   sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned pin origin/main
+   readlink /home/devloop/ssdlc/.ssdlc/devloop/current
+   grep -x 'state_dir = ".devloop"' /home/devloop/ssdlc/.ssdlc/devloop/current/devloop/config.toml
+   ```
+
+   Il pin finisce con `pinned …` e lo smoke test passato; `readlink` stampa il `pinned-<sha12>`
+   nuovo e `grep` la riga del default nuovo: la copia nuova è di #563 o successiva. Se il primo
+   `grep` non dà `0`, l'overlay ha già uno `state_dir`: ci si ferma e si chiede all'operatore. Se
+   il pin fallisce non si sposta nulla: l'overlay torna quello di prima
+   (`cat /root/devloop-563-prima/config.local.toml > config.local.toml`), e il loop riparte con
+   `systemctl start devloop` sulla copia di prima, che `current` nomina ancora.
+
+4. **Lo spostamento**, con `mv`. Lo `state_dir` diventa `.devloop` del clone nuovo; `.ssdlc/` del
+   clone resta solo se contiene altro, e devloop non la legge.
+
+   ```bash
+   mv /home/devloop/ssdlc /home/devloop/devloop
+   mv /home/devloop/devloop/.ssdlc/devloop /home/devloop/devloop/.devloop
+   rmdir /home/devloop/devloop/.ssdlc || ls -A /home/devloop/devloop/.ssdlc
+   mv /home/supervisor/ssdlc /home/supervisor/devloop
+   mv /home/coordinator/ssdlc /home/coordinator/devloop
+   mv /var/lib/devloop-coordination /var/lib/devloop-coordination-devloop
+   ```
+
+   La casella si sposta con i suoi messaggi, `root:devloop-roles` 2770. Le chiavi non si spostano.
+
+5. **Le ACL**, verificate dopo lo spostamento, con `acl-prima` del passo 2:
+
+   ```bash
+   getfacl -p /home/devloop /home/devloop/devloop/.devloop /home/devloop/devloop/.devloop/config.local.toml /home/devloop/devloop/.devloop/project.toml
+   ```
+
+   Devono esserci, come prima: `user:supervisor:--x` e `user:coordinator:--x` su `/home/devloop`;
+   `user:devloop-agent:--x` e `default:user:devloop-agent:---` sullo `state_dir`;
+   `user:supervisor:r--`, `user:coordinator:r--` e `user:devloop-agent:---` sull'overlay;
+   `user:supervisor:r--` e `user:devloop-agent:---` sul file di progetto. Una voce che manca si
+   rimette con gli script del passo 11, che la aggiungono solo se manca.
+
+6. **I worktree di git.** Senza worktree al passo 2 non c'è nulla da fare. Altrimenti, come
+   l'utente del clone, `git worktree repair` dal clone nuovo con il percorso nuovo di ogni
+   worktree, che ripara i collegamenti nei due sensi; per devloop:
+
+   ```bash
+   sudo -u devloop -H git -C /home/devloop/devloop worktree repair /home/devloop/devloop/.devloop/worktrees/*
+   sudo -u devloop -H git -C /home/devloop/devloop worktree list
+   ```
+
+   `worktree list` mostra i percorsi nuovi, senza `prunable`. Allo stesso modo per un worktree
+   del supervisore o del coordinatore, come il loro utente.
+
+7. **Lo `state_dir`**: il link `current`, i percorsi assoluti dei file di stato e la riga del
+   passo 3, che si toglie.
+
+   ```bash
+   cd /home/devloop/devloop/.devloop
+   readlink current
+   test -f current/devloop/__main__.py && echo ok
+   grep -rlF /home/devloop/ssdlc . --exclude-dir=worktrees --exclude-dir='pinned-*' --exclude-dir='rejected-*' --exclude-dir=logs --exclude-dir=agent-shared --exclude='*.log' --exclude='turn-journal*' --exclude=config.local.toml
+   grep -vx 'state_dir = ".ssdlc/devloop"' config.local.toml > /root/devloop-563-prima/overlay-dopo
+   cat /root/devloop-563-prima/overlay-dopo > config.local.toml
+   cmp config.local.toml /root/devloop-563-prima/config.local.toml && echo uguale
+   grep -rlF /home/devloop/ssdlc config.local.toml project.toml
+   ```
+
+   `readlink` stampa lo stesso `pinned-<sha12>` del passo 3, relativo, e `test` stampa `ok`. Il
+   primo `grep -r` non stampa nulla: i file di stato di devloop (`pin-base.json`, che tiene solo
+   il commit, e gli altri `*.json`) non hanno percorsi assoluti. Un file che compare si riporta
+   all'operatore e non si corregge a mano. Il journal (`turn-journal*`, una catena di hash) e i
+   log tengono i percorsi di prima come storia e non si riscrivono. `cmp` stampa `uguale`: l'overlay
+   è quello di prima. L'ultimo `grep` non stampa nulla: l'overlay e il file di progetto non
+   nominano il clone (`key_dir` è `/home/devloop/.ghapps`, che non cambia).
+
+8. **Il clone di devloop su `origin/main`**, con il launcher nuovo:
+
+   ```bash
+   sudo -u devloop -H git -C /home/devloop/devloop checkout --detach origin/main
+   sudo -u devloop -H git -C /home/devloop/devloop status --short
+   ```
+
+   `status --short` non stampa nulla (`.devloop/` è ignorata dal `.gitignore` nuovo).
+
+9. **Le CLI dell'utente degli agent.** `trustedWorkspaces` di agy nomina il clone di prima. Il
+   file è sigillato (#438): lo riscrive root, al suo posto, così proprietario e modo restano;
+   l'utente degli agent non lo scrive. Le cache di agy (`~/.gemini/antigravity-cli/cache/`) e le
+   sessioni non si riscrivono.
+
+   ```bash
+   f=/home/devloop-agent/.gemini/antigravity-cli/settings.json
+   grep -c '/home/devloop/ssdlc' "$f"
+   sed -e 's|"/home/devloop/ssdlc/\.ssdlc/devloop\([/"]\)|"/home/devloop/devloop/.devloop\1|g' -e 's|"/home/devloop/ssdlc\([/"]\)|"/home/devloop/devloop\1|g' "$f" > /root/devloop-563-prima/agy-settings-dopo
+   python3 -I -m json.tool /root/devloop-563-prima/agy-settings-dopo > /dev/null && echo json
+   cat /root/devloop-563-prima/agy-settings-dopo > "$f"
+   grep -c '/home/devloop/ssdlc' "$f"
+   grep -n '/home/devloop/devloop' "$f"
+   stat -c '%U %a' "$f"
+   grep -lF /home/devloop/ssdlc /home/devloop-agent/.claude.json /home/devloop-agent/.claude/settings.json /home/devloop-agent/.codex/config.toml /home/devloop-agent/.gemini/settings.json /home/devloop/.codex/config.toml /home/devloop/.claude.json /home/devloop/.claude/settings.json
+   ```
+
+   Il primo `grep -c` dà almeno `1`, il secondo `0`; `json` conferma che il file è valido, e
+   `grep -n` mostra la voce nuova di `trustedWorkspaces`; `stat` dà il proprietario e il modo di
+   prima (`root`, sigillato). L'ultimo `grep` non stampa nomi di file (al più `No such file` per
+   un file che non c'è): il 2026-11-23 nessuno di quei file nominava il clone. Un file che compare
+   si riscrive allo stesso modo, da root, dopo una copia in `/root/devloop-563-prima`.
+
+10. **`ops/params.env`** del checkout dell'operatore. Si tolgono i valori che con `PROJECT`
+    devono prendere il default (clone di devloop, servizio, sudoers, copia di root, casella,
+    `state_dir`) e si scrivono quelli che restano di prima:
+
+    ```bash
+    cd /root/repos/ssdlc/ops
+    sed -i -E '/^(PROJECT|DEVLOOP_CLONE|SUPERVISOR_CLONE|SERVICE_NAME|SUDOERS_FILE|AGENT_SUDOERS_FILE|COORDINATOR_SUDOERS_FILE|COORDINATOR_OPS_DIR|COORDINATION_DIR|STATE_DIR)=/d' params.env
+    cat >> params.env <<'EOF'
+    # #563: l'istanza devloop@devloop, con gli utenti, le key_dir e i clone di questo host
+    PROJECT=devloop
+    DEVLOOP_USER=devloop
+    AGENT_USER=devloop-agent
+    SUPERVISOR_USER=supervisor
+    COORDINATOR_USER=coordinator
+    SUPERVISOR_CLONE=/home/supervisor/devloop
+    DEVLOOP_KEY_DIR=/home/devloop/.ghapps
+    SUPERVISOR_KEY_DIR=/home/supervisor/.ghapps
+    COORDINATOR_KEY_DIR=/home/coordinator/.ghapps
+    EOF
+    grep -nE '^(REPO|SOURCE_REPO|PROJECT|DEVLOOP_CLONE|STATE_DIR)=' params.env
+    ```
+
+    L'ultimo comando stampa `REPO=brushtyler/devloop` e `PROJECT=devloop`, nessun `SOURCE_REPO`
+    non vuoto, nessun `DEVLOOP_CLONE` né `STATE_DIR`.
+
+11. **Unità, sudoers e copie di prima** si tolgono **prima** degli script: finché ci sono, ogni
+    script si ferma (`DEVLOOP_USER 'devloop' è già l'utente devloop di un'altra installazione di
+    devloop dell'host`), perché con `PROJECT` non sono più dell'installazione. Le loro copie sono
+    in `/root/devloop-563-prima`. Poi gli script, ciascuno prima con `--dry-run`:
+
+    ```bash
+    systemctl disable devloop
+    rm /etc/systemd/system/devloop.service
+    rm -f /etc/sudoers.d/devloop-supervisor /etc/sudoers.d/devloop-agent /etc/sudoers.d/devloop-coordinator
+    rm -rf /usr/local/lib/devloop-coordinator
+    systemctl daemon-reload
+    sudo bash /root/repos/ssdlc/ops/host/setup-devloop.sh --dry-run
+    sudo bash /root/repos/ssdlc/ops/host/setup-devloop.sh
+    sudo bash /root/repos/ssdlc/ops/host/setup-agent-user.sh --dry-run
+    sudo bash /root/repos/ssdlc/ops/host/setup-agent-user.sh
+    sudo bash /root/repos/ssdlc/ops/host/setup-supervisor.sh --dry-run
+    sudo bash /root/repos/ssdlc/ops/host/setup-supervisor.sh
+    sudo bash /root/repos/ssdlc/ops/host/setup-coordinator.sh --dry-run
+    sudo bash /root/repos/ssdlc/ops/host/setup-coordinator.sh
+    ```
+
+    Nessuno dei quattro stampa `useradd`: gli utenti esistono (`ok: l'utente devloop esiste`, e
+    così gli altri). `setup-devloop.sh` scrive `/etc/systemd/system/devloop@.service` e la
+    drop-in `/etc/systemd/system/devloop@devloop.service.d/project.conf`, con `User=devloop`,
+    `WorkingDirectory=/home/devloop/devloop`, `ExecStart=/usr/bin/python3
+    /home/devloop/devloop/scripts/devloop-pinned run` e il log in
+    `/home/devloop/devloop/.devloop/run.log`, e trova clone, `state_dir`, overlay e `key_dir`
+    (`ok: …`). `setup-agent-user.sh` scrive `/etc/sudoers.d/devloop-agent-devloop` e trova le ACL
+    dello `state_dir`. `setup-supervisor.sh` scrive `/etc/sudoers.d/devloop-supervisor-devloop`,
+    con `systemctl … devloop@devloop`, e trova il clone (`… è già un clone di brushtyler/devloop`),
+    le ACL dell'overlay e la casella `/var/lib/devloop-coordination-devloop`.
+    `setup-coordinator.sh` scrive `/etc/sudoers.d/devloop-coordinator-devloop` e la copia
+    `/usr/local/lib/devloop-coordinator-devloop`, e trova la `key_dir` `/home/coordinator/.ghapps`.
+    Una `key_dir` con il suffisso `-devloop` vuol dire che `params.env` non è quello del passo 10:
+    ci si ferma.
+
+12. **Verifiche**, a loop fermo:
+
+    ```bash
+    sudo bash /root/repos/ssdlc/ops/host/check-host.sh
+    sudo -u devloop -H python3 /home/devloop/devloop/scripts/devloop-pinned apps
+    sudo -u devloop -H python3 /home/devloop/devloop/scripts/devloop-pinned status
+    sudo -u devloop -H python3 /home/devloop/devloop/scripts/devloop-pinned tick --dry-run
+    sudo -u supervisor -H sh -c 'cd ~/devloop && DEVLOOP_APP_KEY_DIR=/home/supervisor/.ghapps python3 scripts/supervisor-token.py --state-dir /home/devloop/devloop/.devloop --perm issues=read -- gh api repos/brushtyler/devloop --jq .full_name'
+    sudo -u coordinator -H sh -c 'cd ~/devloop && DEVLOOP_APP_KEY_DIR=/home/coordinator/.ghapps python3 scripts/coordinator-token.py --state-dir /home/devloop/devloop/.devloop --perm issues=read -- gh api repos/brushtyler/devloop --jq .full_name'
+    sudo -u coordinator -H sudo -n -l
+    ```
+
+    `check-host.sh` non dà nessun `ERRORE` (l'unità e la drop-in `coincide`, i tre sudoers con il
+    suffisso, la casella, il coordinatore e la sua copia); `devloop.service` non è più fra le unità.
+    `apps` nomina `apps of brushtyler/devloop, keys in /home/devloop/.ghapps` e trova ogni app. I
+    due script dei token stampano `brushtyler/devloop`. `tick --dry-run` esce con 0. `sudo -n -l`
+    del coordinatore elenca i comandi con `devloop@devloop` e `/home/devloop/devloop/.devloop`.
+    Con un errore, il rollback.
+
+13. **Avvio**, e le sessioni dei ruoli:
+
+    ```bash
+    grep -qx enabled /root/devloop-563-prima/enabled && systemctl enable devloop@devloop
+    systemctl start devloop@devloop
+    systemctl is-active devloop@devloop      # "active"
+    tail -n 20 /home/devloop/devloop/.devloop/run.log
+    sudo -u supervisor -H sh -c 'cd ~/.claude/projects && test -d -home-supervisor-ssdlc && test ! -e -home-supervisor-devloop && mv -- -home-supervisor-ssdlc -home-supervisor-devloop'
+    ```
+
+    All'avvio il journal di devloop registra il cambio della chiave di fiducia `state_dir`
+    (`.ssdlc/devloop` → `.devloop`). L'ultimo comando porta la memoria di Claude Code del
+    supervisore al nome del clone nuovo ([Da copiare](#da-copiare)); se la directory non c'è, non
+    fa nulla. Poi l'operatore riavvia le sessioni con `ops/host/start-role.sh`, che passa a
+    ciascuna i valori nuovi (lo `state_dir`, la casella, la sveglia nella copia nuova):
+
+    ```bash
+    sudo bash /root/repos/ssdlc/ops/host/start-role.sh supervisor
+    sudo bash /root/repos/ssdlc/ops/host/start-role.sh coordinator
+    ```
+
+    Alla prima sessione nella directory nuova una CLI può chiedere di fidarsi della directory:
+    l'operatore conferma. `/root/devloop-563-prima` si cancella quando il loop gira con i percorsi
+    nuovi e l'operatore non prevede il rollback.
+
+**Rollback.** A loop fermo (`systemctl stop devloop@devloop`, sessioni chiuse come al passo 1),
+come root, l'inverso nell'ordine inverso, dalle copie di `/root/devloop-563-prima`; un passo non
+ancora fatto si salta. Non servono gli script di `ops/`: le copie sono i file di prima.
+
+```bash
+cd /root/devloop-563-prima
+systemctl disable devloop@devloop
+rm -r /etc/systemd/system/devloop@devloop.service.d
+ls -d /etc/systemd/system/devloop@*.service.d 2>/dev/null || rm /etc/systemd/system/devloop@.service
+rm -f /etc/sudoers.d/devloop-supervisor-devloop /etc/sudoers.d/devloop-agent-devloop /etc/sudoers.d/devloop-coordinator-devloop
+rm -rf /usr/local/lib/devloop-coordinator-devloop
+cp -p devloop.service /etc/systemd/system/devloop.service
+for f in devloop-supervisor devloop-agent devloop-coordinator; do test -e sudoers-$f && cp -p sudoers-$f /etc/sudoers.d/$f; done
+test -d coordinator-ops && cp -a coordinator-ops /usr/local/lib/devloop-coordinator
+systemctl daemon-reload
+grep -qx enabled enabled && systemctl enable devloop
+cp -p params.env /root/repos/ssdlc/ops/params.env
+cat agy-settings.json > /home/devloop-agent/.gemini/antigravity-cli/settings.json
+mv /var/lib/devloop-coordination-devloop /var/lib/devloop-coordination
+mv /home/coordinator/devloop /home/coordinator/ssdlc
+mv /home/supervisor/devloop /home/supervisor/ssdlc
+sudo -u devloop -H mkdir -p /home/devloop/devloop/.ssdlc
+mv /home/devloop/devloop/.devloop /home/devloop/devloop/.ssdlc/devloop
+mv /home/devloop/devloop /home/devloop/ssdlc
+sudo -u devloop -H git -C /home/devloop/ssdlc checkout --detach "$(cat clone-head)"
+```
+
+Con dei worktree, `git worktree repair` come al passo 6, con i percorsi di prima. Poi la copia
+fissata di prima, con la riga del passo 3 per il tempo del pin: la copia di #563, che `current`
+nomina, accetta lo `state_dir` di prima solo con quella riga. Infine l'overlay di prima, al suo
+posto, e l'avvio:
+
+```bash
+cd /home/devloop/ssdlc/.ssdlc/devloop
+cat /root/devloop-563-prima/overlay-pin > config.local.toml
+sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned pin "$(sed 's/^pinned-//' /root/devloop-563-prima/current)"
+cat /root/devloop-563-prima/config.local.toml > config.local.toml
+readlink current
+systemctl start devloop
+```
+
+`readlink` stampa il `pinned-<sha12>` di `/root/devloop-563-prima/current`. La memoria del
+supervisore torna al nome di prima con il `mv` inverso del passo 13, come `supervisor`. Dopo il
+rollback `check-host.sh` si esegue dalla copia di root ripristinata
+(`sudo bash /usr/local/lib/devloop-coordinator/host/check-host.sh --read-only`), che ha i
+parametri di prima, non dal checkout dell'operatore su `origin/main`, i cui script hanno già lo
+`state_dir` `.devloop`. Le sessioni ripartono con `start-role.sh` dal checkout dell'operatore
+portato a un commit precedente a #563.

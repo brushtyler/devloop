@@ -16,8 +16,10 @@ devloop's pinned copy of that state_dir, with the configuration of its project (
 installation's config.toml, the project file and the local overlay), whose ``repo`` and
 ``[apps]`` give the repository and the app; only the actor's key is read, from
 ``$DEVLOOP_APP_KEY_DIR`` or the project's ``key_dir``. The state_dir is DIR, or
-``.ssdlc/devloop`` of the main checkout of this clone, the launcher's default, also when the
-script runs from a linked worktree: git's common directory names the main checkout. Run it from
+``.devloop`` of the main checkout of this clone, the launcher's default, also when the script
+runs from a linked worktree: git's common directory names the main checkout. Like the launcher,
+it stops when that directory is missing and the clone still has the state_dir of before #563
+(``OLD_STATE``): it never falls back on it. Run it from
 the checkout of the managed repository, or one of its worktrees: the command runs in the current
 directory.
 
@@ -39,7 +41,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 LAUNCHER = ROOT / 'scripts' / 'devloop-pinned'
 # The launcher's default state_dir, under the main checkout of this clone.
-STATE = Path('.ssdlc') / 'devloop'
+STATE = Path('.devloop')
+# The default state_dir of before #563, never used: present without STATE, it stops the script.
+OLD_STATE = Path('.ssdlc') / 'devloop'
 STATE_DIR = '--state-dir'
 
 
@@ -73,7 +77,12 @@ def command(argv, python=sys.executable):
     if not argv or '--' not in argv:
         raise SystemExit(__doc__.strip())
     if state is None:
-        state = main_checkout() / STATE
+        root = main_checkout()
+        state = root / STATE
+        if not state.exists() and (root / OLD_STATE).exists():
+            raise SystemExit(f'agent-token: {root / OLD_STATE} is the state_dir of before #563, '
+                             f'and {state} does not exist: move it as ops/host/migrate.md says, '
+                             'section "Percorsi devloop e istanza devloop@devloop"')
     # The launcher wants it absolute; with it, it leaves the current directory as it is.
     return [python, str(LAUNCHER), STATE_DIR, os.path.abspath(state), 'token', *argv]
 

@@ -227,7 +227,7 @@ class FollowTranscriptTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.home = Path(self.tmp.name) / 'home'
-        self.wt = Path(self.tmp.name) / 'repo' / '.ssdlc' / 'devloop' / 'worktrees' / 'issue-52'
+        self.wt = Path(self.tmp.name) / 'repo' / '.devloop' / 'worktrees' / 'issue-52'
         self.wt.mkdir(parents=True)
         self.wt = Path(os.path.realpath(self.wt))
 

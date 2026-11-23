@@ -161,13 +161,13 @@ class OutputTailTests(unittest.TestCase):
 
     def test_no_absolute_paths(self):
         out = '\n'.join([
-            'cd /home/devloop/ssdlc/.ssdlc/devloop/worktrees/issue-215 && python3 -m unittest',
+            'cd /home/devloop/devloop/.devloop/worktrees/issue-215 && python3 -m unittest',
             'File "/usr/lib/python3.12/subprocess.py", line 1209, in communicate',
             'PATH=/usr/bin:/home/op/.local/bin --log=/var/log/x.log (/tmp/abc/)',
             'see https://github.com/o/r/blob/main/devloop/agents.py and tests/test_x.py',
             'relative ./devloop/agents.py, home ~/.codex/config.toml, ratio 3/4',
         ])
-        tail = agents.output_tail(out, '', '/home/devloop/ssdlc/.ssdlc/devloop/worktrees/issue-215',
+        tail = agents.output_tail(out, '', '/home/devloop/devloop/.devloop/worktrees/issue-215',
                                   env={})
         self.assertIsNone(ABSOLUTE.search(tail), tail)
         lines = tail.splitlines()

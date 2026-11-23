@@ -7,7 +7,7 @@ repo = "brushtyler/ssdlc"
 base_branch = "main"
 branch_prefix = "agent/issue-"
 # Worktrees, logs and the lock live here, relative to the main checkout (ignored by git).
-state_dir = ".ssdlc/devloop"
+state_dir = ".devloop"
 # The same tests as `python3 -m unittest discover -s tests`, split across parallel worker
 # processes (each runs several modules in turn, like the serial discover does in one process).
 test_cmd = "python3 scripts/run-tests.py"

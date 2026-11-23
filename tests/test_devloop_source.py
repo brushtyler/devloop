@@ -200,10 +200,10 @@ class StateDirTests(TwoRepositoriesCase):
         with mock.patch.dict(os.environ, {cli.STATE_ENV: str(self.state)}):
             self.assertEqual(cli.state_path(cfg, self.managed), self.state)
             # Relative to the managed repository, the same directory.
-            inside = dataclasses.replace(cfg, state_dir='.ssdlc/devloop')
-            with mock.patch.dict(os.environ, {cli.STATE_ENV: str(self.managed / '.ssdlc/devloop')}):
+            inside = dataclasses.replace(cfg, state_dir='.devloop')
+            with mock.patch.dict(os.environ, {cli.STATE_ENV: str(self.managed / '.devloop')}):
                 self.assertEqual(cli.state_path(inside, self.managed),
-                                 self.managed / '.ssdlc/devloop')
+                                 self.managed / '.devloop')
             with self.assertRaisesRegex(ConfigError, 'is not the directory given to the launcher'):
                 cli.state_path(inside, self.managed)
 
@@ -304,13 +304,55 @@ class LauncherTests(TwoRepositoriesCase):
         # caller does not reach devloop.
         root = self.tmp / 'clone'
         (root / 'scripts').mkdir(parents=True)
-        state = root / '.ssdlc' / 'devloop'
+        state = root / '.devloop'
         write(state / 'pinned-0123456789ab' / 'devloop' / '__main__.py', '')
         os.symlink('pinned-0123456789ab', state / 'current')
         with mock.patch.dict(os.environ, {cli.STATE_ENV: '/elsewhere'}):
             argv, env = load_launcher().command(root, ['run'])
         self.assertNotIn(cli.STATE_ENV, env)
         self.assertEqual(argv[1:], ['-P', '-m', 'devloop', 'run'])
+
+    def test_the_state_dir_of_before_563_stops_the_launcher(self):
+        # #563: the default state_dir is .devloop. A clone that still has .ssdlc/devloop, and no
+        # .devloop, stops the launcher with the section of the migration: no silent fallback.
+        root = self.tmp / 'clone'
+        old = root / '.ssdlc' / 'devloop'
+        write(old / 'pinned-0123456789ab' / 'devloop' / '__main__.py', '')
+        os.symlink('pinned-0123456789ab', old / 'current')
+        write(old / 'config.local.toml', '')
+        launcher = load_launcher()
+        with self.assertRaises(SystemExit) as raised:
+            launcher.command(root, ['run'])
+        message = str(raised.exception.code)
+        self.assertIn(f'devloop-pinned: {old} is the state_dir of before #563 and '
+                      f'{root / ".devloop"} does not exist', message)
+        self.assertIn('stop the loop and move it', message)
+        self.assertIn('ops/host/migrate.md, section "Percorsi devloop e istanza devloop@devloop"',
+                      message)
+        # Through main too, before anything runs.
+        calls = []
+        with self.assertRaises(SystemExit):
+            launcher.main(['status'], euid=1000, execve=lambda *a: calls.append(a), root=root)
+        self.assertEqual(calls, [])
+        # The section it names exists.
+        migrate = (Path(__file__).resolve().parents[1] / 'ops/host/migrate.md').read_text(
+            encoding='utf-8')
+        self.assertIn('\n## Percorsi devloop e istanza devloop@devloop (#563)\n', migrate)
+        # Without either directory, the message of before: no pinned copy, pin first.
+        shutil.rmtree(root / '.ssdlc')
+        with self.assertRaises(SystemExit) as raised:
+            launcher.command(root, ['run'])
+        message = str(raised.exception.code)
+        self.assertIn(f'no pinned copy at {root / ".devloop" / "current"}', message)
+        self.assertIn('--project-config .devloop/project.toml', message)
+        # With .devloop present, .ssdlc/devloop beside it is never read (#563).
+        new = root / '.devloop'
+        write(new / 'pinned-ba9876543210' / 'devloop' / '__main__.py', '')
+        os.symlink('pinned-ba9876543210', new / 'current')
+        write(old / 'config.local.toml', '')
+        argv, env = launcher.command(root, ['run'])
+        self.assertEqual(argv[1:], ['-P', '-m', 'devloop', 'run'])
+        self.assertEqual(env['PYTHONPATH'], str((new / 'pinned-ba9876543210').resolve()))
 
     def test_the_real_package_stops_on_another_state_dir(self):
         copy_package(self.copy)
@@ -322,12 +364,13 @@ class LauncherTests(TwoRepositoriesCase):
         proc = self.launch('--state-dir', str(self.state), 'fallback', 'reset', implementer)
         self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
         self.assertIn('devloop: invalid config: state_dir: '
-                      f'{self.managed / ".ssdlc/devloop"} is not the directory given to the '
+                      f'{self.managed / ".devloop"} is not the directory given to the '
                       f'launcher, {self.state}', proc.stderr)
         self.overlay.write_text(f'source = "{self.source}"\nstate_dir = "{self.state}"\n')
         proc = self.launch('--state-dir', str(self.state), 'fallback', 'reset', implementer)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn('no model remembered unavailable', proc.stdout)
+        self.assertFalse((self.managed / '.devloop').exists())
         self.assertFalse((self.managed / '.ssdlc').exists())
 
 

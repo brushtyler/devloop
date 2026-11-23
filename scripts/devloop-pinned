@@ -4,12 +4,17 @@
     scripts/devloop-pinned [--allow-root] [--state-dir DIR] <devloop arguments>
 
 From the clone this script belongs to, it runs ``python3 -P -m devloop`` with ``PYTHONPATH`` on
-the copy that ``.ssdlc/devloop/current`` points at (made by ``python3 -m devloop pin <ref>``)
-and, when ``.ssdlc/devloop/config.local.toml`` exists, ``--local-config`` on it: the keys it sets
+the copy that ``.devloop/current`` points at (made by ``python3 -m devloop pin <ref>``)
+and, when ``.devloop/config.local.toml`` exists, ``--local-config`` on it: the keys it sets
 replace those of the copy's ``devloop/config.toml``. When ``project.toml`` exists beside the
 overlay, it passes ``--project-config`` on it: the project file of the host (ADR 0006, R2), with
 the facts and the added restrictions of the managed repository. It works run directly by the dedicated user
 or through ``sudo -u devloop -H``, and refuses to run as root without ``--allow-root``.
+
+The default state_dir is ``.devloop`` since #563. When the clone has no ``.devloop`` but still
+the state_dir of before, ``.ssdlc/devloop``, the script stops and names the section of
+``ops/host/migrate.md`` that moves it: it never falls back on it, nor reads ``.ssdlc/``, the
+state directory of the old SSDLC engine.
 
 With ``--state-dir DIR`` (ADR 0006, R1) the pinned copy and the overlay are those of ``DIR``, an
 absolute path, and the script may live anywhere, as the copy the host installs outside the
@@ -31,7 +36,11 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-STATE = Path('.ssdlc') / 'devloop'
+STATE = Path('.devloop')
+# The default state_dir of before #563: present without STATE, it stops the launcher.
+OLD_STATE = Path('.ssdlc') / 'devloop'
+# The section of ops/host/migrate.md that moves OLD_STATE to STATE.
+MIGRATION = 'ops/host/migrate.md, section "Percorsi devloop e istanza devloop@devloop"'
 ALLOW_ROOT = '--allow-root'
 STATE_DIR = '--state-dir'
 # The state_dir given with --state-dir, for devloop's check (devloop/__main__.py, STATE_ENV).
@@ -43,6 +52,10 @@ def command(root, argv, python=sys.executable, state=None):
     of the clone ``root``), or SystemExit."""
     given = state is not None
     state = Path(state) if given else root / STATE
+    if not given and not state.exists() and (root / OLD_STATE).exists():
+        sys.exit(f'devloop-pinned: {root / OLD_STATE} is the state_dir of before #563 and '
+                 f'{state} does not exist: devloop does not use it any more; stop the loop and '
+                 f'move it to {state} ({MIGRATION})')
     pointer = state / 'current'
     copy = pointer.resolve() if pointer.is_symlink() else None
     if copy is None or not (copy / 'devloop' / '__main__.py').is_file():

@@ -280,8 +280,8 @@ class RunTestsDistributionTests(ProjectMixin, unittest.TestCase):
         return serial, self.run_tests(root, jobs)
 
     def history(self, root, durations):
-        (root / '.ssdlc').mkdir(exist_ok=True)
-        (root / '.ssdlc' / 'test-durations.json').write_text(json.dumps(durations))
+        (root / '.devloop').mkdir(exist_ok=True)
+        (root / '.devloop' / 'test-durations.json').write_text(json.dumps(durations))
 
     def log(self, root):
         """``{what: [pid, ...]}`` from log.txt."""
@@ -306,7 +306,7 @@ class RunTestsDistributionTests(ProjectMixin, unittest.TestCase):
         self.assertEqual(len(set(log['slow.A'])), 1, log)   # a class is never split
         self.assertEqual(len(log['slow.A.setUpClass']), 1, log)
         self.assertNotEqual(log['slow.A'][0], log['slow.B'][0], log)
-        durations = json.loads((root / '.ssdlc' / 'test-durations.json').read_text())
+        durations = json.loads((root / '.devloop' / 'test-durations.json').read_text())
         self.assertIsInstance(durations['test_slow'], (int, float))
         self.assertLess(durations['test_slow'], 100)
 
@@ -360,7 +360,7 @@ class RunTestsDistributionTests(ProjectMixin, unittest.TestCase):
         # The versioned file is only read; the measured durations go to the local history.
         self.assertEqual(json.loads((root / 'tests' / 'durations.json').read_text()),
                          {'cases_elsewhere': 100, 'test_short': 10})
-        local = json.loads((root / '.ssdlc' / 'test-durations.json').read_text())
+        local = json.loads((root / '.devloop' / 'test-durations.json').read_text())
         self.assertEqual(set(local), {'cases_elsewhere', 'test_short', 'test_absent'})
 
     def test_the_local_history_wins_over_the_versioned_durations(self):
@@ -417,7 +417,7 @@ class RunTestsDistributionTests(ProjectMixin, unittest.TestCase):
         self.assertIn('FAILED (modules=1, worker problems=0)', parallel.stdout)
         self.assertEqual(len(re.findall(r'^FAIL test_slow \(3 tests', parallel.stdout, re.M)), 1)
         # A failed module still records its total time.
-        durations = json.loads((root / '.ssdlc' / 'test-durations.json').read_text())
+        durations = json.loads((root / '.devloop' / 'test-durations.json').read_text())
         self.assertLess(durations['test_slow'], 100)
 
     def fake_git(self, root, code):

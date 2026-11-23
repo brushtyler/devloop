@@ -18,7 +18,9 @@ R3's: it updates the frozen ``config.toml`` and ``effective.json`` with it, sayi
 ``updated`` lists those made so far: the implementer app of #407 and the capacity delegation of
 #412, merged beside R3; the keys by role of #499, which change the policy version too; the
 ``second_reviewer`` of #521, ``parallel`` by default; the coordinator actor of #528, off by
-default; ``max_requested_fix_rounds`` of #536, the cap of the code by default). A change of ssdlc's own values updates it the same way, saying so: the restrictions, the
+default; ``max_requested_fix_rounds`` of #536, the cap of the code by default; the
+``state_dir`` ``.devloop`` of #563, which replaces the value of before). A change of ssdlc's own
+values updates it the same way, saying so: the restrictions, the
 test prefix and the documentation map of the SSDLC engine, removed with it (ADR 0007, R1, #538),
 which change the policy version too.
 
@@ -456,9 +458,9 @@ class FirstPinTests(unittest.TestCase):
     """The first pin the documents give runs the clone's devloop, not the launcher: since R3
     it passes the project file and the overlay itself, before the command."""
 
-    STATE = Path('.ssdlc') / 'devloop'
-    ARGV = ['--project-config', '.ssdlc/devloop/project.toml',
-            '--local-config', '.ssdlc/devloop/config.local.toml', 'pin', 'origin/main']
+    STATE = Path('.devloop')
+    ARGV = ['--project-config', '.devloop/project.toml',
+            '--local-config', '.devloop/config.local.toml', 'pin', 'origin/main']
     DOCS = ('ops/README.md', 'ops/host/migrate.md', 'docs/devloop/guide.md')
 
     def setUp(self):

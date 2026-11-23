@@ -446,7 +446,11 @@ class MigrateTests(unittest.TestCase):
         self.assertEqual((back.repo, back.repo_aliases), (OLD, (NEW,)))
 
     def test_the_params_step(self):
-        shutil.copy(ROOT / 'ops' / 'params.env.example', self.tmp / 'params.env')
+        # The params of the host before the rename: the example with the old name, as it was
+        # until #563 moved the host to the paths of devloop.
+        example = (ROOT / 'ops' / 'params.env.example').read_text(encoding='utf-8')
+        self.assertIn(f'\nREPO={NEW}\n', example)
+        (self.tmp / 'params.env').write_text(example.replace(f'\nREPO={NEW}\n', f'\nREPO={OLD}\n'))
         self.assertEqual(self.params(), [OLD, '', '/home/devloop/ssdlc',
                                          '/home/supervisor/ssdlc'])
         # Without DEVLOOP_CLONE and SUPERVISOR_CLONE, the new REPO alone moves the clones.

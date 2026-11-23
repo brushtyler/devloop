@@ -122,7 +122,7 @@ class PinCleanupTests(GitCase):
 
 class RealWorktreeTests(GitCase):
     def test_the_git_worktree_of_a_closed_issue_is_removed(self):
-        ws = Workspace(self.root, '.ssdlc/devloop', 'main')
+        ws = Workspace(self.root, '.devloop', 'main')
         ws.base_copy('issue-66')
         ws.base_copy('issue-70')
         keeper = Housekeeping(self.state, ws, GCGH(issues={66: 'CLOSED'}), ledger=Ledger(),

@@ -34,8 +34,10 @@ Two ways, each for its use:
   journal and in the issues, never in the mailbox.
 - **The mailbox**, for quick alerts, always available, also when GitHub or your app does not
   work: the directory `COORDINATION_DIR` of `ops/params.env` (default
-  `/var/lib/devloop-coordination`; with `PROJECT`, `/var/lib/devloop-coordination-<project>`),
-  shared by you and the coordinator through the group `devloop-roles`. `to-coordinator/` holds
+  `/var/lib/devloop-coordination`; with `PROJECT`, `/var/lib/devloop-coordination-<project>`,
+  on the host of this repository `/var/lib/devloop-coordination-devloop` since #563; the first
+  message of your session gives the values of your installation, which win over the examples
+  here), shared by you and the coordinator through the group `devloop-roles`. `to-coordinator/` holds
   your messages to the coordinator, `to-supervisor/` its messages to you. One file per message,
   plain text, with a unique name (UTC date and time and a random suffix), published with an
   atomic rename from a temporary file whose name starts with `.`:
