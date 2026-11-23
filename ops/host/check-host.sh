@@ -159,7 +159,11 @@ check_traverse() {
     esac
     for private in "$DEVLOOP_KEY_DIR" "$DEVLOOP_HOME/.claude" "$DEVLOOP_HOME/.codex"; do
         [ -d "$private" ] || continue
-        if getfacl -p --omit-header "$private" 2>/dev/null | grep -q "^user:$user:"; then
+        # L'output di getfacl si legge per intero prima di cercarvi la voce: con pipefail,
+        # getfacl | grep -q perde la voce se grep esce prima che getfacl abbia finito di
+        # scrivere (SIGPIPE, 141).
+        entry=$(getfacl -p --omit-header "$private" 2>/dev/null)
+        if grep -q "^user:$user:" <<<"$entry"; then
             fail "$private ha un'ACL per $user: deve restare 700 senza eccezioni"
         fi
     done
