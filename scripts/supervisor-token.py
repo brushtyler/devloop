@@ -26,6 +26,11 @@ labels. Only issues and pull_requests (read or write) and metadata=read may be a
 supervisor neither implements nor merges, and its app has no contents permission.
 
 The token reaches the command through GH_TOKEN only; it is never printed.
+
+The command also gets GH_REPO set to the project's ``repo`` (#571): the token is valid only
+there, and ``gh`` would otherwise pick the repository of the current directory's clone, the
+source of devloop for a project with the source apart (SOURCE_REPO). A GH_REPO of the caller
+naming another repository is refused before any key is read.
 """
 
 import os
@@ -93,9 +98,24 @@ def parse(argv):
     return state, permissions or dict(DEFAULT), command
 
 
+def project_repo(repo):
+    """``repo`` of the project as GH_REPO for the command (#571), or exit when the caller's
+    GH_REPO names another repository: the token would not reach it. GH_REPO may carry the host
+    (``github.com/OWNER/REPO``)."""
+    chosen = os.environ.get('GH_REPO', '').strip().strip('/')
+    if chosen.lower().startswith('github.com/'):
+        chosen = chosen[len('github.com/'):]
+    if chosen and chosen.lower() != repo.lower():
+        raise SystemExit(f'supervisor-token: GH_REPO={chosen} is not the project\'s repository '
+                         f'{repo}, the only one the token reaches; unset it or pass the '
+                         f'{STATE_DIR} of that project')
+    return repo
+
+
 def main(argv):
     state, permissions, command = parse(argv)
     cfg = load_config(state)
+    repo = project_repo(cfg.repo)
     configured = cfg.apps.get(SUPERVISOR)
     if configured is None:
         raise SystemExit(f'supervisor-token: no [apps.supervisor] in the overlay of {state}')
@@ -105,6 +125,8 @@ def main(argv):
     env = {k: v for k, v in os.environ.items()
            if k not in ('GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN')}
     env['GH_TOKEN'] = app.token(permissions)
+    # gh acts on the project's repository, not on the origin of the current clone (#571).
+    env['GH_REPO'] = repo
     return subprocess.run(command, env=env).returncode
 
 

@@ -7,7 +7,7 @@
 # istruzioni, configurazione e binari delle sue CLI; l'ambiente dei turni gli arriva con sudo -E,
 # che sudo-rs ignora), il lock per repository (directory comune, gruppo, overlay; ADR 0006, R8),
 # servizio, CLI degli agent (--version, e un `git --version` con il loro strumento di shell,
-# #494) e `devloop apps`, e il coordinatore, se c'è (key_dir e chiave della sua app, ACL e lettura dell'overlay, #549;
+# #494) e `devloop apps`, e il coordinatore, se l'overlay del progetto lo dichiara (#571; key_dir e chiave della sua app, ACL e lettura dell'overlay, #549;
 # sudoers e copia di root di questo script, #530). Con più progetti sullo stesso host si esegue una volta per progetto, con i suoi
 # parametri (--params).
 # Non cambia nulla, se non le sessioni e le cache che le CLI degli agent scrivono da sé. Delle
@@ -250,8 +250,27 @@ if getent group "$COORDINATION_GROUP" >/dev/null; then
 else
     fail "il gruppo $COORDINATION_GROUP non esiste (setup-supervisor.sh)"
 fi
+# Il coordinatore è facoltativo per progetto, non per host (#571): fa parte di questo progetto solo
+# se l'overlay ne dichiara l'app ([apps.coordinator]) o il ruolo ([roles.coordinator]). Un utente
+# coordinator che l'host ha per un altro progetto non lo rende obbligatorio qui.
+OVERLAY_FILE="$STATE_PATH/config.local.toml"
+coordinator_declared() {
+    [ -f "$1" ] && python3 -I -B - "$1" <<'EOF'
+import sys, tomllib
+try:
+    with open(sys.argv[1], 'rb') as fh:
+        data = tomllib.load(fh)
+except (OSError, tomllib.TOMLDecodeError):
+    sys.exit(1)
+declared = any(isinstance(data.get(table), dict) and 'coordinator' in data[table]
+               for table in ('apps', 'roles'))
+sys.exit(0 if declared else 1)
+EOF
+}
+PROJECT_COORDINATOR=0
+coordinator_declared "$OVERLAY_FILE" && PROJECT_COORDINATOR=1
 roles=$SUPERVISOR_USER
-user_exists "$COORDINATOR_USER" && roles="$roles $COORDINATOR_USER"
+[ "$PROJECT_COORDINATOR" = 1 ] && user_exists "$COORDINATOR_USER" && roles="$roles $COORDINATOR_USER"
 for user in $roles; do
     if in_group "$user"; then
         ok "$user è nel gruppo $COORDINATION_GROUP"
@@ -302,13 +321,15 @@ check_root_path() {
     [ "$bad" = 1 ] || ok "$path e le directory sopra sono di root, non scrivibili da altri"
 }
 
-# Il coordinatore (#530), facoltativo: la key_dir della sua app e la lettura dell'overlay, con
-# il solo attraversamento della home di devloop (#549), il suo sudoers in sola
+# Il coordinatore (#530), facoltativo per progetto (#571): la key_dir della sua app e la lettura
+# dell'overlay, con il solo attraversamento della home di devloop (#549), il suo sudoers in sola
 # lettura e la copia di root di check-host.sh, dei file che legge e dei parametri, da cui esegue
-# `check-host.sh --read-only`.
-step "Coordinatore $COORDINATOR_USER (facoltativo, #530)"
-if ! user_exists "$COORDINATOR_USER"; then
-    say "  l'utente $COORDINATOR_USER non esiste: coordinatore non installato (setup-coordinator.sh)"
+# `check-host.sh --read-only`. Solo se l'overlay del progetto lo dichiara.
+step "Coordinatore $COORDINATOR_USER (facoltativo per progetto, #530, #571)"
+if [ "$PROJECT_COORDINATOR" != 1 ]; then
+    ok "$OVERLAY_FILE non dichiara né [apps.coordinator] né [roles.coordinator]: nessun coordinatore per questo progetto (per aggiungerlo, setup-coordinator.sh)"
+elif ! user_exists "$COORDINATOR_USER"; then
+    fail "$OVERLAY_FILE dichiara il coordinatore, ma l'utente $COORDINATOR_USER non esiste (setup-coordinator.sh)"
 else
     ok "l'utente $COORDINATOR_USER esiste"
     # La key_dir della sua app (#549): 700, solo la chiave del coordinatore, 600.
@@ -317,7 +338,6 @@ else
     # L'overlay di devloop, da cui scripts/coordinator-token.py legge repo e [apps.coordinator]
     # (#549): solo l'attraversamento della home di devloop, l'ACL di sola lettura sull'overlay
     # (#554), e che il coordinatore lo legga.
-    OVERLAY_FILE="$STATE_PATH/config.local.toml"
     if command -v getfacl >/dev/null && [ -d "$DEVLOOP_HOME" ]; then
         check_traverse "$COORDINATOR_USER" setup-coordinator.sh
     fi

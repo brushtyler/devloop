@@ -321,6 +321,10 @@ ops_load_params() {
         : "${SUPERVISOR_CLONE:=${SUPERVISOR_HOME:-/home/${SUPERVISOR_USER:-supervisor}}/devloop-$PROJECT}"
         # Anche il coordinatore: la key_dir della sua app (#549) è del progetto.
         : "${COORDINATOR_KEY_DIR:=${COORDINATOR_HOME:-/home/${COORDINATOR_USER:-coordinator}}/.ghapps-$PROJECT}"
+        # Con SOURCE_REPO, i clone della sorgente da cui supervisore e coordinatore coniano i
+        # token delle loro app (#571), al tag SOURCE_REF del progetto.
+        : "${SUPERVISOR_SOURCE_CLONE:=${SUPERVISOR_HOME:-/home/${SUPERVISOR_USER:-supervisor}}/devloop-source-$PROJECT}"
+        : "${COORDINATOR_SOURCE_CLONE:=${COORDINATOR_HOME:-/home/${COORDINATOR_USER:-coordinator}}/devloop-source-$PROJECT}"
         # La casella fra supervisore e coordinatore (#543) è del progetto, come la sveglia del
         # coordinatore che la legge.
         : "${COORDINATION_DIR:=/var/lib/devloop-coordination-$PROJECT}"
@@ -362,6 +366,8 @@ ops_load_params() {
     : "${SOURCE_REPO:=}"
     : "${SOURCE_REF:=}"
     : "${SOURCE_CLONE:=$DEVLOOP_HOME/devloop-source}"
+    : "${SUPERVISOR_SOURCE_CLONE:=$SUPERVISOR_HOME/devloop-source}"
+    : "${COORDINATOR_SOURCE_CLONE:=$COORDINATOR_HOME/devloop-source}"
     : "${LAUNCHER_DIR:=/usr/local/lib/devloop}"
     : "${REPO_LOCK_DIR:=/run/devloop/repos}"
     : "${REPO_LOCK_GROUP:=devloop-repos}"
@@ -392,6 +398,8 @@ ops_load_params() {
         [[ $SOURCE_REF =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] && [[ $SOURCE_REF != *..* ]] \
             || die "SOURCE_REF deve essere il tag di $SOURCE_REPO da cui installare l'avviatore: '$SOURCE_REF'"
         _require_abs SOURCE_CLONE
+        _require_abs SUPERVISOR_SOURCE_CLONE
+        _require_abs COORDINATOR_SOURCE_CLONE
         _require_abs LAUNCHER_DIR
         LAUNCHER=$LAUNCHER_DIR/devloop-pinned
     else
@@ -677,6 +685,37 @@ ensure_coordination() {
             run chmod 2770 "$dir"
         fi
     done
+}
+
+# clone_origin DIR: l'URL dell'origin del clone DIR, letto da .git/config senza eseguire git nel
+# clone d'altri; vuoto se non si legge. origin_slug URL: owner/nome di quell'URL di GitHub.
+clone_origin() {
+    awk '/^[[:space:]]*\[/ { inside = ($0 ~ /^[[:space:]]*\[remote "origin"\]/) }
+         inside && /^[[:space:]]*url[[:space:]]*=/ { sub(/^[^=]*=[[:space:]]*/, ""); print; exit }' \
+        "$1/.git/config" 2>/dev/null || true
+}
+origin_slug() { printf '%s' "$1" | sed -E 's#^.*github\.com[:/]##; s#/+$##; s#\.git$##'; }
+
+# ensure_source_clone USER DIR: in DIR, di USER, un clone di SOURCE_REPO con il tag SOURCE_REF
+# di origin estratto (#571). Da lì il supervisore e il coordinatore di un progetto con la
+# sorgente a parte lanciano scripts/supervisor-token.py e scripts/coordinator-token.py, che il
+# repository gestito non contiene. Un clone di un altro repository ferma lo script; uno che c'è
+# già passa al tag SOURCE_REF, che si riesegue lo script dopo averlo cambiato.
+ensure_source_clone() {
+    local user=$1 dir=$2 origin slug
+    if [ -d "$dir/.git" ]; then
+        origin=$(clone_origin "$dir")
+        slug=$(origin_slug "$origin")
+        [ "${slug,,}" = "${SOURCE_REPO,,}" ] \
+            || die "$dir è un clone di '${origin:-origine sconosciuta}', non di $SOURCE_REPO: scegliere un altro percorso"
+        ok "$dir è già un clone di $SOURCE_REPO"
+    else
+        as_user "$user" git clone --quiet "https://github.com/$SOURCE_REPO.git" "$dir"
+    fi
+    # Il tag come è su origin, anche se il clone ne aveva uno locale con lo stesso nome.
+    as_user "$user" git -C "$dir" fetch --quiet --no-tags origin \
+        "+refs/tags/$SOURCE_REF:refs/tags/$SOURCE_REF"
+    as_user "$user" git -C "$dir" checkout --quiet --detach "refs/tags/$SOURCE_REF"
 }
 
 # Sostituisce i segnaposto @NOME@ di un file dichiarativo con i valori dei parametri.

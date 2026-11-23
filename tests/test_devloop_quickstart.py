@@ -28,7 +28,8 @@ ROLE = {'dispatcher': 'dispatcher', 'implementer': 'implementer', 'merger': 'mer
 DERIVED = ('REPO', 'APP_PREFIX', 'PROJECT', 'DEFAULT_BRANCH', 'DEVLOOP_USER', 'AGENT_USER',
            'DEVLOOP_HOME', 'DEVLOOP_CLONE', 'STATE_PATH', 'SOURCE_REF', 'SOURCE_CLONE',
            'DEVLOOP_KEY_DIR', 'SUPERVISOR_KEY_DIR', 'LAUNCHER', 'LAUNCHER_CMD', 'SERVICE_NAME',
-           'REPO_LOCK_DIR', 'DEVLOOP_KEYS', 'SUPERVISOR_KEYS', 'APPS')
+           'REPO_LOCK_DIR', 'DEVLOOP_KEYS', 'SUPERVISOR_KEYS', 'APPS', 'SUPERVISOR_SOURCE_CLONE',
+           'COORDINATOR_KEY_DIR')
 
 
 def text():
@@ -218,6 +219,36 @@ class ParameterTests(QuickstartTestCase):
         self.assertIn(f'sudo install {owner} <slug>.<date>.private-key.pem '
                       f'{p["DEVLOOP_KEY_DIR"]}/', lines)
         self.assertIn(f'{state}/config.local.toml', text())
+
+    def test_the_supervisor_mints_its_tokens_from_the_clone_of_the_source(self):
+        # #571: acme/widget does not hold scripts/supervisor-token.py: the supervisor runs it
+        # from the clone of the source that setup-supervisor.sh makes, with its key_dir and the
+        # project's state_dir; its read-only token of gh must reach the new repository.
+        p = self.derived()
+        lines = commands()
+        self.assertIn(f'cd {p["SUPERVISOR_SOURCE_CLONE"]}', lines)
+        self.assertIn(f'DEVLOOP_APP_KEY_DIR={p["SUPERVISOR_KEY_DIR"]} python3 '
+                      f'scripts/supervisor-token.py --state-dir {p["STATE_PATH"]} -- '
+                      'gh issue comment <ISSUE> --body-file <FILE>', lines)
+        self.assertIn(f'`{p["SUPERVISOR_SOURCE_CLONE"]}` (`SUPERVISOR_SOURCE_CLONE`)', text())
+        self.assertTrue((ROOT / 'scripts' / 'supervisor-token.py').is_file())
+        page = ' '.join(text().split())
+        self.assertIn("The supervisor's read-only `gh` token must reach `acme/widget` too", page)
+
+    def test_the_coordinator_is_optional_for_the_project(self):
+        # #571: check-host.sh checks the coordinator only if the overlay declares it; the page
+        # says how to add it, with the app, its key_dir and setup-coordinator.sh.
+        p = self.derived()
+        page = ' '.join(text().split())
+        self.assertIn('A project has a coordinator only if its overlay declares it, with '
+                      '`[apps.coordinator]` or `[roles.coordinator]`', page)
+        self.assertIn('the app `coordinator` in `APPS`', page)
+        self.assertIn(f'its key in `{p["COORDINATOR_KEY_DIR"]}`', page)
+        self.assertIn('`sudo bash ops/host/setup-coordinator.sh --params ops/params-widget.env`',
+                      page)
+        # The example has none: the parameters leave out its app, the overlay its tables.
+        self.assertNotIn('coordinator', p['APPS'].split())
+        self.assertNotIn('coordinator', example('config.local.toml'))
 
 
 class CommandTests(unittest.TestCase):

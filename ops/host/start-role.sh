@@ -123,7 +123,10 @@ case $ROLE in
             # Il clone del coordinatore, da cui lancia scripts/coordinator-token.py (#565): nella
             # sua home, con il nome del repository, come i clone di devloop e del supervisore
             # senza PROJECT (/home/coordinator/devloop su questo host, ADR 0007).
+            # Con la sorgente a parte, il clone della sorgente che prepara setup-coordinator.sh
+            # (#571): il repository gestito non contiene lo script.
             TOKEN_CLONE=$COORDINATOR_HOME/${REPO#*/}
+            [ -z "$SOURCE_REPO" ] || TOKEN_CLONE=$COORDINATOR_SOURCE_CLONE
         fi
         ;;
     host)

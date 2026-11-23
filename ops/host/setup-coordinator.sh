@@ -4,7 +4,9 @@
 # sull'overlay (#554), per leggere l'overlay, la key_dir
 # della sua GitHub App (700, #549), la casella fra supervisore e coordinatore (#543), una copia di
 # root di check-host.sh e della sveglia coordinator-wait.sh (#543) con i file che leggono e i
-# parametri, e un sudoers con soli comandi di lettura e la sveglia (ops/host/sudoers-coordinator).
+# parametri, e un sudoers con soli comandi di lettura e la sveglia (ops/host/sudoers-coordinator);
+# con SOURCE_REPO anche un clone della sorgente al tag SOURCE_REF, da cui lanciare
+# scripts/coordinator-token.py (#571).
 # Idempotente: si può rieseguire, fa solo ciò che manca; va rieseguito dopo ogni aggiornamento di
 # ops/, perché la copia resti uguale al checkout (check-host.sh avvisa se non lo è). Non scrive
 # segreti. La chiave dell'app, la CLI dell'agent del coordinatore, il suo login e il token di sola
@@ -137,6 +139,16 @@ ensure_coordination "$COORDINATOR_USER"
 step "key_dir del coordinatore (700)"
 ensure_dir "$COORDINATOR_KEY_DIR" 700 "$COORDINATOR_USER"
 
+# Il clone da cui il coordinatore lancia scripts/coordinator-token.py (#565): con la sorgente a
+# parte il repository gestito non contiene devloop, quindi un clone della sorgente, al tag
+# SOURCE_REF del progetto, che questo script prepara (#571).
+TOKEN_CLONE=$COORDINATOR_HOME/${REPO#*/}
+if [ -n "$SOURCE_REPO" ]; then
+    step "Clone di $SOURCE_REPO al tag $SOURCE_REF per $COORDINATOR_USER (i token della sua app)"
+    ensure_source_clone "$COORDINATOR_USER" "$COORDINATOR_SOURCE_CLONE"
+    TOKEN_CLONE=$COORDINATOR_SOURCE_CLONE
+fi
+
 # Il coordinatore esegue come root solo questa copia, di root, mai il clone di devloop (che
 # devloop scrive) né il checkout dell'operatore.
 step "Copia di root di check-host.sh ($COORDINATOR_OPS_DIR)"
@@ -169,10 +181,11 @@ for role in $COORDINATOR_KEYS; do
     fi
 done
 # key_dir di [apps] nell'overlay è quella di devloop: il coordinatore indica la propria (#549).
-todo "coniare i token come $COORDINATOR_USER, dal suo clone, con la sua key_dir e lo state_dir di devloop:"
+todo "coniare i token come $COORDINATOR_USER, dal suo clone ($TOKEN_CLONE), con la sua key_dir e lo state_dir di devloop:"
 say "  DEVLOOP_APP_KEY_DIR=$COORDINATOR_KEY_DIR python3 scripts/coordinator-token.py --state-dir $STATE_PATH -- <comando>"
 todo "installare la CLI dell'agent del coordinatore come $COORDINATOR_USER e fare il login"
-todo "token fine-grained di sola lettura per gh, come $COORDINATOR_USER (ops/github/tokens.md)"
+todo "token fine-grained di sola lettura per gh, come $COORDINATOR_USER, con accesso a $REPO (ops/github/tokens.md)"
+todo "app coordinator del progetto in [apps.coordinator] dell'overlay $STATE_PATH/config.local.toml: senza, check-host.sh non verifica il coordinatore di questo progetto"
 
 step 'Fatto'
 say "Poi: ops/host/check-host.sh per verificare utenti, permessi, sudoers e la copia."
