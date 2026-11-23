@@ -4299,6 +4299,7 @@ if [ "$1" = /usr/bin/tail ]; then cat {shlex.quote(str(self.log))}; exit 0; fi
 dir={shlex.quote(str(self.watch))}
 n=$(( $(cat "$dir/count" 2>/dev/null || echo 0) + 1 ))
 echo "$n" > "$dir/count"
+if [ -f "$dir/$n.delay" ]; then sleep "$(cat "$dir/$n.delay")"; fi
 if [ -f "$dir/$n.out" ]; then cat "$dir/$n.out"; exit "$(cat "$dir/$n.status")"; fi
 sleep 0.2
 exit 3''')
@@ -4320,11 +4321,13 @@ state=$(cat {shlex.quote(str(self.service_state))}); echo "$state"
     # devloop watch puts the time before each line (Watcher.run): the fake does the same.
     STAMP = '12:34 '
 
-    def answer(self, n, lines, status=0):
+    def answer(self, n, lines, status=0, delay=None):
         """The answer of the n-th call of the fake watch, each line with the time before it, as
-        devloop watch prints it."""
+        devloop watch prints it; with ``delay``, after that many seconds."""
         (self.watch / f'{n}.out').write_text(''.join(f'{self.STAMP}{line}\n' for line in lines))
         (self.watch / f'{n}.status').write_text(f'{status}\n')
+        if delay is not None:
+            (self.watch / f'{n}.delay').write_text(f'{delay}\n')
 
     def wait(self, *args):
         env = dict(os.environ, PATH=f'{self.bin}:{os.environ.get("PATH", "/usr/bin:/bin")}',
@@ -4392,12 +4395,17 @@ state=$(cat {shlex.quote(str(self.service_state))}); echo "$state"
         self.assertEqual(self.watch_calls(), [])
 
     def test_the_end_of_the_period_wakes_it(self):
-        self.answer(1, ['PR #5 CI pass @abc1234', 'issue #7 labels +agent:ready'])
-        done = self.wait('--period', '1')
+        # The first call answers, with events that are not the coordinator's, only after the
+        # period is over: the period ends during it whatever the load of the host (#579), and
+        # the next round wakes it without calling watch again. Before that call there is only
+        # the first reading of the mailbox, the log and the service, far shorter than the
+        # period.
+        self.answer(1, ['PR #5 CI pass @abc1234', 'issue #7 labels +agent:ready'], delay=2.2)
+        done = self.wait('--period', '2')
         self.assertEqual((done.returncode, done.stdout),
-                         (0, 'periodo: 1s senza eventi del coordinatore: il controllo '
+                         (0, 'periodo: 2s senza eventi del coordinatore: il controllo '
                              'periodico\n'), done.stderr)
-        self.assertGreaterEqual(len(self.watch_calls()), 2)
+        self.assertEqual(len(self.watch_calls()), 1)
 
     def test_a_new_error_in_the_log_wakes_it_once(self):
         # The lines of run.log at the first run are the base, not events.
