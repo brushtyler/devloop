@@ -237,8 +237,26 @@ sudo bash ops/host/setup-agent-user.sh --params ops/params-widget.env --dry-run
 sudo bash ops/host/setup-agent-user.sh --params ops/params-widget.env
 sudo bash ops/host/setup-agent-user.sh --params ops/params-widget.env --unseal
 sudo -iu devloop-widget-agent        # install claude, codex and agy in ~/.local/bin, log in to each
+sudo pkill -u devloop-widget-agent -f 'codex app-server'  # the daemon codex's login leaves running
+sudo -u devloop-widget-agent rm -rf -- /home/devloop-widget-agent/.codex/{app-server-control,app-server-daemon,version.json,.tmp,tui-thread-reference-capabilities}
 sudo bash ops/host/setup-agent-user.sh --params ops/params-widget.env
 ```
+
+After the logins, two things before the run without `--unseal`:
+
+- **codex.** Its interactive login leaves a daemon of the agent user running
+  (`codex app-server --listen unix://`) and five entries in `~/.codex` that are not in the list
+  of allowed entries (`AGENT_CLI_ALLOWED`): `app-server-control`, `app-server-daemon`,
+  `version.json`, `.tmp` and `tui-thread-reference-capabilities`. Stop the daemon first, then
+  remove the entries as `devloop-widget-agent`, as above. The run without `--unseal` reports any
+  process of the agent user still running and every unknown entry, and prints the commands to
+  stop the processes and to remove the entries.
+- **agy.** Its login asks to trust the current directory, the home of the agent user (`sudo -iu`
+  starts there): refuse. The agent user has no clone of its own; the turns run in the worktrees
+  of the `state_dir`. The run without `--unseal` writes in `trustedWorkspaces` of the sealed
+  `~/.gemini/antigravity-cli/settings.json` at most `/var/lib/devloop/widget/worktrees`, and does
+  not touch a value already narrower; `ops/host/check-host.sh` warns when the value holds a whole
+  home or a directory outside the `state_dir`.
 
 The script creates `devloop-widget-agent`, its ACLs on the `state_dir` and the worktrees and its
 sudoers rule. `--unseal` opens the directories of the CLIs for the installation and the logins;

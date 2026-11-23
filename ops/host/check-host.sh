@@ -4,7 +4,8 @@
 # sudoers, la lettura dell'overlay e del file di progetto per il supervisore (ACL r--, #543), la
 # casella fra supervisore e coordinatore (gruppo, directory 2770 di root, #543), l'utente degli agent (non legge key_dir né state_dir, non scrive .git né le directory
 # che contengono worktree e turni, è nell'overlay, esegue git nei worktree di devloop, non cambia
-# istruzioni, configurazione e binari delle sue CLI; l'ambiente dei turni gli arriva con sudo -E,
+# istruzioni, configurazione e binari delle sue CLI, agy si fida al più della directory dei
+# worktree, #572; l'ambiente dei turni gli arriva con sudo -E,
 # che sudo-rs ignora), il lock per repository (directory comune, gruppo, overlay; ADR 0006, R8),
 # servizio, CLI degli agent (--version, e un `git --version` con il loro strumento di shell,
 # #494) e `devloop apps`, e il coordinatore, se l'overlay del progetto lo dichiara (#571; key_dir e chiave della sua app, ACL e lettura dell'overlay, #549;
@@ -158,7 +159,11 @@ check_traverse() {
     esac
     for private in "$DEVLOOP_KEY_DIR" "$DEVLOOP_HOME/.claude" "$DEVLOOP_HOME/.codex"; do
         [ -d "$private" ] || continue
-        if getfacl -p --omit-header "$private" 2>/dev/null | grep -q "^user:$user:"; then
+        # L'output di getfacl si legge per intero prima di cercarvi la voce: con pipefail,
+        # getfacl | grep -q perde la voce se grep esce prima che getfacl abbia finito di
+        # scrivere (SIGPIPE, 141).
+        entry=$(getfacl -p --omit-header "$private" 2>/dev/null)
+        if grep -q "^user:$user:" <<<"$entry"; then
             fail "$private ha un'ACL per $user: deve restare 700 senza eccezioni"
         fi
     done
@@ -529,6 +534,17 @@ if codex_why=$(codex_memories "$AGENT_HOME/.codex/config.toml"); then
     ok "$AGENT_HOME/.codex/config.toml imposta [features] memories = false"
 else
     fail "${codex_why:-$AGENT_HOME/.codex/config.toml non si legge}: devloop non parte (setup-agent-user.sh aggiunge [features] memories = false)"
+fi
+# Le directory di cui agy si fida (#572): al più quella dei worktree dello state_dir, dove girano
+# i turni. Una home intera, o una directory fuori dallo state_dir, è un avviso.
+AGY_SETTINGS="$AGENT_HOME/.gemini/antigravity-cli/settings.json"
+if agy_why=$(agy_trusted_workspaces check "$AGY_SETTINGS" "$STATE" "$DEVLOOP_HOME" \
+        "$SUPERVISOR_HOME" "$AGENT_HOME" "$COORDINATOR_HOME"); then
+    ok "$AGY_SETTINGS: trustedWorkspaces non nomina home né directory fuori da $STATE"
+else
+    while IFS= read -r line; do
+        [ -n "$line" ] && warn "$line (al più [\"$STATE/worktrees\"]: setup-agent-user.sh)"
+    done <<<"${agy_why:-$AGY_SETTINGS non si legge}"
 fi
 # Le voci che le CLI creano al primo uso (#494): restano dell'utente degli agent, che le scrive.
 for entry in "${AGENT_CLI_WRITABLE[@]}"; do

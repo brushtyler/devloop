@@ -524,7 +524,31 @@ suo installatore. Tutto come utente `devloop-agent` (`sudo -iu devloop-agent`), 
 | `agy` | secondo le istruzioni del fornitore | `~/.local/bin/agy` |
 
 Per ciascuna: login (`claude`, `codex`, `agy` avviati una volta in una sessione interattiva) e
-verifica con `~/.local/bin/<cli> --version`.
+verifica con `~/.local/bin/<cli> --version`. Dopo i login, prima di `setup-agent-user.sh` senza
+`--unseal` (#572):
+
+- **codex.** Il login interattivo lascia acceso un demone di `devloop-agent`
+  (`codex app-server --listen unix://`) e cinque voci di `~/.codex` fuori da
+  `AGENT_CLI_ALLOWED`: `app-server-control`, `app-server-daemon`, `version.json`, `.tmp` e
+  `tui-thread-reference-capabilities`. Prima si ferma il demone, poi si tolgono le voci, come
+  `devloop-agent`; la lista non si allarga:
+
+  ```bash
+  sudo pkill -u devloop-agent -f 'codex app-server'
+  sudo -u devloop-agent rm -rf -- /home/devloop-agent/.codex/{app-server-control,app-server-daemon,version.json,.tmp,tui-thread-reference-capabilities}
+  ```
+
+  `setup-agent-user.sh` senza `--unseal` segnala i processi di `devloop-agent` ancora attivi
+  (solo PID e nome) e le voci sconosciute, e stampa i comandi per fermarli e per toglierle; non
+  li esegue.
+- **agy.** Il login chiede di fidarsi della directory corrente, cioè la home di `devloop-agent`
+  (`sudo -iu` parte da lì): si rifiuta. `devloop-agent` non ha un clone suo, i turni girano nei
+  worktree dello `state_dir`. `setup-agent-user.sh` senza `--unseal` scrive in
+  `trustedWorkspaces` di `~/.gemini/antigravity-cli/settings.json`, sigillato, al più la sola
+  directory dei worktree (`<state_dir>/worktrees`), al posto di un valore più largo o che manca;
+  un valore già più stretto (solo quella directory o directory dentro di essa, o una lista
+  vuota) non lo tocca. `check-host.sh` avvisa se il valore contiene una home intera o una
+  directory fuori dallo `state_dir`.
 
 Gli aggiornamenti automatici restano spenti: devloop non deve avviare un turno mentre una CLI
 sostituisce il proprio eseguibile. Per Claude Code, `~/.claude/settings.json` con

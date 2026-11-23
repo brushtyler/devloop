@@ -13,7 +13,10 @@
 # non li cambia per i turni dopo. L'utente degli agent crea e sostituisce nelle directory delle
 # CLI solo le proprie voci (credenziali, lock, sessioni, cache e log), e devloop ammette solo
 # quelle della lista AGENT_CLI_ALLOWED: lo script segnala le altre. Crea sue le voci che le CLI
-# creano al primo uso (AGENT_CLI_WRITABLE). --unseal rende all'utente degli agent le directory delle CLI, per installarle, aggiornarle
+# creano al primo uso (AGENT_CLI_WRITABLE). Senza --unseal limita trustedWorkspaces di agy alla
+# directory dei worktree, e segnala i processi attivi dell'utente degli agent (il demone che il
+# login di codex lascia acceso) con il comando per fermarli e quello per togliere le voci
+# sconosciute (#572). --unseal rende all'utente degli agent le directory delle CLI, per installarle, aggiornarle
 # o fare un login a loop fermo; devloop non parte finché lo script non viene rieseguito senza.
 # Idempotente: si può rieseguire, fa solo ciò che manca. Non scrive segreti. Le CLI, i loro
 # login e la chiave [agent_user] nell'overlay restano passi manuali (ops/README.md).
@@ -266,11 +269,54 @@ if [ "$UNSEAL" != 1 ]; then
         rm -f "$codex_new"
     fi
 
+    step "agy: trustedWorkspaces al più la directory dei worktree (#572)"
+    # Il login interattivo di agy chiede di fidarsi della directory corrente, la home
+    # dell'utente degli agent, che va rifiutata: l'utente degli agent non ha un clone suo, e i
+    # turni girano nei worktree dello state_dir. Lo script scrive nel settings.json sigillato
+    # al più quella directory, al posto di un valore più largo o che manca; un valore già più
+    # stretto non lo tocca.
+    AGY_SETTINGS="$AGENT_HOME/.gemini/antigravity-cli/settings.json"
+    AGY_WORKTREES="$STATE/worktrees"
+    if [ -L "$AGY_SETTINGS" ]; then
+        todo "$AGY_SETTINGS è un link: impostare a mano trustedWorkspaces al più a [\"$AGY_WORKTREES\"] nel file a cui porta"
+    else
+        agy_new=$(mktemp)
+        agy_status=0
+        agy_why=$(agy_trusted_workspaces narrow "$AGY_SETTINGS" "$AGY_WORKTREES" "$agy_new") \
+            || agy_status=$?
+        case $agy_status in
+            0) ok "$AGY_SETTINGS: trustedWorkspaces non nomina nulla fuori da $AGY_WORKTREES" ;;
+            3) agy_mode=$(stat -c %a "$AGY_SETTINGS" 2>/dev/null) || agy_mode=644
+               if [ "$DRY_RUN" = 1 ]; then
+                   say "  [dry-run] scriverebbe $AGY_SETTINGS (mode $agy_mode, proprietario root):"
+                   sed 's/^/    | /' "$agy_new"
+               else
+                   run install -m "$agy_mode" -o root -g "$AGENT_GROUP" "$agy_new" "$AGY_SETTINGS"
+               fi ;;
+            *) todo "${agy_why:-$AGY_SETTINGS non si legge}: impostare a mano trustedWorkspaces al più a [\"$AGY_WORKTREES\"]" ;;
+        esac
+        rm -f "$agy_new"
+    fi
+
+    step "Processi di $AGENT_USER (#572)"
+    # A loop fermo nessun processo dell'utente degli agent resta acceso. Il login interattivo di
+    # codex lascia acceso il suo demone (`codex app-server`), che crea voci fuori dalla lista
+    # qui sotto e le ricrea finché gira: va fermato prima di toglierle. Lo script lo segnala e
+    # stampa il comando, non lo esegue. Solo PID e nome: la riga di comando non si stampa.
+    agent_procs=$(pgrep -l -u "$AGENT_USER" 2>/dev/null) || agent_procs=
+    if [ -n "$agent_procs" ]; then
+        agent_pids=$(printf '%s\n' "$agent_procs" | awk '{print $1}' | tr '\n' ' ')
+        todo "processi attivi di $AGENT_USER: $(printf '%s\n' "$agent_procs" | tr '\n' ',' | sed 's/,$//; s/,/, /g') (il login di codex lascia acceso il demone codex app-server): fermarli, a loop fermo, con: sudo kill ${agent_pids% }; poi togliere le voci segnalate qui sotto e rieseguire lo script"
+    else
+        ok "nessun processo di $AGENT_USER attivo"
+    fi
+
     step "Voci delle directory delle CLI: solo quelle della lista (#517)"
     # devloop rifiuta ogni turno finché una directory delle CLI contiene una voce che non è
     # nella lista (AGENT_CLI_ALLOWED), né sigillata né una directory delle CLI: lo script la
-    # segnala, non la rimuove.
+    # segnala, non la rimuove, e stampa il comando per toglierle (#572).
     unknown=0
+    remove=()
     for dir in "${AGENT_CLI_DIRS[@]}"; do
         [ -d "$AGENT_HOME/$dir" ] && ! [ -L "$AGENT_HOME/$dir" ] || continue
         while IFS= read -r -d '' record && IFS= read -r -d '' target; do
@@ -281,6 +327,7 @@ if [ "$UNSEAL" != 1 ]; then
                 known=$?
             fi
             unknown=1
+            remove+=("$AGENT_HOME/$dir/$name")
             if [ "$known" = 4 ]; then
                 todo "$AGENT_HOME/$dir/$name è un link a $target, che non è un file regolare (un altro link, che potrebbe uscire dalla directory, o nulla): rimuoverlo come $AGENT_USER, a loop fermo"
             elif [ "$known" = 3 ]; then
@@ -292,7 +339,15 @@ if [ "$UNSEAL" != 1 ]; then
             fi
         done < <(find "$AGENT_HOME/$dir" -mindepth 1 -maxdepth 1 -printf '%y/%f\0%l\0' 2>/dev/null)
     done
-    [ "$unknown" = 1 ] || ok "le directory delle CLI contengono solo voci della lista"
+    if [ "$unknown" = 1 ]; then
+        remove_cmd="sudo -u $(printf '%q' "$AGENT_USER") rm -rf --"
+        for path in "${remove[@]}"; do
+            remove_cmd+=" $(printf '%q' "$path")"
+        done
+        todo "per togliere queste voci come $AGENT_USER, a loop fermo e dopo aver fermato i suoi processi: $remove_cmd"
+    else
+        ok "le directory delle CLI contengono solo voci della lista"
+    fi
 fi
 
 step "Sessioni di $AGENT_USER leggibili da $DEVLOOP_USER"

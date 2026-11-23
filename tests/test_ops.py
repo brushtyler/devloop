@@ -1955,6 +1955,143 @@ class DryRunTests(OpsTestCase):
                       'memories = false', done.stdout)
         self.assertEqual(self.mutating_calls(), [])
 
+    def test_setup_agent_user_narrows_the_trusted_workspaces_of_agy(self):
+        # #572: the sealed settings.json of agy trusts at most the directory of the worktrees
+        # of the state_dir; a value already narrower is not touched.
+        agent = self.home / 'agent'
+        settings = agent / '.gemini/antigravity-cli/settings.json'
+        worktrees = self.home / 'devloop/devloop/.devloop/worktrees'
+        params = self.params(DEVLOOP_USER=ME, AGENT_USER='opsdry-noagent')
+
+        def written(before):
+            if before is None:
+                settings.unlink(missing_ok=True)
+            else:
+                settings.parent.mkdir(parents=True, exist_ok=True)
+                settings.write_text(before)
+                settings.chmod(0o640)
+            done = self.run_script('host/setup-agent-user.sh', '--dry-run', '--params',
+                                   str(params))
+            self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+            out = done.stdout
+            head = f'  [dry-run] scriverebbe {settings} (mode '
+            if head not in out:
+                return out, None
+            lines = out.split(head, 1)[1].splitlines()[1:]
+            content = ''.join(line[6:] + '\n' for line in
+                              itertools.takewhile(lambda l: l.startswith('    | '), lines))
+            self.assertEqual(settings.read_text() if before is not None else None, before)
+            return out, json.loads(content)
+        # Wider than the worktrees, as on devloop's host: only the worktrees, the rest kept.
+        out, data = written(json.dumps({'model': 'm (high)', 'trustedWorkspaces': [
+            '/home/devloop/devloop', '/home/devloop', f'{worktrees}/issue-1']}))
+        self.assertIn(f'scriverebbe {settings} (mode 640, proprietario root):', out)
+        self.assertEqual(data, {'model': 'm (high)', 'trustedWorkspaces': [str(worktrees)]})
+        # Missing, or the placeholder {}: the worktrees.
+        for before in (None, '{}\n'):
+            with self.subTest(before=before):
+                out, data = written(before)
+                self.assertEqual(data, {'trustedWorkspaces': [str(worktrees)]})
+        # Already narrower: untouched.
+        for value in ([str(worktrees)], [f'{worktrees}/issue-1/'], []):
+            with self.subTest(value=value):
+                out, data = written(json.dumps({'trustedWorkspaces': value}))
+                self.assertIsNone(data)
+                self.assertIn(f'ok: {settings}: trustedWorkspaces non nomina nulla fuori da '
+                              f'{worktrees}', out)
+        # Under the worktrees as written, but a link that leads outside the state_dir or to a
+        # home: not narrower, so the worktrees take its place.
+        worktrees.mkdir(parents=True, exist_ok=True)
+        (self.tmp / 'outside').mkdir(exist_ok=True)
+        (worktrees / 'outside').symlink_to(self.tmp / 'outside')
+        (worktrees / 'home').symlink_to(self.home / 'devloop')
+        try:
+            for entry in ('outside', 'outside/sub', 'home'):
+                with self.subTest(entry=entry):
+                    out, data = written(json.dumps({'trustedWorkspaces': [
+                        f'{worktrees}/issue-1', f'{worktrees}/{entry}']}))
+                    self.assertEqual(data, {'trustedWorkspaces': [str(worktrees)]})
+        finally:
+            (worktrees / 'outside').unlink()
+            (worktrees / 'home').unlink()
+        # Not JSON, or not a list of paths: reported, never changed.
+        for before, why in (('{', 'non è un JSON valido'),
+                            ('{"trustedWorkspaces": "/home"}',
+                             'imposta trustedWorkspaces a un valore che non è una lista di '
+                             'percorsi')):
+            with self.subTest(before=before):
+                out, data = written(before)
+                self.assertIsNone(data)
+                self.assertIn(f'da fare a mano: {settings} {why}', out)
+        # A link: what it leads to is set by hand.
+        settings.unlink()
+        settings.symlink_to(self.tmp / 'elsewhere.json')
+        done = self.run_script('host/setup-agent-user.sh', '--dry-run', '--params', str(params))
+        self.assertIn(f'da fare a mano: {settings} è un link: impostare a mano trustedWorkspaces '
+                      f'al più a ["{worktrees}"]', done.stdout)
+        # --unseal leaves the sealed files alone.
+        settings.unlink()
+        settings.write_text('{"trustedWorkspaces": ["/home"]}')
+        done = self.run_script('host/setup-agent-user.sh', '--dry-run', '--unseal', '--params',
+                               str(params))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertNotIn('trustedWorkspaces', done.stdout)
+        self.assertEqual(self.mutating_calls(), [])
+
+    def test_setup_agent_user_reports_the_daemon_codex_leaves_running(self):
+        # #572: codex's interactive login leaves `codex app-server` running and entries not in
+        # the list; the script reports the processes of the agent user and prints the commands
+        # to stop them and to remove the entries, running neither. The list is not widened.
+        agent = self.home / 'agent'
+        codex = agent / '.codex'
+        codex.mkdir(parents=True)
+        for name in ('app-server-control', '.tmp'):
+            (codex / name).mkdir()
+        for name in ('version.json', 'app-server-daemon', 'tui-thread-reference-capabilities'):
+            (codex / name).write_text('x\n')
+        for name in ('app-server-control', 'app-server-daemon', 'version.json', '.tmp',
+                     'tui-thread-reference-capabilities'):
+            self.assertNotIn(f'.codex/{name}', [entry for entry, _ in agentuser.CLI_ALLOWED])
+        self.shim('pgrep', '[ "$*" = "-l -u opsdry-noagent" ] || exit 2\n'
+                           'echo "4242 codex"\necho "4243 node"')
+        params = self.params(DEVLOOP_USER=ME, AGENT_USER='opsdry-noagent')
+        done = self.run_script('host/setup-agent-user.sh', '--dry-run', '--params', str(params))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        out = done.stdout
+        self.assertIn('da fare a mano: processi attivi di opsdry-noagent: 4242 codex, 4243 node '
+                      '(il login di codex lascia acceso il demone codex app-server): fermarli, a '
+                      'loop fermo, con: sudo kill 4242 4243; poi togliere le voci segnalate qui '
+                      'sotto e rieseguire lo script', out)
+        removal = [line for line in out.splitlines() if 'rm -rf --' in line]
+        self.assertEqual(len(removal), 1, out)
+        self.assertTrue(removal[0].startswith(
+            '  da fare a mano: per togliere queste voci come opsdry-noagent, a loop fermo e dopo '
+            "aver fermato i suoi processi: sudo -u opsdry-noagent rm -rf -- "), removal[0])
+        paths = shlex.split(removal[0].split(' rm -rf -- ', 1)[1])
+        self.assertEqual(sorted(paths), sorted(
+            f'{codex}/{name}' for name in ('app-server-control', 'app-server-daemon',
+                                           'version.json', '.tmp',
+                                           'tui-thread-reference-capabilities')))
+        # The processes are reported before the entries, which go after the daemon stops.
+        self.assertLess(out.index('processi attivi'), out.index(' rm -rf -- '))
+        self.assertEqual(self.mutating_calls(), [])
+        # No process, no entry: nothing to do.
+        self.shim('pgrep', 'exit 1')
+        for name in ('app-server-control', '.tmp'):
+            (codex / name).rmdir()
+        for name in ('version.json', 'app-server-daemon', 'tui-thread-reference-capabilities'):
+            (codex / name).unlink()
+        done = self.run_script('host/setup-agent-user.sh', '--dry-run', '--params', str(params))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn('ok: nessun processo di opsdry-noagent attivo', done.stdout)
+        self.assertIn('ok: le directory delle CLI contengono solo voci della lista', done.stdout)
+        self.assertNotIn('rm -rf', done.stdout)
+        # With --unseal the processes are not checked: the logins are still running.
+        self.shim('pgrep', 'echo "4242 codex"')
+        done = self.run_script('host/setup-agent-user.sh', '--dry-run', '--unseal', '--params',
+                               str(params))
+        self.assertNotIn('processi attivi', done.stdout)
+
     def test_setup_agent_user_keeps_the_files_of_the_clis_readable(self):
         # #438: a version before wrote settings.json 600, and a CLI may keep a directory 700:
         # once root's, the agent user still reads them, through its group, without writing.
@@ -3136,6 +3273,67 @@ class CheckHostTests(OpsTestCase):
                 self.assertEqual(errors, [f'  ERRORE: {config} {why}: devloop non parte '
                                           '(setup-agent-user.sh aggiunge [features] memories = '
                                           'false)'])
+
+    def test_trusted_workspaces_of_agy_beyond_the_worktrees_are_a_warning(self):
+        # #572: a whole home, or a directory outside the state_dir, in trustedWorkspaces of agy
+        # is a warning, never an error.
+        settings = self.agent / '.gemini/antigravity-cli/settings.json'
+        worktrees = self.state / 'worktrees'
+        suffix = f' (al più ["{worktrees}"]: setup-agent-user.sh)'
+        for value in (None, [str(worktrees)], [f'{worktrees}/issue-1'], [str(self.state)], []):
+            with self.subTest(value=value):
+                settings.write_text('{}' if value is None
+                                    else json.dumps({'trustedWorkspaces': value}))
+                done, errors = self.check()
+                self.assertEqual(errors, [])
+                self.assertIn(f'ok: {settings}: trustedWorkspaces non nomina home né directory '
+                              f'fuori da {self.state}', done.stdout)
+                self.assertNotIn('trustedWorkspaces nomina', done.stdout)
+        # devloop's host: the clone and the home of devloop, both outside the state_dir.
+        settings.write_text(json.dumps({'trustedWorkspaces': [
+            str(self.devloop / 'devloop'), str(self.devloop), str(worktrees), 'rel',
+            str(self.tmp / 'elsewhere')]}))
+        done, errors = self.check()
+        self.assertEqual(errors, [])
+        warnings = [line for line in done.stdout.splitlines() if 'trustedWorkspaces' in line]
+        self.assertEqual(warnings, [
+            f'  ATTENZIONE: {settings}: trustedWorkspaces nomina {self.devloop}/devloop, fuori '
+            f'dallo state_dir {self.state}{suffix}',
+            f'  ATTENZIONE: {settings}: trustedWorkspaces nomina {self.devloop}, che è o '
+            f'contiene la home {self.devloop}{suffix}',
+            f"  ATTENZIONE: {settings}: trustedWorkspaces nomina 'rel', che non è un percorso "
+            f'assoluto{suffix}',
+            f'  ATTENZIONE: {settings}: trustedWorkspaces nomina {self.tmp}/elsewhere, fuori '
+            f'dallo state_dir {self.state}{suffix}'])
+        # A directory that holds a home: /home of the host, or the parent of the test homes.
+        settings.write_text(json.dumps({'trustedWorkspaces': [str(self.home)]}))
+        done, errors = self.check()
+        self.assertIn(f'trustedWorkspaces nomina {self.home}, che è o contiene la home ',
+                      done.stdout)
+        # Under the worktrees as written, but links that lead outside the state_dir or to a
+        # home: warned, with where they lead.
+        worktrees.mkdir(parents=True, exist_ok=True)
+        (self.tmp / 'outside').mkdir(exist_ok=True)
+        (worktrees / 'outside').symlink_to(self.tmp / 'outside')
+        (worktrees / 'home').symlink_to(self.devloop)
+        real_outside = os.path.realpath(self.tmp / 'outside')
+        real_home = os.path.realpath(self.devloop)
+        settings.write_text(json.dumps({'trustedWorkspaces': [
+            f'{worktrees}/outside', f'{worktrees}/outside/sub', f'{worktrees}/home']}))
+        done, errors = self.check()
+        self.assertEqual(errors, [])
+        warnings = [line for line in done.stdout.splitlines() if 'trustedWorkspaces' in line]
+        self.assertEqual(warnings, [
+            f'  ATTENZIONE: {settings}: trustedWorkspaces nomina {worktrees}/outside (porta a '
+            f'{real_outside}), fuori dallo state_dir {self.state}{suffix}',
+            f'  ATTENZIONE: {settings}: trustedWorkspaces nomina {worktrees}/outside/sub (porta '
+            f'a {real_outside}/sub), fuori dallo state_dir {self.state}{suffix}',
+            f'  ATTENZIONE: {settings}: trustedWorkspaces nomina {worktrees}/home (porta a '
+            f'{real_home}), che è o contiene la home {real_home}{suffix}'])
+        settings.write_text('[')
+        done, errors = self.check()
+        self.assertEqual(errors, [])
+        self.assertIn(f'  ATTENZIONE: {settings} non è un JSON valido', done.stdout)
 
     def test_an_entry_of_the_clis_not_in_the_list_is_an_error(self):
         # #517: as devloop before each turn.
