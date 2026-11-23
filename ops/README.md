@@ -389,6 +389,11 @@ chiave si installa così:
 sudo install -o devloop -g devloop -m 600 <slug>.<data>.private-key.pem /home/devloop/.ghapps/
 ```
 
+La `key_dir` di ogni ruolo può avere un nome non di default (`DEVLOOP_KEY_DIR`,
+`SUPERVISOR_KEY_DIR`, `COORDINATOR_KEY_DIR` di `params.env` e, per devloop, `key_dir` in `[apps]`
+dell'overlay); per spostarla su un host in servizio, per esempio dopo che la sua posizione è
+finita in un testo pubblico, vedi [host/migrate.md](host/migrate.md#spostare-una-key_dir-582).
+
 ### 5. Utente degli agent e CLI
 
 Gli agent e i test non girano come `devloop`, che può leggere le chiavi delle app e lo
@@ -658,7 +663,10 @@ sudo bash ops/host/check-host.sh --no-apps   # senza interrogare GitHub
 
 Verifica gli utenti; `key_dir`, `~/.claude` e `~/.codex` con mode 700 e il proprietario giusto;
 ogni chiave `*.pem` con mode 600 e del suo utente, una chiave per app attesa e, nella `key_dir`
-del supervisore, nessuna chiave in più; l'ACL `user:supervisor:--x` sulla home di devloop e
+del supervisore, nessuna chiave in più; quando un parametro indica una `key_dir` non di default,
+nessuna chiave di un'app del progetto rimasta nella `key_dir` di default del ruolo (`~/.ghapps`
+e, con `PROJECT`, `~/.ghapps-<progetto>` di supervisore e coordinatore: un errore, #582,
+[host/migrate.md](host/migrate.md#spostare-una-key_dir-582)); l'ACL `user:supervisor:--x` sulla home di devloop e
 nessuna ACL per il supervisore sulle sue directory private; che il supervisore legga `run.log`;
 i due sudoers (440, root, accettati da `visudo`, uguali a quelli generati); l'ACL
 `user:supervisor:r--` sull'overlay e sul file di progetto, e che il supervisore li legga (#543:

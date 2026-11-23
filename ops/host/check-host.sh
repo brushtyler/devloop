@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Verifica l'installazione di devloop e del supervisore: utenti, directory private (700), chiavi
-# delle app (600, del proprietario giusto, solo quelle attese), ACL sulla home di devloop,
+# delle app (600, del proprietario giusto, solo quelle attese, nessuna rimasta nella key_dir di
+# default quando il parametro ne indica un'altra, #582), ACL sulla home di devloop,
 # sudoers, la lettura dell'overlay e del file di progetto per il supervisore (ACL r--, #543), la
 # casella fra supervisore e coordinatore (gruppo, directory 2770 di root, #543), l'utente degli agent (non legge key_dir né state_dir, non scrive .git né le directory
 # che contengono worktree e turni, è nell'overlay, esegue git nei worktree di devloop, non cambia
@@ -139,6 +140,57 @@ check_keys() {
     done
 }
 
+# Le key_dir di default del supervisore o del coordinatore, con la home HOME: ~/.ghapps e, con
+# PROJECT, ~/.ghapps-<progetto>. Con PROJECT, ~/.ghapps è anche la key_dir di default di
+# un'installazione senza PROJECT dello stesso host (un'unità devloop*.service che non è quella di
+# questo progetto): se c'è, le chiavi che vi stanno possono essere sue (un insieme di app
+# condiviso, ADR 0006, D3), e non si guarda.
+default_key_dirs() {
+    local home=$1 other
+    if [ -z "$PROJECT" ]; then
+        printf '%s\n' "$home/.ghapps"
+        return
+    fi
+    for other in "$SYSTEMD_DIR"/devloop*.service; do
+        if [ -f "$other" ] && [ "$other" != "$UNIT_FILE" ]; then
+            printf '%s\n' "$home/.ghapps-$PROJECT"
+            return
+        fi
+    done
+    printf '%s\n' "$home/.ghapps" "$home/.ghapps-$PROJECT"
+}
+
+# Le chiavi dimenticate nel vecchio posto (#582): quando il parametro PARAM (DEVLOOP_KEY_DIR,
+# SUPERVISOR_KEY_DIR, COORDINATOR_KEY_DIR) indica una key_dir che non è quella di default, nessuna
+# chiave di un'app del progetto (APPS) resta nelle key_dir di default OLD... del ruolo: le chiavi
+# si spostano, non si copiano (ops/host/migrate.md, "Spostare una key_dir"). Le righe nominano il
+# parametro, non la key_dir nuova, che non va pubblicata.
+check_left_keys() {
+    local param=$1 dir=${!1} old app key count
+    shift
+    for old in "$@"; do
+        [ -d "$old" ] || continue
+        if [ "$old" = "$dir" ] || [ "$old" -ef "$dir" ]; then
+            continue
+        fi
+        if ! [ -r "$old" ] || ! [ -x "$old" ]; then
+            fail "$old non è leggibile da $(id -un): eseguire come root"
+            continue
+        fi
+        count=0
+        for app in $APPS; do
+            for key in "$old/$APP_PREFIX$app".*.private-key.pem; do
+                [ -e "$key" ] && count=$((count + 1))
+            done
+        done
+        if [ "$count" = 0 ]; then
+            ok "$old, key_dir di default, non ha chiavi del progetto: $param indica un'altra key_dir"
+        else
+            fail "$old, key_dir di default, ha ancora $count chiavi di app del progetto, ma $param indica un'altra key_dir: spostarle, non copiarle (ops/host/migrate.md, \"Spostare una key_dir\")"
+        fi
+    done
+}
+
 step 'Utenti'
 for user in "$DEVLOOP_USER" "$SUPERVISOR_USER" "$AGENT_USER"; do
     if user_exists "$user"; then ok "l'utente $user esiste"; else fail "l'utente $user non esiste"; fi
@@ -155,6 +207,10 @@ step 'Chiavi delle GitHub App (600)'
 ops_devloop_keys "$STATE_PATH/config.local.toml"
 check_keys "$DEVLOOP_KEY_DIR" "$DEVLOOP_USER" "$DEVLOOP_KEYS_REQUIRED" 0 "$DEVLOOP_KEYS_OPTIONAL"
 check_keys "$SUPERVISOR_KEY_DIR" "$SUPERVISOR_USER" "$SUPERVISOR_KEYS" 1
+# La key_dir di default di devloop è sempre ~/.ghapps: con PROJECT l'utente è del progetto.
+check_left_keys DEVLOOP_KEY_DIR "$DEVLOOP_HOME/.ghapps"
+# shellcheck disable=SC2046  # percorsi senza spazi (ops_load_params)
+check_left_keys SUPERVISOR_KEY_DIR $(default_key_dirs "$SUPERVISOR_HOME")
 
 # check_traverse USER SETUP: USER attraversa soltanto la home di devloop (ACL --x, che mette lo
 # script SETUP) e non ha ACL sulle directory private di devloop, che restano 700.
@@ -349,6 +405,8 @@ else
     # La key_dir della sua app (#549): 700, solo la chiave del coordinatore, 600.
     check_dir "$COORDINATOR_KEY_DIR" 700 "$COORDINATOR_USER"
     check_keys "$COORDINATOR_KEY_DIR" "$COORDINATOR_USER" "$COORDINATOR_KEYS" 1
+    # shellcheck disable=SC2046  # percorsi senza spazi (ops_load_params)
+    check_left_keys COORDINATOR_KEY_DIR $(default_key_dirs "$COORDINATOR_HOME")
     # L'overlay di devloop, da cui scripts/coordinator-token.py legge repo e [apps.coordinator]
     # (#549): solo l'attraversamento della home di devloop, l'ACL di sola lettura sull'overlay
     # (#554), e che il coordinatore lo legga.

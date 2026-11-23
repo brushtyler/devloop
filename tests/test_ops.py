@@ -18,6 +18,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import textwrap
 import tomllib
 import unittest
 from pathlib import Path
@@ -767,6 +768,193 @@ class DevloopPathsGuideTests(unittest.TestCase):
             'cat /root/devloop-563-prima/config.local.toml > config.local.toml'))
         # The tag of the old engine is never touched, nor removed.
         self.assertNotIn('ssdlc-engine-final', ' '.join(self.commands()))
+
+
+class KeyDirMoveGuideTests(OpsTestCase):
+    """ops/host/migrate.md, "Spostare una key_dir (#582)": the move of the key_dir of a role on a
+    host in service, after its position was exposed. Its steps run here on temporary
+    directories: everything but the commands of the host (systemctl, sudo, tmux, pkill)."""
+
+    HEADING = '## Spostare una key_dir (#582)'
+    ANCHOR = 'host/migrate.md#spostare-una-key_dir-582'
+    HOST = ('systemctl', 'sudo ', 'tmux', 'pkill')
+
+    def section(self):
+        return RootStepsGuideTests().section(self.HEADING)
+
+    def commands(self, text=None):
+        """The commands, with their spaces collapsed (the comments that name the roles stay)."""
+        return [' '.join(c.split()) for c in RootStepsGuideTests.commands(
+            self.section() if text is None else text, inline=False)]
+
+    def blocks(self, part):
+        """The shell blocks of the steps (``part`` 'steps') or of the rollback ('rollback')."""
+        section = self.section()
+        at = section.index('**Rollback.**')
+        text = section[:at] if part == 'steps' else section[at:]
+        return [textwrap.dedent(block) for block in re.findall(r'```bash\n(.*?)```', text, re.S)]
+
+    def index(self, commands, command):
+        self.assertIn(command, commands)
+        return commands.index(command)
+
+    def test_the_guides_link_it_and_it_has_its_parts(self):
+        self.assertIn(f'({self.ANCHOR})', (OPS / 'README.md').read_text(encoding='utf-8'))
+        for path in ('params.env.example', 'host/check-host.sh'):
+            with self.subTest(path=path):
+                text = (OPS / path).read_text(encoding='utf-8').replace('\\"', '"')
+                self.assertIn('ops/host/migrate.md, "Spostare una key_dir"', text)
+        self.assertIn('Spostare una key_dir', self.HEADING)
+        section = ' '.join(self.section().split())
+        for phrase in ('### Comandi', '**Rollback.**', '**a loop fermo**',
+                       '**Le chiavi non cambiano**: non è una rotazione',
+                       '**Il nome nuovo non si pubblica**', 'con l\'agent dell\'host, come root',
+                       '`DEVLOOP_KEY_DIR`', '`SUPERVISOR_KEY_DIR`', '`COORDINATOR_KEY_DIR`',
+                       '`key_dir` in `[apps]` dell\'overlay', 'mai copiate lasciando l\'originale',
+                       '`start-role.sh supervisor`', '`start-role.sh coordinator`'):
+            self.assertIn(phrase, section)
+
+    def test_the_order_of_the_steps(self):
+        commands = self.commands()
+        stop = self.index(commands, 'systemctl stop devloop@devloop # devloop')
+        move = self.index(commands, 'find "$vecchia" -mindepth 1 -maxdepth 1 -exec mv -n -t '
+                                    '"$nuova" -- {} +')
+        params = self.index(commands, 'printf \'%s=%s\\n\' "$parametro" "$nuova" >> "$params"')
+        setup = self.index(commands, 'sudo bash /root/repos/ssdlc/ops/host/setup-$ruolo.sh')
+        check = self.index(commands, 'sudo bash /root/repos/ssdlc/ops/host/check-host.sh '
+                                     '--no-apps')
+        start = self.index(commands, 'systemctl start devloop@devloop')
+        self.assertLess(stop, move)
+        self.assertLess(move, params)
+        self.assertLess(params, setup)
+        self.assertLess(setup, check)
+        self.assertLess(check, start)
+        for role in ('supervisor', 'coordinator'):
+            self.assertLess(check, self.index(
+                commands, f'sudo bash /root/repos/ssdlc/ops/host/start-role.sh {role}'))
+        # The keys move, never copied; the new name is never printed, only written to files.
+        for command in commands + self.commands(self.section()[self.section().index(
+                '**Rollback.**'):]):
+            with self.subTest(command=command):
+                if re.match(r'(cp|rsync|install)\b', command) and not command.startswith(
+                        'install -d'):
+                    self.assertNotIn('$vecchia', command)
+                    self.assertNotIn('$nuova', command)
+                if re.match(r'(echo|printf|cat)\b', command) and '$nuova' in command:
+                    self.assertIn('>', command)
+
+    def installation(self, base, overlay_text, **params):
+        """A host under ``base``: the homes of the three roles, each with its key_dir of
+        default and keys of the project, the overlay ``overlay_text`` and params.env."""
+        homes = {role: base / 'home' / role for role in ('devloop', 'supervisor', 'coordinator')}
+        for role, home in homes.items():
+            keys = home / '.ghapps'
+            keys.mkdir(parents=True)
+            keys.chmod(0o700)
+            for app in {'devloop': DEVLOOP_KEYS, 'supervisor': SUPERVISOR_KEYS,
+                        'coordinator': ('coordinator',)}[role]:
+                key = keys / f'{PREFIX}{app}.2026-11-18.private-key.pem'
+                key.write_text('not a key\n')
+                key.chmod(0o600)
+        overlay = base / 'state/config.local.toml'
+        overlay.parent.mkdir(parents=True)
+        overlay.write_text(overlay_text)
+        path = self.params(DEVLOOP_HOME=str(homes['devloop']),
+                           SUPERVISOR_HOME=str(homes['supervisor']),
+                           COORDINATOR_HOME=str(homes['coordinator']), **params)
+        moved = base / 'params.env'
+        path.rename(moved)
+        return homes, overlay, moved
+
+    def run_blocks(self, blocks, base, role, param, params, overlay):
+        """The blocks, in one shell as the section asks, with the values of the role, ``ME`` as
+        its user and the paths of the host replaced by those under ``base``."""
+        script = 'set -e\n' + '\n'.join(b for b in blocks if not any(h in b for h in self.HOST))
+        for name, value in (('ruolo', role), ('utente', ME), ('parametro', param)):
+            script = re.sub(rf'^{name}=\S+', f'{name}={value}', script, count=1, flags=re.M)
+        for old, new in (('/root/repos/ssdlc/ops/params.env', str(params)),
+                         ('/root/repos/ssdlc/ops', str(OPS)),
+                         ('/home/devloop/devloop/.devloop/config.local.toml', str(overlay)),
+                         ('/root/keydir-582-', f'{base}/root/keydir-582-')):
+            self.assertIn(old, script)
+            script = script.replace(old, new)
+        return subprocess.run([BASH, '-c', script], capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL, timeout=120,
+                              env=dict(os.environ, LC_ALL='C.UTF-8'))
+
+    def key_dir(self, params, param):
+        return DryRunTests.resolved(self, params, param)[param]
+
+    def test_the_steps_move_the_key_dir_of_devloop_and_the_rollback_brings_it_back(self):
+        apps = '[apps.dispatcher]\napp_id = 1\nslug = "x-dispatcher"\n'
+        for name, text in (('with key_dir', f'repo = "o/r"\n[apps]\nkey_dir = "~/.ghapps"\n{apps}'),
+                           ('default key_dir', f'repo = "o/r"\n[apps]\n{apps}')):
+            with self.subTest(overlay=name):
+                base = self.tmp / name.replace(' ', '-')
+                homes, overlay, params = self.installation(
+                    base, text, DEVLOOP_KEY_DIR=str(self.tmp / name.replace(' ', '-') /
+                                                    'home/devloop/.ghapps'))
+                old = homes['devloop'] / '.ghapps'
+                names = sorted(p.name for p in old.iterdir())
+                done = self.run_blocks(self.blocks('steps'), base, 'devloop', 'DEVLOOP_KEY_DIR',
+                                       params, overlay)
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                out = done.stdout.splitlines()
+                for line in ('pronto', 'spostata', 'params', 'True', f'700 {ME}'):
+                    self.assertIn(line, out)
+                self.assertEqual(out.count(f'600 {ME}'), len(names))
+                # A new directory beside the old one, 700, with the keys moved, 600; the old one
+                # is gone; the new name is never printed.
+                self.assertFalse(old.exists())
+                new = [p for p in homes['devloop'].iterdir()
+                       if re.fullmatch(r'\.[0-9a-f]{16}', p.name)]
+                self.assertEqual(len(new), 1, list(homes['devloop'].iterdir()))
+                new = new[0]
+                self.assertEqual(stat.S_IMODE(new.stat().st_mode), 0o700)
+                self.assertEqual(sorted(p.name for p in new.iterdir()), names)
+                for key in new.iterdir():
+                    self.assertEqual(stat.S_IMODE(key.stat().st_mode), 0o600)
+                self.assertNotIn(new.name, done.stdout + done.stderr)
+                # params.env and the overlay name the new key_dir; the rest of the overlay stays.
+                self.assertEqual(self.key_dir(params, 'DEVLOOP_KEY_DIR'), str(new))
+                data = tomllib.loads(overlay.read_text())
+                self.assertEqual(data['apps']['key_dir'], str(new))
+                self.assertEqual(data['apps']['dispatcher'], {'app_id': 1, 'slug': 'x-dispatcher'})
+                copies = base / 'root/keydir-582-devloop'
+                self.assertEqual((copies / 'vecchia').read_text(), f'{old}\n')
+                self.assertEqual((copies / 'config.local.toml').read_text(), text)
+                # The other roles do not change.
+                for role in ('supervisor', 'coordinator'):
+                    self.assertTrue((homes[role] / '.ghapps').is_dir())
+                # The rollback, in the shell of step 1: everything as before.
+                done = self.run_blocks(self.blocks('steps')[:1] + self.blocks('rollback'), base,
+                                       'devloop', 'DEVLOOP_KEY_DIR', params, overlay)
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                self.assertIn('params', done.stdout.splitlines())
+                self.assertFalse(new.exists())
+                self.assertEqual(sorted(p.name for p in old.iterdir()), names)
+                self.assertEqual(stat.S_IMODE(old.stat().st_mode), 0o700)
+                self.assertEqual(self.key_dir(params, 'DEVLOOP_KEY_DIR'), str(old))
+                self.assertEqual(overlay.read_text(), text)
+
+    def test_the_steps_move_the_key_dir_of_the_supervisor_of_its_default(self):
+        # SUPERVISOR_KEY_DIR not written in params.env: the key_dir of before is the default,
+        # and the parameter is added. The overlay is devloop's: its step is not run.
+        text = 'repo = "o/r"\n[apps]\nkey_dir = "~/.ghapps"\n'
+        homes, overlay, params = self.installation(self.tmp, text)
+        old = homes['supervisor'] / '.ghapps'
+        names = sorted(p.name for p in old.iterdir())
+        steps = [b for b in self.blocks('steps') if 'tomllib' not in b]
+        done = self.run_blocks(steps, self.tmp, 'supervisor', 'SUPERVISOR_KEY_DIR', params,
+                               overlay)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertFalse(old.exists())
+        new = self.key_dir(params, 'SUPERVISOR_KEY_DIR')
+        self.assertEqual(Path(new).parent, homes['supervisor'])
+        self.assertEqual(sorted(p.name for p in Path(new).iterdir()), names)
+        self.assertEqual(params.read_text().count('SUPERVISOR_KEY_DIR='), 1)
+        self.assertEqual(overlay.read_text(), text)
+        self.assertTrue((homes['devloop'] / '.ghapps').is_dir())
 
 
 class RootStepsGuideTests(unittest.TestCase):
@@ -3890,6 +4078,78 @@ exec "$@"''')
         done = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params))
         self.assertIn(f'  ERRORE: manca la chiave di {PREFIX}coordinator in {keys}\n', done.stdout)
         self.assertEqual(self.mutating_calls(), [])
+
+    def left_keys(self, params):
+        """The lines of check-host.sh on the keys left in a default key_dir (#582)."""
+        done = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params))
+        return [line for line in done.stdout.splitlines() if 'key_dir di default' in line]
+
+    def test_a_key_left_in_the_default_key_dir_is_an_error(self):
+        # #582: after the move of a key_dir (ops/host/migrate.md, "Spostare una key_dir"), a
+        # key of an app of the project still in the default key_dir of its role is an error. The
+        # lines name the parameter, never the new key_dir.
+        self.declare_coordinator()
+        self.fake_host('classic sudo', users=(FAKE_AGENT, FAKE_SUPERVISOR, FAKE_COORDINATOR))
+        coordinator = self.home / 'coordinator'
+        (coordinator / '.ghapps').mkdir(parents=True, mode=0o700)
+        self.key(coordinator, 'coordinator')
+        users = dict(DEVLOOP_USER=ME, SUPERVISOR_USER=FAKE_SUPERVISOR, AGENT_USER=FAKE_AGENT)
+        # The parameters on the default key_dirs: nothing to say.
+        self.assertEqual(self.left_keys(self.params(**users)), [])
+        roles = ((self.devloop, 'DEVLOOP_KEY_DIR'), (self.supervisor, 'SUPERVISOR_KEY_DIR'),
+                 (coordinator, 'COORDINATOR_KEY_DIR'))
+        moved = {}
+        for home, param in roles:
+            moved[param] = home / '.k0123456789abcdef'
+            (home / '.ghapps').rename(moved[param])
+            (home / '.ghapps').mkdir(mode=0o700)
+        params = self.params(**users, **{p: str(d) for p, d in moved.items()})
+        lines = self.left_keys(params)
+        self.assertEqual(lines, [f"  ok: {home}/.ghapps, key_dir di default, non ha chiavi del "
+                                 f"progetto: {param} indica un'altra key_dir"
+                                 for home, param in roles])
+        # A key copied back, or left behind: an error, with how many; a key of an app of
+        # another project is not counted.
+        for home, param in roles:
+            for key in moved[param].iterdir():
+                shutil.copy2(key, home / '.ghapps' / key.name)
+            (home / '.ghapps' / 'x-other-dispatcher.2026-11-18.private-key.pem').write_text('k')
+        lines = self.left_keys(params)
+        self.assertEqual(lines, [
+            f'  ERRORE: {home}/.ghapps, key_dir di default, ha ancora '
+            f'{len(list(moved[param].iterdir()))} chiavi di app del progetto, ma {param} indica '
+            f'un\'altra key_dir: spostarle, non copiarle (ops/host/migrate.md, "Spostare una '
+            f'key_dir")' for home, param in roles])
+        for line in lines:
+            self.assertNotIn('.k0123456789abcdef', line)
+        # The old key_dirs removed, as the section does: nothing to say.
+        for home, _ in roles:
+            shutil.rmtree(home / '.ghapps')
+        self.assertEqual(self.left_keys(params), [])
+        self.assertEqual(self.mutating_calls(), [])
+
+    def test_with_project_the_default_key_dirs_of_the_shared_roles(self):
+        # #582: with PROJECT the default key_dir of the supervisor is ~/.ghapps-<project>, and
+        # also ~/.ghapps, unless an installation without PROJECT on the host (a unit
+        # devloop*.service other than this project's) may hold its keys there.
+        unit = self.tmp / 'systemd/devloop.service'
+        unit.write_text('[Service]\nUser=opsdry-other\n')
+        project = self.supervisor / '.ghapps-opstest'
+        project.mkdir(mode=0o700)
+        self.key(self.supervisor, 'supervisor').rename(
+            project / f'{PREFIX}supervisor.2026-11-18.private-key.pem')
+        new = self.supervisor / '.k0123456789abcdef'
+        new.mkdir(mode=0o700)
+        params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=ME, AGENT_USER='root',
+                             PROJECT='opstest', SUPERVISOR_KEY_DIR=str(new))
+        error = ('  ERRORE: {dir}, key_dir di default, ha ancora {n} chiavi di app del progetto, '
+                 "ma SUPERVISOR_KEY_DIR indica un'altra key_dir: spostarle, non copiarle "
+                 '(ops/host/migrate.md, "Spostare una key_dir")')
+        self.assertEqual(self.left_keys(params), [error.format(dir=project, n=1)])
+        unit.unlink()
+        self.assertEqual(self.left_keys(params), [
+            error.format(dir=self.supervisor / '.ghapps', n=1),
+            error.format(dir=project, n=1)])
 
     def test_the_coordinator_reaches_the_overlay_through_the_home_of_devloop_only(self):
         # #549: scripts/coordinator-token.py reads repo and [apps.coordinator] from the overlay
