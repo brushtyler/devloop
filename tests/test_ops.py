@@ -1366,6 +1366,54 @@ class DryRunTests(OpsTestCase):
         self.assertEqual(self.mutating_calls(), [])
         self.assertEqual(self.tree(), before)
 
+    def test_setup_devloop_asks_for_the_implementer_key_only_with_its_app(self):
+        # #569: the default DEVLOOP_KEYS knows implementer, but its key is a manual step only
+        # when the project's overlay declares [apps.implementer]; an explicit DEVLOOP_KEYS of
+        # params.env is authoritative.
+        overlay = self.home / 'devloop/devloop/.devloop/config.local.toml'
+        todo = (f'da fare a mano: copiare la chiave di {PREFIX}implementer in '
+                f'{self.home}/devloop/.ghapps')
+        optional = (f'la chiave di {PREFIX}implementer serve solo con [apps.implementer] '
+                    "nell'overlay: per ora non manca")
+
+        def keys(overlay_text=None, **overrides):
+            if overlay_text is None:
+                overlay.unlink(missing_ok=True)
+            else:
+                overlay.parent.mkdir(parents=True, exist_ok=True)
+                overlay.write_text(overlay_text)
+            params = self.params(DEVLOOP_USER='opsdry-nouser', **overrides)
+            done = self.run_script('host/setup-devloop.sh', '--dry-run', '--params', str(params))
+            self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+            out = done.stdout
+            section = out[out.index('==> Chiavi delle GitHub App'):out.index('==> Fatto')]
+            for role in DEVLOOP_KEYS:
+                if 'DEVLOOP_KEYS' not in overrides or role in overrides['DEVLOOP_KEYS']:
+                    self.assertIn(f'copiare la chiave di {PREFIX}{role} in', section)
+            return section
+
+        # An installation without the app: its key is not asked for.
+        for text in (None, 'repo = "brushtyler/devloop"\n[apps.dispatcher]\napp_id = 1\n'):
+            with self.subTest(overlay=text):
+                section = keys(text)
+                self.assertNotIn(todo, section)
+                self.assertIn(optional, section)
+        # With [apps.implementer] it is.
+        declared = '[apps.implementer]\napp_id = 7\nslug = "brushtyler-devloop-implementer"\n'
+        section = keys(declared)
+        self.assertIn(todo, section)
+        self.assertNotIn(optional, section)
+        # An explicit DEVLOOP_KEYS decides, with or without the app.
+        without = 'dispatcher claude-agent codex-agent agy-agent'
+        for text in (None, declared):
+            with self.subTest(explicit=without, overlay=text):
+                section = keys(text, DEVLOOP_KEYS=shlex.quote(without))
+                self.assertNotIn('implementer', section)
+                self.assertNotIn(f'{PREFIX}merger', section)
+        section = keys(None, DEVLOOP_KEYS=shlex.quote(f'{without} implementer'))
+        self.assertIn(todo, section)
+        self.assertNotIn(optional, section)
+
     def test_setup_devloop_dry_run_does_nothing_already_done(self):
         # The state of an installation already in place: a rerun has nothing left to do.
         devloop = self.home / 'devloop'
@@ -4077,6 +4125,57 @@ echo "sudo $*" >> "$OPS_TEST_CALLS"''')
         self.assertEqual(done.returncode, 1)
         self.assertEqual(errors, [f'  ERRORE: manca la chiave di {PREFIX}dispatcher in '
                                   f'{self.devloop}/.ghapps'])
+
+    def test_the_implementer_key_is_required_only_when_the_overlay_declares_its_app(self):
+        # #569: the default DEVLOOP_KEYS knows implementer: its key is no longer an app not
+        # listed, and it is required only with [apps.implementer] in the project's overlay.
+        overlay = self.state / 'config.local.toml'
+        base = overlay.read_text()
+        missing = f'  ERRORE: manca la chiave di {PREFIX}implementer in {self.devloop}/.ghapps'
+        absent = (f"ok: nessuna chiave di {PREFIX}implementer: l'overlay non dichiara "
+                  '[apps.implementer]')
+        present = f'ok: chiave di {PREFIX}implementer presente'
+        # Without the app and without its key: no error, no warning.
+        done, errors = self.check()
+        self.assertEqual(errors, [], done.stdout)
+        self.assertIn(absent, done.stdout)
+        self.assertNotIn("chiave di un'app non elencata", done.stdout)
+        # Without the app, with its key: recognised, no warning (the evidence of #569).
+        key = self.key(self.devloop, 'implementer')
+        done, errors = self.check()
+        self.assertEqual(errors, [], done.stdout)
+        self.assertIn(present, done.stdout)
+        self.assertIn(f'{key}: 600, {ME}', done.stdout)
+        self.assertNotIn("chiave di un'app non elencata", done.stdout)
+        # With the app, its key is required.
+        overlay.write_text(base + '[apps.implementer]\napp_id = 7\n'
+                           'slug = "brushtyler-devloop-implementer"\n')
+        done, errors = self.check()
+        self.assertEqual(errors, [], done.stdout)
+        self.assertIn(present, done.stdout)
+        key.unlink()
+        done, errors = self.check()
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(errors, [missing])
+        self.assertNotIn(absent, done.stdout)
+
+    def test_an_explicit_devloop_keys_is_authoritative(self):
+        # #569: a DEVLOOP_KEYS written in params.env decides which keys are required, whatever
+        # the overlay declares.
+        overlay = self.state / 'config.local.toml'
+        missing = f'  ERRORE: manca la chiave di {PREFIX}implementer in {self.devloop}/.ghapps'
+        listed = ' '.join(DEVLOOP_KEYS)
+        # Listed: required even without [apps.implementer].
+        done, errors = self.check(DEVLOOP_KEYS=shlex.quote(f'{listed} implementer'))
+        self.assertEqual(errors, [missing])
+        # Not listed: its key is an app not listed, even with [apps.implementer].
+        overlay.write_text(overlay.read_text() + '[apps.implementer]\napp_id = 7\n')
+        key = self.key(self.devloop, 'implementer')
+        done, errors = self.check(DEVLOOP_KEYS=shlex.quote(listed))
+        self.assertEqual(errors, [], done.stdout)
+        self.assertIn(f"  ATTENZIONE: {key}: chiave di un'app non elencata ({listed})\n",
+                      done.stdout)
+        self.assertNotIn(f'{PREFIX}implementer presente', done.stdout)
 
     def test_a_key_dir_not_700_is_an_error(self):
         (self.devloop / '.ghapps').chmod(0o750)

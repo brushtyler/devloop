@@ -204,11 +204,21 @@ fi
 say "  il servizio non viene avviato né abilitato: lo fa l'operatore (ops/README.md)"
 
 step 'Chiavi delle GitHub App'
-for role in $DEVLOOP_KEYS; do
+# La chiave dell'implementer, con il default di DEVLOOP_KEYS, solo se l'overlay dichiara
+# [apps.implementer] (#569).
+ops_devloop_keys "$STATE_PATH/config.local.toml"
+for role in $DEVLOOP_KEYS_REQUIRED; do
     if compgen -G "$DEVLOOP_KEY_DIR/$APP_PREFIX$role.*.private-key.pem" >/dev/null 2>&1; then
         ok "chiave di $APP_PREFIX$role presente"
     else
         todo "copiare la chiave di $APP_PREFIX$role in $DEVLOOP_KEY_DIR (mode 600, proprietario $DEVLOOP_USER)"
+    fi
+done
+for role in $DEVLOOP_KEYS_OPTIONAL; do
+    if compgen -G "$DEVLOOP_KEY_DIR/$APP_PREFIX$role.*.private-key.pem" >/dev/null 2>&1; then
+        ok "chiave di $APP_PREFIX$role presente"
+    else
+        say "  la chiave di $APP_PREFIX$role serve solo con [apps.$role] nell'overlay: per ora non manca"
     fi
 done
 

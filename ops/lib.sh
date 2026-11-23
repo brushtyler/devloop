@@ -341,6 +341,42 @@ sys.exit(3)
 EOF
 }
 
+# overlay_declares_app FILE ROLE: l'overlay FILE ha la tabella [apps.ROLE]. Un overlay che manca o
+# non si legge non dichiara nulla.
+overlay_declares_app() {
+    [ -f "$1" ] && python3 -I -B - "$1" "$2" <<'EOF'
+import sys, tomllib
+try:
+    with open(sys.argv[1], 'rb') as fh:
+        data = tomllib.load(fh)
+except (OSError, tomllib.TOMLDecodeError):
+    sys.exit(1)
+apps = data.get('apps')
+sys.exit(0 if isinstance(apps, dict) and isinstance(apps.get(sys.argv[2]), dict) else 1)
+EOF
+}
+
+# ops_devloop_keys OVERLAY: divide DEVLOOP_KEYS fra le chiavi richieste nella key_dir di devloop
+# (DEVLOOP_KEYS_REQUIRED) e quelle soltanto riconosciute (DEVLOOP_KEYS_OPTIONAL), #569. Con il
+# default, la chiave dell'implementer è richiesta solo se OVERLAY dichiara [apps.implementer]:
+# un'installazione senza quell'app non la deve avere. Un DEVLOOP_KEYS di params.env le richiede
+# tutte.
+ops_devloop_keys() {
+    local role
+    DEVLOOP_KEYS_REQUIRED=$DEVLOOP_KEYS
+    DEVLOOP_KEYS_OPTIONAL=
+    if [ "$DEVLOOP_KEYS_EXPLICIT" = 0 ] && ! overlay_declares_app "$1" implementer; then
+        DEVLOOP_KEYS_REQUIRED=
+        for role in $DEVLOOP_KEYS; do
+            if [ "$role" = implementer ]; then
+                DEVLOOP_KEYS_OPTIONAL=$role
+            else
+                DEVLOOP_KEYS_REQUIRED="${DEVLOOP_KEYS_REQUIRED:+$DEVLOOP_KEYS_REQUIRED }$role"
+            fi
+        done
+    fi
+}
+
 say() { printf '%s\n' "$*"; }
 step() { printf '\n==> %s\n' "$*"; }
 ok() { printf '  ok: %s\n' "$*"; }
@@ -452,7 +488,12 @@ ops_load_params() {
     : "${DEVLOOP_KEY_DIR:=$DEVLOOP_HOME/.ghapps}"
     : "${SUPERVISOR_KEY_DIR:=$SUPERVISOR_HOME/.ghapps}"
     : "${COORDINATOR_KEY_DIR:=$COORDINATOR_HOME/.ghapps}"
-    : "${DEVLOOP_KEYS:=dispatcher merger claude-agent codex-agent agy-agent}"
+    # Un DEVLOOP_KEYS scritto in params.env è autorevole: ogni chiave elencata è richiesta. Il
+    # default comprende implementer, ma la sua chiave è richiesta solo se l'overlay del progetto
+    # dichiara [apps.implementer] (#569; ops_devloop_keys).
+    DEVLOOP_KEYS_EXPLICIT=0
+    [ -n "${DEVLOOP_KEYS:-}" ] && DEVLOOP_KEYS_EXPLICIT=1
+    : "${DEVLOOP_KEYS:=dispatcher merger claude-agent codex-agent agy-agent implementer}"
     : "${SUPERVISOR_KEYS:=supervisor claude-agent}"
     : "${COORDINATOR_KEYS:=coordinator}"
     : "${DEVLOOP_PATH:=$DEVLOOP_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin}"
