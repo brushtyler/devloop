@@ -2200,13 +2200,17 @@ per gli altri ruoli quelli dei commenti.
 
 6. **L'overlay, solo per devloop**: `key_dir` in `[apps]`, che devloop legge per coniare i token.
    Il file si riscrive al suo posto (`cat … >`), così proprietario, modo e ACL restano. Senza la
-   riga l'overlay usa il default `~/.ghapps`, e la riga si aggiunge sotto `[apps]`:
+   riga l'overlay usa il default `~/.ghapps`, e la riga si aggiunge sotto `[apps]`. Un overlay può
+   non avere la riga `[apps]` e dichiarare solo `[apps.<ruolo>]`: allora `[apps]` con la riga si
+   aggiunge in fondo, e le altre tabelle restano come sono:
 
    ```bash
    if grep -q '^key_dir *=' "$overlay"; then
        sed "s|^key_dir *=.*|key_dir = \"$nuova\"|" "$overlay" > "$copie/overlay-dopo"
+   elif grep -Eq '^\[ *apps *\] *(#.*)?$' "$overlay"; then
+       sed -E "/^\[ *apps *\] *(#.*)?$/a key_dir = \"$nuova\"" "$overlay" > "$copie/overlay-dopo"
    else
-       sed "/^\[apps\]$/a key_dir = \"$nuova\"" "$overlay" > "$copie/overlay-dopo"
+       { cat "$overlay"; printf '\n[apps]\nkey_dir = "%s"\n' "$nuova"; } > "$copie/overlay-dopo"
    fi
    cat "$copie/overlay-dopo" > "$overlay"
    python3 -I -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["apps"]["key_dir"] == sys.argv[2])' "$overlay" "$nuova"

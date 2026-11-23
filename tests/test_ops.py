@@ -887,8 +887,13 @@ class KeyDirMoveGuideTests(OpsTestCase):
 
     def test_the_steps_move_the_key_dir_of_devloop_and_the_rollback_brings_it_back(self):
         apps = '[apps.dispatcher]\napp_id = 1\nslug = "x-dispatcher"\n'
+        # The overlay with key_dir, without it under [apps], and without the line [apps] (the
+        # table declared only by [apps.<role>]), with or without a final newline.
         for name, text in (('with key_dir', f'repo = "o/r"\n[apps]\nkey_dir = "~/.ghapps"\n{apps}'),
-                           ('default key_dir', f'repo = "o/r"\n[apps]\n{apps}')):
+                           ('default key_dir', f'repo = "o/r"\n[apps]\n{apps}'),
+                           ('apps with a comment', f'repo = "o/r"\n[apps]  # le app\n{apps}'),
+                           ('implicit apps', f'repo = "o/r"\n{apps}'),
+                           ('implicit apps no newline', f'repo = "o/r"\n{apps}'.rstrip('\n'))):
             with self.subTest(overlay=name):
                 base = self.tmp / name.replace(' ', '-')
                 homes, overlay, params = self.installation(
@@ -4127,6 +4132,30 @@ exec "$@"''')
             shutil.rmtree(home / '.ghapps')
         self.assertEqual(self.left_keys(params), [])
         self.assertEqual(self.mutating_calls(), [])
+
+    def test_a_key_left_of_an_app_not_in_apps_is_an_error(self):
+        # #582: APPS lists only the apps to create (with a shared set, only those missing,
+        # ops/README.md): the apps of the project are also those of the keys of the roles and of
+        # the tables [apps.<role>] of the overlay.
+        overlay = self.state / 'config.local.toml'
+        overlay.write_text(overlay.read_text() + '\n[apps.extra]\napp_id = 9\nslug = "x-extra"\n')
+        moved = self.devloop / '.k0123456789abcdef'
+        (self.devloop / '.ghapps').rename(moved)
+        (self.devloop / '.ghapps').mkdir(mode=0o700)
+        params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=ME, AGENT_USER='root',
+                             APPS='merger', DEVLOOP_KEY_DIR=str(moved))
+        ok = (f"  ok: {self.devloop}/.ghapps, key_dir di default, non ha chiavi del progetto: "
+              "DEVLOOP_KEY_DIR indica un'altra key_dir")
+        error = (f'  ERRORE: {self.devloop}/.ghapps, key_dir di default, ha ancora 1 chiavi di '
+                 "app del progetto, ma DEVLOOP_KEY_DIR indica un'altra key_dir: spostarle, non "
+                 'copiarle (ops/host/migrate.md, "Spostare una key_dir")')
+        self.assertIn(ok, self.left_keys(params))
+        for role in ('dispatcher', 'extra'):
+            with self.subTest(role=role):
+                self.key(self.devloop, role)
+                self.assertIn(error, self.left_keys(params))
+                (self.devloop / '.ghapps' / f'{PREFIX}{role}.2026-11-18.private-key.pem').unlink()
+                self.assertIn(ok, self.left_keys(params))
 
     def test_with_project_the_default_key_dirs_of_the_shared_roles(self):
         # #582: with PROJECT the default key_dir of the supervisor is ~/.ghapps-<project>, and

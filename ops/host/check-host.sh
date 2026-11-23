@@ -160,11 +160,36 @@ default_key_dirs() {
     printf '%s\n' "$home/.ghapps" "$home/.ghapps-$PROJECT"
 }
 
+# project_apps OVERLAY: le app del progetto, una per riga: quelle di APPS, delle chiavi dei ruoli
+# (DEVLOOP_KEYS, SUPERVISOR_KEYS, COORDINATOR_KEYS) e delle tabelle [apps.<ruolo>] dell'overlay
+# OVERLAY. APPS da solo non basta: con un insieme condiviso elenca soltanto le app da creare
+# (ops/README.md).
+project_apps() {
+    local overlay=$1 app
+    {
+        for app in $APPS $DEVLOOP_KEYS $SUPERVISOR_KEYS $COORDINATOR_KEYS; do
+            printf '%s\n' "$app"
+        done
+        [ -f "$overlay" ] && python3 -I -B - "$overlay" <<'EOF'
+import sys, tomllib
+try:
+    with open(sys.argv[1], 'rb') as fh:
+        apps = tomllib.load(fh).get('apps')
+except (OSError, tomllib.TOMLDecodeError):
+    sys.exit(0)
+if isinstance(apps, dict):
+    for name, table in apps.items():
+        if isinstance(table, dict):
+            print(name)
+EOF
+    } | grep -E '^[a-z0-9-]+$' | sort -u
+}
+
 # Le chiavi dimenticate nel vecchio posto (#582): quando il parametro PARAM (DEVLOOP_KEY_DIR,
 # SUPERVISOR_KEY_DIR, COORDINATOR_KEY_DIR) indica una key_dir che non è quella di default, nessuna
-# chiave di un'app del progetto (APPS) resta nelle key_dir di default OLD... del ruolo: le chiavi
-# si spostano, non si copiano (ops/host/migrate.md, "Spostare una key_dir"). Le righe nominano il
-# parametro, non la key_dir nuova, che non va pubblicata.
+# chiave di un'app del progetto (project_apps) resta nelle key_dir di default OLD... del ruolo: le
+# chiavi si spostano, non si copiano (ops/host/migrate.md, "Spostare una key_dir"). Le righe
+# nominano il parametro, non la key_dir nuova, che non va pubblicata.
 check_left_keys() {
     local param=$1 dir=${!1} old app key count
     shift
@@ -178,7 +203,7 @@ check_left_keys() {
             continue
         fi
         count=0
-        for app in $APPS; do
+        for app in $(project_apps "$STATE_PATH/config.local.toml"); do
             for key in "$old/$APP_PREFIX$app".*.private-key.pem; do
                 [ -e "$key" ] && count=$((count + 1))
             done
