@@ -1995,6 +1995,21 @@ class DryRunTests(OpsTestCase):
                 self.assertIsNone(data)
                 self.assertIn(f'ok: {settings}: trustedWorkspaces non nomina nulla fuori da '
                               f'{worktrees}', out)
+        # Under the worktrees as written, but a link that leads outside the state_dir or to a
+        # home: not narrower, so the worktrees take its place.
+        worktrees.mkdir(parents=True, exist_ok=True)
+        (self.tmp / 'outside').mkdir(exist_ok=True)
+        (worktrees / 'outside').symlink_to(self.tmp / 'outside')
+        (worktrees / 'home').symlink_to(self.home / 'devloop')
+        try:
+            for entry in ('outside', 'outside/sub', 'home'):
+                with self.subTest(entry=entry):
+                    out, data = written(json.dumps({'trustedWorkspaces': [
+                        f'{worktrees}/issue-1', f'{worktrees}/{entry}']}))
+                    self.assertEqual(data, {'trustedWorkspaces': [str(worktrees)]})
+        finally:
+            (worktrees / 'outside').unlink()
+            (worktrees / 'home').unlink()
         # Not JSON, or not a list of paths: reported, never changed.
         for before, why in (('{', 'non è un JSON valido'),
                             ('{"trustedWorkspaces": "/home"}',
@@ -3226,6 +3241,26 @@ class CheckHostTests(OpsTestCase):
         done, errors = self.check()
         self.assertIn(f'trustedWorkspaces nomina {self.home}, che è o contiene la home ',
                       done.stdout)
+        # Under the worktrees as written, but links that lead outside the state_dir or to a
+        # home: warned, with where they lead.
+        worktrees.mkdir(parents=True, exist_ok=True)
+        (self.tmp / 'outside').mkdir(exist_ok=True)
+        (worktrees / 'outside').symlink_to(self.tmp / 'outside')
+        (worktrees / 'home').symlink_to(self.devloop)
+        real_outside = os.path.realpath(self.tmp / 'outside')
+        real_home = os.path.realpath(self.devloop)
+        settings.write_text(json.dumps({'trustedWorkspaces': [
+            f'{worktrees}/outside', f'{worktrees}/outside/sub', f'{worktrees}/home']}))
+        done, errors = self.check()
+        self.assertEqual(errors, [])
+        warnings = [line for line in done.stdout.splitlines() if 'trustedWorkspaces' in line]
+        self.assertEqual(warnings, [
+            f'  ATTENZIONE: {settings}: trustedWorkspaces nomina {worktrees}/outside (porta a '
+            f'{real_outside}), fuori dallo state_dir {self.state}{suffix}',
+            f'  ATTENZIONE: {settings}: trustedWorkspaces nomina {worktrees}/outside/sub (porta '
+            f'a {real_outside}/sub), fuori dallo state_dir {self.state}{suffix}',
+            f'  ATTENZIONE: {settings}: trustedWorkspaces nomina {worktrees}/home (porta a '
+            f'{real_home}), che è o contiene la home {real_home}{suffix}'])
         settings.write_text('[')
         done, errors = self.check()
         self.assertEqual(errors, [])
