@@ -2574,11 +2574,22 @@ esac''')
     HOST_USERS = {'DEVLOOP_USER': 'devloop', 'AGENT_USER': 'devloop-agent',
                   'SUPERVISOR_USER': 'supervisor', 'COORDINATOR_USER': 'coordinator'}
 
-    def devloop_project(self):
+    # The paths of the host that params.env leaves to the defaults of PROJECT at step 10 of
+    # ops/host/migrate.md: empty is unset for ops/lib.sh.
+    PROJECT_DEFAULTS = dict.fromkeys(('SUDOERS_FILE', 'AGENT_SUDOERS_FILE',
+                                      'COORDINATOR_SUDOERS_FILE', 'COORDINATOR_OPS_DIR',
+                                      'COORDINATION_DIR'), '')
+
+    def devloop_project(self, **paths):
         """The host of this repository after #563, with the moves of ops/host/migrate.md done:
         ``params.env`` as at its step 10 (PROJECT=devloop with the users, the supervisor's clone
-        and the key_dirs of before written; the other paths the defaults of PROJECT), the clones
-        and the state_dir at their new paths, and the users already there (fake_host)."""
+        and the key_dirs of before written), the clones and the state_dir at their new paths,
+        and the users already there (fake_host).
+
+        The paths that are the defaults of PROJECT on the host (sudoers, mailbox, root's copy
+        of the coordinator) are those of ``params`` under the temporary directory, and
+        ROOT_COPY for the copy, unless ``paths`` sets them (PROJECT_DEFAULTS): the dry runs
+        read them, and on the operator's host they exist (#566)."""
         home = self.home
         for clone in (home / 'devloop/devloop', home / 'supervisor/devloop'):
             (clone / '.git').mkdir(parents=True)
@@ -2599,15 +2610,40 @@ esac''')
             DEVLOOP_KEY_DIR=str(home / 'devloop/.ghapps'),
             SUPERVISOR_KEY_DIR=str(home / 'supervisor/.ghapps'),
             COORDINATOR_KEY_DIR=str(home / 'coordinator/.ghapps'),
-            # The defaults of PROJECT: empty is unset for ops/lib.sh.
-            SUDOERS_FILE='', AGENT_SUDOERS_FILE='', COORDINATOR_SUDOERS_FILE='',
-            COORDINATOR_OPS_DIR='', COORDINATION_DIR='')
+            **{'COORDINATOR_OPS_DIR': ROOT_COPY, **paths})
+
+    def test_the_project_devloop_gets_the_paths_of_the_host_of_its_project(self):
+        # #563, #566: the paths params.env leaves unset are those of PROJECT, as ops/lib.sh
+        # resolves them, whether they exist on the host or not. The check of the other
+        # installations, which reads the host's units and sudoers, is not part of it.
+        params = self.devloop_project(**self.PROJECT_DEFAULTS)
+        names = ('SERVICE_NAME', 'DEVLOOP_USER', 'AGENT_USER', 'SUDOERS_FILE',
+                 'AGENT_SUDOERS_FILE', 'COORDINATOR_SUDOERS_FILE', 'COORDINATOR_OPS_DIR',
+                 'COORDINATION_DIR')
+        done = subprocess.run(
+            [BASH, '-c', f'. {OPS / "lib.sh"}; ops_check_host_users() {{ :; }}; '
+                         'PARAMS_FILE=$1; shift; ops_load_params; '
+                         'for name; do printf "%s=%s\\n" "$name" "${!name}"; done',
+             '_', str(params), *names],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=60)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(dict(line.split('=', 1) for line in done.stdout.splitlines()), {
+            'SERVICE_NAME': 'devloop@devloop', 'DEVLOOP_USER': 'devloop',
+            'AGENT_USER': 'devloop-agent',
+            'SUDOERS_FILE': '/etc/sudoers.d/devloop-supervisor-devloop',
+            'AGENT_SUDOERS_FILE': '/etc/sudoers.d/devloop-agent-devloop',
+            'COORDINATOR_SUDOERS_FILE': '/etc/sudoers.d/devloop-coordinator-devloop',
+            'COORDINATOR_OPS_DIR': '/usr/local/lib/devloop-coordinator-devloop',
+            'COORDINATION_DIR': '/var/lib/devloop-coordination-devloop'})
 
     def test_this_host_as_the_project_devloop_keeps_its_users(self):
         # #563: PROJECT=devloop with the users of today gives the instance devloop@devloop, the
         # clones .../devloop and no new user, nor a key_dir or a supervisor's clone of PROJECT.
+        # #566: the sudoers, the mailbox and root's copy are not the host's (devloop_project),
+        # so the dry runs do not depend on them; the test above checks their defaults.
         params = self.devloop_project()
         home, systemd = self.home, self.tmp / 'systemd'
+        sudoers, box = self.tmp / 'sudoers.d', self.tmp / 'coordination'
         clone, state = home / 'devloop/devloop', home / 'devloop/devloop/.devloop'
         before = self.tree()
         outs = {}
@@ -2638,24 +2674,22 @@ esac''')
         self.assertIn(f'install -d -m 700 -o devloop -g devloop {home}/devloop/.ghapps\n', out)
         self.assertNotIn(f'{systemd}/devloop.service', out)
         out = outs['setup-agent-user.sh']
-        self.assertIn('scriverebbe /etc/sudoers.d/devloop-agent-devloop (mode 440', out)
+        self.assertIn(f'scriverebbe {sudoers}/devloop-agent (mode 440', out)
         self.assertIn('    | devloop ALL=(devloop-agent) NOPASSWD:SETENV:', out)
         out = outs['setup-supervisor.sh']
         self.assertIn("ok: l'utente supervisor esiste\n", out)
-        self.assertIn('scriverebbe /etc/sudoers.d/devloop-supervisor-devloop (mode 440', out)
+        self.assertIn(f'scriverebbe {sudoers}/devloop-supervisor (mode 440', out)
         self.assertIn('    | supervisor ALL=(devloop) NOPASSWD:', out)
         self.assertIn('    /usr/bin/systemctl restart devloop@devloop, \\\n', out)
         self.assertIn(f'    /usr/bin/python3 {clone}/scripts/devloop-pinned tick --dry-run, \\\n',
                       out)
         self.assertIn(f'ok: {home}/supervisor/devloop è già un clone di brushtyler/devloop', out)
         self.assertIn(f'-o supervisor -g supervisor {home}/supervisor/.ghapps\n', out)
-        self.assertIn('install -d -m 2770 -o root -g '
-                      f'{GROUP} /var/lib/devloop-coordination-devloop\n', out)
+        self.assertIn(f'install -d -m 2770 -o root -g {GROUP} {box}\n', out)
         out = outs['setup-coordinator.sh']
         self.assertIn("ok: l'utente coordinator esiste\n", out)
-        self.assertIn('scriverebbe /etc/sudoers.d/devloop-coordinator-devloop (mode 440', out)
-        self.assertIn('install -d -m 755 -o root -g root /usr/local/lib/devloop-coordinator-devloop\n',
-                      out)
+        self.assertIn(f'scriverebbe {sudoers}/devloop-coordinator (mode 440', out)
+        self.assertIn(f'install -d -m 755 -o root -g root {ROOT_COPY}\n', out)
         self.assertIn('    /usr/bin/journalctl --no-pager -n 200 -u devloop@devloop, \\\n', out)
         self.assertIn(f'    /usr/bin/tail -n 200 {state}/run.log, \\\n', out)
         self.assertIn(f'  DEVLOOP_APP_KEY_DIR={home}/coordinator/.ghapps python3 '
@@ -4125,7 +4159,9 @@ echo "$2:x:1000:"''')
     def test_the_sessions_of_the_project_devloop_get_the_paths_of_563(self):
         # #563: PROJECT=devloop with the users of before and the supervisor's clone written. The
         # sessions start in the clone .../devloop, with the state_dir .devloop of devloop's clone,
-        # the mailbox and the wake-up of the project, the defaults of PROJECT.
+        # the mailbox and the wake-up of the project, the defaults of PROJECT: the script only
+        # names them. The sudoers stay those of the test, so that the check of the other
+        # installations reads none of the host's (#566).
         devloop = self.home / 'devloop'
         state = devloop / 'devloop' / '.devloop'
         state.mkdir(parents=True)
@@ -4134,8 +4170,7 @@ echo "$2:x:1000:"''')
             PROJECT='devloop', REPO='brushtyler/devloop', DEVLOOP_USER='devloop',
             AGENT_USER='devloop-agent', SUPERVISOR_USER=FAKE_SUPERVISOR,
             COORDINATOR_USER=FAKE_COORDINATOR, DEVLOOP_HOME=str(devloop),
-            SUPERVISOR_CLONE=str(self.clone), SUDOERS_FILE='', AGENT_SUDOERS_FILE='',
-            COORDINATOR_SUDOERS_FILE='', COORDINATOR_OPS_DIR='', COORDINATION_DIR='')
+            SUPERVISOR_CLONE=str(self.clone), COORDINATOR_OPS_DIR='', COORDINATION_DIR='')
         self.assertEqual(self.clone, self.home / 'supervisor' / 'devloop')
         box = '/var/lib/devloop-coordination-devloop'
         for role, directory in (('supervisor', self.clone),
