@@ -2,7 +2,8 @@
 # Prepara l'host per il supervisore di devloop: utente, ACL di solo attraversamento sulla home
 # di devloop (per leggere i log) e di sola lettura sull'overlay e sul file di progetto dello
 # state_dir (#543), la casella fra supervisore e coordinatore (#543), sudoers minimale, clone,
-# key_dir 700, impostazioni di Claude Code senza aggiornamenti automatici.
+# key_dir 700, impostazioni di Claude Code senza aggiornamenti automatici; con SOURCE_REPO anche un
+# clone della sorgente al tag SOURCE_REF, da cui lanciare scripts/supervisor-token.py (#571).
 # Idempotente: si può rieseguire, fa solo ciò che manca. Non scrive segreti. Claude Code, il suo
 # login, la chiave dell'app e il token di sola lettura per gh restano passi manuali (ops/README.md).
 # Va eseguito dopo setup-devloop.sh.
@@ -109,15 +110,23 @@ step "Clone di $REPO per $SUPERVISOR_USER"
 if [ -d "$SUPERVISOR_CLONE/.git" ]; then
     # Un clone per progetto (ADR 0006, R8): uno di un altro repository è di un altro progetto,
     # e non si condivide. L'origin si legge dal file, senza eseguire git nel clone d'altri.
-    origin=$(awk '/^[[:space:]]*\[/ { inside = ($0 ~ /^[[:space:]]*\[remote "origin"\]/) }
-                  inside && /^[[:space:]]*url[[:space:]]*=/ { sub(/^[^=]*=[[:space:]]*/, ""); print; exit }' \
-        "$SUPERVISOR_CLONE/.git/config" 2>/dev/null || true)
-    slug=$(printf '%s' "$origin" | sed -E 's#^.*github\.com[:/]##; s#/+$##; s#\.git$##')
+    origin=$(clone_origin "$SUPERVISOR_CLONE")
+    slug=$(origin_slug "$origin")
     [ "${slug,,}" = "${REPO,,}" ] \
         || die "$SUPERVISOR_CLONE è un clone di '${origin:-origine sconosciuta}', non di $REPO: è di un altro progetto, scegliere un altro SUPERVISOR_CLONE"
     ok "$SUPERVISOR_CLONE è già un clone di $REPO"
 else
     as_user "$SUPERVISOR_USER" git clone "https://github.com/$REPO.git" "$SUPERVISOR_CLONE"
+fi
+
+# Il repository gestito di un progetto con la sorgente a parte non contiene devloop, quindi
+# nemmeno scripts/supervisor-token.py (#571): il supervisore lo lancia da un clone della
+# sorgente, al tag SOURCE_REF del progetto.
+TOKEN_CLONE=$SUPERVISOR_CLONE
+if [ -n "$SOURCE_REPO" ]; then
+    step "Clone di $SOURCE_REPO al tag $SOURCE_REF per $SUPERVISOR_USER (i token della sua app)"
+    ensure_source_clone "$SUPERVISOR_USER" "$SUPERVISOR_SOURCE_CLONE"
+    TOKEN_CLONE=$SUPERVISOR_SOURCE_CLONE
 fi
 
 step 'Directory private (700)'
@@ -152,7 +161,10 @@ for role in $SUPERVISOR_KEYS; do
         todo "copiare la chiave di $APP_PREFIX$role in $SUPERVISOR_KEY_DIR (mode 600, proprietario $SUPERVISOR_USER)"
     fi
 done
-todo "token fine-grained di sola lettura per gh, come $SUPERVISOR_USER (ops/github/tokens.md)"
+# key_dir di [apps] nell'overlay è quella di devloop: il supervisore indica la propria (#571).
+say "  i token della sua app si coniano come $SUPERVISOR_USER, dal clone $TOKEN_CLONE, con la sua key_dir e lo state_dir del progetto:"
+say "  DEVLOOP_APP_KEY_DIR=$SUPERVISOR_KEY_DIR python3 scripts/supervisor-token.py --state-dir $STATE_PATH -- <comando>"
+todo "token fine-grained di sola lettura per gh, come $SUPERVISOR_USER, con accesso a $REPO: con un altro progetto sull'host, estendere quello che c'è o affiancarne uno nuovo (ops/github/tokens.md)"
 
 step 'Fatto'
 say "Poi: ops/host/check-host.sh per verificare utenti, permessi, ACL, sudoers e servizio."

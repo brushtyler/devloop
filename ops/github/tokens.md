@@ -42,6 +42,13 @@ mostra in `permissions` quelli dell'account, non quelli del token.
 
 `gh` lo conserva nella propria configurazione dell'utente del supervisore (`~/.config/gh`).
 
+**Un altro progetto sullo stesso host** (#571). Il supervisore è uno per host: per il repository
+di un nuovo progetto il suo token va **esteso** (*Edit* → *Repository access*: aggiungere il
+repository, con gli stessi permessi) oppure, se il repository è di un altro proprietario (un token
+fine-grained ne ha uno solo), **affiancato** da un token nuovo con gli stessi campi e quel
+proprietario come *Resource owner*. La prova di lettura qui sopra si ripete con il repository
+nuovo. Lo stesso vale per il token di sola lettura del coordinatore, se il progetto lo ha.
+
 **Rinnovo:** prima della scadenza si genera un token nuovo con gli stessi permessi (*Regenerate
 token*) e si ripete `gh auth login --with-token`. **Revoca:** dalla stessa pagina, *Delete*, se il
 token è finito altrove o se l'host viene dismesso.

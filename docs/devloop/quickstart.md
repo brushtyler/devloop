@@ -269,6 +269,30 @@ sudo bash ops/host/setup-supervisor.sh --params ops/params-widget.env --dry-run
 sudo bash ops/host/setup-supervisor.sh --params ops/params-widget.env
 ```
 
+`acme/widget` does not contain devloop, so the supervisor's clone of it has no
+`scripts/supervisor-token.py`: the script also clones the source, `brushtyler/devloop`, at the tag
+`SOURCE_REF`, in `/home/supervisor/devloop-source-widget` (`SUPERVISOR_SOURCE_CLONE`), and prints
+the command that mints the tokens of the supervisor's app, as `supervisor`, from that clone, with
+its `key_dir` and the project's `state_dir`:
+
+```bash
+cd /home/supervisor/devloop-source-widget
+DEVLOOP_APP_KEY_DIR=/home/supervisor/.ghapps-widget python3 scripts/supervisor-token.py \
+    --state-dir /var/lib/devloop/widget -- gh issue comment <ISSUE> --body-file <FILE>
+```
+
+The supervisor's read-only `gh` token must reach `acme/widget` too: extend the one it has to this
+repository or, for a repository of another owner, add a new one
+([Token di sola lettura del supervisore](../../ops/github/tokens.md#token-di-sola-lettura-del-supervisore)).
+
+**Coordinator (optional).** A project has a coordinator only if its overlay declares it, with
+`[apps.coordinator]` or `[roles.coordinator]`; otherwise `check-host.sh` says so in one line. To
+add it: the app `coordinator` in `APPS` of the project's set (step 3), its key in
+`/home/coordinator/.ghapps-widget`, `[apps.coordinator]` in the overlay, and
+`sudo bash ops/host/setup-coordinator.sh --params ops/params-widget.env`, which also gives it its
+clone of the source for `scripts/coordinator-token.py`
+([10. Coordinatore (facoltativo)](../../ops/README.md#10-coordinatore-facoltativo)).
+
 ## 8. Checks
 
 ```bash
@@ -278,7 +302,8 @@ sudo -u devloop-widget -H /usr/bin/env -C /home/devloop-widget/widget /usr/bin/p
 ```
 
 - `check-host.sh` exits with 1 on an error: users, modes, keys, ACLs, sudoers, the agent user,
-  the repository lock, the unit, the CLIs and `devloop apps`
+  the repository lock, the unit, the CLIs and `devloop apps`, and the coordinator only if the
+  overlay declares it (step 7)
   ([8. Verifica](../../ops/README.md#8-verifica)).
 - `apps` names `acme/widget` and the `key_dir`, then each app with its installation and its
   permissions ([GitHub identities](reference.md#github-identities)).
@@ -311,7 +336,9 @@ devloop works on the issues of `acme/widget` that a user of `trusted_users` labe
 - **A new version of devloop** is a new tag of `brushtyler/devloop`, pinned by hand: the pin after a merge is
   off when the installation has its own source. Pin with the launcher (`pin <tag>` instead of
   `apps` in the commands of step 8), then restart the service
-  ([Installation source](guide.md#installation-source), [Rollback](guide.md#rollback)).
+  ([Installation source](guide.md#installation-source), [Rollback](guide.md#rollback)). With the
+  new tag in `SOURCE_REF`, `setup-supervisor.sh` (and `setup-coordinator.sh`, if the project has
+  the coordinator) moves the clone of the source of its role to that tag.
 - **A change of the project file or of the overlay** is read again before each tick; most keys
   need a restart ([Changes while the loop runs](guide.md#changes-while-the-loop-runs)).
 - **Updating a CLI** is done by hand with the loop stopped ([Agent CLIs](guide.md#agent-clis)).

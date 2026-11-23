@@ -556,6 +556,12 @@ dell'operatore sono di solito 600, e `scripts/supervisor-token.py` legge l'overl
 `/var/lib/devloop-coordination` con `to-coordinator/`, `to-supervisor/` e le loro `done/`, di
 root, del gruppo, 2770; [I quattro ruoli](#i-quattro-ruoli)), installa il sudoers minimale dopo
 averlo validato con `visudo -c`, clona il repository e prepara `key_dir` e `~/.claude` (700).
+Con la sorgente a parte (`SOURCE_REPO`, [Un altro progetto](#un-altro-progetto)) il repository
+gestito non contiene `scripts/supervisor-token.py`: lo script clona anche la sorgente, come
+`supervisor`, in `SUPERVISOR_SOURCE_CLONE` (`/home/supervisor/devloop-source`; con `PROJECT`,
+`~/devloop-source-<progetto>`) e la porta al tag `SOURCE_REF`, a ogni esecuzione (#571). Alla
+fine stampa il comando con cui il supervisore conia i token della sua app, dal clone giusto, con
+la sua `key_dir` (`DEVLOOP_APP_KEY_DIR`) e lo `state_dir` del progetto (`--state-dir`).
 Se al posto di `to-coordinator` o `to-supervisor` c'è un file (la casella di prima del #543) lo
 script si ferma: si sposta prima, come in
 [host/migrate.md](host/migrate.md#casella-fra-i-ruoli-e-sveglia-del-coordinatore-543).
@@ -592,7 +598,8 @@ Poi, a mano:
   (`/home/devloop/devloop/.devloop`), dal cui overlay legge `repo` e `[apps.supervisor]`
   (ADR 0006, R6); prima passano da `scripts/agent-token.py`, con
   l'attore `claude`, che non espone l'app `supervisor`;
-- **token di sola lettura** per `gh` ([github/tokens.md](github/tokens.md));
+- **token di sola lettura** per `gh` ([github/tokens.md](github/tokens.md)); per un altro
+  progetto sullo stesso host, esteso al suo repository o affiancato da uno nuovo;
 - **Claude Code** come utente `supervisor`, con lo stesso `npm install` del passo 5 e il login;
 - gli strumenti del diario (`~/supervisor`) e la memoria di Claude Code non vengono dal
   repository: su una macchina nuova si copiano da quella vecchia ([host/migrate.md](host/migrate.md)).
@@ -611,7 +618,7 @@ nessuna ACL per il supervisore sulle sue directory private; che il supervisore l
 i due sudoers (440, root, accettati da `visudo`, uguali a quelli generati); l'ACL
 `user:supervisor:r--` sull'overlay e sul file di progetto, e che il supervisore li legga (#543:
 un errore se un file sostituito l'ha persa); la casella (#543: il gruppo `devloop-roles`, con
-dentro `supervisor` e, se c'è, `coordinator`, e senza `devloop` né `devloop-agent`;
+dentro `supervisor` e, se il progetto lo ha, `coordinator`, e senza `devloop` né `devloop-agent`;
 `/var/lib/devloop-coordination`, `to-coordinator/`, `to-supervisor/` e le loro `done/`, di root,
 del gruppo, 2770: un errore se manca); che `devloop-agent` non
 legga `key_dir`, lo `state_dir`, l'overlay e il file di progetto, non attraversi `key_dir`, non legga né attraversi le
@@ -644,8 +651,11 @@ codice di uscita** (`ok: … (uscita 0)`, `ERRORE: … (uscita N; l'output non s
 l'output della CLI né il testo del modello (#530): chi esegue la verifica, anche un agent, non lo
 legge. Per vederlo si ripete la prova a mano
 ([host/migrate.md](host/migrate.md#file-delle-cli-di-root-sullutente-degli-agent-438), passo 5).
-Se il coordinatore è installato (passo 10) verifica anche il suo sudoers e la copia di root di
-`check-host.sh`; altrimenti lo dice in una riga, senza errore.
+Il coordinatore è facoltativo **per progetto**, non per host (#571): se l'overlay del progetto lo
+dichiara (`[apps.coordinator]` o `[roles.coordinator]`) verifica anche l'utente, la sua `key_dir`,
+il suo sudoers e la copia di root di `check-host.sh` (passo 10), con un errore se l'utente manca;
+altrimenti lo dice in una riga (`nessun coordinatore per questo progetto`), senza errore, anche
+se l'host ha l'utente `coordinator` per un altro progetto.
 
 Poi, come in [docs/devloop/guide.md](../docs/devloop/guide.md#installation-as-a-dedicated-user):
 
@@ -679,7 +689,10 @@ resta fermo, come descritto in *Continuous loop* della guida di devloop).
 Il coordinatore ([ADR 0002](../docs/adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-22-modello-a-quattro-ruoli-524-527))
 ha sull'host **solo lettura**: un utente di sistema suo, `coordinator` (`COORDINATOR_USER`,
 diverso da `devloop`, `devloop-agent` e `supervisor`), con un sudoers di soli comandi di lettura.
-Si installa quando l'operatore assegna il ruolo; devloop non lo richiede.
+Si installa quando l'operatore assegna il ruolo; devloop non lo richiede. È facoltativo per
+progetto: un progetto ha il coordinatore quando il suo overlay dichiara `[apps.coordinator]` o
+`[roles.coordinator]`, e solo allora `check-host.sh` lo verifica (#571). Su un host con più
+progetti lo script si esegue con `--params` di ciascun progetto che lo vuole.
 
 ```bash
 sudo bash ops/host/setup-coordinator.sh --dry-run
@@ -777,7 +790,10 @@ contenuti**.
    ([host/config.local.toml.example](host/config.local.toml.example)). L'app conta come
    coordinatore solo con `[roles.coordinator]`, decisione dell'operatore
    ([docs/devloop/guide.md](../docs/devloop/guide.md), "The coordinator").
-4. Il coordinatore, come utente `coordinator` e dal proprio clone, conia i token con
+4. Il coordinatore, come utente `coordinator` e dal proprio clone (con la sorgente a parte,
+   `COORDINATOR_SOURCE_CLONE`, `/home/coordinator/devloop-source` o, con `PROJECT`,
+   `~/devloop-source-<progetto>`, che `setup-coordinator.sh` clona al tag `SOURCE_REF`, #571),
+   conia i token con
    `scripts/coordinator-token.py`, che legge `repo` e `[apps.coordinator]` dall'overlay dello
    `state_dir` di `--state-dir` e solo la propria chiave dalla `key_dir` di
    `DEVLOOP_APP_KEY_DIR`; il token arriva al comando solo in `GH_TOKEN`, mai stampato.
@@ -951,6 +967,7 @@ progetto:
 | `SUPERVISOR_KEY_DIR` | `/home/supervisor/.ghapps-widget`: le chiavi dell'insieme di app del progetto |
 | `SUPERVISOR_CLONE` | `/home/supervisor/devloop-widget`: il clone del supervisore per il progetto |
 | `COORDINATOR_SUDOERS_FILE`, `COORDINATOR_OPS_DIR` | `/etc/sudoers.d/devloop-coordinator-widget`, `/usr/local/lib/devloop-coordinator-widget` |
+| `SUPERVISOR_SOURCE_CLONE`, `COORDINATOR_SOURCE_CLONE` | con `SOURCE_REPO`, `/home/supervisor/devloop-source-widget` e `/home/coordinator/devloop-source-widget`: i clone della sorgente da cui i due ruoli coniano i token delle loro app (#571) |
 
 `SUPERVISOR_USER`, `COORDINATOR_USER`, `REPO_LOCK_DIR`, `REPO_LOCK_GROUP` e `TMPFILES_FILE` sono
 gli stessi per tutti i progetti dell'host. Un `params.env` senza `PROJECT` continua a installare

@@ -49,6 +49,10 @@ LEVEL = {'read': 1, 'write': 2}
 FAKE_AGENT = 'opsdry-agent'
 FAKE_SUPERVISOR = 'opsdry-supervisor'
 FAKE_COORDINATOR = 'opsdry-coordinator'
+# check-host.sh for a project whose overlay declares no coordinator (#571).
+NO_COORDINATOR = ('  ok: {overlay} non dichiara né [apps.coordinator] né [roles.coordinator]: '
+                  'nessun coordinatore per questo progetto (per aggiungerlo, setup-coordinator.sh)'
+                  '\n')
 # What the fakes of the CLIs print, as a model would: check-host.sh never shows it (#530).
 MODEL_TEXT = 'MODEL-TEXT-4c1d9e'
 # The real stat, which the fake of ``OpsTestCase.root_copy`` calls for any other path.
@@ -2620,6 +2624,64 @@ esac''')
                     self.assertIn(f'ok: {clone} è già un clone di acme/widget', done.stdout)
         self.assertEqual(self.mutating_calls(), [])
 
+    def test_the_roles_of_a_project_with_its_source_get_a_clone_of_the_source(self):
+        # #571: the managed repository of a project with SOURCE_REPO does not hold devloop, nor
+        # scripts/supervisor-token.py and scripts/coordinator-token.py: supervisor and
+        # coordinator get a clone of the source of the project, at its tag SOURCE_REF, and the
+        # command that mints their tokens from it, with their key_dir and the project's state_dir.
+        source = dict(SOURCE_REPO='brushtyler/devloop', SOURCE_REF='v1.2.0',
+                      STATE_DIR='/var/lib/devloop/widget')
+        copy = self.root_copy()
+        params = self.project_params(COORDINATOR_OPS_DIR=copy, **source)
+        sup, coord = self.home / 'supervisor', self.home / 'coordinator'
+        for script, user, home, name in (
+                ('host/setup-supervisor.sh', 'supervisor', sup, 'supervisor-token.py'),
+                ('host/setup-coordinator.sh', FAKE_COORDINATOR, coord, 'coordinator-token.py')):
+            with self.subTest(script=script):
+                done = self.run_script(script, '--dry-run', '--params', str(params))
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                out = done.stdout
+                clone = home / 'devloop-source-widget'
+                git = f'[dry-run] sudo -u {user} -H -- git'
+                self.assertIn(f'{git} clone --quiet https://github.com/brushtyler/devloop.git '
+                              f'{clone}\n', out)
+                self.assertIn(f'{git} -C {clone} fetch --quiet --no-tags origin '
+                              '+refs/tags/v1.2.0:refs/tags/v1.2.0\n', out)
+                self.assertIn(f'{git} -C {clone} checkout --quiet --detach refs/tags/v1.2.0\n',
+                              out)
+                self.assertIn(f'dal clone {clone}' if user == 'supervisor'
+                              else f'dal suo clone ({clone})', out)
+                self.assertIn(f'  DEVLOOP_APP_KEY_DIR={home}/.ghapps-widget python3 '
+                              f'scripts/{name} --state-dir /var/lib/devloop/widget -- <comando>\n',
+                              out)
+        # Without SOURCE_REPO the supervisor mints them from its clone of the managed repository,
+        # which holds devloop, and no clone of the source is made.
+        done = self.run_script('host/setup-supervisor.sh', '--dry-run', '--params',
+                               str(self.project_params()))
+        self.assertIn(f'dal clone {sup}/devloop-widget,', done.stdout)
+        self.assertNotIn('devloop-source', done.stdout)
+        # A clone already there of another repository is refused; one of the source is reused.
+        params = self.project_params(COORDINATOR_OPS_DIR=copy, **source)
+        clone = sup / 'devloop-source-widget'
+        (clone / '.git').mkdir(parents=True)
+        for url, refused in (('https://github.com/acme/widget.git', True),
+                             ('git@github.com:brushtyler/devloop.git', False)):
+            with self.subTest(url=url):
+                (clone / '.git/config').write_text(f'[remote "origin"]\n\turl = {url}\n')
+                done = self.run_script('host/setup-supervisor.sh', '--dry-run', '--params',
+                                       str(params))
+                if refused:
+                    self.assertNotEqual(done.returncode, 0)
+                    self.assertIn(f"{clone} è un clone di '{url}', non di brushtyler/devloop",
+                                  done.stderr)
+                else:
+                    self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                    self.assertIn(f'ok: {clone} è già un clone di brushtyler/devloop', done.stdout)
+                    self.assertNotIn('git clone --quiet', done.stdout)
+                    self.assertIn(f'-C {clone} checkout --quiet --detach refs/tags/v1.2.0',
+                                  done.stdout)
+        self.assertEqual(self.mutating_calls(), [])
+
     # The users of the host of this repository (#563): written in params.env beside PROJECT.
     HOST_USERS = {'DEVLOOP_USER': 'devloop', 'AGENT_USER': 'devloop-agent',
                   'SUPERVISOR_USER': 'supervisor', 'COORDINATOR_USER': 'coordinator'}
@@ -2909,6 +2971,13 @@ class CheckHostTests(OpsTestCase):
                              f'echo "{reads}"; fi\n'
                              f'done\n'
                              f'echo "group::r-x"\necho "other::---"')
+
+    def declare_coordinator(self, table='apps'):
+        """The overlay declares the project's coordinator (#571): its app, or its role."""
+        overlay = self.state / 'config.local.toml'
+        body = ('app_id = 1000007\nslug = "x-coordinator"\n' if table == 'apps'
+                else 'name = "codex-coordinator"\nkind = "codex"\n')
+        overlay.write_text(overlay.read_text() + f'\n[{table}.coordinator]\n{body}')
 
     def service(self, state):
         self.shim('systemctl', f'case "$1" in is-active) echo {state} ;; is-enabled) echo enabled ;;'
@@ -3309,6 +3378,7 @@ exec "$@"''')
     def test_the_read_only_check_starts_no_cli_and_writes_nothing(self):
         # #530: the coordinator's check, as root through its sudoers, from the root copy: no
         # CLI started, no devloop apps, nothing written, only status lines.
+        self.declare_coordinator()
         self.fake_host('classic sudo', users=(FAKE_AGENT, FAKE_SUPERVISOR, FAKE_COORDINATOR))
         sudo_log = self.executing_sudo()
         self.shim('visudo', 'exit 0')  # visudo -c only reads
@@ -3365,10 +3435,12 @@ exec "$@"''')
 
     def test_the_coordinator_is_checked_when_it_is_installed(self):
         # #530: absent, a line; present, its sudoers and the root copy, equal to this checkout.
+        # #571: present for the project when its overlay declares it.
         done, errors = self.check()
         self.assertEqual(errors, [], done.stdout)
-        self.assertIn(f"  l'utente {FAKE_COORDINATOR} non esiste: coordinatore non installato "
-                      '(setup-coordinator.sh)\n', done.stdout)
+        self.assertIn(NO_COORDINATOR.format(overlay=self.state / 'config.local.toml'),
+                      done.stdout)
+        self.declare_coordinator()
         self.fake_host('classic sudo', users=(FAKE_AGENT, FAKE_SUPERVISOR, FAKE_COORDINATOR))
         params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=FAKE_SUPERVISOR,
                              AGENT_USER=FAKE_AGENT)
@@ -3395,8 +3467,44 @@ exec "$@"''')
                       done.stdout)
         self.assertEqual(self.mutating_calls(), [])
 
+    def test_the_coordinator_is_optional_per_project_not_per_host(self):
+        # #571: on a host whose coordinator serves another project, a project whose overlay
+        # declares neither [apps.coordinator] nor [roles.coordinator] has no coordinator: a line,
+        # no error, and the coordinator is not asked to be in the group of its mailbox.
+        self.fake_host('classic sudo', users=(FAKE_AGENT, FAKE_SUPERVISOR, FAKE_COORDINATOR))
+        params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=FAKE_SUPERVISOR,
+                             AGENT_USER=FAKE_AGENT)
+        overlay = self.state / 'config.local.toml'
+
+        def coordinator():
+            done = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params))
+            out = done.stdout
+            return out[out.index('==> Casella'):out.index('==> Utente degli agent')]
+        out = coordinator()
+        self.assertIn(NO_COORDINATOR.format(overlay=overlay), out)
+        self.assertNotIn('ERRORE', out[out.index('==> Coordinatore'):])
+        self.assertNotIn(FAKE_COORDINATOR + ' ', out[:out.index('==> Coordinatore')])
+        # Declared by its role, or by its app: its checks, and the group of the mailbox.
+        for table in ('roles', 'apps'):
+            with self.subTest(table=table):
+                overlay.write_text(f'repo_lock_dir = "{self.locks}"\n[agent_user]\nname = "root"\n')
+                self.declare_coordinator(table)
+                out = coordinator()
+                self.assertIn(f"  ok: l'utente {FAKE_COORDINATOR} esiste\n", out)
+                self.assertIn(f'  ERRORE: {self.tmp}/sudoers.d/devloop-coordinator non esiste '
+                              '(setup-coordinator.sh)', out)
+                self.assertIn(f'  ERRORE: {FAKE_COORDINATOR} non è nel gruppo {GROUP} '
+                              '(setup-supervisor.sh, setup-coordinator.sh)\n', out)
+        # Declared, without its user on the host: an error, which names the setup.
+        self.fake_host('classic sudo', users=(FAKE_AGENT, FAKE_SUPERVISOR))
+        out = coordinator()
+        self.assertIn(f'  ERRORE: {overlay} dichiara il coordinatore, ma l\'utente '
+                      f'{FAKE_COORDINATOR} non esiste (setup-coordinator.sh)\n', out)
+        self.assertEqual(self.mutating_calls(), [])
+
     def test_the_key_dir_of_the_coordinator_is_checked(self):
         # #549: the key_dir of the coordinator's app, 700 and its own, with only its key, 600.
+        self.declare_coordinator()
         self.fake_host('classic sudo', users=(FAKE_AGENT, FAKE_SUPERVISOR, FAKE_COORDINATOR))
         params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=FAKE_SUPERVISOR,
                              AGENT_USER=FAKE_AGENT)
@@ -3427,6 +3535,7 @@ exec "$@"''')
         # #549: scripts/coordinator-token.py reads repo and [apps.coordinator] from the overlay
         # of devloop's state_dir, in the home of devloop: traversal only, no ACL on devloop's
         # private directories, and the overlay readable as the coordinator.
+        self.declare_coordinator()
         self.fake_host('classic sudo', users=(FAKE_AGENT, FAKE_SUPERVISOR, FAKE_COORDINATOR))
         params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=FAKE_SUPERVISOR,
                              AGENT_USER=FAKE_AGENT)
@@ -3530,6 +3639,7 @@ exec "$@"''')
 
     def test_the_group_of_the_mailbox_holds_the_two_roles_only(self):
         # #543: supervisor and coordinator in the group, devloop and the agent user out of it.
+        self.declare_coordinator()
         self.fake_host('classic sudo', users=(FAKE_AGENT, FAKE_SUPERVISOR, FAKE_COORDINATOR))
         # The fake id puts each user in a group of its own: the agent user's is the mailbox's.
         params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=FAKE_SUPERVISOR,
@@ -4226,6 +4336,22 @@ echo "$2:x:1000:"''')
         channel = self.cli_args(self.clone)[3][-1].split('\n\n')[1]
         self.assertNotIn('coordinator-token.py', channel)
         self.assertNotIn(str(key_dir), channel)
+
+    def test_with_a_separate_source_the_coordinator_mints_from_the_clone_of_the_source(self):
+        # #571: the managed repository does not hold scripts/coordinator-token.py; the session
+        # gets the clone of the source that setup-coordinator.sh prepares.
+        clone = self.home / 'coordinator' / 'devloop-source'
+        (clone / '.git').mkdir(parents=True)
+        self.params_file = self.params(SUPERVISOR_USER=FAKE_SUPERVISOR,
+                                       SUPERVISOR_CLONE=str(self.clone),
+                                       STATE_DIR=str(self.state), REPO='acme/widget',
+                                       SOURCE_REPO='brushtyler/devloop', SOURCE_REF='v1.2.0')
+        done = self.start('coordinator')
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertNotIn('manca il clone del coordinatore', done.stdout)
+        channel = self.cli_args(self.home / 'coordinator')[3][-1].split('\n\n')[1]
+        self.assertIn(f'and your clone, from which you run scripts/coordinator-token.py, is '
+                      f'{clone}.', channel)
 
     def test_a_missing_clone_of_the_coordinator_is_a_warning(self):
         # The session starts all the same: it reads its mailbox and tells the operator.
