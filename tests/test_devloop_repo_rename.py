@@ -299,19 +299,46 @@ class MigrateTests(unittest.TestCase):
             local = tomllib.load(f)
         return config.parse_config(config.apply_overlay(ssdlc_project.data(), local))
 
-    def params(self):
-        """``REPO``, ``SOURCE_REPO``, ``DEVLOOP_CLONE`` and ``SUPERVISOR_CLONE`` as
-        ``ops_load_params`` of ``ops/lib.sh`` completes them from the temporary params.env."""
+    def load_params(self, systemd=None):
+        """``ops_load_params`` of ``ops/lib.sh`` on the temporary params.env. The units and the
+        sudoers of the host are left out (#576): ``SYSTEMD_DIR`` is ``systemd``, by default an
+        empty directory of the test, and the sudoers files are under the temporary directory, so
+        another installation of devloop on the host does not change what the test sees."""
         probe = self.tmp / 'probe.sh'
         probe.write_text(f'. {shlex.quote(str(ROOT / "ops" / "lib.sh"))}\n'
                          f'PARAMS_FILE={shlex.quote(str(self.tmp / "params.env"))}\n'
                          'ops_load_params\n'
                          'printf "%s\\n" "$REPO" "$SOURCE_REPO" "$DEVLOOP_CLONE" '
                          '"$SUPERVISOR_CLONE"\n', encoding='utf-8')
-        done = subprocess.run([BASH, str(probe)], capture_output=True, text=True,
-                              stdin=subprocess.DEVNULL, timeout=60)
+        host = self.tmp / 'host'
+        env = dict(os.environ, LC_ALL='C.UTF-8',
+                   SYSTEMD_DIR=str(systemd or host / 'systemd'),
+                   SUDOERS_FILE=str(host / 'sudoers.d' / 'devloop-supervisor'),
+                   AGENT_SUDOERS_FILE=str(host / 'sudoers.d' / 'devloop-agent'),
+                   COORDINATOR_SUDOERS_FILE=str(host / 'sudoers.d' / 'devloop-coordinator'))
+        return subprocess.run([BASH, str(probe)], capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL, timeout=60, env=env)
+
+    def params(self):
+        """``REPO``, ``SOURCE_REPO``, ``DEVLOOP_CLONE`` and ``SUPERVISOR_CLONE`` as
+        ``ops_load_params`` of ``ops/lib.sh`` completes them from the temporary params.env."""
+        done = self.load_params()
         self.assertEqual(done.returncode, 0, done.stderr)
         return done.stdout.splitlines()
+
+    def test_the_params_do_not_depend_on_the_units_of_the_host(self):
+        # #576: on a host where another installation already uses the user devloop, the params
+        # of the test are refused only if ops_load_params reads that installation's units.
+        (self.tmp / 'params.env').write_text(
+            (ROOT / 'ops' / 'params.env.example').read_text(encoding='utf-8'))
+        other = self.tmp / 'other-host' / 'devloop@other.service.d'
+        other.mkdir(parents=True)
+        (other / 'project.conf').write_text('[Service]\nUser=devloop\n', encoding='utf-8')
+        done = self.load_params(systemd=other.parent)
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("DEVLOOP_USER 'devloop' è già l'utente devloop di un'altra installazione",
+                      done.stderr)
+        self.assertEqual(self.params()[0], NEW)
 
     def test_the_commands_in_their_order(self):
         steps = (
