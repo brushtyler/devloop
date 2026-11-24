@@ -186,7 +186,7 @@ class LatestRoundTests(unittest.TestCase):
 
     def test_the_review_says_the_loop_goes_on(self):
         body = markdown.render_review(norm(trust([finding()])), header(REV_NAME),
-                                      native='REQUEST_CHANGES')
+                                      native='REQUEST_CHANGES', language=CFG.language)
         self.assertIn('Policy di fiducia: review e merge dell\'operatore', body)
         self.assertIn('### Policy di fiducia toccata', body)
         self.assertIn('devloop non si ferma', body)
@@ -194,8 +194,14 @@ class LatestRoundTests(unittest.TestCase):
         self.assertEqual(markdown.native_event(norm(trust([finding()]))), 'REQUEST_CHANGES')
         self.assertEqual(markdown.native_event(norm(trust())), 'APPROVE')
         decision = markdown.render_review(norm(raw_review('needs_operator', human='scelta')),
-                                          header(REV_NAME))
+                                          header(REV_NAME), language=CFG.language)
         self.assertIn('### Decisione richiesta', decision)
+        # In English by default (#632).
+        body = markdown.render_review(norm(trust([finding()])), header(REV_NAME),
+                                      native='REQUEST_CHANGES')
+        self.assertIn('Trust policy: review and merge by the operator', body)
+        self.assertIn('### Trust policy touched', body)
+        self.assertIn('devloop does not stop', body)
 
 
 class ReviewRoundTests(unittest.TestCase):

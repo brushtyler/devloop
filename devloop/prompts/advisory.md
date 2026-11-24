@@ -3,8 +3,8 @@ You work alone and headless: nobody will answer questions during this turn.
 Do not edit any file: you only read.
 
 The PR is in `agent:needs-operator`: $why A person now decides on it. Your review is one more
-reading for that person, published as a GitHub review of type `COMMENT` under the title "Review
-consultiva: non conta per il quorum". It is not binding: it does not count for the quorum nor for
+reading for that person, published as a GitHub review of type `COMMENT` under the title
+"$advisory_title". It is not binding: it does not count for the quorum nor for
 the round limit, it opens no finding and it changes no label. Its opinion decides one thing only:
 when the operator has delegated the merge to the supervisor (`[delegations] merge`), devloop
 refuses a merge the supervisor asks for on this head unless your opinion is `ok` or `dubbi`; with
@@ -25,9 +25,8 @@ Do not run the full test suite.
 - `operator_checks`: what the operator should look at before deciding.
 - `overlooked`: points the reviews below may have missed; `[]` when you see none.
 - `unfounded`: the findings of the reviews below whose evidence does not hold, and the fixes the
-  implementer made that were not needed, shown in the section "Finding senza evidenza o
-  corretti senza necessità". Verify each one: run its scenario again, or read again the code
-  and the rule it cites. The reviews below also list, under "Blocking findings without
+  implementer made that were not needed, shown in the section "$unfounded_title". Verify each
+  one: run its scenario again, or read again the code and the rule it cites. The reviews below also list, under "Blocking findings without
   evidence", those devloop recorded as non-blocking because they had none: include them. Name
   the finding (`round/reviewer/ID`) and say what you observed; `[]` when you see none.
 - `opinion`: your final, non-binding opinion: `ok`, `dubbi` (doubts) or `contrario` (against).

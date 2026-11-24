@@ -17,8 +17,8 @@ if _TESTS_DIR not in sys.path:
 
 from devloop import config, markdown, receipt  # noqa: E402
 from devloop.agents import AgentError, AgentRunner  # noqa: E402
-from devloop.dispatch_advisory import (ADVISORY_TITLE, MAX_ATTEMPTS,  # noqa: E402
-                                       RETRY_SECONDS, AdvisoryFailures, AdvisoryResults,
+from devloop.dispatch_advisory import (MAX_ATTEMPTS, RETRY_SECONDS,  # noqa: E402
+                                       TEXTS, AdvisoryFailures, AdvisoryResults,
                                        normalize_advisory)
 from devloop.dispatcher import Dispatcher  # noqa: E402
 from devloop.github import GitHubError  # noqa: E402
@@ -28,6 +28,9 @@ from devloop.workspace import Workspace  # noqa: E402
 from helpers import ssdlc_project  # noqa: E402
 from helpers.devloop_fakes import SHA1, FakeIdentities  # noqa: E402
 from test_devloop import CFG, IMPL, META, REV, FakeRunner, FakeWS, raw_review  # noqa: E402
+
+# The title of the advisory review in the language of the test project (#632).
+ADVISORY_TITLE = TEXTS.texts(CFG.language)('title')
 from test_devloop import receipt as policy_receipt  # noqa: E402
 from test_devloop_conclave import ThreadGH  # noqa: E402
 from test_devloop_receipt import ReceiptGH, receipts  # noqa: E402

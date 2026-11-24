@@ -346,7 +346,8 @@ class ActionsMixin:
             self._record_ci(pr, pr.head_sha, summarize_checks(details)[0], details,
                             review['round'], jobs=self._ci_jobs(details),
                             voided_approval=voided)
-        self.gh.comment(pr.number, render_review(review, dispatcher_header()))
+        self.gh.comment(pr.number, render_review(review, dispatcher_header(),
+                                                 language=self.cfg.language))
         records = joined + [review]
         if joined and waiting_reviewers(records, self.cfg.conclave):
             # The round still waits for its other reviewers: it is applied after them.
@@ -860,11 +861,13 @@ class ActionsMixin:
                 # One native review under the reviewer's own app (#325): its body is the
                 # record devloop reads, and its event the verdict branch protection sees.
                 self._submit_review(reviewer_gh, pr, key,
-                                    render_native_review(review, self.runner.header(used)))
+                                    render_native_review(review, self.runner.header(used),
+                                                         language=self.cfg.language))
             else:
                 # An agent without an app publishes with the operator's login: the comment
                 # stays its record, as before.
-                reviewer_gh.comment(pr.number, render_review(review, self.runner.header(used)))
+                reviewer_gh.comment(pr.number, render_review(review, self.runner.header(used),
+                                                             language=self.cfg.language))
             records.append(review)
         new = records[len(done):]
         if new and ci != 'pending':
@@ -1143,7 +1146,8 @@ class ActionsMixin:
         if conclave is not None:
             fix['conclave'] = conclave
         self._as(agent.key, PR_COMMENT).comment(
-            pr.number, render_fix(fix, self.runner.header(used), round_no))
+            pr.number, render_fix(fix, self.runner.header(used), round_no,
+                                  language=self.cfg.language))
         self.gh.edit_labels(pr.number, add=[lb.review], remove=[lb.changes])
         self.ws.remove(name)
 

@@ -618,6 +618,17 @@ SINCE_R4 = {
             'refuses a merge the supervisor asks for on this head unless your opinion is `ok` or '
             '`dubbi`; with\n'
             '`contrario`, or without a review, the merge stays the operator\'s.\n'),
+        # #632: the titles of the review in the project's language, as the dispatcher writes
+        # them.
+        Replaced('under the title "Review\nconsultiva: non conta per il quorum". It is not '
+                 'binding: it does not count for the quorum nor for\n',
+                 'under the title\n"$advisory_title". It is not binding: it does not count for '
+                 'the quorum nor for\n'),
+        Replaced('shown in the section "Finding senza evidenza o\n  corretti senza necessità". '
+                 'Verify each one: run its scenario again, or read again the code\n  and the '
+                 'rule it cites.',
+                 'shown in the section "$unfounded_title". Verify each\n  one: run its scenario '
+                 'again, or read again the code and the rule it cites.'),
     ),
     'preflight': (
         ('external tool, access or resource can close.\n\n', _TRUST_POLICY_PREFLIGHT),

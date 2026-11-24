@@ -311,7 +311,10 @@ class FindingTests(unittest.TestCase):
                                        reviewer=KEY, role=FINDINGS_ONLY)
         self.assertEqual(made['role'], FINDINGS_ONLY)
         self.assertIn('Review di soli finding', made['note'])
-        self.assertIn('Review di soli finding, round 2/3', markdown.render_review(made, 'h'))
+        self.assertIn('Review di soli finding, round 2/3',
+                      markdown.render_review(made, 'h', language='Italian'))
+        # In English by default (#632).
+        self.assertIn('Findings-only review, round 2/3', markdown.render_review(made, 'h'))
 
     def test_the_ledger_records_its_turn_as_finding_only(self):
         turn = {'type': 'turn', 'state': 'open', 'kind': 'review', 'agent': KEY,

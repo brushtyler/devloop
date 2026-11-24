@@ -43,6 +43,7 @@ from .apps import REVIEW
 from .budget import BUDGET, BudgetRefused
 from .context import _template, format_operator_decisions, format_previous_rounds, prompt_values
 from .dispatch_actions import Models
+from .i18n import ENGLISH, Catalog
 from .journal import JournalError, TurnBlocked
 from .ledger import timestamp as ledger_timestamp
 from .markdown import (ADVISORY_OPINIONS, MAX_BODY, dispatcher_header, fitted, publishable,
@@ -53,10 +54,72 @@ from .supervision import UNCERTAIN_TURN
 from . import receipt as pr_receipt
 from .review import current_round
 
-ADVISORY_TITLE = 'Review consultiva: non conta per il quorum'
-# The section of the findings of the quorum whose evidence does not hold, and of the fixes that
-# were not needed (#481).
-UNFOUNDED_TITLE = 'Finding senza evidenza o corretti senza necessità'
+# The texts of the advisory review (#632), in the project's ``language`` (``i18n``); English
+# for a language without translation. The opinions (``ADVISORY_OPINIONS``) are values of the
+# record and of the agent's answer: they are never translated.
+TEXTS = Catalog(
+    en={
+        'title': 'Advisory review: does not count for the quorum',
+        # The section of the findings of the quorum whose evidence does not hold, and of the
+        # fixes that were not needed (#481).
+        'unfounded': 'Findings without evidence or fixed without need',
+        # What the advisory review decides, in the texts devloop publishes (#486): only whether
+        # the supervisor may merge the head, when the operator delegated the merge, or the
+        # coordinator (#529), when the operator turned it on.
+        'no_effect': ('It counts neither for the quorum nor for the round limit, opens no '
+                      'finding and changes neither labels nor promotion. The opinion counts '
+                      'only for the merge delegated to the supervisor, when the operator turned '
+                      'it on (`[delegations] merge`), and for the reserved merge of the '
+                      'coordinator (`[roles.coordinator]`): with `contrario`, or without an '
+                      'advisory review, devloop refuses the `/devloop merge` of this head, and '
+                      'the merge stays the operator\'s.'),
+        'none': '_None indicated._',
+        'not_indicated': '_Not indicated._',
+        'head': ('**Commit:** `{sha}` · **Agent:** `{reviewer}` · **Non-binding opinion:** '
+                 '**{opinion}**'),
+        'reading': '> This review is one more reading for the operator. {no_effect}',
+        'summary': '### Summary of the PR',
+        'risks': '### Residual risks',
+        'checks': '### What the operator would look at',
+        'overlooked': '### Points the reviewers of the quorum may have overlooked',
+        'final': '### Final opinion',
+        'summary_title': '## Advisory review for the operator',
+        'done': ('On commit {head} the PR received the advisory review of {who}: a GitHub '
+                 'review of type `COMMENT` titled "{title}". Non-binding opinion: '
+                 '**{opinion}**.'),
+        'failed': 'The advisory review of {who} on commit {head} did not succeed{error}.',
+        'new_head': 'A new advisory review comes only with a new head.',
+    },
+    it={
+        'title': 'Review consultiva: non conta per il quorum',
+        'unfounded': 'Finding senza evidenza o corretti senza necessità',
+        'no_effect': ('Non conta per il quorum né per il limite dei round, non apre finding e '
+                      'non cambia label né promozione. Il parere conta solo per il merge '
+                      'delegato al supervisore, quando l\'operatore lo ha attivato '
+                      '(`[delegations] merge`), e per il merge riservato del coordinatore '
+                      '(`[roles.coordinator]`): con `contrario`, o senza review consultiva, '
+                      'devloop rifiuta il `/devloop merge` di questo head, e il merge resta '
+                      'all\'operatore.'),
+        'none': '_Nessuno indicato._',
+        'not_indicated': '_Non indicato._',
+        'head': ('**Commit:** `{sha}` · **Agent:** `{reviewer}` · **Parere non vincolante:** '
+                 '**{opinion}**'),
+        'reading': '> Questa review è una lettura in più per l\'operatore. {no_effect}',
+        'summary': '### Riassunto della PR',
+        'risks': '### Rischi residui',
+        'checks': '### Cosa guarderebbe l\'operatore',
+        'overlooked': '### Punti che i reviewer del quorum potrebbero aver trascurato',
+        'final': '### Parere finale',
+        'summary_title': '## Review consultiva per l\'operatore',
+        'done': ('Sul commit {head} la PR ha ricevuto la review consultiva di {who}: una review '
+                 'GitHub di tipo `COMMENT` intitolata "{title}". Parere non vincolante: '
+                 '**{opinion}**.'),
+        'failed': 'La review consultiva di {who} sul commit {head} non è riuscita{error}.',
+        'new_head': 'Una nuova review consultiva arriva solo con un nuovo head.',
+    })
+# The titles in English, the default language.
+ADVISORY_TITLE = TEXTS.tables[ENGLISH]['title']
+UNFOUNDED_TITLE = TEXTS.tables[ENGLISH]['unfounded']
 # What the readable text keeps of the agent's answer: at most so many points per list.
 MAX_POINTS = 20
 # An action that failed on a head without a result of its turn kept (#381): the turn of that
@@ -100,57 +163,53 @@ def advisory_record(head, reviewer, opinion=None):
             'opinion': opinion}
 
 
-# What the advisory review decides, in the texts devloop publishes (#486): only whether the
-# supervisor may merge the head, when the operator delegated the merge, or the coordinator
-# (#529), when the operator turned it on.
-NO_EFFECT = ('Non conta per il quorum né per il limite dei round, non apre finding e non cambia '
-             'label né promozione. Il parere conta solo per il merge delegato al supervisore, '
-             'quando l\'operatore lo ha attivato (`[delegations] merge`), e per il merge '
-             'riservato del coordinatore (`[roles.coordinator]`): con `contrario`, o '
-             'senza review consultiva, devloop rifiuta il `/devloop merge` di questo head, e il '
-             'merge resta all\'operatore.')
+def advisory_titles(language=ENGLISH):
+    """The values of the advisory prompt (``devloop/prompts/advisory.md``) that name the titles
+    of the review in ``language``: ``advisory_title`` and ``unfounded_title``."""
+    t = TEXTS.texts(language)
+    return {'advisory_title': t('title'), 'unfounded_title': t('unfounded')}
 
 
-def _bullets(items):
-    return [f'- {item}' for item in items] if items else ['_Nessuno indicato._']
+def _bullets(t, items):
+    return [f'- {item}' for item in items] if items else [t('none')]
 
 
-def render_advisory_review(advisory, reviewer, head_sha, header):
+def render_advisory_review(advisory, reviewer, head_sha, header, language=ENGLISH):
     """``{event, body}`` of the native review of the advisory agent (#369): always ``COMMENT``,
-    never an approval nor a request for changes, with the ``advisory`` record as its marker."""
-    parts = [f'## {ADVISORY_TITLE}', '',
-             f'**Commit:** `{head_sha[:12]}` · **Agent:** `{reviewer}` · **Parere non '
-             f'vincolante:** **{advisory["opinion"]}**', '',
-             f'> Questa review è una lettura in più per l\'operatore. {NO_EFFECT}', '',
-             '### Riassunto della PR', '', advisory['summary'] or '_Non indicato._', '',
-             '### Rischi residui', '', *_bullets(advisory['residual_risks']), '',
-             '### Cosa guarderebbe l\'operatore', '', *_bullets(advisory['operator_checks']), '',
-             '### Punti che i reviewer del quorum potrebbero aver trascurato', '',
-             *_bullets(advisory['overlooked']), '',
+    never an approval nor a request for changes, with the ``advisory`` record as its marker.
+    ``language``: the project's (#632), of the titles and notes; the agent's text is its own."""
+    t = TEXTS.texts(language)
+    parts = [f'## {t("title")}', '',
+             t('head', sha=head_sha[:12], reviewer=reviewer, opinion=advisory['opinion']), '',
+             t('reading', no_effect=t('no_effect')), '',
+             t('summary'), '', advisory['summary'] or t('not_indicated'), '',
+             t('risks'), '', *_bullets(t, advisory['residual_risks']), '',
+             t('checks'), '', *_bullets(t, advisory['operator_checks']), '',
+             t('overlooked'), '', *_bullets(t, advisory['overlooked']), '',
              # #481: the findings of the quorum whose evidence does not hold, and the fixes
              # that were not needed.
-             f'### {UNFOUNDED_TITLE}', '', *_bullets(advisory.get('unfounded', [])), '',
-             '### Parere finale', '',
+             f'### {t("unfounded")}', '', *_bullets(t, advisory.get('unfounded', [])), '',
+             t('final'), '',
              f'**{advisory["opinion"]}**' + (f': {advisory["opinion_reason"]}'
                                               if advisory['opinion_reason'] else '')]
     record = advisory_record(head_sha, reviewer, advisory['opinion'])
-    return {'event': 'COMMENT', 'body': fitted(header, '\n'.join(parts), 'advisory', record)}
+    return {'event': 'COMMENT', 'body': fitted(header, '\n'.join(parts), 'advisory', record,
+                                               language=language)}
 
 
-def render_advisory_summary(record, error=''):
+def render_advisory_summary(record, error='', language=ENGLISH):
     """The dispatcher's summary of the advisory review of a head for the operator (#369), with
-    the ``advisory`` record: who wrote it and its opinion, never the agent's text."""
+    the ``advisory`` record: who wrote it and its opinion, never the agent's text.
+    ``language``: the project's (#632)."""
+    t = TEXTS.texts(language)
     head, who = f'`{record["head"][:12]}`', f'`{record["reviewer"]}`'
     if record['outcome'] == 'done':
-        text = (f'Sul commit {head} la PR ha ricevuto la review consultiva di {who}: una review '
-                f'GitHub di tipo `COMMENT` intitolata "{ADVISORY_TITLE}". Parere non '
-                f'vincolante: **{record["opinion"]}**.')
+        text = t('done', head=head, who=who, title=t('title'), opinion=record['opinion'])
     else:
-        text = (f'La review consultiva di {who} sul commit {head} non è riuscita'
-                + (f' ({error})' if error else '') + '.')
-    text += (f'\n\n{NO_EFFECT} Una nuova review consultiva arriva solo con un nuovo head.')
-    return publishable(dispatcher_header() + '\n## Review consultiva per l\'operatore\n\n'
-                       + text + '\n', 'advisory', record)
+        text = t('failed', who=who, head=head, error=f' ({error})' if error else '')
+    text += f'\n\n{t("no_effect")} {t("new_head")}'
+    return publishable(dispatcher_header() + f'\n{t("summary_title")}\n\n' + text + '\n',
+                       'advisory', record)
 
 
 class _StateFile:
@@ -509,7 +568,8 @@ class AdvisoryMixin:
             # With the agent's identity, never APPROVE nor REQUEST_CHANGES: GitHub accepts a
             # COMMENT also from the PR's author, the implementer.
             self._submit_review(self._as(key, REVIEW), view, key,
-                                render_advisory_review(advisory, key, head, kept['header']))
+                                render_advisory_review(advisory, key, head, kept['header'],
+                                                       language=self.cfg.language))
         self._advisory_finish(view, advisory_record(head, key,
                                                     advisory['opinion'] if advisory else None),
                               kept['error'])
@@ -539,6 +599,8 @@ class AdvisoryMixin:
                                diff_stat=self.ws.diff_stat(path),
                                previous=format_previous_rounds(pr.reviews, pr.fixes,
                                                                pr.closures),
+                               # The titles the review will have, in the project's language.
+                               **advisory_titles(cfg.language),
                                language=cfg.language)
             raw, used = self._turn(Models(cfg.agent(key)), 'review', prompt, 'advisory', path,
                                    name, where=(pr.number, 'advisory'))
@@ -563,7 +625,8 @@ class AdvisoryMixin:
         current, then the dispatcher's summary, last, since it ends the advisory review of the
         head. Then the kept result is forgotten."""
         self._advisory_receipt(pr, record)
-        self.gh.comment(pr.number, render_advisory_summary(record, error))
+        self.gh.comment(pr.number, render_advisory_summary(record, error,
+                                                           language=self.cfg.language))
         self.log(f'  advisory summary written: {record["opinion"] or "failed"}')
         self._advisory_forget(pr.number)
 

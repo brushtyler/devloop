@@ -620,10 +620,15 @@ class SecurityFieldTests(unittest.TestCase):
         self.assertTrue(all(f['security'] is False for f in derived))
 
     def test_the_published_review_marks_a_security_finding(self):
-        text = markdown.render_review(norm(raw_review('request_changes', [
-            finding('falla', security=True), finding('stile', line=4)])), SHA1)
+        record = norm(raw_review('request_changes', [finding('falla', security=True),
+                                                     finding('stile', line=4)]))
+        text = markdown.render_review(record, SHA1, language='Italian')
         self.assertIn('falla *(sicurezza)*', text)
         self.assertNotIn('stile *(sicurezza)*', text)
+        # In English by default (#632).
+        text = markdown.render_review(record, SHA1)
+        self.assertIn('falla *(security)*', text)
+        self.assertNotIn('stile *(security)*', text)
 
     def test_the_review_prompt_asks_for_the_field(self):
         from devloop.context import PROMPT_DIR

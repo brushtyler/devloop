@@ -401,14 +401,35 @@ follow it too (#628), in the languages devloop has a translation for: Italian an
 value is read without case, as a name (`English`, `Italian`, `italiano`) or a tag (`en`, `it`,
 `it-IT`); any other language gets the English texts. The shared catalogue is `devloop/i18n.py`.
 
-Today the [ledger records](protocol.md#evidence-and-telemetry) follow it (#631): titles,
-notes and names of their fields, and `not reported` for a value nobody attested. The other
-texts of the dispatcher are still in Italian, until the parts of #628 that translate them.
+Today these texts follow it:
+
+- the [ledger records](protocol.md#evidence-and-telemetry) (#631): titles, notes and names of
+  their fields, and `not reported` for a value nobody attested;
+- the review, the fix and the readiness check (#632): the review comment or native review
+  (verdict, sections, notes on the base and on the trust policy, the notice of a text cut
+  short), the comment of a fix, the comment of a readiness check with its notes, and the
+  dispatcher's answers to a refused `/devloop approve` and to a `/devloop recheck` that runs no
+  check;
+- the [advisory review](guide.md#advisory-review-for-the-operator) and the dispatcher's summary
+  of it (#632), whose titles the advisory prompt names in the same language;
+- the comment of a [conclave](guide.md#conclave-on-a-block) (#632).
+
+Only the text devloop composes changes. The values of the records stay as written, in every
+language: the opinions `ok`, `dubbi`, `contrario` and the votes `APPROVA`, `BLOCCA` of the
+agents' schemas, and the texts a record holds, such as the note of a review, the reasons of a
+conclave or of a refused recheck and the gaps of a readiness check, are shown as recorded. The
+other texts of the dispatcher (escalations, merge and receipts among them, and the acceptance
+map and the step on the host that the comment of a fix repeats from the pull request) are still
+in Italian, until the parts of #628 that translate them.
+
 What devloop reads never changes with the language: the `devloop:<kind>:v1` markers and their
 fields, the `/devloop …` commands and the labels. A text that devloop recognises by its title or
 a phrase is recognised in every language it has, so that a change of `language` leaves the
 texts already published recognised: [`devloop watch`](guide.md#waking-the-supervising-agent) leaves out a
-ledger record whose title is `## devloop ledger` or `## Registro devloop`.
+ledger record whose title is `## devloop ledger` or `## Registro devloop`. The texts of the
+review, the fix, the readiness check, the advisory review and the conclave are read only through
+their markers, never by title or phrase: those published before a change of `language` keep
+counting as before.
 
 ### No background work in a turn
 
@@ -687,7 +708,8 @@ document) with the quotation. The prompts use it this way:
 - **Advisory review prompt** (`devloop/prompts/advisory.md`). The field `unfounded` of
   [`devloop/schemas/advisory.json`](../../devloop/schemas/advisory.json) lists the findings of
   the quorum whose evidence does not hold and the fixes that were not needed, in the section
-  "Finding senza evidenza o corretti senza necessità" of the advisory review. The previous
+  "Findings without evidence or fixed without need" of the advisory review, named in the
+  project's [language](#language-of-the-texts) as the review names it. The previous
   rounds it reads list, under "Blocking findings without evidence", the findings devloop
   demoted, each as `round/reviewer/ID` with its detail.
 

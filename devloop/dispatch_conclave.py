@@ -499,7 +499,7 @@ class ConclaveMixin:
         """Write ``record`` on issue or PR ``number``: a new comment when ``comment`` is None,
         else an edit of it. Returns the comment id; a new comment whose id is neither returned
         nor found again raises ``GitHubError``."""
-        body = render(record)
+        body = render(record, language=self.cfg.language)
         if comment is not None:
             self.gh.edit_comment(comment, body)
             return comment

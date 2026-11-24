@@ -15,8 +15,8 @@ from .context import (APPROVE_COMMAND, _render_issue_comments, _template,
                       format_operator_decisions, prompt_values, trust_policy_rule)
 from .dispatch_actions import Models, ready_approval
 from .dispatch_supervision import UntrustedChange
-from .markdown import (carries_record, read_marker, render_approve_refused, render_escalation,
-                       render_preflight, render_recheck)
+from .markdown import (TEXTS, carries_record, read_marker, render_approve_refused,
+                       render_escalation, render_preflight, render_recheck)
 from .planning import (RECHECK_COMMAND, label_names, operator_blocked, preflight_state,
                        repository_bound)
 from .supervision import (ACCEPT_DEFAULTS, DECIDE, PREFLIGHT_DEFAULT, command_line, describe,
@@ -422,15 +422,18 @@ class PreflightMixin:
                    for c, why in refused]
         author = self._as(agent_key, ISSUE_COMMENT)
         head = self.runner.header(agent)
+        # The comment and its notes in the project's language (#632).
+        language = self.cfg.language
+        t = TEXTS.texts(language)
         if outcome['ready']:
             if owned:
                 # Label first: if the comment is lost, the next tick checks the issue again.
                 self.gh.edit_labels(number, remove=sorted(labels & lb.operator()))
-                note = note or 'Il blocco messo dal controllo di prontezza è stato rimosso.'
+                note = note or t('note_block_removed')
             elif present:
-                note = (f'{shown} resta: non risulta messo dal controllo di prontezza, '
-                        'quindi lo rimuove una persona.')
-            author.comment(number, render_preflight(record, head, note, refused))
+                note = t('note_label_stays', labels=shown)
+            author.comment(number, render_preflight(record, head, note, refused,
+                                                    language=language))
             self.log('  ready' + (', block removed' if owned else ''))
             return
         # The class of the escalation (#182): in "auto" gaps that are all defaults go to the
@@ -440,7 +443,8 @@ class PreflightMixin:
             number, cls, 'preflight',
             key=self._issue_key('preflight', base, digest) if base else None)
         if supervised:
-            author.comment(number, render_preflight(record, head, note, refused))
+            author.comment(number, render_preflight(record, head, note, refused,
+                                                    language=language))
             self.gh.comment(number, render_escalation(
                 'Il controllo di prontezza ha trovato solo lacune con un default proposto '
                 '(`default_available`): il supervisore può accettarli con '
@@ -450,17 +454,16 @@ class PreflightMixin:
             self.log(f'  not ready: {len(record["gaps"])} gap(s), to the supervisor')
             return
         if why:
-            note = note or (f'In modalità di merge `auto` queste lacune andrebbero al supervisore, '
-                            f'ma l\'escalation resta all\'operatore: {why}.')
+            note = note or t('note_not_supervised', why=why)
         if owned:
             record.update(blocked=True, labeled=records[-1][1]['labeled'])
         elif present:
-            note = note or (f'{shown} era già presente e non è attribuito al controllo '
-                            'di prontezza: un nuovo esito positivo non lo rimuove.')
+            note = note or t('note_label_present', labels=shown)
         else:
             record.update(blocked=True, labeled=len(self._operator_labelers(number)))
         # Comment first: if the label is lost, the next tick blocks the issue again.
-        author.comment(number, render_preflight(record, head, note, refused))
+        author.comment(number, render_preflight(record, head, note, refused,
+                                                language=language))
         if record['blocked'] and not owned:
             self.gh.edit_labels(number, add=[lb.needs_operator])
         self.log(f'  not ready: {len(record["gaps"])} gap(s)')
@@ -568,7 +571,7 @@ class PreflightMixin:
         self.gh.comment(number, render_approve_refused(
             [c['id'] for c, _ in refused],
             [((c.get('author') or {}).get('login'), c.get('created_at'), why)
-             for c, why in refused]))
+             for c, why in refused], language=self.cfg.language))
 
     def _do_recheck_refused(self, number):
         """Answer, once, a request of a person for a new check that runs none (#468): the
@@ -582,7 +585,7 @@ class PreflightMixin:
         self.log(f'  {refused["request"]} by {refused["by"]} runs no readiness check: '
                  f'{refused["log"]}')
         record = {key: value for key, value in refused.items() if key != 'log'}
-        self.gh.comment(number, render_recheck(record))
+        self.gh.comment(number, render_recheck(record, language=self.cfg.language))
 
     def _do_preflight_block(self, number):
         """Block again an issue whose latest check, still valid for its text (and its base,
@@ -596,5 +599,4 @@ class PreflightMixin:
         outcome = {k: record[k] for k in ('ready', 'gaps', 'split', 'base', 'trust_policy',
                                           'trust_policy_reason') if k in record}
         self._publish_preflight(number, outcome, view['hash'], record['agent'],
-                                note='Esito del controllo precedente, riusato: il testo '
-                                     'dell\'issue non è cambiato.')
+                                note=TEXTS.texts(self.cfg.language)('note_reused'))

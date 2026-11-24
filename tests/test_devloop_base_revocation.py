@@ -174,9 +174,13 @@ class CountingTests(unittest.TestCase):
         record = dict(self.record(2, resync=self.revoked()), max_rounds=2, ci='pass',
                       summary='ok', human_reason='', blocking_findings=[],
                       non_blocking_findings=[], previous_findings=[], checks_performed=[])
-        body = markdown.render_review(record, '')
+        body = markdown.render_review(record, '', language='Italian')
         self.assertIn(f'Il round 1 aveva approvato `{SHA1[:12]}`', body)
         self.assertIn('questo round rivede lo stesso commit', body)
+        # In English by default (#632).
+        body = markdown.render_review(record, '')
+        self.assertIn(f'Round 1 had approved `{SHA1[:12]}`', body)
+        self.assertIn('this round reviews the same commit', body)
 
 
 if __name__ == '__main__':
