@@ -1866,7 +1866,8 @@ does not apply gets a dispatcher comment with the reason and how to resume (the 
 above, `/devloop recheck` for a readiness check, the manual merge for an operator merge), and the
 item stays in `agent:needs-operator`. A command from outside `trusted_users` and the supervisor's
 identity is only logged. The trace is the one of the supervisor's commands, under the title
-"Comando su un'escalation all'operatore".
+"Command on an escalation to the operator" ("Comando su un'escalation all'operatore" in Italian,
+the project's [language](reference.md#language-of-the-texts) choosing, #633).
 
 A turn left without an outcome, because devloop stopped while it ran, becomes `uncertain` in the
 [turn journal](protocol.md#turn-journal) and is never run again automatically. With

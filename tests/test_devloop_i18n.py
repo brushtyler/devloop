@@ -1,8 +1,8 @@
-"""devloop: the language of the dispatcher's texts (#631, #632). The project's ``language``
-chooses Italian or English, English for a language without translation; the ledger writes its
-records in it, and so do the review, the fix, the readiness check, the advisory review and the
-conclave, with the same markers, and the records already published stay recognised after a
-change of ``language``."""
+"""devloop: the language of the dispatcher's texts (#631, #632, #633). The project's
+``language`` chooses Italian or English, English for a language without translation; the ledger
+writes its records in it, and so do the review, the fix, the readiness check, the advisory
+review, the conclave, the escalations and the answers to the commands on them, with the same
+markers, and the records already published stay recognised after a change of ``language``."""
 
 import dataclasses
 import unittest
@@ -28,6 +28,8 @@ from test_devloop_conclave_substitute import (CCFG, COORDINATED, NOW, TIMEOUT, U
                                               SubstituteBase)
 from test_devloop_coordinator import COORDINATOR
 from test_devloop_preflight import checked
+from test_devloop_supervision import AUTO as SUPERVISION_AUTO
+from test_devloop_supervision import Case as SupervisionCase
 from test_devloop_supervision import SUPERVISOR_LOGIN, Identities
 from test_devloop_trust_decisions import (BOT, HEADER, LATER, APPROVAL, PreflightGH, comment,
                                           history)
@@ -460,13 +462,16 @@ class DispatcherLanguageTests(unittest.TestCase):
     def test_review_texts_catalogues_are_complete(self):
         for catalog in (review.TEXTS, acceptance.TEXTS):
             self.assertEqual(set(catalog.tables[ITALIAN]), set(catalog.tables[ENGLISH]))
-        # Every class has its English description (#632), and Italian stays the default.
+        # Every class has its English description (#632), the default since the escalations
+        # follow the project's language (#633), and its Italian one.
         for cls in (*supervision.CRITICAL, *supervision.NON_CRITICAL):
             with self.subTest(cls=cls):
                 self.assertNotEqual(supervision.describe(cls, language='English'),
                                     'class not recognised, hence critical')
-                self.assertEqual(supervision.describe(cls, language='Italian'),
+                self.assertEqual(supervision.describe(cls, language='English'),
                                  supervision.describe(cls))
+                self.assertNotEqual(supervision.describe(cls, language='Italian'),
+                                    supervision.describe(cls))
         self.assertEqual(supervision.describe('tests_failed', language='French'),
                          'failing tests, or no change')
         self.assertEqual(supervision.describe(None, language='English'),
@@ -749,6 +754,196 @@ class ConclaveReasonLanguageTests(SubstituteBase):
                 self.assertEqual(record['votes'][0]['missing'], why)
                 self.check_language(language, why)
         self.assertTrue(self.texts('French')('why_started').startswith('call started'))
+
+
+class EscalationLanguageTests(unittest.TestCase):
+    """#633: the frame of an escalation, its title, its class and how to resume, in the
+    project's language; the marker is the same."""
+
+    FRAMES = {
+        'Italian': ('## Serve un intervento dell\'operatore', '**Classe:** `tool_failure` '
+                    '(l\'agent o il modello non ha prodotto un risultato), non critica.',
+                    'Per riprendere: correggere la causa', 'In alternativa, un utente fidato '
+                    'può ripetere il passo `review`', '## Escalation al supervisore',
+                    'Escalation non critica: decide il supervisore'),
+        'English': ('## The operator is needed', '**Class:** `tool_failure` (the agent or the '
+                    'model produced no result), non-critical.', 'To resume: fix the cause',
+                    'Otherwise, a trusted user may run the step `review` again',
+                    '## Escalation to the supervisor',
+                    'Non-critical escalation: the supervisor decides'),
+    }
+
+    def test_the_frame_of_an_escalation(self):
+        retry = {'step': 'review', 'key': {'step': 'review', 'head': SHA1}, 'resume': 'r'}
+        markers = []
+        for language in ('Italian', 'English', 'French'):
+            with self.subTest(language=language):
+                frame = self.FRAMES.get(language, self.FRAMES['English'])
+                operator = markdown.render_escalation('Motivo.', cls='tool_failure',
+                                                      retry=retry, language=language)
+                supervised = markdown.render_escalation('Motivo.', cls='tool_failure',
+                                                        supervised=retry, language=language)
+                for phrase in frame[:4]:
+                    self.assertIn(phrase, operator)
+                for phrase in frame[4:]:
+                    self.assertIn(phrase, supervised)
+                self.assertIn('Motivo.', operator)  # the reason is the caller's
+                markers.append((markdown.read_marker(operator, 'notice'),
+                                markdown.read_marker(supervised, 'notice')))
+        self.assertEqual(markers[0], markers[1])
+        self.assertEqual(markers[0], markers[2])
+        self.assertIn('**Class:** `round_limit` (limit of the review rounds), critical.',
+                      markdown.render_escalation('r', cls='round_limit'))  # English by default
+
+    def test_the_texts_supervision_gives(self):
+        self.assertIn('`/devloop grant-round <motivo>`',
+                      supervision.operator_rounds_text('Italian'))
+        for language in ('English', 'French'):
+            self.assertIn('`/devloop grant-round <reason>`',
+                          supervision.operator_rounds_text(language))
+        self.assertEqual(supervision.coordinator_refusal('reconcile', 'Italian')[1],
+                         '`/devloop reconcile` è riservato all\'operatore di persona, mai al '
+                         'coordinatore')
+        self.assertEqual(supervision.coordinator_refusal('veto', 'French')[1],
+                         '`/devloop veto` is not among the commands delegated to the coordinator')
+        self.assertIsNone(supervision.coordinator_refusal('retry', 'Italian'))
+
+    def test_the_catalogues_have_every_text_in_italian(self):
+        from devloop import budget, dispatch_supervision, journal
+        for catalog in (dispatch_supervision.TEXTS, markdown.ESCALATION_TEXTS, budget.TEXTS,
+                        journal.TEXTS):
+            self.assertEqual(set(catalog.tables[ITALIAN]), set(catalog.tables[ENGLISH]))
+
+
+class BudgetJournalLanguageTests(unittest.TestCase):
+    """#633: the reasons ``budget`` and ``journal`` give to the escalations and to the answers
+    of the dispatcher, in the project's language, English for a language without
+    translation."""
+
+    def test_the_refusal_of_a_turn_of_no_story(self):
+        from devloop import budget
+        from devloop.budget import BudgetRefused
+        from devloop.journal import TurnJournal
+        expected = {'Italian': 'non è coperto dall\'envelope di budget: l\'issue #9 non '
+                               'appartiene a nessuna storia del journal',
+                    'English': 'is not covered by the budget envelope: issue #9 belongs to no '
+                               'story of the journal'}
+        for language in ('Italian', 'English', 'French'):
+            with self.subTest(language=language):
+                with self.assertRaises(BudgetRefused) as caught:
+                    budget.reserve(CFG.budget, TurnJournal(), repo='o/r', issue=9,
+                                   kind='review', agent=CFG.agent('codex'), language=language)
+                self.assertEqual(caught.exception.category, 'SCOPE_REQUIRED')
+                self.assertIn(expected.get(language, expected['English']),
+                              str(caught.exception))
+                _, extension, why = budget.grantable(CFG.budget, TurnJournal(), repo='o/r',
+                                                     issue=9, kind='review',
+                                                     agent=CFG.agent('codex'),
+                                                     language=language)
+                self.assertIsNone(extension)
+                self.assertEqual(why, budget.no_story(9, language))
+
+    def test_the_extension_and_the_state_of_a_story(self):
+        from devloop import budget
+        extension = {'turns': 1, 'role_turns': {'review': 1}, 'phase_turns': {'impl': 2},
+                     'wall_seconds': 900, 'percent': 25}
+        self.assertEqual(budget.extension_text(extension, 'Italian'),
+                         'turni +1, turni `review` +1, fase `impl` +2, tempo +900 s')
+        for language in ('English', 'French'):
+            self.assertEqual(budget.extension_text(extension, language),
+                             'turns +1, turns `review` +1, phase `impl` +2, time +900 s')
+        count = {'consumed': 1, 'reserved': 1, 'cap': 3, 'available': 1}
+        found = {'turns': count, 'roles': {}, 'phases': {},
+                 'usd': {'metered_usd': {'consumed': None, 'unattested': 2, 'reserved': 0.0,
+                                         'available': None, 'cap': 1}},
+                 'time': {'consumed': 10, 'cap': 60, 'available': 50,
+                          'deadline_at': '2027-01-15T08:01:00Z'},
+                 'extension': extension}
+        self.assertEqual(budget.describe(found, 'Italian'), (
+            'turni 2 di 3 (consumati 1, prenotati 1, disponibili 1); `metered_usd` consumati non '
+            'attestato (turni senza valore attestato: 2), prenotati 0.00 USD, disponibili non '
+            'attestato di 1.00 USD; tempo trascorso 10 s di 60 s, disponibili 50 s, scadenza '
+            '2027-01-15T08:01:00Z; tetti già estesi una volta dal supervisore (`grant-budget`): '
+            'turni +1, turni `review` +1, fase `impl` +2, tempo +900 s'))
+        self.assertEqual(budget.describe(found, 'French'), (
+            'turns 2 of 3 (consumed 1, reserved 1, available 1); `metered_usd` consumed not '
+            'attested (turns without an attested value: 2), reserved 0.00 USD, available not '
+            'attested of 1.00 USD; time elapsed 10 s of 60 s, available 50 s, deadline '
+            '2027-01-15T08:01:00Z; caps already extended once by the supervisor (`grant-budget`): '
+            'turns +1, turns `review` +1, phase `impl` +2, time +900 s'))
+
+    def test_the_turns_that_block_a_work_and_the_reconciliation(self):
+        from devloop import journal
+        from devloop.journal import TurnJournal
+        turn = {'turn': 'turn-1-0a1b2c3d', 'kind': 'review', 'agent': 'codex', 'number': 100,
+                'at': '2026-11-24T10:00:00Z', 'outcome': None}
+        expected = {
+            'Italian': ('il lavoro dell\'issue #7 ha turni senza esito registrato',
+                        'turno `review` di `codex` su #100', 'Per ognuno, un commento con prima '
+                        'riga `/devloop reconcile <turno> <returned|failed|not_dispatched>`',
+                        'il turno `turn-9-0a1b2c3d` non è nel journal'),
+            'English': ('the work of issue #7 has turns without a recorded outcome',
+                        'turn `review` of `codex` on #100', 'For each one, a comment whose first '
+                        'line is `/devloop reconcile <turn> <returned|failed|not_dispatched>`',
+                        'the turn `turn-9-0a1b2c3d` is not in the journal'),
+        }
+        for language in ('Italian', 'English', 'French'):
+            with self.subTest(language=language):
+                block, described, how, unknown = expected.get(language, expected['English'])
+                text = journal.blocked_text(7, [turn], language)
+                for phrase in (block, described, how):
+                    self.assertIn(phrase, text)
+                with self.assertRaisesRegex(ValueError, unknown):
+                    TurnJournal().reconcile('turn-9-0a1b2c3d', 'failed', by='u', comment=1,
+                                            note='n', language=language)
+
+
+class SupervisionLanguageTests(SupervisionCase):
+    """#633: the escalations to the supervisor and the dispatcher's answers to the commands
+    on them, in the project's language; the records are the same."""
+
+    LANGUAGES = {
+        'Italian': ('## Escalation al supervisore', '## Decisione del supervisore',
+                    'rifiutato: vale solo per un\'escalation `preflight_default` del controllo '
+                    'di prontezza. Il comando è speso; l\'escalation resta al supervisore.',
+                    'oppure `/devloop escalate <motivo>`',
+                    '## Serve un intervento dell\'operatore',
+                    'Il supervisore `agy-agent[bot]` passa all\'operatore l\'escalation di '
+                    'classe `tool_failure`: modello instabile'),
+        'English': ('## Escalation to the supervisor', '## Decision of the supervisor',
+                    'refused: it applies only to a `preflight_default` escalation of the '
+                    'readiness check. The command is spent; the escalation stays with the '
+                    'supervisor.', 'or `/devloop escalate <reason>`',
+                    '## The operator is needed',
+                    'The supervisor `agy-agent[bot]` hands the escalation of class '
+                    '`tool_failure` to the operator: modello instabile'),
+    }
+
+    def test_an_escalation_and_the_answers_to_the_commands(self):
+        records = {}
+        for language in ('Italian', 'English', 'French'):
+            with self.subTest(language=language):
+                (escalation, trace, refused, resume, operator,
+                 handed) = self.LANGUAGES.get(language, self.LANGUAGES['English'])
+                d = self.make(dataclasses.replace(SUPERVISION_AUTO, language=language),
+                              AgentError('codex crashed'))
+                self.assertEqual(self.tick(d), [('review', 100)])
+                self.assertIn(escalation, self.gh.threads[100][-1]['body'])
+                # A command that does not apply is answered, in the same language.
+                self.gh.command(100, '/devloop accept-defaults')
+                self.assertEqual(self.tick(d), [('supervise', 100)])
+                body = ' '.join(self.gh.threads[100][-1]['body'].split())
+                for phrase in (trace, refused, resume):
+                    self.assertIn(phrase, body)
+                # The escalation goes to the operator, with the supervisor's reason.
+                self.gh.command(100, '/devloop escalate modello instabile')
+                self.assertEqual(self.tick(d), [('supervise', 100)])
+                self.assertIn(operator, self.gh.threads[100][-1]['body'])
+                self.assertIn(handed, self.gh.threads[100][-1]['body'])
+                records[language] = ([dict(r, comment=None) for r in self.decisions(100)],
+                                     self.escalations(100))
+        self.assertEqual(records['Italian'], records['English'])
+        self.assertEqual(records['English'], records['French'])
 
 
 if __name__ == '__main__':

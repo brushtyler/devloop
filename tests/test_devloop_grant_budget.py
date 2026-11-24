@@ -218,7 +218,9 @@ class GrantTests(BudgetCase):
         self.assertEqual((state['turns']['cap'], state['roles']['review']['cap'],
                           state['time']['cap']), (5, 5, 86400 + 21600))
         self.assertEqual(state['usd']['cli_estimate_usd']['cap'], 5.0)  # never the dollars
-        self.assertIn('tetti già estesi una volta', budget.describe(state))
+        # In English by default (#633), in the project's language when asked.
+        self.assertIn('caps already extended once', budget.describe(state))
+        self.assertIn('tetti già estesi una volta', budget.describe(state, 'Italian'))
         self.assertEqual(d.cfg.budget.turns, 4)
         # The review runs, booked in the extended envelope with the frozen limits.
         self.assertEqual(self.tick(d), [('review', 100)])
@@ -233,7 +235,7 @@ class GrantTests(BudgetCase):
         with self.assertRaises(BudgetRefused) as caught:
             budget.reserve(d.cfg.budget, journal, repo=REPO, issue=7, kind='review',
                            agent=reviewer)
-        self.assertIn('tetti già estesi una volta', str(caught.exception))
+        self.assertIn('caps already extended once', str(caught.exception))
         d._escalate_failure(Action('review', 100), pr(), caught.exception)
         record = self.escalations(100)[-1]
         self.assertEqual((record['class'], record['to']), ('budget', 'operator'))
@@ -294,7 +296,7 @@ class GrantTests(BudgetCase):
         journal._clock = lambda: later
         with self.assertRaisesRegex(BudgetRefused, 'wall-time exhausted') as caught:
             d._check_budget(100, 'review', d.cfg.agent(d.cfg.reviewer))
-        self.assertNotIn('decade', str(caught.exception))
+        self.assertNotIn('lapses', str(caught.exception))
         self.assertEqual(journal.extension(self.story), grant)
         self.assertFalse([e for e in journal._events if e['event'] == 'grant_lapsed'])
 
@@ -760,7 +762,7 @@ class EnvelopeTests(unittest.TestCase):
         with self.assertRaisesRegex(BudgetRefused, 'wall-time exhausted') as caught:
             self.book(policy)
         # An extension a turn used is spent: it never lapses (#466).
-        self.assertNotIn('decade', str(caught.exception))
+        self.assertNotIn('lapses', str(caught.exception))
         self.assertFalse(self.journal.lapse(self.story, 1, 'LIMIT_REACHED'))
         self.assertEqual(self.journal.extension(self.story)['extension'], extension)
 
@@ -776,15 +778,15 @@ class EnvelopeTests(unittest.TestCase):
         self.now = START + 4501  # the turn waited past the 900 seconds more
         with self.assertRaisesRegex(BudgetRefused, 'wall-time exhausted') as caught:
             self.book(policy)
-        self.assertIn('decade ora, senza spendere l\'unica estensione della storia',
+        self.assertIn('it lapses now, without spending the one extension of the story',
                       ' '.join(str(caught.exception).split()))
         self.assertIsNone(self.journal.extension(self.story))
         self.assertEqual(len(self.journal.grants()), 1)  # it still counts for the day
         # Not "already extended": the extension is simply not enough any more.
         _, again, why = self.grantable(policy)
         self.assertIsNone(again)
-        self.assertIn('non coprirebbe comunque', why)
-        self.assertNotIn('unica estensione', why)
+        self.assertIn('would still not cover', why)
+        self.assertNotIn('one extension', why)
         # The same command does not apply again; another one may, once, and is the only one.
         self.assertEqual(self.journal.extend(self.story, extension, 7, 1, 'x', 3),
                          (None, 'lapsed'))
@@ -828,7 +830,7 @@ class EnvelopeTests(unittest.TestCase):
         with self.assertRaisesRegex(BudgetRefused, 'wall-time exhausted') as caught:
             budget.reserve(policy, read_only, repo=REPO, issue=7, kind='review',
                            agent=CFG.agent('codex'), check_only=True)
-        self.assertNotIn('decade', str(caught.exception))
+        self.assertNotIn('lapses', str(caught.exception))
         self.assertEqual(TurnJournal(tmp).extension(self.story)['extension'], extension)
 
     def test_a_time_past_the_extension_is_not_offered(self):
@@ -837,7 +839,7 @@ class EnvelopeTests(unittest.TestCase):
         self.now = START + 4500  # past the 900 seconds the extension would add
         story, extension, why = self.grantable(policy)
         self.assertIsNone(extension)
-        self.assertIn('non coprirebbe comunque', why)
+        self.assertIn('would still not cover', why)
         self.assertIsNone(self.journal.extension(self.story))
 
     def test_the_dollars_are_never_extended(self):
@@ -852,14 +854,14 @@ class EnvelopeTests(unittest.TestCase):
             self.book(policy, agent='claude')
         _, extension, why = self.grantable(policy, agent='claude')
         self.assertIsNone(extension)
-        self.assertIn('mai dollari né token', why)
+        self.assertIn('never dollars nor tokens', why)
 
     def test_a_refusal_that_is_not_a_limit_is_not_offered(self):
         policy = envelope()
         # Covered without an extension: nothing to grant.
         _, extension, why = self.grantable(policy)
         self.assertIsNone(extension)
-        self.assertIn('copre già il turno', why)
+        self.assertIn('already covers the turn', why)
         # A turn left without outcome by a process that stopped: OUTCOME_UNCERTAIN, which only
         # a reconciliation settles.
         tmp = self.enterContext(tempfile.TemporaryDirectory())
@@ -939,7 +941,14 @@ class CommandTests(unittest.TestCase):
         body = markdown.render_supervision({'command': 'grant-budget', 'by': 'x',
                                             'reason': REASON, 'outcome': 'granted'}, 't')
         self.assertEqual(markdown.read_marker(body, 'supervision')['command'], 'grant-budget')
-        self.assertIn('grant-budget <motivo>', markdown.SUPERVISOR_RESUME)
+        # The escalation to the supervisor names the command, in the project's language (#633).
+        self.assertIn('grant-budget <motivo>',
+                      markdown.render_escalation('r', cls=supervision.BUDGET_GRANTABLE,
+                                                 supervised={'step': 'review'},
+                                                 language='Italian'))
+        self.assertIn('grant-budget <reason>',
+                      markdown.render_escalation('r', cls=supervision.BUDGET_GRANTABLE,
+                                                 supervised={'step': 'review'}))
 
 
 class DocsTests(unittest.TestCase):

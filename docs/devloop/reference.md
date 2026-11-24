@@ -425,15 +425,35 @@ Today these texts follow it:
   writes in a new conclave record: a contribution missing (an agent failed or timed out, an
   output beyond the limits, a call started without a result, no proposal to vote on), a
   context changed, a substitute vote of the coordinator refused or not given by its deadline.
-  The checks of a record read back (`consistent`) are only logged, in Italian.
+  The checks of a record read back (`consistent`) are only logged, in Italian;
+- the frame of every [escalation](guide.md#escalations-to-the-supervisor) (#633): its title
+  ("The operator is needed", "Serve un intervento dell'operatore" in Italian; "Escalation to
+  the supervisor", "Escalation al supervisore"), the class with its description, the commands of
+  the supervisor and how the operator resumes it, retry included;
+- the escalations and the answers to the commands that `devloop/dispatch_supervision.py`
+  composes (#633): the trace of each command on an escalation to the supervisor or to the
+  operator, of a `/devloop capacity` and of a `/devloop merge-budget` on the issue of the
+  summary, with their titles ("Decision of the supervisor", "Decisione del supervisore"), why a
+  command does not apply and how to resume, the grants of a round or of the budget, the
+  coordinator's closure of findings, the defaults accepted or decided, and the escalations to
+  the operator they write; the note on why a non-critical escalation stays with the operator, and
+  the readiness check's escalation of its defaults to the supervisor;
+- the reasons these texts take from `devloop/supervision.py`, `devloop/budget.py` and
+  `devloop/journal.py` (#633): the descriptions of the classes, how a trusted user grants one
+  more round, why a command of the coordinator is not delegated, the refusal of a turn by the
+  budget envelope with the state of the story's budget, the extension of the envelope and why
+  it is not granted, the turns that block a work (`uncertain_turn`), and the dispatcher's
+  answer to a refused `/devloop reconcile` with its reason ("Reconciliation not applied",
+  "Riconciliazione non applicata"). `devloop status` still shows the budget in Italian.
 
 Only the text devloop composes changes, in the language of the moment it composes it. The
 values of the records stay as written, in every language: the opinions `ok`, `dubbi`,
 `contrario` and the votes `APPROVA`, `BLOCCA` of the agents' schemas, the texts of the agents
 (the reasons of a conclave vote, the gaps of a readiness check the agent lists) and the texts of
 a record already published, such as the note of an earlier review, the reason of an earlier
-recheck or of a conclave already recorded, are shown as recorded. The other texts of the dispatcher (escalations, with the descriptions of
-their classes, merge and receipts among them, and the acceptance map and the step on the host
+recheck or of a conclave already recorded, are shown as recorded. The other texts of the
+dispatcher (the reasons of the escalations composed elsewhere, such as a failed step or the
+round limit, merge and receipts among them, and the acceptance map and the step on the host
 that the comment of a fix repeats from the pull request) are still in Italian, until the parts
 of #628 that translate them.
 
@@ -971,7 +991,9 @@ It appears in three places, and nowhere with the budget off:
   reason its turns are refused (`SCOPE_REQUIRED`, #396). `status` reads the journal without the
   lock: a turn running in the dispatcher counts as reserved;
 - the [PR receipt](protocol.md#pr-receipt), in its section "Budget della storia", as a table;
-- the escalation of a turn the envelope refuses, as the state at the refusal.
+- the escalation of a turn the envelope refuses, as the state at the refusal, in the project's
+  [language](#language-of-the-texts) (#633): in English `not attested` and `at least` stand for
+  `non attestato` and `almeno`.
 
 #### Prerequisites of activation
 

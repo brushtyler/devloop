@@ -19,10 +19,11 @@ from .budget import grantable as budget_grantable
 from .config import same_agent
 from .context import REREVIEW_COMMAND, operator_comments, requests_rereview
 from .github import GitHubError
+from .i18n import Catalog
 from .journal import OPERATOR_ROUNDS, JournalError
 from .ledger import entries as ledger_entries
-from .markdown import (PREFLIGHT_RESUME, RESUME, carries_record, operator_retry_text,
-                       read_marker, render_escalation, render_supervision)
+from .markdown import (carries_record, operator_retry_text, preflight_resume, read_marker,
+                       render_escalation, render_supervision, resume_text)
 from .planning import (FIX_COMMAND, Action, PullRequest, closed_by_first, findings_decreasing,
                        label_names, last_counted_ci, missing_verdicts, operator_blocked,
                        waiver)
@@ -35,20 +36,18 @@ from .supervision import (ACCEPT_DEFAULTS, BUDGET_GRANTABLE, CAPACITY, CAPACITY_
                           MAX_CAPACITY, MAX_CAPACITY_HOURS, MAX_COORDINATOR_OPERATOR_ROUNDS,
                           MAX_MERGE_BUDGET,
                           MAX_RETRIES, MERGE, MERGE_BUDGET, MERGED_ISSUE, OPEN_FINDINGS,
-                          OPERATOR_ROUNDS_TEXT, PREFLIGHT_DEFAULT, REREVIEW, RETRY, RETRY_STEPS,
+                          PREFLIGHT_DEFAULT, REREVIEW, RETRY, RETRY_STEPS,
                           ROUND_GRANTABLE, SYNC_FAILED, TOOL_FAILURE, capacity_arguments,
                           changed_input, command_line, coordinator_command,
                           coordinator_refusal, critical,
-                          merge_budget_arguments, preflight_class, retries_done,
-                          supervisor_command)
+                          merge_budget_arguments, operator_rounds_text, preflight_class,
+                          retries_done, supervisor_command)
 from .workspace import WorkspaceError
 
 # The fields of a turn the budget envelope refused (#411) that a ``budget`` escalation to the
 # operator records (#595): the story, the kind and the agent of the turn, for the coordinator's
 # extension of the envelope (``_operator_grant_budget``), and the refusal's category.
 BUDGET_FIELDS = ('story', 'kind', 'agent', 'category')
-# How the trace of the coordinator's closure of findings (#606) names each status.
-CLOSED_TEXT = {'resolved': 'risolto', 'withdrawn': 'ritirato'}
 
 
 def budget_fields(source):
@@ -65,26 +64,712 @@ HOLD_COMMAND = '/devloop hold'
 RELEASE_COMMAND = '/devloop release'
 # The label a PR resumes from when the supervisor retries a step that failed on it (#182).
 RESUME_STEP = {'review': 'review', 'fix': 'changes', 'sync': 'review'}
-# The titles of the dispatcher's trace of a command: on an escalation to the supervisor (#182)
-# or to the operator (#321).
-SUPERVISOR_TITLE = 'Decisione del supervisore'
-OPERATOR_TITLE = 'Comando su un\'escalation all\'operatore'
-# The title of the dispatcher's trace of a ``/devloop capacity`` command (#412).
-CAPACITY_TITLE = 'Limite di capacità temporaneo'
-CAPACITY_USAGE = (f'Il comando si scrive come `/devloop {CAPACITY} <chiave> <valore> <durata> '
-                  '<motivo>`, come prima riga di un commento su questa issue: la chiave è '
-                  + ' o '.join(f'`{key}`' for key in MAX_CAPACITY) + ', la durata `<N>h` o '
-                  '`<N>m`, il motivo, che può continuare nelle righe successive, riporta o cita '
-                  'l\'analisi delle cause.')
-# The titles of the dispatcher's trace of a delegated merge and of an extension of its daily cap
-# (#486), and how the extension is written.
-MERGE_TITLE = 'Merge delegato al supervisore'
-COORDINATOR_MERGE_TITLE = 'Merge riservato del coordinatore'  # #529
-MERGE_BUDGET_TITLE = 'Merge delegati: estensione del tetto giornaliero'
-MERGE_BUDGET_USAGE = (f'Il comando si scrive come `/devloop {MERGE_BUDGET} <N> <motivo>`, come '
-                      'prima riga di un commento di un utente fidato su questa issue: `N` da 1 a '
-                      f'{MAX_MERGE_BUDGET} merge delegati in più per il giorno UTC in cui è '
-                      'scritto, il motivo obbligatorio.')
+# The texts of the escalations and of the answers to the commands (#633), in the project's
+# ``language`` (``i18n``); English for a language without translation. Commands, labels, classes,
+# keys and the fields of the ``supervision`` records are never translated, and no text here is
+# read back: the records are read through their markers. The titles of the traces: of a command
+# on an escalation to the supervisor (#182) or to the operator (#321), of a ``/devloop capacity``
+# (#412), of a delegated merge and of an extension of its daily cap (#486), of the coordinator's
+# reserved merge (#529). The reasons of a refusal are composed in the same language, and so are
+# those that ``supervision``, ``budget`` and ``journal`` give.
+_KEYS = ' or '.join(f'`{key}`' for key in MAX_CAPACITY)
+_CHIAVI = ' o '.join(f'`{key}`' for key in MAX_CAPACITY)
+TEXTS = Catalog(
+    en={
+        # Titles and usage.
+        'supervisor_title': 'Decision of the supervisor',
+        'operator_title': 'Command on an escalation to the operator',
+        'capacity_title': 'Temporary capacity limit',
+        'merge_title': 'Merge delegated to the supervisor',
+        'coordinator_merge_title': 'Reserved merge of the coordinator',
+        'merge_budget_title': 'Delegated merges: extension of the daily cap',
+        'capacity_usage': (f'The command is written as `/devloop {CAPACITY} <key> <value> '
+                           '<duration> <reason>`, as the first line of a comment on this issue: '
+                           f'the key is {_KEYS}, the duration `<N>h` or `<N>m`, the reason, '
+                           'which may go on in the following lines, gives or cites the analysis '
+                           'of the causes.'),
+        'merge_budget_usage': (f'The command is written as `/devloop {MERGE_BUDGET} <N> '
+                               '<reason>`, as the first line of a comment of a trusted user on '
+                               f'this issue: `N` from 1 to {MAX_MERGE_BUDGET} more delegated '
+                               'merges for the UTC day it is written in, the reason required.'),
+        # Pieces.
+        'trace': '`/devloop {name}` by `{by}`: {text}',
+        'the_pr': 'the PR',
+        'the_issue': 'the issue',
+        'The_pr': 'The PR',
+        'The_issue': 'The issue',
+        'or': ' or ',
+        'reason_arg': '<reason>',
+        'decisions_arg': '<decisions>',
+        'text_arg': '<text>',
+        'reason_title': '**Reason:**',
+        'causes_title': '**Reason and analysis of the causes:**',
+        'resolved': 'resolved',
+        'withdrawn': 'withdrawn',
+        'of_code': 'of the code',
+        'of_delegation': 'of the delegation',
+        # Outcomes.
+        'refused': 'refused: {why}.',
+        'not_applicable': 'not applicable: {why}. {how}',
+        'spent': 'The command is spent; {stays}',
+        'item_stays': '{where} stays in `{label}`.',
+        'escalation_stays': 'the escalation stays with the supervisor.',
+        # Why an escalation stays with the operator (``_supervised``).
+        'why_step': 'the step `{step}` is not among those the supervisor may run again',
+        'why_marker': ('the body of the PR no longer ends with its marker: who implemented it '
+                       'and its merge mode cannot be verified'),
+        'why_own_budget': ('the supervisor implemented this PR, and the grant of budget is not '
+                           'among the escalations of process it decides on the PRs of its own '
+                           'agent too'),
+        'why_mode': ('the merge mode of this PR is `{mode}`, not `auto` (override of the level '
+                     'or `operator_only_paths`)'),
+        'not_computable': 'not computable',
+        'why_author': ('issue #{issue} was opened by `{author}`, who is neither a trusted user '
+                       'nor an app of devloop'),
+        'why_design': 'the label `{label}` is present',
+        'why_key': 'the input of the step was not recorded before it ran',
+        'why_unverifiable': 'it could not be verified that the escalation is not critical ({error})',
+        'why_operator': ('In merge mode `auto` this escalation would go to the supervisor, but '
+                         'it stays with the operator: {why}.'),
+        'why_round': ('In merge mode `auto` the supervisor could grant another round, but the '
+                      'escalation stays with the operator: {why}.'),
+        'preflight_defaults': ('The readiness check found only gaps with a proposed default '
+                               '(`default_available`): the supervisor may accept them with '
+                               '`/devloop {accept}`, or decide otherwise with `/devloop {decide} '
+                               '<decisions>`.'),
+        'budget_grantable': ('The supervisor may extend the envelope of this story once, in turns '
+                             'and time only, with `/devloop grant-budget <reason>`, where the '
+                             'reason gives or cites the analysis of the causes: {extension}.'),
+        # Commands not applicable (``_supervisor_view``).
+        'missing_text': ('the text is missing, the command is written as `/devloop {command} '
+                         '{arguments}`'),
+        'operator_escalation': ('the escalation is entrusted to the operator, not to the '
+                                'supervisor: a trusted user decides'),
+        'not_auto': ('the merge mode is `{mode}`, not `auto`, so the supervisor\'s commands do '
+                     'not apply'),
+        # Commands on an escalation to the supervisor (``_do_supervise``).
+        'only_merge': ('applies only to a ready PR whose merge is the operator\'s, not to an '
+                       'escalation to the supervisor'),
+        'only_finding': 'applies only to an `open_findings` escalation to the operator',
+        'only_report': ('applies only to the issue of the summary (`[report] issue`), not to an '
+                        'escalation'),
+        'refused_critical': ('refused. The escalation is critical (class `{cls}`) or not '
+                             'entrusted to the supervisor: the operator decides.'),
+        'to_operator_critical': ('The supervisor cannot decide this escalation (class `{cls}`): '
+                                 '`/devloop {name}` of `{by}` was refused.'),
+        'escalated': 'the escalation goes to the operator: {reason}',
+        'to_operator_escalated': ('The supervisor `{by}` hands the escalation of class `{cls}` '
+                                  'to the operator: {reason}'),
+        'only_round_grantable': ('it applies only to a `{cls}` escalation of a PR at the round '
+                                 'limit'),
+        'only_budget_grantable': ('it applies only to a `{cls}` escalation of a turn refused by '
+                                  'the budget envelope'),
+        'only_preflight_default': ('it applies only to a `preflight_default` escalation of the '
+                                   'readiness check'),
+        'only_retry': 'it applies only to the `tool_failure` and `sync_failed` escalations',
+        'only_rereview': 'it applies only to a `tool_failure` escalation of the review of a PR',
+        'merged_why': ('the issue is already resolved by a merged devloop PR ({merged}), so '
+                       'running its step again would duplicate the work'),
+        'merged_spent': 'The command is spent; the issue goes to a `merged_issue` escalation.',
+        'merged_resume': ('If it is resolved it should be closed; if more work is needed, a new '
+                          'issue should be opened.'),
+        'not_retryable': 'the escalation does not record a step that can be run again',
+        'to_operator_not_retryable': ('The escalation does not record a step the supervisor may '
+                                      'run again: `/devloop {name}` of `{by}` was refused.'),
+        'superseded': ('the input of the step changed after the escalation ({changed}), so the '
+                       'command refers to a superseded input'),
+        'superseded_grant': ('the input of the step changed after the escalation ({changed}), so '
+                             'the grant refers to a superseded input'),
+        'no_longer_auto': 'the merge mode is no longer `auto` with a supervisor',
+        'became_critical': 'refused: the escalation became critical ({why}).',
+        'to_operator_became': ('The supervisor can no longer decide this escalation: {why}. '
+                               '`/devloop {name}` of `{by}` was refused.'),
+        'limit': ('not run: the step `{step}` was already run again {done} times for the same '
+                  'input.'),
+        'to_operator_limit': ('The step `{step}` failed again after {done} attempts authorized '
+                              'by the supervisor (at most {max}): `/devloop {name}` of `{by}` '
+                              'was not run.'),
+        # The supervisor's rereview (#491).
+        'rereview_asked': ('in the latest round a reviewer asked for a decision of the operator '
+                           '({asked}), and a new review would override it'),
+        'rereview_no_round': ('no review round of this head waits for the verdict of a reviewer '
+                              'of the quorum: `/devloop {retry}` already opens a round with the '
+                              'current configuration'),
+        'rereview_again': ('after the latest round with a verdict a new review was already '
+                           'asked, by a trusted user or by the supervisor, and its round wrote '
+                           'no verdict: another one would repeat it without counting for '
+                           '`max_review_rounds`'),
+        'rereview_first': ('the latest round was closed by the first reviewer of the quorum, who '
+                           'did not approve ({verdicts}): with `second_reviewer = "{second}"` '
+                           'the second reviewer was not asked and no verdict is missing, and a '
+                           'new review would override its own'),
+        'rereview_all': ('every reviewer of the quorum of the latest round already has a verdict '
+                         '({verdicts}), and a new review would override it'),
+        'rereview_applied': ('a new review round opens in place of round {round}, which lacks '
+                             'the verdict of {reviewers}. The new round chooses the reviewers '
+                             'with the current configuration, has a new receipt and counts for '
+                             '`max_review_rounds`; the merge stays where its mode puts it.'),
+        'rereview_operator': ('the escalation is entrusted to the operator: the supervisor may '
+                              'ask for a new review there only after a `tool_failure` of the '
+                              'review of a PR'),
+        'not_supervisors': 'the escalation is not the supervisor\'s ({why})',
+        'no_supervisor': 'no supervisor configured',
+        # Grants of rounds (#405, #553) and of budget (#411, #595).
+        'cap_pr': ('{granted} rounds were already granted to this PR, the maximum of the '
+                   'delegation (`[delegations] max_rounds_per_pr` = {cap})'),
+        'grants_unknown': ('today\'s grants cannot be verified: the journal of the turns is not '
+                           'available or not readable'),
+        'cap_day': ('{today} grants were already made today, the daily maximum (`[delegations] '
+                    'max_grants_per_day` = {cap})'),
+        'owners': 'the owner of some findings cannot be rebuilt',
+        'security': ('security findings stay open, or findings that do not say whether they '
+                     'are: {keys}'),
+        'no_progress': ('the latest counted round is not a failed CI and the open blocking '
+                        'findings are not fewer than those of the round before'),
+        'rounds_why': 'the delegation of the rounds does not apply: {why}',
+        'head_moved': ('the head of the PR changed after the escalation, so the grant refers to '
+                       'a superseded input'),
+        'to_operator_round': ('The supervisor cannot grant another round to this PR: {why}. '
+                              '`/devloop {command}` of `{by}` was refused.\n\n{rounds}'),
+        'rounds_off': ('the delegation of the rounds is off (`[delegations] rounds`), or the '
+                       'merge mode is no longer `auto` with a supervisor'),
+        'daily_reached': ('meanwhile today\'s grants reached the daily maximum (`[delegations] '
+                          'max_grants_per_day` = {cap})'),
+        'round_granted': ('one more round granted to this PR: its limit becomes {limit} rounds '
+                          '(`max_review_rounds` = {max}, plus {total} granted). Rounds granted '
+                          'to this PR by the delegation: {granted} of {cap}; grants of today: '
+                          '{daily} of {daily_cap}. The PR goes back to `{resume}`.'),
+        'turn_unknown': ('the refused turn cannot be rebuilt: its agent (`{agent}`) is not '
+                         'configured, or the kind of the turn is missing'),
+        'journal_unreadable': 'the journal of the turns is not readable ({error})',
+        'budget_why': 'the delegation of the budget does not apply: {why}',
+        'to_operator_budget': ('The supervisor cannot extend the budget envelope of this story: '
+                               '{why}. `/devloop {command}` of `{by}` was refused.\n\nThe values '
+                               'of the envelope and the extensions beyond the one delegated to '
+                               'the supervisor stay decisions of the operator (ADR 0004, D2).'),
+        'budget_off': 'the delegation of the budget is off (`[delegations] budget`)',
+        'no_turn_step': 'the escalation does not record the step of the refused turn',
+        'other_story': ('the story of the work (`{story}`) is not the one of the escalation '
+                        '(`{expected}`)'),
+        'story_spent': 'meanwhile the story `{story}` already had its one extension',
+        'extension_lapsed': ('the extension of this command already lapsed, because the first '
+                             'turn after the grant was refused all the same: a new grant is '
+                             'needed'),
+        'stays_there': '{what} stays in `{held}`{how}: the step `{step}` does not resume from here.',
+        'where_operator': ', where the operator decides as before',
+        'where_latest': ', with its latest escalation',
+        'pr_back': 'The PR goes back to `{label}`.',
+        'merged_after': ('The issue is however already resolved by a merged devloop PR '
+                         '({merged}): the step `{step}` does not resume and the issue goes to a '
+                         '`merged_issue` escalation.'),
+        'step_now': 'The step `{step}` of the issue resumes now, as after a retry.',
+        'recovered': ('A previous run stopped after recording the extension in the journal of '
+                      'the turns: here its trace is completed, without applying it again. '
+                      '{where}'),
+        'extended': ('the caps of the budget envelope of the story `{story}` are extended: '
+                     '{extension} ({percent}% of the values fixed at its first booking, rounded '
+                     'down; no dollar nor token). It is the one extension of the story: another '
+                     'refusal goes to the operator. Grants of the day: {daily} of {cap}. {where}'),
+        # Capacity limits (#412) and delegated merges (#486) on the issue of the summary.
+        'capacity_refuse': ('not applicable: {why}. The command is spent; the capacity limits '
+                            'stay those of before.\n\n{usage}'),
+        'report_only': ('on the issue of the summary only `/devloop {capacity}` and `/devloop '
+                        '{merge_budget}` apply'),
+        'capacity_off': ('the delegation of the capacity limits is off (`[delegations] '
+                         'capacity`): only the operator changes the limits'),
+        'capacity_malformed': ('the command is not complete or not well formed: key, integer '
+                               'value, duration and reason are needed'),
+        'capacity_refused_key': ('`{setting}` is not delegated: devloop applies it only when '
+                                 '`devloop run` restarts, so only the operator changes it'),
+        'capacity_unknown_key': '`{setting}` is not among the keys of the delegation',
+        'value_code': ('the value {value} is out of the limits of the code: `{setting}` goes '
+                       'from 1 to {cap} (cap of the code)'),
+        'value_delegation': ('the value {value} is out of the limits of the delegation: '
+                             '`{setting}` goes from 1 to {cap} (`[delegations] '
+                             'capacity_{setting}`)'),
+        'hours_code': 'the duration exceeds the maximum of {hours} hours (cap of the code)',
+        'hours_delegation': ('the duration exceeds the maximum of {hours} hours (`[delegations] '
+                             'capacity_max_hours`)'),
+        'time_expiry': ('the time of the command cannot be read, so the expiry cannot be '
+                        'verified'),
+        'elapsed': ('the duration, counted from when the command was written ({written}), is '
+                    'already over'),
+        'capacity_daily': ('today\'s grants already reached the daily maximum (`[delegations] '
+                           'max_grants_per_day` = {cap})'),
+        'capacity_granted': ('`{setting}` is {value} until {until} (configured value: '
+                             '{configured}; cap {of}: {cap}). At the expiry the configured value '
+                             'comes back; '
+                             'another `/devloop {capacity}` on the same key replaces this one. '
+                             'Grants of today: {daily} of {daily_cap}.'),
+        'merge_budget_refuse': ('not applicable: {why}. The command is spent; the cap of the '
+                                'delegated merges stays the one of before.\n\n{usage}'),
+        'merge_budget_trusted': ('only a trusted user (`trusted_users`) extends the cap of the '
+                                 'delegated merges, never the supervisor nor an app'),
+        'merge_off': 'the delegation of the merge is off (`[delegations] merge`)',
+        'merge_budget_malformed': ('the command is not complete or not well formed: an integer '
+                                   'from 1 to {max} and the reason are needed'),
+        'time_day': 'the time of the command cannot be read, so the day cannot be verified',
+        'day_over': 'the UTC day of the command ({day}) is already over',
+        'merge_budget_granted': ('on {day} (UTC) the merges delegated to the supervisor may be '
+                                 '{n} more: the cap of the day becomes {cap} (`[delegations] '
+                                 'max_merges_per_day` = {max}, plus the extensions of the day). '
+                                 'The next day it is the configured one again.'),
+        # Retries and how to resume.
+        'retry_applied': ('the step `{step}` runs again (attempt {attempt} of {max}), without '
+                          'counting a review round.'),
+        'manual': ('remove `{label}` and set the label of the step to run (`agent:ready` on the '
+                   'issue, `agent:review` or `agent:changes` on the PR).'),
+        'without_supervisor': 'To resume without the supervisor: {manual}',
+        'supervisor_resume': ('To resume, the supervisor or a trusted user writes as the first '
+                              'line of a comment {valid}. To resume without the supervisor: '
+                              '{manual}'),
+        'preflight_alternative': ('Otherwise, a trusted user decides the gaps of the readiness '
+                                  'check with `/devloop {accept}` or `/devloop {decide} '
+                                  '<decisions>` as the first line of a comment.'),
+        'operator_merge_resume': ('The PR is ready and its merge is the operator\'s: it is '
+                                  'merged by hand, as the dispatcher\'s comment on the '
+                                  'operator\'s merge explains.'),
+        # Commands on an escalation to the operator (#321).
+        'merge_delegation': ('`/devloop {merge}` is a delegation of the supervisor; the operator '
+                             'merges the PR by hand'),
+        'merge_pr_only': ('`/devloop {merge}` applies only to a ready PR whose merge is the '
+                          'operator\'s'),
+        'already_operator': 'the escalation is already with the operator',
+        'grant_budget_delegation': ('`/devloop {command}` is a delegation of the supervisor, '
+                                    'only on a `{cls}` escalation; the values of the envelope '
+                                    'and the other extensions stay decisions of the operator'),
+        'decide_only': ('it applies only to an issue whose latest readiness check failed with '
+                        'gaps all `default_available` and no split'),
+        'preflight_no_retry': 'the readiness check is not run again with `/devloop retry`',
+        'not_step': ('what brought {where} here is not an escalation that records a step to run '
+                     'again'),
+        'preflight_ready': ('the readiness check starts again by adding `{ready}` back, which the '
+                            'issue no longer has'),
+        'preflight_ready_resume': 'To resume: remove `{operator}` and add `{ready}` back.',
+        'operator_limit': ('not run: the step `{step}` was already run again {done} times for the '
+                           'same input (at most {max}). {stays}\n\n{resume}'),
+        # The coordinator's closure of findings (#606).
+        'finding_coordinator_only': ('`/devloop {finding}` as a command of an escalation is the '
+                                     'coordinator\'s only; a trusted user closes a finding with '
+                                     'the same line and then puts the PR back in `{review}`'),
+        'finding_open_only': ('the coordinator\'s `/devloop {finding}` applies only to a `{cls}` '
+                              'escalation of a PR'),
+        'finding_form': ('each line is written as `{form} <round/reviewer/ID> '
+                         'resolved|withdrawn <reason>`, and the reason is required'),
+        'finding_owners': 'some findings of the PR have no owner that can be rebuilt',
+        'finding_head': ('the latest review round is not of the head of the PR (`{head}`): a new '
+                         'review is needed, not the closure of a finding'),
+        'finding_asking': ('in round {round} {who} does not approve the head and still asks for '
+                           'changes or a decision: the coordinator closes a finding, it does not '
+                           'override a verdict'),
+        'finding_trust': ('a reviewer marked `trust_policy` {keys}: the findings on the trust '
+                          'policy stay the operator\'s'),
+        'finding_absent': '{keys} is not open on this PR',
+        'closed_left': ('closed by the coordinator:\n\n{listed}\n\n{left} stay open: the PR '
+                        'stays in `{label}`.'),
+        'closed_all': ('closed by the coordinator:\n\n{listed}\n\nNo finding stays open: the PR '
+                       'goes back to `{review}`, where the recorded approval is applied again '
+                       'without a new review; promotion and merge follow their rules.'),
+        'grant_budget_class': ('`/devloop {command}` extends the budget envelope only on a '
+                               '`{budget}` escalation to the operator or a `{grantable}` one to '
+                               'the supervisor; on an escalation of another class it does not '
+                               'apply'),
+        'old_budget_escalation': ('the escalation does not record the step, the story, the kind '
+                                  'or the agent of the refused turn (it predates #595), so the '
+                                  'extension cannot be verified'),
+        'not_granted': 'the extension is not granted: {why}',
+        'story_spent_operator': ('meanwhile the story `{story}` already had its one extension: a '
+                                 'second one is the operator\'s'),
+        'lapsed_operator': 'the extension of this command already lapsed: a new grant is needed',
+        'grant_round_class': ('`/devloop {command}` grants one more round only to a PR in a '
+                              '`round_limit` escalation; on an escalation of another class it '
+                              'does not apply'),
+        'no_head': ('the escalation does not record the head of the PR (it predates #553), so '
+                    'the grant cannot be verified'),
+        'coordinator_rounds': ('{before} round was already granted to this PR on an escalation '
+                               'to the operator: the coordinator grants at most {max} per PR, '
+                               'the operator grants the others'),
+        'no_journal': 'the round cannot be recorded: the journal of the turns is not available',
+        'journal_failed': 'the round cannot be recorded in the journal of the turns',
+        'operator_round_granted': ('one more round granted to this PR only: its limit becomes '
+                                   '{limit} rounds (`max_review_rounds` = {max}, unchanged, plus '
+                                   '{total} granted). The round is outside the caps of the '
+                                   'supervisor\'s delegation; rounds granted to this PR on an '
+                                   'escalation to the operator: {granted}. The PR goes back to '
+                                   '`{resume}`.'),
+        # The gaps of a readiness check (#182, #258).
+        'defaults_refusal': ('The defaults of the readiness check cannot be accepted by the '
+                             'supervisor'),
+        'defaults_what': 'the defaults refer',
+        'accepted_default': '*Accepted default:*',
+        'accepted': ('defaults of the readiness check accepted. This record counts as a trusted '
+                     'comment: the issue goes back in the queue and the check runs again with '
+                     'these defaults.'),
+        'decide_refusal': 'The gaps of the readiness check cannot be decided by the supervisor',
+        'decide_what': 'the decision refers',
+        'proposed_default': '*Proposed default:*',
+        'decided': ('decision on the gaps of the readiness check recorded. This record counts as '
+                    'a trusted comment: the issue goes back in the queue and the check runs '
+                    'again with this decision.\n\nGaps:\n\n{listed}\n\n**Decision:**\n\n'
+                    '{quoted}'),
+        'no_check': 'no failed readiness check to decide',
+        'not_defaults': ('not every gap is `default_available`, or a split is needed: the '
+                         'operator decides'),
+        'design': 'the issue has the label `{label}`',
+        'issue_author': 'the issue was not opened by a trusted user nor by an app of devloop',
+        'coordinator_trust': ('the readiness check declares the trust policy touched, or does '
+                              'not say whether it touches it: the coordinator does not decide '
+                              'it, the operator decides'),
+        'text_changed': ('the text of the issue changed after the readiness check, so {what} to '
+                         'a superseded input'),
+    },
+    it={
+        'supervisor_title': 'Decisione del supervisore',
+        'operator_title': 'Comando su un\'escalation all\'operatore',
+        'capacity_title': 'Limite di capacità temporaneo',
+        'merge_title': 'Merge delegato al supervisore',
+        'coordinator_merge_title': 'Merge riservato del coordinatore',
+        'merge_budget_title': 'Merge delegati: estensione del tetto giornaliero',
+        'capacity_usage': (f'Il comando si scrive come `/devloop {CAPACITY} <chiave> <valore> '
+                           '<durata> <motivo>`, come prima riga di un commento su questa issue: '
+                           f'la chiave è {_CHIAVI}, la durata `<N>h` o `<N>m`, il motivo, che '
+                           'può continuare nelle righe successive, riporta o cita l\'analisi '
+                           'delle cause.'),
+        'merge_budget_usage': (f'Il comando si scrive come `/devloop {MERGE_BUDGET} <N> '
+                               '<motivo>`, come prima riga di un commento di un utente fidato su '
+                               f'questa issue: `N` da 1 a {MAX_MERGE_BUDGET} merge delegati in '
+                               'più per il giorno UTC in cui è scritto, il motivo obbligatorio.'),
+        'trace': '`/devloop {name}` di `{by}`: {text}',
+        'the_pr': 'la PR',
+        'the_issue': 'l\'issue',
+        'The_pr': 'La PR',
+        'The_issue': 'L\'issue',
+        'or': ' oppure ',
+        'reason_arg': '<motivo>',
+        'decisions_arg': '<decisioni>',
+        'text_arg': '<testo>',
+        'reason_title': '**Motivo:**',
+        'causes_title': '**Motivo e analisi delle cause:**',
+        'resolved': 'risolto',
+        'withdrawn': 'ritirato',
+        'of_code': 'del codice',
+        'of_delegation': 'della delega',
+        'refused': 'rifiutato: {why}.',
+        'not_applicable': 'non applicabile: {why}. {how}',
+        'spent': 'Il comando è speso; {stays}',
+        'item_stays': '{where} resta in `{label}`.',
+        'escalation_stays': 'l\'escalation resta al supervisore.',
+        'why_step': 'il passo `{step}` non è fra quelli che il supervisore può ripetere',
+        'why_marker': ('il corpo della PR non termina più con il suo marker: chi l\'ha '
+                       'implementata e la sua modalità di merge non sono verificabili'),
+        'why_own_budget': ('il supervisore ha implementato questa PR, e la concessione di budget '
+                           'non è fra le escalation di processo che decide anche sulle PR del '
+                           'proprio agent'),
+        'why_mode': ('la modalità di merge di questa PR è `{mode}`, non `auto` (override del '
+                     'livello o `operator_only_paths`)'),
+        'not_computable': 'non calcolabile',
+        'why_author': ('l\'issue #{issue} è stata aperta da `{author}`, che non è un utente '
+                       'fidato né un\'app di devloop'),
+        'why_design': 'la label `{label}` è presente',
+        'why_key': 'l\'input del passo non è stato registrato prima dell\'esecuzione',
+        'why_unverifiable': ('non è stato possibile verificare che l\'escalation non sia critica '
+                             '({error})'),
+        'why_operator': ('In modalità di merge `auto` questa escalation andrebbe al supervisore, '
+                         'ma resta all\'operatore: {why}.'),
+        'why_round': ('In modalità di merge `auto` il supervisore potrebbe concedere un altro '
+                      'round, ma l\'escalation resta all\'operatore: {why}.'),
+        'preflight_defaults': ('Il controllo di prontezza ha trovato solo lacune con un default '
+                               'proposto (`default_available`): il supervisore può accettarli '
+                               'con `/devloop {accept}`, o decidere diversamente con `/devloop '
+                               '{decide} <decisioni>`.'),
+        'budget_grantable': ('Il supervisore può estendere una volta l\'envelope di questa '
+                             'storia, solo in turni e tempo, con `/devloop grant-budget '
+                             '<motivo>`, dove il motivo riporta o cita l\'analisi delle cause: '
+                             '{extension}.'),
+        'missing_text': ('manca il testo, il comando va scritto come `/devloop {command} '
+                         '{arguments}`'),
+        'operator_escalation': ('l\'escalation è affidata all\'operatore, non al supervisore: '
+                                'decide un utente fidato'),
+        'not_auto': ('la modalità di merge è `{mode}`, non `auto`, quindi i comandi del '
+                     'supervisore non valgono'),
+        'only_merge': ('vale solo su una PR pronta il cui merge spetta all\'operatore, non su '
+                       'un\'escalation al supervisore'),
+        'only_finding': 'vale solo su un\'escalation `open_findings` all\'operatore',
+        'only_report': ('vale solo sulla issue del riepilogo (`[report] issue`), non su '
+                        'un\'escalation'),
+        'refused_critical': ('rifiutato. L\'escalation è critica (classe `{cls}`) o non è '
+                             'affidata al supervisore: decide l\'operatore.'),
+        'to_operator_critical': ('Il supervisore non può decidere questa escalation (classe '
+                                 '`{cls}`): `/devloop {name}` di `{by}` è stato rifiutato.'),
+        'escalated': 'l\'escalation passa all\'operatore: {reason}',
+        'to_operator_escalated': ('Il supervisore `{by}` passa all\'operatore l\'escalation di '
+                                  'classe `{cls}`: {reason}'),
+        'only_round_grantable': ('vale solo per un\'escalation `{cls}` di una PR al limite dei '
+                                 'round'),
+        'only_budget_grantable': ('vale solo per un\'escalation `{cls}` di un turno rifiutato '
+                                  'dall\'envelope di budget'),
+        'only_preflight_default': ('vale solo per un\'escalation `preflight_default` del '
+                                   'controllo di prontezza'),
+        'only_retry': 'vale solo per le escalation `tool_failure` e `sync_failed`',
+        'only_rereview': 'vale solo per un\'escalation `tool_failure` della review di una PR',
+        'merged_why': ('l\'issue è già risolta da una PR devloop mergiata ({merged}), quindi '
+                       'ripeterne il passo duplicherebbe il lavoro'),
+        'merged_spent': ('Il comando è speso; l\'issue passa a un\'escalation `merged_issue`.'),
+        'merged_resume': ('Se è risolta va chiusa; se serve altro lavoro, va aperta una nuova '
+                          'issue.'),
+        'not_retryable': 'l\'escalation non registra un passo ripetibile',
+        'to_operator_not_retryable': ('L\'escalation non registra un passo che il supervisore '
+                                      'possa ripetere: `/devloop {name}` di `{by}` è stato '
+                                      'rifiutato.'),
+        'superseded': ('l\'input del passo è cambiato dopo l\'escalation ({changed}), quindi il '
+                       'comando si riferisce a un input superato'),
+        'superseded_grant': ('l\'input del passo è cambiato dopo l\'escalation ({changed}), '
+                             'quindi la concessione si riferisce a un input superato'),
+        'no_longer_auto': 'la modalità di merge non è più `auto` con un supervisore',
+        'became_critical': 'rifiutato: l\'escalation è diventata critica ({why}).',
+        'to_operator_became': ('Il supervisore non può più decidere questa escalation: {why}. '
+                               '`/devloop {name}` di `{by}` è stato rifiutato.'),
+        'limit': ('non eseguito: il passo `{step}` è già stato ripetuto {done} volte per lo '
+                  'stesso input.'),
+        'to_operator_limit': ('Il passo `{step}` è fallito di nuovo dopo {done} tentativi '
+                              'autorizzati dal supervisore (al massimo {max}): `/devloop {name}` '
+                              'di `{by}` non è stato eseguito.'),
+        'rereview_asked': ('nell\'ultimo round un reviewer ha chiesto una decisione '
+                           'dell\'operatore ({asked}), e una nuova review la scavalcherebbe'),
+        'rereview_no_round': ('nessun round di review di questo head aspetta il verdetto di un '
+                              'reviewer del quorum: `/devloop {retry}` apre già un round con la '
+                              'configurazione attuale'),
+        'rereview_again': ('dopo l\'ultimo round con un verdetto è già stata chiesta una nuova '
+                           'review, da un utente fidato o dal supervisore, e il suo round non ha '
+                           'scritto alcun verdetto: un\'altra lo ripeterebbe senza contare per '
+                           '`max_review_rounds`'),
+        'rereview_first': ('l\'ultimo round è stato chiuso dal primo reviewer del quorum, che non '
+                           'ha approvato ({verdicts}): con `second_reviewer = "{second}"` il '
+                           'secondo reviewer non era richiesto e non manca alcun verdetto, e una '
+                           'nuova review scavalcherebbe il suo'),
+        'rereview_all': ('ogni reviewer del quorum dell\'ultimo round ha già un verdetto '
+                         '({verdicts}), e una nuova review lo scavalcherebbe'),
+        'rereview_applied': ('si apre un round di review nuovo al posto del round {round}, in cui '
+                             'manca il verdetto di {reviewers}. Il round nuovo sceglie i reviewer '
+                             'con la configurazione attuale, ha una ricevuta nuova e conta per '
+                             '`max_review_rounds`; il merge resta dove lo mette la sua '
+                             'modalità.'),
+        'rereview_operator': ('l\'escalation è affidata all\'operatore: il supervisore vi può '
+                              'chiedere una nuova review solo dopo un `tool_failure` della review '
+                              'di una PR'),
+        'not_supervisors': 'l\'escalation non è del supervisore ({why})',
+        'no_supervisor': 'nessun supervisore configurato',
+        'cap_pr': ('a questa PR sono già stati concessi {granted} round, il massimo della delega '
+                   '(`[delegations] max_rounds_per_pr` = {cap})'),
+        'grants_unknown': ('le concessioni di oggi non sono verificabili: il journal dei turni '
+                           'non è disponibile o non è leggibile'),
+        'cap_day': ('oggi sono già state fatte {today} concessioni, il massimo giornaliero '
+                    '(`[delegations] max_grants_per_day` = {cap})'),
+        'owners': 'il proprietario di alcuni finding non è ricostruibile',
+        'security': ('restano aperti finding di sicurezza, o finding che non dicono se lo sono: '
+                     '{keys}'),
+        'no_progress': ('l\'ultimo round contato non è una CI fallita e i finding bloccanti '
+                        'aperti non sono meno di quelli del round precedente'),
+        'rounds_why': 'la delega dei round non si applica: {why}',
+        'head_moved': ('il head della PR è cambiato dopo l\'escalation, quindi la concessione si '
+                       'riferisce a un input superato'),
+        'to_operator_round': ('Il supervisore non può concedere un altro round a questa PR: '
+                              '{why}. `/devloop {command}` di `{by}` è stato rifiutato.\n\n'
+                              '{rounds}'),
+        'rounds_off': ('la delega dei round è spenta (`[delegations] rounds`), o la modalità di '
+                       'merge non è più `auto` con un supervisore'),
+        'daily_reached': ('nel frattempo le concessioni di oggi hanno raggiunto il massimo '
+                          'giornaliero (`[delegations] max_grants_per_day` = {cap})'),
+        'round_granted': ('concesso un round in più a questa PR: il suo limite passa a {limit} '
+                          'round (`max_review_rounds` = {max}, più {total} concessi). Round '
+                          'concessi a questa PR dalla delega: {granted} di {cap}; concessioni di '
+                          'oggi: {daily} di {daily_cap}. La PR torna in `{resume}`.'),
+        'turn_unknown': ('il turno rifiutato non è ricostruibile: il suo agent (`{agent}`) non è '
+                         'configurato, o il tipo del turno manca'),
+        'journal_unreadable': 'il journal dei turni non è leggibile ({error})',
+        'budget_why': 'la delega del budget non si applica: {why}',
+        'to_operator_budget': ('Il supervisore non può estendere l\'envelope di budget di questa '
+                               'storia: {why}. `/devloop {command}` di `{by}` è stato '
+                               'rifiutato.\n\nI valori dell\'envelope e le estensioni oltre '
+                               'l\'unica delegata al supervisore restano decisioni '
+                               'dell\'operatore (ADR 0004, D2).'),
+        'budget_off': 'la delega del budget è spenta (`[delegations] budget`)',
+        'no_turn_step': 'l\'escalation non registra il passo del turno rifiutato',
+        'other_story': ('la storia del lavoro (`{story}`) non è quella dell\'escalation '
+                        '(`{expected}`)'),
+        'story_spent': 'nel frattempo la storia `{story}` ha già avuto la sua unica estensione',
+        'extension_lapsed': ('l\'estensione di questo comando è già decaduta, perché il primo '
+                             'turno dopo la concessione è stato rifiutato comunque: serve una '
+                             'nuova concessione'),
+        'stays_there': '{what} resta in `{held}`{how}: il passo `{step}` non riparte da qui.',
+        'where_operator': ', dove decide l\'operatore come prima',
+        'where_latest': ', con la sua escalation più recente',
+        'pr_back': 'La PR torna in `{label}`.',
+        'merged_after': ('L\'issue è però già risolta da una PR devloop mergiata ({merged}): il '
+                         'passo `{step}` non riparte e l\'issue passa a un\'escalation '
+                         '`merged_issue`.'),
+        'step_now': 'Il passo `{step}` dell\'issue riparte ora, come dopo un retry.',
+        'recovered': ('Un\'elaborazione precedente si era fermata dopo aver registrato '
+                      'l\'estensione nel journal dei turni: qui se ne completa la traccia, senza '
+                      'applicarla di nuovo. {where}'),
+        'extended': ('estesi i tetti dell\'envelope di budget della storia `{story}`: '
+                     '{extension} (il {percent}% dei valori fissati alla sua prima '
+                     'prenotazione, arrotondato per difetto; nessun dollaro né token). È '
+                     'l\'unica estensione della storia: un altro rifiuto va all\'operatore. '
+                     'Concessioni del giorno: {daily} di {cap}. {where}'),
+        'capacity_refuse': ('non applicabile: {why}. Il comando è speso; i limiti di capacità '
+                            'restano quelli di prima.\n\n{usage}'),
+        'report_only': ('sulla issue del riepilogo valgono solo `/devloop {capacity}` e '
+                        '`/devloop {merge_budget}`'),
+        'capacity_off': ('la delega dei limiti di capacità è spenta (`[delegations] capacity`): '
+                         'i limiti li cambia solo l\'operatore'),
+        'capacity_malformed': ('il comando non è completo o non è ben formato: servono chiave, '
+                               'valore intero, durata e motivo'),
+        'capacity_refused_key': ('`{setting}` non è delegata: devloop la applica solo al '
+                                 'riavvio di `devloop run`, quindi la cambia solo l\'operatore'),
+        'capacity_unknown_key': '`{setting}` non è fra le chiavi della delega',
+        'value_code': ('il valore {value} è fuori dai limiti del codice: `{setting}` va da 1 a '
+                       '{cap} (tetto del codice)'),
+        'value_delegation': ('il valore {value} è fuori dai limiti della delega: `{setting}` va '
+                             'da 1 a {cap} (`[delegations] capacity_{setting}`)'),
+        'hours_code': 'la durata supera il massimo di {hours} ore (tetto del codice)',
+        'hours_delegation': ('la durata supera il massimo di {hours} ore (`[delegations] '
+                             'capacity_max_hours`)'),
+        'time_expiry': ('l\'ora del comando non è leggibile, quindi la scadenza non è '
+                        'verificabile'),
+        'elapsed': ('la durata, contata da quando il comando è stato scritto ({written}), è già '
+                    'trascorsa'),
+        'capacity_daily': ('oggi le concessioni hanno già raggiunto il massimo giornaliero '
+                           '(`[delegations] max_grants_per_day` = {cap})'),
+        'capacity_granted': ('`{setting}` vale {value} fino a {until} (valore configurato: '
+                             '{configured}; tetto {of}: {cap}). Alla scadenza torna il valore '
+                             'configurato; un altro `/devloop {capacity}` sulla stessa chiave '
+                             'sostituisce questo. Concessioni di oggi: {daily} di {daily_cap}.'),
+        'merge_budget_refuse': ('non applicabile: {why}. Il comando è speso; il tetto dei merge '
+                                'delegati resta quello di prima.\n\n{usage}'),
+        'merge_budget_trusted': ('il tetto dei merge delegati lo estende solo un utente fidato '
+                                 '(`trusted_users`), mai il supervisore né un\'app'),
+        'merge_off': 'la delega del merge è spenta (`[delegations] merge`)',
+        'merge_budget_malformed': ('il comando non è completo o non è ben formato: servono un '
+                                   'numero intero da 1 a {max} e il motivo'),
+        'time_day': 'l\'ora del comando non è leggibile, quindi il giorno non è verificabile',
+        'day_over': 'il giorno UTC del comando ({day}) è già finito',
+        'merge_budget_granted': ('il {day} (UTC) i merge delegati al supervisore possono essere '
+                                 '{n} in più: il tetto del giorno passa a {cap} (`[delegations] '
+                                 'max_merges_per_day` = {max}, più le estensioni del giorno). Il '
+                                 'giorno dopo torna quello configurato.'),
+        'retry_applied': ('il passo `{step}` viene ripetuto (tentativo {attempt} di {max}), senza '
+                          'contare un round di review.'),
+        'manual': ('rimuovere `{label}` e impostare la label del passo da eseguire '
+                   '(`agent:ready` sulla issue, `agent:review` o `agent:changes` sulla PR).'),
+        'without_supervisor': 'Per riprendere senza il supervisore: {manual}',
+        'supervisor_resume': ('Per riprendere, il supervisore o un utente fidato scrive come '
+                              'prima riga di un commento {valid}. Per riprendere senza il '
+                              'supervisore: {manual}'),
+        'preflight_alternative': ('In alternativa, un utente fidato decide le lacune del '
+                                  'controllo di prontezza con `/devloop {accept}` o `/devloop '
+                                  '{decide} <decisioni>` come prima riga di un commento.'),
+        'operator_merge_resume': ('La PR è pronta e il merge spetta all\'operatore: si mergia a '
+                                  'mano, come spiega il commento «Il merge spetta '
+                                  'all\'operatore».'),
+        'merge_delegation': ('`/devloop {merge}` è una delega del supervisore; l\'operatore '
+                             'mergia la PR a mano'),
+        'merge_pr_only': ('`/devloop {merge}` vale solo su una PR pronta il cui merge spetta '
+                          'all\'operatore'),
+        'already_operator': 'l\'escalation è già all\'operatore',
+        'grant_budget_delegation': ('`/devloop {command}` è una delega del supervisore, solo su '
+                                    'un\'escalation `{cls}`; i valori dell\'envelope e le altre '
+                                    'estensioni restano decisioni dell\'operatore'),
+        'decide_only': ('vale solo su un\'issue il cui ultimo controllo di prontezza è fallito '
+                        'con lacune tutte `default_available` e nessuna suddivisione'),
+        'preflight_no_retry': 'il controllo di prontezza non si ripete con `/devloop retry`',
+        'not_step': ('quello che ha portato qui {where} non è un\'escalation che registri un '
+                     'passo da ripetere'),
+        'preflight_ready': ('il controllo di prontezza riparte rimettendo `{ready}`, che l\'issue '
+                            'non ha più'),
+        'preflight_ready_resume': 'Per riprendere: rimuovere `{operator}` e rimettere `{ready}`.',
+        'operator_limit': ('non eseguito: il passo `{step}` è già stato ripetuto {done} volte per '
+                           'lo stesso input (al massimo {max}). {stays}\n\n{resume}'),
+        'finding_coordinator_only': ('`/devloop {finding}` come comando di un\'escalation è solo '
+                                     'del coordinatore; un utente fidato chiude un finding con '
+                                     'la stessa riga e poi riporta la PR in `{review}`'),
+        'finding_open_only': ('`/devloop {finding}` del coordinatore vale solo su un\'escalation '
+                              '`{cls}` di una PR'),
+        'finding_form': ('ogni riga va scritta come `{form} <round/reviewer/ID> '
+                         'resolved|withdrawn <motivo>`, e il motivo è obbligatorio'),
+        'finding_owners': 'alcuni finding della PR non hanno un proprietario ricostruibile',
+        'finding_head': ('l\'ultimo round di review non è del head della PR (`{head}`): serve '
+                         'una nuova review, non la chiusura di un finding'),
+        'finding_asking': ('nel round {round} {who} non approva il head e chiede ancora modifiche '
+                           'o una decisione: il coordinatore chiude un finding, non scavalca un '
+                           'verdetto'),
+        'finding_trust': ('un reviewer ha marcato `trust_policy` {keys}: i finding sulla politica '
+                          'di fiducia restano dell\'operatore'),
+        'finding_absent': '{keys} non è aperto su questa PR',
+        'closed_left': ('chiusi dal coordinatore:\n\n{listed}\n\nRestano aperti {left}: la PR '
+                        'resta in `{label}`.'),
+        'closed_all': ('chiusi dal coordinatore:\n\n{listed}\n\nNessun finding resta aperto: la '
+                       'PR torna in `{review}`, dove l\'approvazione registrata viene riapplicata '
+                       'senza una nuova review; promozione e merge seguono le loro regole.'),
+        'grant_budget_class': ('`/devloop {command}` estende l\'envelope di budget solo su '
+                               'un\'escalation `{budget}` all\'operatore o `{grantable}` al '
+                               'supervisore; su un\'escalation di altra classe non vale'),
+        'old_budget_escalation': ('l\'escalation non registra il passo, la storia, il tipo o '
+                                  'l\'agent del turno rifiutato (è precedente a #595), quindi '
+                                  'l\'estensione non è verificabile'),
+        'not_granted': 'l\'estensione non si concede: {why}',
+        'story_spent_operator': ('nel frattempo la storia `{story}` ha già avuto la sua unica '
+                                 'estensione: una seconda è dell\'operatore'),
+        'lapsed_operator': ('l\'estensione di questo comando è già decaduta: serve una nuova '
+                            'concessione'),
+        'grant_round_class': ('`/devloop {command}` concede un round in più solo a una PR in '
+                              'un\'escalation `round_limit`; su un\'escalation di altra classe '
+                              'non vale'),
+        'no_head': ('l\'escalation non registra il head della PR (è precedente a #553), quindi '
+                    'la concessione non è verificabile'),
+        'coordinator_rounds': ('a questa PR è già stato concesso {before} round su un\'escalation '
+                               'all\'operatore: il coordinatore ne concede al massimo {max} per '
+                               'PR, gli altri li concede l\'operatore'),
+        'no_journal': ('il round non si può registrare: il journal dei turni non è '
+                       'disponibile'),
+        'journal_failed': 'il round non si può registrare nel journal dei turni',
+        'operator_round_granted': ('concesso un round in più a questa sola PR: il suo limite '
+                                   'passa a {limit} round (`max_review_rounds` = {max}, '
+                                   'invariato, più {total} concessi). Il round è fuori dai tetti '
+                                   'della delega del supervisore; round concessi a questa PR su '
+                                   'un\'escalation all\'operatore: {granted}. La PR torna in '
+                                   '`{resume}`.'),
+        'defaults_refusal': ('I default del controllo di prontezza non possono essere accettati '
+                             'dal supervisore'),
+        'defaults_what': 'i default si riferiscono',
+        'accepted_default': '*Default accettato:*',
+        'accepted': ('default del controllo di prontezza accettati. Questo record conta come un '
+                     'commento fidato: l\'issue torna in coda e il controllo si ripete con '
+                     'questi default.'),
+        'decide_refusal': ('Le lacune del controllo di prontezza non possono essere decise dal '
+                           'supervisore'),
+        'decide_what': 'la decisione si riferisce',
+        'proposed_default': '*Default proposto:*',
+        'decided': ('decisione sulle lacune del controllo di prontezza registrata. Questo record '
+                    'conta come un commento fidato: l\'issue torna in coda e il controllo si '
+                    'ripete con questa decisione.\n\nLacune:\n\n{listed}\n\n**Decisione:**\n\n'
+                    '{quoted}'),
+        'no_check': 'nessun controllo di prontezza fallito da decidere',
+        'not_defaults': ('non tutte le lacune sono `default_available`, o serve una '
+                         'suddivisione: decide l\'operatore'),
+        'design': 'l\'issue ha la label `{label}`',
+        'issue_author': 'l\'issue non è stata aperta da un utente fidato né da un\'app di devloop',
+        'coordinator_trust': ('il controllo di prontezza dichiara toccata la policy di fiducia, '
+                              'o non dice se la tocca: il coordinatore non la decide, decide '
+                              'l\'operatore'),
+        'text_changed': ('il testo dell\'issue è cambiato dopo il controllo di prontezza, quindi '
+                         '{what} a un input superato'),
+    })
+
+
+def quoted(text):
+    """``text`` as a Markdown quote, one ``>`` per line."""
+    return '\n'.join(f'> {line}'.rstrip() for line in (text or '').splitlines())
 
 
 def _epoch(stamp):
@@ -135,6 +820,14 @@ class UntrustedChange(RuntimeError):
 class SupervisionMixin:
     """The methods of ``Dispatcher`` for supervision and commands (#293). They use the
     dispatcher state and its other methods through ``self``."""
+
+    def _texts(self):
+        """The ``TEXTS`` of the project's ``language`` (#633)."""
+        return TEXTS.texts(self.cfg.language)
+
+    def _where(self, is_pr, capital=False):
+        """How the texts name the PR or the issue, in the project's language."""
+        return self._texts()(('The_' if capital else 'the_') + ('pr' if is_pr else 'issue'))
 
     def _supervisor_implemented(self, pr):
         """Whether the supervisor's agent implemented ``pr`` (ADR 0002, principle 4). The agent
@@ -192,40 +885,35 @@ class SupervisionMixin:
         is a critical class, which never reaches the supervisor. This replaces option (a) of
         ADR 0005, P5-2 (#406), and with it ``[delegations] retry_own_prs``, now without
         effect."""
-        cfg, lb = self.cfg, self.cfg.labels
+        cfg, t = self.cfg, self._texts()
         if critical(cls) or cfg.merge.mode != 'auto' or not cfg.supervisor:
             return None, ''
         if step not in RETRY_STEPS:
-            return None, f'il passo `{step}` non è fra quelli che il supervisore può ripetere'
+            return None, t('why_step', step=step)
         try:
             labels = set()
             if pr is not None:
                 if not pr.meta.get('implementer'):
-                    return None, ('il corpo della PR non termina più con il suo marker: chi l\'ha '
-                                  'implementata e la sua modalità di merge non sono verificabili')
+                    return None, t('why_marker')
                 labels |= pr.labels
                 if cls == BUDGET_GRANTABLE and self._supervisor_implemented(pr):
                     # The escalations of process the supervisor decides on its agent's PRs too
                     # (#527) are those the operator listed on #524; an extension of the budget
                     # is not among them.
-                    return None, ('il supervisore ha implementato questa PR, e la concessione di '
-                                  'budget non è fra le escalation di processo che decide anche '
-                                  'sulle PR del proprio agent')
+                    return None, t('why_own_budget')
                 mode = 'auto' if any_merge else self._merge_mode(pr)
                 if mode != 'auto':
-                    return None, (f'la modalità di merge di questa PR è `{mode or "non calcolabile"}`'
-                                  ', non `auto` (override del livello o `operator_only_paths`)')
+                    return None, t('why_mode', mode=mode or t('not_computable'))
             issue = pr.issue if pr is not None else number
             history = self.gh.issue_history(issue)
             if not self._devloop_author(history['author']):
-                return None, (f'l\'issue #{issue} è stata aperta da `{history["author"]}`, che non '
-                              'è un utente fidato né un\'app di devloop')
+                return None, t('why_author', issue=issue, author=history['author'])
             untrusted = self._untrusted_change(history)
             if untrusted:
                 return None, untrusted
             labels |= label_names(self.gh.issue(issue).get('labels') or [])
             if DESIGN_LABEL in labels:
-                return None, f'la label `{DESIGN_LABEL}` è presente'
+                return None, t('why_design', label=DESIGN_LABEL)
             if pr is not None:
                 return self._retry_payload(step, pr, reviewer), ''
             if key is None and cls in (PREFLIGHT_DEFAULT, MERGED_ISSUE):
@@ -235,10 +923,10 @@ class SupervisionMixin:
                 key = self._issue_key(step, self.ws.base_head(),
                                       self._request_hash(history, self.gh.issue_comments(number)))
             if not isinstance(key, dict) or key.get('step') != step:
-                return None, 'l\'input del passo non è stato registrato prima dell\'esecuzione'
+                return None, t('why_key')
             return {'step': step, 'key': key}, ''
         except (GitHubError, WorkspaceError) as exc:
-            return None, f'non è stato possibile verificare che l\'escalation non sia critica ({exc})'
+            return None, t('why_unverifiable', error=exc)
 
     def _retry_payload(self, step, pr=None, reviewer=None, key=None):
         """What a retry of ``step`` needs, recorded in its escalation: the step, the key of its
@@ -389,6 +1077,7 @@ class SupervisionMixin:
             else:
                 start = max(start, position)  # a record without the id spends what precedes it
         found = refused = supervised = None
+        t = self._texts()
         for comment in comments[start + 1:]:
             body = comment.get('body') or ''
             login = (comment.get('author') or {}).get('login')
@@ -421,8 +1110,8 @@ class SupervisionMixin:
             # The coordinator's identity (#528): a delegated command counts as a trusted
             # user's; any other is answered as refused, the closed perimeter.
             delegated = self._coordinator_may(login, command)
-            outside = (coordinator_refusal(command) if self._is_coordinator(login)
-                       else None)
+            outside = (coordinator_refusal(command, self.cfg.language)
+                       if self._is_coordinator(login) else None)
             # The supervisor's rereview also counts on an escalation to the operator (#491), of
             # a PR whose merge is the operator's: ``_operator_rereview`` decides whether it
             # applies. A trusted user's command waiting there wins over it.
@@ -440,8 +1129,8 @@ class SupervisionMixin:
                      None)
                     if not (self._may_hold(login) or delegated)
                     else (f'malformed, expected `/devloop {command} <sha> <reason>`',
-                          f'manca il testo, il comando va scritto come `/devloop {command} <sha> '
-                          '<motivo>`') if reason is None
+                          t('missing_text', command=command,
+                            arguments='<sha> ' + t('reason_arg'))) if reason is None
                     else (None, None))
             elif operator:
                 allowed = login in self.cfg.trusted_users or rereview or delegated
@@ -449,23 +1138,21 @@ class SupervisionMixin:
                     ('the author is not a trusted user', None) if not allowed
                     and not self._may_hold(login)
                     else ('the escalation is the operator\'s, not the supervisor\'s',
-                          'l\'escalation è affidata all\'operatore, non al supervisore: decide '
-                          'un utente fidato') if not allowed
+                          t('operator_escalation')) if not allowed
                     else (f'malformed, expected `/devloop {command} <text>`',
-                          f'manca il testo, il comando va scritto come `/devloop {command} '
-                          '<testo>`') if reason is None
+                          t('missing_text', command=command, arguments=t('text_arg')))
+                    if reason is None
                     else (None, None))
             else:
                 why, refusal = (
                     ('the author is neither the supervisor nor a trusted user', None)
                     if not (self._may_hold(login) or delegated)
                     else (f'merge mode is "{self.cfg.merge.mode}", not "auto"',
-                          f'la modalità di merge è `{self.cfg.merge.mode}`, non `auto`, quindi '
-                          'i comandi del supervisore non valgono')
+                          t('not_auto', mode=self.cfg.merge.mode))
                     if self.cfg.merge.mode != 'auto'
                     else (f'malformed, expected `/devloop {command} <text>`',
-                          f'manca il testo, il comando va scritto come `/devloop {command} '
-                          '<testo>`') if reason is None
+                          t('missing_text', command=command, arguments=t('text_arg')))
+                    if reason is None
                     else (None, None))
             if why:
                 self.log(f'  #{number}: ignored `/devloop {command}` by {login}: {why}')
@@ -484,7 +1171,8 @@ class SupervisionMixin:
         retry resumes, recorded again so that the operator may still retry it (#321).
         ``extra``: more fields of its record, such as the head of a ``round_limit`` (#553)."""
         lb = self.cfg.labels
-        self.gh.comment(number, render_escalation(reason, cls=cls, retry=retry, extra=extra))
+        self.gh.comment(number, render_escalation(reason, cls=cls, retry=retry, extra=extra,
+                                                  language=self.cfg.language))
         self.gh.edit_labels(number, add=[lb.needs_operator],
                             remove=[lb.needs_supervisor, *remove])
 
@@ -548,6 +1236,7 @@ class SupervisionMixin:
             self.log('  in neither agent:needs-supervisor nor agent:needs-operator any more; '
                      'nothing to do')
             return
+        t = self._texts()
 
         def tracer(command, cls):
             """The ``trace(outcome, text, **extra)`` of the ``supervision`` record of
@@ -563,10 +1252,10 @@ class SupervisionMixin:
                     # The coordinator's reserved merge (#529): the summary lists it apart.
                     record['role'] = COORDINATOR
                 self.gh.comment(number, render_supervision(
-                    record, f'`/devloop {name}` di `{by}`: {text.strip()}',
-                    COORDINATOR_MERGE_TITLE if coordinator and operator
-                    else MERGE_TITLE if name == MERGE and operator
-                    else OPERATOR_TITLE if operator else SUPERVISOR_TITLE, records))
+                    record, t('trace', name=name, by=by, text=text.strip()),
+                    t('coordinator_merge_title' if coordinator and operator
+                      else 'merge_title' if name == MERGE and operator
+                      else 'operator_title' if operator else 'supervisor_title'), records))
                 self.log(f'  {name} by {by}: {outcome}')
             return trace
 
@@ -610,31 +1299,36 @@ class SupervisionMixin:
         carried_remove = [] if keep_ready or (carry and carry['step'] == 'preflight') \
             else [lb.ready]
         trace = tracer(command, cls)
-        stays = 'Il comando è speso; l\'escalation resta al supervisore.'
+        stays = t('spent', stays=t('escalation_stays'))
+
+        def refused(why, superseded=False):
+            """The answer to a command that does not apply: the escalation stays with the
+            supervisor."""
+            return trace('refused', t('refused', why=why) + f' {stays}\n\n'
+                         + self._supervisor_resume(escalation, is_pr, superseded=superseded))
+
         if command.get('refusal'):
-            where = 'la PR' if is_pr else 'l\'issue'
-            how = (f'Il comando è speso; {where} resta in `{lb.needs_operator}`.\n\n'
-                   + self._operator_resume(command['anchor'], is_pr) if operator
-                   else f'Il comando è speso; {where} resta in `{lb.needs_supervisor}`.\n\n'
-                   + self._supervisor_resume(escalation, is_pr))
-            return trace('refused', f'non applicabile: {command["refusal"]}. {how}')
+            where = self._where(is_pr)
+            how = (t('spent', stays=t('item_stays', where=where, label=lb.needs_operator))
+                   + '\n\n' + self._operator_resume(command['anchor'], is_pr) if operator
+                   else t('spent', stays=t('item_stays', where=where, label=lb.needs_supervisor))
+                   + '\n\n' + self._supervisor_resume(escalation, is_pr))
+            return trace('refused', t('not_applicable', why=command['refusal'], how=how))
         if name in (CAPACITY, MERGE_BUDGET) or name in (MERGE, FINDING) and not operator:
             # A temporary capacity limit (#412) and an extension of the delegated merges (#486)
             # are never a decision on an escalation; a delegated merge applies only to a PR
             # whose merge is the operator's (#486), the coordinator's closure of findings only
             # on an ``open_findings`` escalation, always the operator's (#606).
-            where = 'la PR' if is_pr else 'l\'issue'
             label = lb.needs_operator if operator else lb.needs_supervisor
             resume = (self._operator_resume(command['anchor'], is_pr) if operator
                       else self._supervisor_resume(escalation, is_pr))
-            what = ('vale solo su una PR pronta il cui merge spetta all\'operatore, non su '
-                    'un\'escalation al supervisore' if name == MERGE
-                    else 'vale solo su un\'escalation `open_findings` all\'operatore'
-                    if name == FINDING
-                    else 'vale solo sulla issue del riepilogo (`[report] issue`), non su '
-                         'un\'escalation')
-            return trace('refused', f'non applicabile: `/devloop {name}` {what}. Il '
-                         f'comando è speso; {where} resta in `{label}`.\n\n{resume}')
+            what = t('only_merge' if name == MERGE
+                     else 'only_finding' if name == FINDING else 'only_report')
+            return trace('refused', t('not_applicable', why=f'`/devloop {name}` {what}',
+                                      how=t('spent', stays=t('item_stays',
+                                                             where=self._where(is_pr),
+                                                             label=label))
+                                      + f'\n\n{resume}'))
         if operator and name == REREVIEW:
             # Only the supervisor's reaches here: a trusted user's is no command (#491).
             return self._operator_rereview(target, number, labels, fresh if is_pr else None,
@@ -643,73 +1337,56 @@ class SupervisionMixin:
             return self._operator_command(target, number, labels, comments, command, trace,
                                           fresh if is_pr else None)
         if critical(cls) or escalation.get('to') != 'supervisor':
-            trace('refused', 'rifiutato. L\'escalation è critica (classe '
-                  f'`{cls}`) o non è affidata al supervisore: decide l\'operatore.')
-            return self._to_operator(number, f'Il supervisore non può decidere questa escalation '
-                                     f'(classe `{cls}`): `/devloop {name}` di `{by}` è stato '
-                                     'rifiutato.', 'supervisor_refused', carried_remove, carry)
+            trace('refused', t('refused_critical', cls=cls))
+            return self._to_operator(number, t('to_operator_critical', cls=cls, name=name, by=by),
+                                     'supervisor_refused', carried_remove, carry)
         if name == ESCALATE:
             reason = ' '.join(command['reason'].split())
-            trace('escalated', f'l\'escalation passa all\'operatore: {reason}')
-            return self._to_operator(number, f'Il supervisore `{by}` passa all\'operatore '
-                                     f'l\'escalation di classe `{cls}`: {reason}',
+            trace('escalated', t('escalated', reason=reason))
+            return self._to_operator(number, t('to_operator_escalated', by=by, cls=cls,
+                                               reason=reason),
                                      'supervisor_escalated', carried_remove, carry)
         if name == GRANT_ROUND:
             if not is_pr or cls != ROUND_GRANTABLE:
-                return trace('refused', 'rifiutato: vale solo per un\'escalation '
-                             f'`{ROUND_GRANTABLE}` di una PR al limite dei round. {stays}\n\n'
-                             + self._supervisor_resume(escalation, is_pr))
+                return refused(t('only_round_grantable', cls=ROUND_GRANTABLE))
             return self._grant_round(target, number, fresh, labels, comments, command,
                                      escalation, trace)
         if name == GRANT_BUDGET:
             if cls != BUDGET_GRANTABLE:
-                return trace('refused', 'rifiutato: vale solo per un\'escalation '
-                             f'`{BUDGET_GRANTABLE}` di un turno rifiutato dall\'envelope di '
-                             f'budget. {stays}\n\n' + self._supervisor_resume(escalation, is_pr))
+                return refused(t('only_budget_grantable', cls=BUDGET_GRANTABLE))
             return self._grant_budget(target, number, fresh if is_pr else None, labels,
                                       comments, command, escalation, trace, human_remove)
         if name in (ACCEPT_DEFAULTS, DECIDE):
             if is_pr or cls != PREFLIGHT_DEFAULT:
-                return trace('refused', 'rifiutato: vale solo per un\'escalation `preflight_default` '
-                             f'del controllo di prontezza. {stays}\n\n'
-                             + self._supervisor_resume(escalation, is_pr))
+                return refused(t('only_preflight_default'))
             if name == DECIDE:
                 return self._decide(number, labels, comments, trace, command['reason'],
                                     coordinator=self._is_coordinator(by))
             return self._accept_defaults(number, labels, comments, trace)
         if cls not in (TOOL_FAILURE, SYNC_FAILED):
-            return trace('refused', 'rifiutato: vale solo per le escalation `tool_failure` e '
-                         f'`sync_failed`. {stays}\n\n' + self._supervisor_resume(escalation, is_pr))
+            return refused(t('only_retry'))
         if name == REREVIEW and not (is_pr and cls == TOOL_FAILURE
                                      and escalation.get('step') == 'review'):
-            return trace('refused', 'rifiutato: vale solo per un\'escalation `tool_failure` della '
-                         f'review di una PR. {stays}\n\n'
-                         + self._supervisor_resume(escalation, is_pr))
+            return refused(t('only_rereview'))
         # An issue a merged devloop PR already resolved is never checked nor implemented again
         # (#228), whatever escalation it waits in: the retry becomes a merged_issue escalation.
         merged = [] if is_pr else self._merged_prs(number)
         if merged:
-            trace('refused', 'rifiutato: l\'issue è già risolta da una PR devloop mergiata ('
-                  + ', '.join(f'#{m["number"]}' for m in merged) + '), quindi ripeterne il '
-                  'passo duplicherebbe il lavoro. Il comando è speso; l\'issue passa a '
-                  'un\'escalation `merged_issue`.')
+            trace('refused', self._merged_refusal(merged))
             return self._do_merged_issue(number, merged)
         key, step = escalation.get('key'), escalation.get('step')
         if not self._retryable(escalation, is_pr):
-            trace('refused', 'rifiutato: l\'escalation non registra un passo ripetibile.')
-            return self._to_operator(number, 'L\'escalation non registra un passo che il '
-                                     f'supervisore possa ripetere: `/devloop {name}` di `{by}` è '
-                                     'stato rifiutato.', 'supervisor_refused', human_remove)
+            trace('refused', t('refused', why=t('not_retryable')))
+            return self._to_operator(number, t('to_operator_not_retryable', name=name, by=by),
+                                     'supervisor_refused', human_remove)
         current = self._current_key(number, key, target if is_pr else None)
         # The base of an implementation does not bind its retry (#475): the step starts again
         # from the current base with the saved work of its timed-out turn reapplied.
         changed = changed_input(current, key)
 
         def superseded():
-            return trace('refused', 'rifiutato: l\'input del passo è cambiato dopo '
-                         'l\'escalation (' + ', '.join(f'`{k}`' for k in changed)
-                         + f'), quindi il comando si riferisce a un input superato. {stays}\n\n'
-                         + self._supervisor_resume(escalation, is_pr, superseded=True))
+            return refused(t('superseded', changed=', '.join(f'`{k}`' for k in changed)),
+                           superseded=True)
 
         # What made the escalation non-critical is checked again, on data read now: a
         # phase:design label, an untrusted text or author, the PR's own merge mode or its
@@ -725,26 +1402,31 @@ class SupervisionMixin:
         route, why = self._supervised(number, cls, step, target if is_pr else None,
                                       key.get('reviewer'), key=key)
         if route is None:
-            why = why or 'la modalità di merge non è più `auto` con un supervisore'
-            trace('refused', f'rifiutato: l\'escalation è diventata critica ({why}).')
-            return self._to_operator(number, 'Il supervisore non può più decidere questa '
-                                     f'escalation: {why}. `/devloop {name}` di `{by}` è stato '
-                                     'rifiutato.', 'supervisor_refused', carried_remove, carry)
+            why = why or t('no_longer_auto')
+            trace('refused', t('became_critical', why=why))
+            return self._to_operator(number, t('to_operator_became', why=why, name=name, by=by),
+                                     'supervisor_refused', carried_remove, carry)
         if changed:
             return superseded()
         if name == REREVIEW:
             return self._rereview(number, target, command, escalation, trace)
 
         def limit(done):
-            trace('limit', f'non eseguito: il passo `{step}` è già stato ripetuto {done} volte '
-                  'per lo stesso input.', key=key)
-            self._to_operator(number, f'Il passo `{step}` è fallito di nuovo dopo {done} '
-                              f'tentativi autorizzati dal supervisore (al massimo '
-                              f'{MAX_RETRIES}): `/devloop {name}` di `{by}` non è stato '
-                              'eseguito.', 'retry_limit', human_remove)
+            trace('limit', t('limit', step=step, done=done), key=key)
+            self._to_operator(number, t('to_operator_limit', step=step, done=done,
+                                        max=MAX_RETRIES, name=name, by=by),
+                              'retry_limit', human_remove)
 
         self._apply_retry(number, is_pr, comments, escalation, [lb.needs_supervisor], trace,
                           limit)
+
+    def _merged_refusal(self, merged):
+        """The answer to a command on an issue the merged devloop PRs ``merged`` resolved
+        (#228): it becomes a ``merged_issue`` escalation."""
+        t = self._texts()
+        return (t('refused', why=t('merged_why', merged=', '.join(f'#{m["number"]}'
+                                                                  for m in merged)))
+                + ' ' + t('merged_spent'))
 
     def _do_delegated_merge(self, target):
         """A ``/devloop merge`` of the supervisor on a PR (#486), planned in the merge lane
@@ -777,46 +1459,34 @@ class SupervisionMixin:
         record, it voids the open round as a trusted user's request would (``_read_thread``),
         and spends the command. Then the PR goes back to ``agent:review``, where the next tick
         opens the new round; the merge is untouched and stays where the merge mode puts it."""
-        lb = self.cfg.labels
+        lb, t = self.cfg.labels, self._texts()
         label = lb.needs_operator if operator else lb.needs_supervisor
-        stays = (f'Il comando è speso; la PR resta in `{label}`.\n\n{resume}' if operator
-                 else 'Il comando è speso; l\'escalation resta al supervisore.\n\n'
-                      + self._supervisor_resume(escalation, True))
+        stays = (t('spent', stays=t('item_stays', where=t('the_pr'), label=label))
+                 + f'\n\n{resume}' if operator
+                 else t('spent', stays=t('escalation_stays')) + '\n\n'
+                 + self._supervisor_resume(escalation, True))
         latest = current_round(pr.reviews)
         missing = missing_verdicts(pr)
         asked = [owner_of(r) for r in latest
                  if current_verdict(r.get('verdict')) == 'needs_operator']
         verdicts = ', '.join(f'`{owner_of(r)}`: `{current_verdict(r.get("verdict"))}`'
                              for r in latest)
-        why = ('nell\'ultimo round un reviewer ha chiesto una decisione dell\'operatore ('
-               + ', '.join(f'`{a}`' for a in asked) + '), e una nuova review la scavalcherebbe'
-               if asked
-               else 'nessun round di review di questo head aspetta il verdetto di un reviewer '
-                    f'del quorum: `/devloop {RETRY}` apre già un round con la configurazione '
-                    'attuale' if not latest or latest[0]['head_sha'] != pr.head_sha
-               else 'dopo l\'ultimo round con un verdetto è già stata chiesta una nuova review, '
-                    'da un utente fidato o dal supervisore, e il suo round non ha scritto alcun '
-                    'verdetto: un\'altra lo ripeterebbe senza contare per `max_review_rounds`'
-               if pr.rereview
+        why = (t('rereview_asked', asked=', '.join(f'`{a}`' for a in asked)) if asked
+               else t('rereview_no_round', retry=RETRY)
+               if not latest or latest[0]['head_sha'] != pr.head_sha
+               else t('rereview_again') if pr.rereview
                # The first reviewer closed the round without approving (#521): the second was
                # not asked, and no verdict is missing.
-               else 'l\'ultimo round è stato chiuso dal primo reviewer del quorum, che non ha '
-                    'approvato (' + verdicts + '): con `second_reviewer = "'
-                    + latest[0]['receipt']['second_reviewer'] + '"` il secondo reviewer non era '
-                    'richiesto e non manca alcun verdetto, e una nuova review scavalcherebbe il '
-                    'suo' if closed_by_first(latest)
-               else 'ogni reviewer del quorum dell\'ultimo round ha già un verdetto ('
-                    + verdicts + '), e una nuova review lo scavalcherebbe' if not missing
+               else t('rereview_first', verdicts=verdicts,
+                      second=latest[0]['receipt']['second_reviewer'])
+               if closed_by_first(latest)
+               else t('rereview_all', verdicts=verdicts) if not missing
                else '')
         if why:
-            return trace('refused', f'rifiutato: {why}. {stays}')
+            return trace('refused', t('refused', why=why) + f' {stays}')
         reviewers = ', '.join(f'`{key}`' for key in missing)
-        trace('applied', f'si apre un round di review nuovo al posto del round '
-              f'{latest[0]["round"]}, in cui manca il verdetto di {reviewers}. Il round nuovo '
-              'sceglie i reviewer con la configurazione attuale, ha una ricevuta nuova e conta '
-              'per `max_review_rounds`; il merge resta dove lo mette la sua modalità.\n\n'
-              '**Motivo:**\n\n'
-              + '\n'.join(f'> {line}'.rstrip() for line in command['reason'].splitlines()),
+        trace('applied', t('rereview_applied', round=latest[0]['round'], reviewers=reviewers)
+              + f'\n\n{t("reason_title")}\n\n' + quoted(command['reason']),
               round=latest[0]['round'], reviewers=missing)
         self.gh.edit_labels(number, add=[lb.review], remove=[label])
 
@@ -829,37 +1499,33 @@ class SupervisionMixin:
         ``operator_only_paths`` path) still holds on the PR read now. Then ``_rereview``
         decides, as on an escalation to the supervisor. Any other case is refused with the
         reason, and the item stays with the operator."""
-        lb = self.cfg.labels
+        lb, t = self.cfg.labels, self._texts()
         anchor = command['anchor']
         escalation = anchor['record']
         is_pr = isinstance(target, PullRequest)
         resume = self._operator_resume(anchor, is_pr)
-        where = 'la PR' if is_pr else 'l\'issue'
 
         def refuse(why):
-            return trace('refused', f'rifiutato: {why}. Il comando è speso; {where} resta in '
-                         f'`{lb.needs_operator}`.\n\n{resume}')
+            return trace('refused', t('refused', why=why) + ' '
+                         + t('spent', stays=t('item_stays', where=self._where(is_pr),
+                                              label=lb.needs_operator))
+                         + f'\n\n{resume}')
 
         if self.cfg.merge.mode != 'auto' or not self.cfg.supervisor:
-            return refuse(f'la modalità di merge è `{self.cfg.merge.mode}`, non `auto`, quindi '
-                          'i comandi del supervisore non valgono')
+            return refuse(t('not_auto', mode=self.cfg.merge.mode))
         if not (is_pr and anchor['kind'] == 'notice' and escalation.get('event') == 'escalation'
                 and escalation.get('class') == TOOL_FAILURE
                 and escalation.get('step') == 'review' and self._retryable(escalation, True)):
-            return refuse('l\'escalation è affidata all\'operatore: il supervisore vi può chiedere '
-                          'una nuova review solo dopo un `tool_failure` della review di una PR')
+            return refuse(t('rereview_operator'))
         key = escalation['key']
         changed = changed_input(self._current_key(number, key, target), key)
         if changed:
-            return refuse('l\'input del passo è cambiato dopo l\'escalation ('
-                          + ', '.join(f'`{k}`' for k in changed)
-                          + '), quindi il comando si riferisce a un input superato')
+            return refuse(t('superseded', changed=', '.join(f'`{k}`' for k in changed)))
         pr = self._fresh_pr(target, labels, fresh, comments)
         route, why = self._supervised(number, TOOL_FAILURE, 'review', pr, key.get('reviewer'),
                                       key=key, any_merge=True)
         if route is None:
-            return refuse('l\'escalation non è del supervisore ('
-                          + (why or 'nessun supervisore configurato') + ')')
+            return refuse(t('not_supervisors', why=why or t('no_supervisor')))
         return self._rereview(number, pr, command, escalation, trace, operator=True,
                               resume=resume)
 
@@ -938,25 +1604,18 @@ class SupervisionMixin:
         state = finding_state(reviews, pr.closures)
         security = [f['key'] for f in state.open if f.get('security') is not False]
         delegated = self._delegated_rounds(pr)
-        why = (f'a questa PR sono già stati concessi {delegated} round, il massimo della '
-               f'delega (`[delegations] max_rounds_per_pr` = {cap})'
-               if delegated >= cap
-               else 'le concessioni di oggi non sono verificabili: il journal dei turni non è '
-                    'disponibile o non è leggibile' if today is None
-               else f'oggi sono già state fatte {today} concessioni, il massimo giornaliero '
-                    f'(`[delegations] max_grants_per_day` = {daily_cap})'
-               if today >= daily_cap
-               else 'il proprietario di alcuni finding non è ricostruibile'
-               if pr.finding_problems or state.problems
-               else 'restano aperti finding di sicurezza, o finding che non dicono se lo sono: '
-                    + ', '.join(f'`{k}`' for k in security) if security
-               else 'l\'ultimo round contato non è una CI fallita e i finding bloccanti aperti '
-                    'non sono meno di quelli del round precedente'
+        t = self._texts()
+        why = (t('cap_pr', granted=delegated, cap=cap) if delegated >= cap
+               else t('grants_unknown') if today is None
+               else t('cap_day', today=today, cap=daily_cap) if today >= daily_cap
+               else t('owners') if pr.finding_problems or state.problems
+               else t('security', keys=', '.join(f'`{k}`' for k in security)) if security
+               else t('no_progress')
                if not (last_counted_ci(reviews, **waiver(cfg, pr.fixes, pr.closures))
                        or findings_decreasing(reviews, pr.closures))
                else '')
         if why:
-            return None, f'la delega dei round non si applica: {why}'
+            return None, t('rounds_why', why=why)
         return {'head': pr.head_sha, 'resume': self._round_resume(pr),
                 'granted': delegated}, ''
 
@@ -976,40 +1635,36 @@ class SupervisionMixin:
         limit of the PR and spends the command; then the ledger ``event`` with the delegation,
         the caps, the value granted and what remains; last the labels: the PR goes back to the
         label it was in (``agent:review`` or ``agent:changes``) and the next tick goes on."""
-        lb = self.cfg.labels
+        lb, t = self.cfg.labels, self._texts()
         by = command['by']
         head = fresh.get('headRefOid') or target.head_sha
         resume = escalation.get('resume')
         resume = resume if resume in (lb.review, lb.changes) else lb.review
         if head != escalation.get('head'):
-            return trace('refused', 'rifiutato: il head della PR è cambiato dopo l\'escalation, '
-                         'quindi la concessione si riferisce a un input superato. Il comando è '
-                         'speso; l\'escalation resta al supervisore.\n\n'
+            return trace('refused', t('refused', why=t('head_moved')) + ' '
+                         + t('spent', stays=t('escalation_stays')) + '\n\n'
                          + self._supervisor_resume(escalation, True, superseded=True))
 
         def refuse(why):
-            trace('refused', f'rifiutato: {why}.')
+            trace('refused', t('refused', why=why))
             # The head and the label to resume go with the escalation, so that a trusted user
             # may grant the round there (#553).
-            return self._to_operator(number, 'Il supervisore non può concedere un altro round a '
-                                     f'questa PR: {why}. `/devloop {GRANT_ROUND}` di `{by}` è '
-                                     f'stato rifiutato.\n\n{OPERATOR_ROUNDS_TEXT}',
+            return self._to_operator(number, t('to_operator_round', why=why, command=GRANT_ROUND,
+                                               by=by,
+                                               rounds=operator_rounds_text(self.cfg.language)),
                                      'round_limit', extra={'head': head, 'resume': resume})
 
         pr = self._fresh_pr(target, labels, fresh, comments)
         route, why = self._round_grant(pr, pr.reviews)
         if route is None:
-            return refuse(why or ('la delega dei round è spenta (`[delegations] rounds`), o la '
-                                  'modalità di merge non è più `auto` con un supervisore'))
+            return refuse(why or t('rounds_off'))
         rules = self.cfg.delegations
         # The daily cap is checked again and the grant recorded in one step (#405): another
         # grant applied in the meantime, on another PR, may have taken the last one.
         daily = self.ledger.journal.grant('rounds', number, command['comment'], by,
                                           rules.max_grants_per_day)
         if daily is None:
-            return refuse('la delega dei round non si applica: nel frattempo le concessioni di '
-                          'oggi hanno raggiunto il massimo giornaliero (`[delegations] '
-                          f'max_grants_per_day` = {rules.max_grants_per_day})')
+            return refuse(t('rounds_why', why=t('daily_reached', cap=rules.max_grants_per_day)))
         # The cap of the delegation counts its own rounds only, not those granted on an
         # escalation to the operator (#553); the limit of the PR counts both.
         granted = self._delegated_rounds(pr) + 1
@@ -1019,13 +1674,10 @@ class SupervisionMixin:
                    'daily_left': rules.max_grants_per_day - daily}
         total = pr.granted_rounds + 1
         limit = self.cfg.max_review_rounds + total
-        trace('granted', f'concesso un round in più a questa PR: il suo limite passa a {limit} '
-              f'round (`max_review_rounds` = {self.cfg.max_review_rounds}, più {total} '
-              f'concessi). Round concessi a questa PR dalla delega: {granted} di '
-              f'{rules.max_rounds_per_pr}; '
-              f'concessioni di oggi: {daily} di {rules.max_grants_per_day}. La PR torna in '
-              f'`{resume}`.\n\n**Motivo e analisi delle cause:**\n\n'
-              + '\n'.join(f'> {line}'.rstrip() for line in command['reason'].splitlines()),
+        trace('granted', t('round_granted', limit=limit, max=self.cfg.max_review_rounds,
+                           total=total, granted=granted, cap=rules.max_rounds_per_pr,
+                           daily=daily, daily_cap=rules.max_grants_per_day, resume=resume)
+              + f'\n\n{t("causes_title")}\n\n' + quoted(command['reason']),
               **figures)
         self.ledger.event(number, 'delegation_grant', delegation='rounds', by=by,
                           comment=command['comment'], **figures)
@@ -1039,24 +1691,21 @@ class SupervisionMixin:
         daily cap of the delegations, for an agent still configured, and when the extension can
         be granted (``budget.grantable``): the story never extended, refused at a limit that
         the extension would cover. Anything that cannot be verified refuses it."""
-        cfg = self.cfg
+        cfg, t = self.cfg, self._texts()
         cap = cfg.delegations.max_grants_per_day
         today = self._grants_today()
         if today is None:
-            return None, ('le concessioni di oggi non sono verificabili: il journal dei turni '
-                          'non è disponibile o non è leggibile')
+            return None, t('grants_unknown')
         if today >= cap:
-            return None, (f'oggi sono già state fatte {today} concessioni, il massimo '
-                          f'giornaliero (`[delegations] max_grants_per_day` = {cap})')
+            return None, t('cap_day', today=today, cap=cap)
         if not isinstance(agent, str) or agent not in cfg.agents or not isinstance(kind, str):
-            return None, ('il turno rifiutato non è ricostruibile: il suo agent (`'
-                          f'{agent}`) non è configurato, o il tipo del turno manca')
+            return None, t('turn_unknown', agent=agent)
         try:
             story, extension, why = budget_grantable(
                 cfg.budget, self.ledger.journal, repo=cfg.repo, issue=issue, kind=kind,
-                agent=cfg.agent(agent))
+                agent=cfg.agent(agent), language=cfg.language)
         except JournalError as exc:
-            return None, f'il journal dei turni non è leggibile ({exc})'
+            return None, t('journal_unreadable', error=exc)
         if why:
             return None, why
         return {'story': story, 'extension': extension, 'kind': kind, 'agent': agent}, ''
@@ -1079,13 +1728,14 @@ class SupervisionMixin:
         apply."""
         if not self.cfg.delegations.budget or step not in RETRY_STEPS:
             return None, ''
+        t = self._texts()
         route, why = self._supervised(number, BUDGET_GRANTABLE, step, pr, reviewer, key=key)
         if route is None:
-            return None, why and f'la delega del budget non si applica: {why}'
+            return None, why and t('budget_why', why=why)
         issue = pr.issue if pr is not None else number
         found, why = self._budget_extension(issue, exc.kind or step, exc.agent)
         if found is None:
-            return None, f'la delega del budget non si applica: {why}'
+            return None, t('budget_why', why=why)
         return dict(route, **found, category=exc.category), ''
 
     def _pending_extension(self, number, comments, is_pr, operator=False):
@@ -1198,7 +1848,7 @@ class SupervisionMixin:
         A run stopped after the journal recorded the extension and before the ``supervision``
         record, or failed there and handed to the operator, is completed by ``_do_supervise``
         before any command (``_pending_extension`` and ``_finish_extension``), never here."""
-        lb = self.cfg.labels
+        lb, t = self.cfg.labels, self._texts()
         rules = self.cfg.delegations
         by = command['by']
         is_pr = fresh is not None
@@ -1206,36 +1856,28 @@ class SupervisionMixin:
                  if self._retryable(escalation, is_pr) else None)
 
         def refuse(why):
-            trace('refused', f'rifiutato: {why}.')
-            return self._to_operator(number, 'Il supervisore non può estendere l\'envelope di '
-                                     f'budget di questa storia: {why}. `/devloop {GRANT_BUDGET}` '
-                                     f'di `{by}` è stato rifiutato.\n\nI valori dell\'envelope e '
-                                     'le estensioni oltre l\'unica delegata al supervisore '
-                                     'restano decisioni dell\'operatore (ADR 0004, D2).',
+            trace('refused', t('refused', why=why))
+            return self._to_operator(number, t('to_operator_budget', why=why,
+                                               command=GRANT_BUDGET, by=by),
                                      BUDGET, remove, carry, extra=budget_fields(escalation))
 
         # An issue a merged devloop PR already resolved is never implemented again (#228), as
         # for a retry: the command becomes a merged_issue escalation, and nothing is extended.
         merged = [] if is_pr else self._merged_prs(number)
         if merged:
-            trace('refused', 'rifiutato: l\'issue è già risolta da una PR devloop mergiata ('
-                  + ', '.join(f'#{m["number"]}' for m in merged) + '), quindi ripeterne il '
-                  'passo duplicherebbe il lavoro. Il comando è speso; l\'issue passa a '
-                  'un\'escalation `merged_issue`.')
+            trace('refused', self._merged_refusal(merged))
             return self._do_merged_issue(number, merged)
         key, step = escalation.get('key'), escalation.get('step')
         if not rules.budget:
-            return refuse('la delega del budget è spenta (`[delegations] budget`)')
+            return refuse(t('budget_off'))
         if carry is None:
-            return refuse('l\'escalation non registra il passo del turno rifiutato')
+            return refuse(t('no_turn_step'))
         current = self._current_key(number, key, target if is_pr else None)
 
         def superseded():
-            return trace('refused', 'rifiutato: l\'input del passo è cambiato dopo '
-                         'l\'escalation (' + ', '.join(f'`{k}`' for k in sorted(current)
-                                                        if current[k] != key.get(k))
-                         + '), quindi la concessione si riferisce a un input superato. Il '
-                         'comando è speso; l\'escalation resta al supervisore.\n\n'
+            changed = ', '.join(f'`{k}`' for k in sorted(current) if current[k] != key.get(k))
+            return trace('refused', t('refused', why=t('superseded_grant', changed=changed))
+                         + ' ' + t('spent', stays=t('escalation_stays')) + '\n\n'
                          + self._supervisor_resume(escalation, is_pr, superseded=True))
 
         # As a retry: the extension is bound to the input of the refused turn (the key of the
@@ -1247,18 +1889,16 @@ class SupervisionMixin:
         route, why = self._supervised(number, BUDGET_GRANTABLE, step, pr,
                                       key.get('reviewer'), key=key)
         if route is None:
-            return refuse(f'la delega del budget non si applica: {why}' if why else
-                          'la modalità di merge non è più `auto` con un supervisore')
+            return refuse(t('budget_why', why=why) if why else t('no_longer_auto'))
         if current != key:
             return superseded()
         found, why = self._budget_extension(pr.issue if is_pr else number,
                                             escalation.get('kind'), escalation.get('agent'))
         if found is None:
-            return refuse(f'la delega del budget non si applica: {why}')
+            return refuse(t('budget_why', why=why))
         story, extension = found['story'], found['extension']
         if story != escalation.get('story'):
-            return refuse(f'la storia del lavoro (`{story}`) non è quella dell\'escalation '
-                          f'(`{escalation.get("story")}`)')
+            return refuse(t('other_story', story=story, expected=escalation.get('story')))
         # As a retry (``_apply_retry``): an issue blocked by an open issue (#277) does not run
         # its step, so the command waits, unspent, until the last block closes.
         if not is_pr and self._issue_blocked(number):
@@ -1270,16 +1910,11 @@ class SupervisionMixin:
                                                     rules.max_grants_per_day,
                                                     reason=command['reason'] or '')
         if problem == 'spent':
-            return refuse(f'nel frattempo la storia `{story}` ha già avuto la sua unica '
-                          'estensione')
+            return refuse(t('story_spent', story=story))
         if problem == 'lapsed':
-            return refuse('l\'estensione di questo comando è già decaduta, perché il primo '
-                          'turno dopo la concessione è stato rifiutato comunque: serve una '
-                          'nuova concessione')
+            return refuse(t('extension_lapsed'))
         if problem:
-            return refuse('nel frattempo le concessioni di oggi hanno raggiunto il massimo '
-                          f'giornaliero (`[delegations] max_grants_per_day` = '
-                          f'{rules.max_grants_per_day})')
+            return refuse(t('daily_reached', cap=rules.max_grants_per_day))
         return self._finish_extension(number, is_pr, comments, escalation, command, trace,
                                       {'story': story, 'extension': extension}, daily)
 
@@ -1333,36 +1968,28 @@ class SupervisionMixin:
             self.ledger.event(number, 'delegation_grant', delegation='budget', by=by,
                               comment=ident, **figures)
         extra = {}
+        t = self._texts()
         if not resume:
             held = lb.needs_operator if operator else lb.needs_supervisor
-            what = 'La PR' if is_pr else 'L\'issue'
-            where = (f'{what} resta in `{held}`' + (', dove decide l\'operatore come prima'
-                                                    if operator else
-                                                    ', con la sua escalation più recente')
-                     + f': il passo `{step}` non riparte da qui.')
+            where = t('stays_there', what=self._where(is_pr, capital=True), held=held,
+                      how=t('where_operator' if operator else 'where_latest'), step=step)
             extra['trace_only'] = True
         elif is_pr:
             label = escalation.get('resume')
             label = label if label in (lb.review, lb.changes) else lb.review
-            where = f'La PR torna in `{label}`.'
+            where = t('pr_back', label=label)
         elif merged:
-            where = ('L\'issue è però già risolta da una PR devloop mergiata ('
-                     + ', '.join(f'#{m["number"]}' for m in merged) + f'): il passo `{step}` '
-                     'non riparte e l\'issue passa a un\'escalation `merged_issue`.')
+            where = t('merged_after', merged=', '.join(f'#{m["number"]}' for m in merged),
+                      step=step)
         else:
-            where = f'Il passo `{step}` dell\'issue riparte ora, come dopo un retry.'
+            where = t('step_now', step=step)
         if recovered:
-            where = ('Un\'elaborazione precedente si era fermata dopo aver registrato '
-                     'l\'estensione nel journal dei turni: qui se ne completa la traccia, senza '
-                     f'applicarla di nuovo. {where}')
-        reason = command['reason'] or ''
-        trace('granted', f'estesi i tetti dell\'envelope di budget della storia `{story}`: '
-              f'{extension_text(extension)} (il {extension["percent"]}% dei valori fissati alla '
-              'sua prima prenotazione, arrotondato per difetto; nessun dollaro né token). È '
-              'l\'unica estensione della storia: un altro rifiuto va all\'operatore. Concessioni '
-              f'del giorno: {daily} di {rules.max_grants_per_day}. {where}\n\n**Motivo e '
-              'analisi delle cause:**\n\n'
-              + '\n'.join(f'> {line}'.rstrip() for line in reason.splitlines()),
+            where = t('recovered', where=where)
+        trace('granted', t('extended', story=story,
+                           extension=extension_text(extension, self.cfg.language),
+                           percent=extension['percent'], daily=daily,
+                           cap=rules.max_grants_per_day, where=where)
+              + f'\n\n{t("causes_title")}\n\n' + quoted(command['reason']),
               **figures, **extra)
         if not resume:
             return None
@@ -1525,58 +2152,48 @@ class SupervisionMixin:
         ident = comment.get('id')
         args = capacity_arguments(text) if name == CAPACITY else None
         coordinator = self._is_coordinator(by)
+        t = self._texts()
 
         def trace(outcome, what, **extra):
             if coordinator:
                 extra['role'] = COORDINATOR
             record = dict(command=name, by=by, comment=ident, outcome=outcome,
                           reason=args[3] if args else text or '', **extra)
-            self.gh.comment(issue, render_supervision(record, f'`/devloop {name}` di `{by}`: '
-                                                      f'{what.strip()}', CAPACITY_TITLE))
+            self.gh.comment(issue, render_supervision(record, t('trace', name=name, by=by,
+                                                                text=what.strip()),
+                                                      t('capacity_title')))
             self.log(f'capacity: {name} by {by}: {outcome}')
 
         def refuse(why):
-            return trace('refused', f'non applicabile: {why}. Il comando è speso; i limiti di '
-                         f'capacità restano quelli di prima.\n\n{CAPACITY_USAGE}')
+            return trace('refused', t('capacity_refuse', why=why, usage=t('capacity_usage')))
 
         if name != CAPACITY:
-            return refuse(f'sulla issue del riepilogo valgono solo `/devloop {CAPACITY}` e '
-                          f'`/devloop {MERGE_BUDGET}`')
+            return refuse(t('report_only', capacity=CAPACITY, merge_budget=MERGE_BUDGET))
         if not (rules.capacity or coordinator):
-            return refuse('la delega dei limiti di capacità è spenta (`[delegations] capacity`): '
-                          'i limiti li cambia solo l\'operatore')
+            return refuse(t('capacity_off'))
         if cfg.merge.mode != 'auto':
-            return refuse(f'la modalità di merge è `{cfg.merge.mode}`, non `auto`, quindi i '
-                          'comandi del supervisore non valgono')
+            return refuse(t('not_auto', mode=cfg.merge.mode))
         if args is None:
-            return refuse('il comando non è completo o non è ben formato: servono chiave, valore '
-                          'intero, durata e motivo')
+            return refuse(t('capacity_malformed'))
         key, value, minutes, _ = args
         if key in CAPACITY_REFUSED:
-            return refuse(f'`{key}` non è delegata: devloop la applica solo al riavvio di '
-                          '`devloop run`, quindi la cambia solo l\'operatore')
+            return refuse(t('capacity_refused_key', setting=key))
         # The coordinator decides beyond the delegation, within the caps of the code (#611).
         cap = MAX_CAPACITY.get(key) if coordinator else rules.capacity_cap(key)
         hours = MAX_CAPACITY_HOURS if coordinator else rules.capacity_max_hours
         if cap is None:
-            return refuse(f'`{key}` non è fra le chiavi della delega')
+            return refuse(t('capacity_unknown_key', setting=key))
         if not 1 <= value <= cap:
-            return refuse(f'il valore {value} è fuori dai limiti '
-                          + (f'del codice: `{key}` va da 1 a {cap} (tetto del codice)'
-                             if coordinator else f'della delega: `{key}` va da 1 a {cap} '
-                             f'(`[delegations] capacity_{key}`)'))
+            return refuse(t('value_code' if coordinator else 'value_delegation', value=value,
+                            setting=key, cap=cap))
         if minutes > hours * 60:
-            return refuse(f'la durata supera il massimo di {hours} ore '
-                          + ('(tetto del codice)' if coordinator
-                             else '(`[delegations] capacity_max_hours`)'))
+            return refuse(t('hours_code' if coordinator else 'hours_delegation', hours=hours))
         written = _epoch(comment.get('created_at'))
         if written is None:
-            return refuse('l\'ora del comando non è leggibile, quindi la scadenza non è '
-                          'verificabile')
+            return refuse(t('time_expiry'))
         until = written + minutes * 60
         if until <= self.clock():
-            return refuse(f'la durata, contata da quando il comando è stato scritto '
-                          f'({iso(written)}), è già trascorsa')
+            return refuse(t('elapsed', written=iso(written)))
         journal = getattr(self.ledger, 'journal', None)
         try:
             daily = (None if journal is None else
@@ -1585,23 +2202,19 @@ class SupervisionMixin:
             self.log(f'capacity: the grant cannot be recorded: {exc}')
             journal = None
         if journal is None:
-            return refuse('le concessioni di oggi non sono verificabili: il journal dei turni non '
-                          'è disponibile o non è leggibile')
+            return refuse(t('grants_unknown'))
         if daily is None:
-            return refuse('oggi le concessioni hanno già raggiunto il massimo giornaliero '
-                          f'(`[delegations] max_grants_per_day` = {rules.max_grants_per_day})')
+            return refuse(t('capacity_daily', cap=rules.max_grants_per_day))
         configured = getattr(cfg, key)
         figures = {'setting': key, 'value': value, 'configured': configured, 'cap': cap,
                    'minutes': minutes, 'until': iso(until), 'daily': daily,
                    'daily_cap': rules.max_grants_per_day,
                    'daily_left': rules.max_grants_per_day - daily}
-        trace('granted', f'`{key}` vale {value} fino a {iso(until)} (valore configurato: '
-              f'{configured}; tetto ' + ('del codice' if coordinator else 'della delega')
-              + f': {cap}). Alla scadenza torna il valore '
-              f'configurato; un altro `/devloop {CAPACITY}` sulla stessa chiave sostituisce '
-              f'questo. Concessioni di oggi: {daily} di {rules.max_grants_per_day}.\n\n'
-              '**Motivo e analisi delle cause:**\n\n'
-              + '\n'.join(f'> {line}'.rstrip() for line in args[3].splitlines()), **figures)
+        trace('granted', t('capacity_granted', setting=key, value=value, until=iso(until),
+                           configured=configured,
+                           of=t('of_code' if coordinator else 'of_delegation'), cap=cap,
+                           capacity=CAPACITY, daily=daily, daily_cap=rules.max_grants_per_day)
+              + f'\n\n{t("causes_title")}\n\n' + quoted(args[3]), **figures)
         if self.ledger is not None:
             self.ledger.event(issue, 'delegation_grant', delegation='capacity', by=by,
                               comment=ident, **figures)
@@ -1619,42 +2232,38 @@ class SupervisionMixin:
         cfg, rules = self.cfg, self.cfg.delegations
         ident = comment.get('id')
         args = merge_budget_arguments(text)
+        t = self._texts()
 
         def trace(outcome, what, **extra):
             record = dict(command=MERGE_BUDGET, by=by, comment=ident, outcome=outcome,
                           reason=args[1] if args else text or '', **extra)
-            self.gh.comment(issue, render_supervision(record, f'`/devloop {MERGE_BUDGET}` di '
-                                                      f'`{by}`: {what.strip()}',
-                                                      MERGE_BUDGET_TITLE))
+            self.gh.comment(issue, render_supervision(record, t('trace', name=MERGE_BUDGET,
+                                                                by=by, text=what.strip()),
+                                                      t('merge_budget_title')))
             self.log(f'merge budget: {MERGE_BUDGET} by {by}: {outcome}')
 
         def refuse(why):
-            return trace('refused', f'non applicabile: {why}. Il comando è speso; il tetto dei '
-                         f'merge delegati resta quello di prima.\n\n{MERGE_BUDGET_USAGE}')
+            return trace('refused', t('merge_budget_refuse', why=why,
+                                      usage=t('merge_budget_usage')))
 
         if by not in cfg.trusted_users:
-            return refuse('il tetto dei merge delegati lo estende solo un utente fidato '
-                          '(`trusted_users`), mai il supervisore né un\'app')
+            return refuse(t('merge_budget_trusted'))
         if not rules.merge:
-            return refuse('la delega del merge è spenta (`[delegations] merge`)')
+            return refuse(t('merge_off'))
         if args is None:
-            return refuse('il comando non è completo o non è ben formato: servono un numero '
-                          f'intero da 1 a {MAX_MERGE_BUDGET} e il motivo')
+            return refuse(t('merge_budget_malformed', max=MAX_MERGE_BUDGET))
         written = _epoch(comment.get('created_at'))
         if written is None:
-            return refuse('l\'ora del comando non è leggibile, quindi il giorno non è '
-                          'verificabile')
+            return refuse(t('time_day'))
         day, today = iso(written)[:10], iso(self.clock())[:10]
         if day < today:
-            return refuse(f'il giorno UTC del comando ({day}) è già finito')
+            return refuse(t('day_over', day=day))
         n, _ = args
         before = sum(e['n'] for e in self._merge_budget_extensions(day))
         cap = rules.max_merges_per_day + before + n
-        trace('granted', f'il {day} (UTC) i merge delegati al supervisore possono essere {n} in '
-              f'più: il tetto del giorno passa a {cap} (`[delegations] max_merges_per_day` = '
-              f'{rules.max_merges_per_day}, più le estensioni del giorno). Il giorno dopo torna '
-              f'quello configurato.\n\n**Motivo:**\n\n'
-              + '\n'.join(f'> {line}'.rstrip() for line in args[1].splitlines()),
+        trace('granted', t('merge_budget_granted', day=day, n=n, cap=cap,
+                           max=rules.max_merges_per_day)
+              + f'\n\n{t("reason_title")}\n\n' + quoted(args[1]),
               value=n, day=day, cap=cap)
         if self.ledger is not None:
             self.ledger.event(issue, 'delegation_grant', delegation='merge_budget', by=by,
@@ -1682,8 +2291,8 @@ class SupervisionMixin:
                                   if r['command'] == RETRY and r['outcome'] == 'applied'])
         if done >= MAX_RETRIES:
             return limit(done)
-        trace('applied', f'il passo `{step}` viene ripetuto (tentativo {done + 1} di '
-              f'{MAX_RETRIES}), senza contare un round di review.', key=key, attempt=done + 1)
+        trace('applied', self._texts()('retry_applied', step=step, attempt=done + 1,
+                                       max=MAX_RETRIES), key=key, attempt=done + 1)
         if is_pr:
             resume = escalation.get('resume')
             self.gh.edit_labels(number, add=[resume if resume in (lb.review, lb.changes)
@@ -1701,47 +2310,48 @@ class SupervisionMixin:
         answer to a command that does not apply (#321): the commands that apply to its class in
         ``auto`` (none outside it; with ``superseded``, an input changed since the escalation,
         no retry nor decision of that input) and the manual steps."""
-        lb = self.cfg.labels
-        manual = (f'rimuovere `{lb.needs_supervisor}` e impostare la label del passo da eseguire '
-                  '(`agent:ready` sulla issue, `agent:review` o `agent:changes` sulla PR).')
+        lb, t = self.cfg.labels, self._texts()
+        manual = t('manual', label=lb.needs_supervisor)
         if self.cfg.merge.mode != 'auto':
-            return 'Per riprendere senza il supervisore: ' + manual
+            return t('without_supervisor', manual=manual)
         cls = escalation.get('class')
+        reason = t('reason_arg')
         valid = []
         if not superseded and not is_pr and cls == PREFLIGHT_DEFAULT:
-            valid = [f'`/devloop {ACCEPT_DEFAULTS}`', f'`/devloop {DECIDE} <decisioni>`']
+            valid = [f'`/devloop {ACCEPT_DEFAULTS}`',
+                     f'`/devloop {DECIDE} {t("decisions_arg")}`']
         elif (not superseded and cls in (TOOL_FAILURE, SYNC_FAILED)
               and self._retryable(escalation, is_pr)):
             valid = [f'`/devloop {RETRY}`']
         elif not superseded and is_pr and cls == ROUND_GRANTABLE:
-            valid = [f'`/devloop {GRANT_ROUND} <motivo>`']
+            valid = [f'`/devloop {GRANT_ROUND} {reason}`']
         elif not superseded and cls == BUDGET_GRANTABLE:
-            valid = [f'`/devloop {GRANT_BUDGET} <motivo>`']
-        valid.append(f'`/devloop {ESCALATE} <motivo>`')
-        return ('Per riprendere, il supervisore o un utente fidato scrive come prima riga di un '
-                'commento ' + ' oppure '.join(valid) + '. Per riprendere senza il supervisore: '
-                + manual)
+            valid = [f'`/devloop {GRANT_BUDGET} {reason}`']
+        valid.append(f'`/devloop {ESCALATE} {reason}`')
+        return t('supervisor_resume', valid=t('or').join(valid), manual=manual)
 
     def _operator_resume(self, anchor, is_pr=None):
         """How the operator resumes an item in ``agent:needs-operator`` put there by
-        ``anchor`` (``_supervisor_view``), for the answer to a command (#321)."""
+        ``anchor`` (``_supervisor_view``), for the answer to a command (#321), in the project's
+        language (#633)."""
         record = anchor['record']
+        language = self.cfg.language
+        t = self._texts()
+        resume = resume_text(language)
         if anchor['kind'] == 'preflight':
-            return PREFLIGHT_RESUME
+            return preflight_resume(language)
         if anchor.get('origin') == PREFLIGHT_DEFAULT and not is_pr:
-            return (RESUME + '\n\nIn alternativa, un utente fidato decide le lacune del '
-                    f'controllo di prontezza con `/devloop {ACCEPT_DEFAULTS}` o `/devloop '
-                    f'{DECIDE} <decisioni>` come prima riga di un commento.')
+            return resume + '\n\n' + t('preflight_alternative', accept=ACCEPT_DEFAULTS,
+                                       decide=DECIDE)
         if record.get('event') == 'operator_merge':
-            return ('La PR è pronta e il merge spetta all\'operatore: si mergia a mano, come '
-                    'spiega il commento «Il merge spetta all\'operatore».')
+            return t('operator_merge_resume')
         if record.get('event') == 'escalation' and is_pr is not None \
                 and self._retryable(record, is_pr):
-            return RESUME + '\n\n' + operator_retry_text(record['step'])
+            return resume + '\n\n' + operator_retry_text(record['step'], language)
         if (is_pr and record.get('event') == 'escalation'
                 and record.get('class') == 'round_limit' and isinstance(record.get('head'), str)):
-            return RESUME + '\n\n' + OPERATOR_ROUNDS_TEXT  # #553
-        return RESUME
+            return resume + '\n\n' + operator_rounds_text(language)  # #553
+        return resume
 
     def _operator_command(self, target, number, labels, comments, command, trace, fresh=None):
         """Apply a command of a trusted user on an issue or PR in ``agent:needs-operator``
@@ -1774,16 +2384,17 @@ class SupervisionMixin:
           the operator merges by hand.
         - ``finding``: only from the coordinator's identity, on an ``open_findings`` escalation
           of a PR (``_coordinator_findings``, #606)."""
-        lb = self.cfg.labels
+        lb, t = self.cfg.labels, self._texts()
+        resume_ = resume_text(self.cfg.language)
         is_pr = isinstance(target, PullRequest)
         name, anchor = command['command'], command['anchor']
         kind, record = anchor['kind'], anchor['record']
-        stays = ('Il comando è speso; ' + ('la PR' if is_pr else 'l\'issue')
-                 + f' resta in `{lb.needs_operator}`.')
+        stays = t('spent', stays=t('item_stays', where=self._where(is_pr),
+                                   label=lb.needs_operator))
         how = self._operator_resume(anchor, is_pr)
 
         def refuse(why, resume=how):
-            return trace('refused', f'non applicabile: {why}. {stays}\n\n{resume}')
+            return trace('refused', t('not_applicable', why=why, how=f'{stays}\n\n{resume}'))
 
         if name == MERGE:
             supervisor = self._supervisor_login()
@@ -1791,11 +2402,9 @@ class SupervisionMixin:
             if not coordinator and (not supervisor or command['by'] != supervisor):
                 # A delegation of the operator to the supervisor (#486): the operator merges a
                 # PR by hand, as before.
-                return refuse(f'`/devloop {MERGE}` è una delega del supervisore; l\'operatore '
-                              'mergia la PR a mano')
+                return refuse(t('merge_delegation', merge=MERGE))
             if not is_pr:
-                return refuse(f'`/devloop {MERGE}` vale solo su una PR pronta il cui merge spetta '
-                              'all\'operatore')
+                return refuse(t('merge_pr_only', merge=MERGE))
             return self._delegated_merge(target, number, comments, command, trace)
         if name == FINDING:
             # Only the coordinator's identity writes it as a command (#606): a trusted user's
@@ -1803,7 +2412,7 @@ class SupervisionMixin:
             return self._coordinator_findings(target, number, labels, fresh, comments, command,
                                               trace, refuse)
         if name == ESCALATE:
-            return refuse('l\'escalation è già all\'operatore')
+            return refuse(t('already_operator'))
         if name == GRANT_ROUND:
             # One more round for this PR only, on a round_limit escalation (#553).
             return self._operator_grant_round(target, number, labels, fresh, comments, command,
@@ -1816,55 +2425,47 @@ class SupervisionMixin:
                                                    trace, refuse)
             # A delegation of the operator to the supervisor (#411): the values of the envelope
             # and the extensions beyond it stay the operator's (ADR 0004, D2).
-            return refuse(f'`/devloop {GRANT_BUDGET}` è una delega del supervisore, solo su '
-                          f'un\'escalation `{BUDGET_GRANTABLE}`; i valori dell\'envelope e le '
-                          'altre estensioni restano decisioni dell\'operatore')
+            return refuse(t('grant_budget_delegation', command=GRANT_BUDGET,
+                            cls=BUDGET_GRANTABLE))
         if name in (ACCEPT_DEFAULTS, DECIDE):
             # The check itself, or a supervisor's escalation of it handed to the operator.
             check = (kind == 'preflight' and preflight_class(record) == PREFLIGHT_DEFAULT
                      or anchor.get('origin') == PREFLIGHT_DEFAULT)
             if is_pr or not check:
-                return refuse('vale solo su un\'issue il cui ultimo controllo di prontezza è '
-                              'fallito con lacune tutte `default_available` e nessuna '
-                              'suddivisione')
+                return refuse(t('decide_only'))
             if name == DECIDE:
                 return self._decide(number, labels, comments, trace, command['reason'],
                                     operator=how,
                                     coordinator=self._is_coordinator(command['by']))
             return self._accept_defaults(number, labels, comments, trace, operator=how)
         if kind == 'preflight':
-            return refuse('il controllo di prontezza non si ripete con `/devloop retry`')
+            return refuse(t('preflight_no_retry'))
         # A supervisor's escalation of a check's defaults or of a resolved issue, handed to the
         # operator, records no failed step, even when an earlier record kept its routing key.
         if (record.get('event') != 'escalation' or not self._retryable(record, is_pr)
                 or anchor.get('origin') in (PREFLIGHT_DEFAULT, MERGED_ISSUE)):
-            return refuse('quello che ha portato qui ' + ('la PR' if is_pr else 'l\'issue')
-                          + ' non è un\'escalation che registri un passo da ripetere')
+            return refuse(t('not_step', where=self._where(is_pr)))
         key, step = record['key'], record['step']
         # The check that restarts an implementation waiting for its base (#459) runs on an
         # issue in agent:working, which keeps it.
         if step == 'preflight' and lb.ready not in labels and not (
                 lb.working in labels and self._base_wait(comments, 'implement')):
-            return refuse(f'il controllo di prontezza riparte rimettendo `{lb.ready}`, che '
-                          'l\'issue non ha più', f'Per riprendere: rimuovere '
-                          f'`{lb.needs_operator}` e rimettere `{lb.ready}`.')
+            return refuse(t('preflight_ready', ready=lb.ready),
+                          t('preflight_ready_resume', operator=lb.needs_operator,
+                            ready=lb.ready))
         merged = [] if is_pr else self._merged_prs(number)
         if merged:
-            return refuse('l\'issue è già risolta da una PR devloop mergiata ('
-                          + ', '.join(f'#{m["number"]}' for m in merged) + '), quindi '
-                          'ripeterne il passo duplicherebbe il lavoro',
-                          'Se è risolta va chiusa; se serve altro lavoro, va aperta una nuova '
-                          'issue.')
+            return refuse(t('merged_why', merged=', '.join(f'#{m["number"]}' for m in merged)),
+                          t('merged_resume'))
         # As for the supervisor, the base of an implementation does not bind its retry (#475).
         changed = changed_input(self._current_key(number, key, target if is_pr else None), key)
         if changed:
-            return refuse('l\'input del passo è cambiato dopo l\'escalation ('
-                          + ', '.join(f'`{k}`' for k in changed)
-                          + '), quindi il comando si riferisce a un input superato', RESUME)
+            return refuse(t('superseded', changed=', '.join(f'`{k}`' for k in changed)),
+                          resume_)
 
         def limit(done):
-            trace('limit', f'non eseguito: il passo `{step}` è già stato ripetuto {done} volte '
-                  f'per lo stesso input (al massimo {MAX_RETRIES}). {stays}\n\n{RESUME}', key=key)
+            trace('limit', t('operator_limit', step=step, done=done, max=MAX_RETRIES,
+                             stays=stays, resume=resume_), key=key)
 
         self._apply_retry(number, is_pr, comments, record,
                           sorted(labels & (lb.operator() | {lb.needs_supervisor})), trace, limit)
@@ -1893,17 +2494,14 @@ class SupervisionMixin:
         promotion and the merge follow their rules. Otherwise it stays with the operator, and
         the escalation still takes the coordinator's commands. ``refuse(why)`` answers why it
         does not apply."""
-        lb = self.cfg.labels
+        lb, t = self.cfg.labels, self._texts()
         anchor = command['anchor']
         record = anchor['record']
         if not self._is_coordinator(command['by']):
-            return refuse(f'`/devloop {FINDING}` come comando di un\'escalation è solo del '
-                          'coordinatore; un utente fidato chiude un finding con la stessa riga e '
-                          f'poi riporta la PR in `{lb.review}`')
+            return refuse(t('finding_coordinator_only', finding=FINDING, review=lb.review))
         if (not isinstance(target, PullRequest) or anchor['kind'] != 'notice'
                 or record.get('event') != 'escalation' or record.get('class') != OPEN_FINDINGS):
-            return refuse(f'`/devloop {FINDING}` del coordinatore vale solo su un\'escalation '
-                          f'`{OPEN_FINDINGS}` di una PR')
+            return refuse(t('finding_open_only', finding=FINDING, cls=OPEN_FINDINGS))
         body = next((c.get('body') or '' for c in comments
                      if not c.get('native') and command['comment'] is not None
                      and c.get('id') == command['comment']), None)
@@ -1911,22 +2509,17 @@ class SupervisionMixin:
             body = f'{FINDING_COMMAND} {command["reason"]}'  # only the first line is known
         lines = finding_commands(body)
         if not lines or any(parsed is None for _, parsed in lines):
-            return refuse(f'ogni riga va scritta come `{FINDING_COMMAND} <round/reviewer/ID> '
-                          'resolved|withdrawn <motivo>`, e il motivo è obbligatorio')
+            return refuse(t('finding_form', form=FINDING_COMMAND))
         pr = self._fresh_pr(target, labels, fresh, comments)
         if pr.finding_problems:
-            return refuse('alcuni finding della PR non hanno un proprietario ricostruibile')
+            return refuse(t('finding_owners'))
         latest = current_round(pr.reviews)
         if not latest or latest[0]['head_sha'] != pr.head_sha:
-            return refuse('l\'ultimo round di review non è del head della PR '
-                          f'(`{pr.head_sha[:12]}`): serve una nuova review, non la chiusura di '
-                          'un finding')
+            return refuse(t('finding_head', head=pr.head_sha[:12]))
         asking = [owner_of(r) for r in latest if flow_verdict(r) != 'approve']
         if asking:
-            return refuse(f'nel round {latest[0]["round"]} '
-                          + ', '.join(f'`{who}`' for who in asking)
-                          + ' non approva il head e chiede ancora modifiche o una decisione: il '
-                          'coordinatore chiude un finding, non scavalca un verdetto')
+            return refuse(t('finding_asking', round=latest[0]['round'],
+                            who=', '.join(f'`{who}`' for who in asking)))
         state = finding_state(pr.reviews, pr.closures)
         still_open = {f['key'] for f in state.open}
         held = trust_policy_findings(pr.reviews)
@@ -1935,28 +2528,24 @@ class SupervisionMixin:
             asked.setdefault(key, (status, reason))
         trust = [key for key in asked if key in held]
         if trust:
-            return refuse('un reviewer ha marcato `trust_policy` '
-                          + ', '.join(f'`{key}`' for key in trust)
-                          + ': i finding sulla politica di fiducia restano dell\'operatore')
+            return refuse(t('finding_trust', keys=', '.join(f'`{key}`' for key in trust)))
         absent = [key for key in asked if key not in still_open]
         if absent:
-            return refuse(', '.join(f'`{key}`' for key in absent)
-                          + ' non è aperto su questa PR')
+            return refuse(t('finding_absent', keys=', '.join(f'`{key}`' for key in absent)))
         author = command['by']
         closed = [{'key': key, 'status': status, 'by': CLOSED_BY_COORDINATOR, 'author': author,
                    'reason': reason, 'head_sha': pr.head_sha}
                   for key, (status, reason) in asked.items()]
-        listed = '\n'.join(f'- `{c["key"]}`: {CLOSED_TEXT[c["status"]]}: '
+        listed = '\n'.join(f'- `{c["key"]}`: {t(c["status"])}: '
                            + ' '.join(c['reason'].split()) for c in closed)
         left = [f['key'] for f in state.open if f['key'] not in asked]
         records = [('finding', {'closed': closed})]
         if left:
-            return trace('closed', f'chiusi dal coordinatore:\n\n{listed}\n\nRestano aperti '
-                         + ', '.join(f'`{key}`' for key in left) + f': la PR resta in '
-                         f'`{lb.needs_operator}`.', records=records, head=pr.head_sha)
-        trace('closed', f'chiusi dal coordinatore:\n\n{listed}\n\nNessun finding resta aperto: '
-              f'la PR torna in `{lb.review}`, dove l\'approvazione registrata viene riapplicata '
-              'senza una nuova review; promozione e merge seguono le loro regole.',
+            return trace('closed', t('closed_left', listed=listed,
+                                     left=', '.join(f'`{key}`' for key in left),
+                                     label=lb.needs_operator),
+                         records=records, head=pr.head_sha)
+        trace('closed', t('closed_all', listed=listed, review=lb.review),
               records=records, head=pr.head_sha)
         self.gh.edit_labels(number, add=[lb.review],
                             remove=sorted(labels & (lb.operator() | {lb.needs_supervisor})))
@@ -1979,46 +2568,37 @@ class SupervisionMixin:
         blocked by an open issue waits, with nothing recorded nor spent. Granted, as
         ``_grant_budget``: the journal first, then the records and the labels
         (``_finish_extension``), the operator labels removed."""
-        lb = self.cfg.labels
+        lb, t = self.cfg.labels, self._texts()
         is_pr = isinstance(target, PullRequest)
         anchor = command['anchor']
         record, by = anchor['record'], command['by']
         if not (anchor['kind'] == 'notice' and record.get('event') == 'escalation'
                 and record.get('class') == BUDGET):
-            return refuse(f'`/devloop {GRANT_BUDGET}` estende l\'envelope di budget solo su '
-                          f'un\'escalation `{BUDGET}` all\'operatore o `{BUDGET_GRANTABLE}` al '
-                          'supervisore; su un\'escalation di altra classe non vale')
+            return refuse(t('grant_budget_class', command=GRANT_BUDGET, budget=BUDGET,
+                            grantable=BUDGET_GRANTABLE))
         if self.cfg.merge.mode != 'auto':
-            return refuse(f'la modalità di merge è `{self.cfg.merge.mode}`, non `auto`, quindi i '
-                          'comandi del supervisore non valgono')
+            return refuse(t('not_auto', mode=self.cfg.merge.mode))
         fields = budget_fields(record)
         if not self._retryable(record, is_pr) or not all(k in fields for k in ('story', 'agent')):
-            return refuse('l\'escalation non registra il passo, la storia, il tipo o l\'agent '
-                          'del turno rifiutato (è precedente a #595), quindi l\'estensione non è '
-                          'verificabile')
+            return refuse(t('old_budget_escalation'))
         merged = [] if is_pr else self._merged_prs(number)
         if merged:
-            return refuse('l\'issue è già risolta da una PR devloop mergiata ('
-                          + ', '.join(f'#{m["number"]}' for m in merged) + '), quindi '
-                          'ripeterne il passo duplicherebbe il lavoro',
-                          'Se è risolta va chiusa; se serve altro lavoro, va aperta una nuova '
-                          'issue.')
+            return refuse(t('merged_why', merged=', '.join(f'#{m["number"]}' for m in merged)),
+                          t('merged_resume'))
         key = record['key']
         current = self._current_key(number, key, target if is_pr else None)
         if current != key:
             changed = [k for k in sorted(current) if current[k] != key.get(k)]
-            return refuse('l\'input del passo è cambiato dopo l\'escalation ('
-                          + ', '.join(f'`{k}`' for k in changed)
-                          + '), quindi la concessione si riferisce a un input superato', RESUME)
+            return refuse(t('superseded_grant', changed=', '.join(f'`{k}`' for k in changed)),
+                          resume_text(self.cfg.language))
         # The kind of the refused turn, or its step, as for the supervisor's (``_budget_grant``).
         found, why = self._budget_extension(target.issue if is_pr else number,
                                             fields.get('kind') or record['step'], fields['agent'])
         if found is None:
-            return refuse(f'l\'estensione non si concede: {why}')
+            return refuse(t('not_granted', why=why))
         story, extension = found['story'], found['extension']
         if story != fields['story']:
-            return refuse(f'la storia del lavoro (`{story}`) non è quella dell\'escalation '
-                          f'(`{fields["story"]}`)')
+            return refuse(t('other_story', story=story, expected=fields['story']))
         if not is_pr and self._issue_blocked(number):
             return None
         rules = self.cfg.delegations
@@ -2026,15 +2606,11 @@ class SupervisionMixin:
                                                     by, rules.max_grants_per_day,
                                                     reason=command['reason'] or '')
         if problem == 'spent':
-            return refuse(f'nel frattempo la storia `{story}` ha già avuto la sua unica '
-                          'estensione: una seconda è dell\'operatore')
+            return refuse(t('story_spent_operator', story=story))
         if problem == 'lapsed':
-            return refuse('l\'estensione di questo comando è già decaduta: serve una nuova '
-                          'concessione')
+            return refuse(t('lapsed_operator'))
         if problem:
-            return refuse('nel frattempo le concessioni di oggi hanno raggiunto il massimo '
-                          f'giornaliero (`[delegations] max_grants_per_day` = '
-                          f'{rules.max_grants_per_day})')
+            return refuse(t('daily_reached', cap=rules.max_grants_per_day))
         return self._finish_extension(number, is_pr, comments, record, command, trace,
                                       {'story': story, 'extension': extension}, daily,
                                       remove=sorted(labels & (lb.operator()
@@ -2063,37 +2639,31 @@ class SupervisionMixin:
         ``delegation_grant`` of the delegation ``operator_rounds``, each with its author; last
         the labels: the PR goes back to the label the escalation recorded (``agent:review`` or
         ``agent:changes``)."""
-        lb = self.cfg.labels
+        lb, t = self.cfg.labels, self._texts()
+        resume_ = resume_text(self.cfg.language)
         anchor = command['anchor']
         record, by = anchor['record'], command['by']
         if not (isinstance(target, PullRequest) and anchor['kind'] == 'notice'
                 and record.get('event') == 'escalation' and record.get('class') == 'round_limit'):
-            return refuse(f'`/devloop {GRANT_ROUND}` concede un round in più solo a una PR in '
-                          'un\'escalation `round_limit`; su un\'escalation di altra classe non '
-                          'vale')
+            return refuse(t('grant_round_class', command=GRANT_ROUND))
         head = (fresh or {}).get('headRefOid') or target.head_sha
         if not isinstance(record.get('head'), str):
-            return refuse('l\'escalation non registra il head della PR (è precedente a #553), '
-                          'quindi la concessione non è verificabile', RESUME)
+            return refuse(t('no_head'), resume_)
         if head != record['head']:
-            return refuse('il head della PR è cambiato dopo l\'escalation, quindi la '
-                          'concessione si riferisce a un input superato', RESUME)
+            return refuse(t('head_moved'), resume_)
         coordinator = self._is_coordinator(by)
         before = self._granted_rounds(comments, operator=True)
         if coordinator and before >= MAX_COORDINATOR_OPERATOR_ROUNDS:
-            return refuse(f'a questa PR è già stato concesso {before} round su un\'escalation '
-                          'all\'operatore: il coordinatore ne concede al massimo '
-                          f'{MAX_COORDINATOR_OPERATOR_ROUNDS} per PR, gli altri li concede '
-                          'l\'operatore', RESUME)
+            return refuse(t('coordinator_rounds', before=before,
+                            max=MAX_COORDINATOR_OPERATOR_ROUNDS), resume_)
         journal = getattr(self.ledger, 'journal', None)
         if journal is None:
-            return refuse('il round non si può registrare: il journal dei turni non è '
-                          'disponibile', RESUME)
+            return refuse(t('no_journal'), resume_)
         try:
             journal.operator_grant(number, command['comment'], by)
         except JournalError as exc:
             self.log(f'  the grant cannot be recorded: {exc}')
-            return refuse('il round non si può registrare nel journal dei turni', RESUME)
+            return refuse(t('journal_failed'), resume_)
         granted = before + 1
         figures = {'head': head, 'granted': granted, 'operator': True}
         if coordinator:
@@ -2103,12 +2673,10 @@ class SupervisionMixin:
         limit = self.cfg.max_review_rounds + total
         resume = record.get('resume')
         resume = resume if resume in (lb.review, lb.changes) else lb.review
-        trace('granted', f'concesso un round in più a questa sola PR: il suo limite passa a '
-              f'{limit} round (`max_review_rounds` = {self.cfg.max_review_rounds}, invariato, '
-              f'più {total} concessi). Il round è fuori dai tetti della delega del supervisore; '
-              f'round concessi a questa PR su un\'escalation all\'operatore: {granted}. La PR '
-              f'torna in `{resume}`.\n\n**Motivo:**\n\n'
-              + '\n'.join(f'> {line}'.rstrip() for line in command['reason'].splitlines()),
+        trace('granted', t('operator_round_granted', limit=limit,
+                           max=self.cfg.max_review_rounds, total=total, granted=granted,
+                           resume=resume)
+              + f'\n\n{t("reason_title")}\n\n' + quoted(command['reason']),
               **figures)
         self.ledger.event(number, 'delegation_grant', delegation=OPERATOR_ROUNDS, by=by,
                           comment=command['comment'], **figures)
@@ -2126,19 +2694,17 @@ class SupervisionMixin:
         supervisor. ``operator``: a trusted user's command on an issue in
         ``agent:needs-operator`` (#321), which stays there when refused and loses the operator
         labels when accepted."""
-        record = self._decidable_check(number, labels, comments, trace,
-                                       'I default del controllo di prontezza non possono essere '
-                                       'accettati dal supervisore', 'i default si riferiscono',
-                                       operator)
+        t = self._texts()
+        record = self._decidable_check(number, labels, comments, trace, t('defaults_refusal'),
+                                       t('defaults_what'), operator)
         if record is None:
             return
         defaults = [{'description': g['description'], 'proposed_default': g['proposed_default']}
                     for g in record['gaps']]
-        listed = '\n'.join(f'- {d["description"].strip()}\n  *Default accettato:* '
+        listed = '\n'.join(f'- {d["description"].strip()}\n  {t("accepted_default")} '
                            f'{d["proposed_default"].strip()}' for d in defaults)
-        trace('accepted', 'default del controllo di prontezza accettati. Questo record conta come '
-              'un commento fidato: l\'issue torna in coda e il controllo si ripete con questi '
-              f'default.\n\n{listed}', defaults=defaults, hash=record['hash'])
+        trace('accepted', t('accepted') + f'\n\n{listed}', defaults=defaults,
+              hash=record['hash'])
         self.gh.edit_labels(number, remove=self._decided_labels(labels, operator))
 
     def _decide(self, number, labels, comments, trace, text, operator=False, coordinator=False):
@@ -2151,20 +2717,16 @@ class SupervisionMixin:
         ``_accept_defaults`` (#321). ``coordinator``: the command is the coordinator's (#528),
         refused on an issue whose check declares the trust policy touched
         (``_decidable_check``)."""
-        record = self._decidable_check(number, labels, comments, trace,
-                                       'Le lacune del controllo di prontezza non possono essere '
-                                       'decise dal supervisore', 'la decisione si riferisce',
-                                       operator, coordinator)
+        t = self._texts()
+        record = self._decidable_check(number, labels, comments, trace, t('decide_refusal'),
+                                       t('decide_what'), operator, coordinator)
         if record is None:
             return
         gaps = [{'description': g['description'], 'proposed_default': g['proposed_default']}
                 for g in record['gaps']]
-        listed = '\n'.join(f'- {g["description"].strip()}\n  *Default proposto:* '
+        listed = '\n'.join(f'- {g["description"].strip()}\n  {t("proposed_default")} '
                            f'{g["proposed_default"].strip()}' for g in gaps)
-        quoted = '\n'.join(f'> {line}'.rstrip() for line in text.strip().splitlines())
-        trace('decided', 'decisione sulle lacune del controllo di prontezza registrata. Questo '
-              'record conta come un commento fidato: l\'issue torna in coda e il controllo si '
-              f'ripete con questa decisione.\n\nLacune:\n\n{listed}\n\n**Decisione:**\n\n{quoted}',
+        trace('decided', t('decided', listed=listed, quoted=quoted(text.strip())),
               gaps=gaps, hash=record['hash'])
         self.gh.edit_labels(number, remove=self._decided_labels(labels, operator))
 
@@ -2184,44 +2746,43 @@ class SupervisionMixin:
         trusted user or a devloop app whose text is still approved, and a check of the current
         text. A gap the operator must decide sends the issue to ``agent:needs-operator`` with
         ``refusal``; a superseded check leaves it to the supervisor. ``what``: what the command
-        decides and its verb (``'i default si riferiscono'``), for the refusal of a superseded
+        decides and its verb (``'the defaults refer'``), for the refusal of a superseded
         check. ``operator``: a command on an escalation to the operator (#321), refused with an
         answer only, the issue staying in ``agent:needs-operator``; a string is how the answer
-        says to resume (``_operator_resume``), ``PREFLIGHT_RESUME`` otherwise.
+        says to resume (``_operator_resume``), ``preflight_resume`` otherwise. Every text in the
+        project's language (#633).
 
         ``coordinator``: a ``decide`` of the coordinator's identity (#528), which decides no gap
         of the trust policy, of the credentials or of the budget. The last two are never
         ``default_available`` (the readiness check classifies them as ``operator_decision``,
         refused above); the first is refused here unless the check declares ``trust_policy``
         ``none``, and a check that does not declare it is refused too (it fails closed)."""
+        t = self._texts()
         history = self.gh.issue_history(number)
         records = self._preflight_records(comments)
         record = records[-1][1] if records else None
-        problem = ('nessun controllo di prontezza fallito da decidere'
-                   if record is None or record['ready']
-                   else 'non tutte le lacune sono `default_available`, o serve una suddivisione: '
-                        'decide l\'operatore' if preflight_class(record) != PREFLIGHT_DEFAULT
-                   else f'l\'issue ha la label `{DESIGN_LABEL}`' if DESIGN_LABEL in labels
-                   else 'l\'issue non è stata aperta da un utente fidato né da un\'app di devloop'
-                   if not self._devloop_author(history['author'])
+        problem = (t('no_check') if record is None or record['ready']
+                   else t('not_defaults') if preflight_class(record) != PREFLIGHT_DEFAULT
+                   else t('design', label=DESIGN_LABEL) if DESIGN_LABEL in labels
+                   else t('issue_author') if not self._devloop_author(history['author'])
                    else self._untrusted_change(history)
-                   or ('il controllo di prontezza dichiara toccata la policy di fiducia, o non '
-                       'dice se la tocca: il coordinatore non la decide, decide l\'operatore'
+                   or (t('coordinator_trust')
                        if coordinator and record.get('trust_policy') != 'none' else None))
-        stays = (f'l\'issue resta in `{self.cfg.labels.needs_operator}`.\n\n'
-                 + (operator if isinstance(operator, str) else PREFLIGHT_RESUME) if operator
-                 else 'l\'escalation resta al supervisore.\n\n'
+        stays = (t('item_stays', where=t('the_issue'), label=self.cfg.labels.needs_operator)
+                 + '\n\n' + (operator if isinstance(operator, str)
+                             else preflight_resume(self.cfg.language)) if operator
+                 else t('escalation_stays') + '\n\n'
                  + self._supervisor_resume({'class': PREFLIGHT_DEFAULT}, False, superseded=True))
         if problem:
             if operator:
-                trace('refused', f'rifiutato: {problem}. Il comando è speso; {stays}')
+                trace('refused', t('refused', why=problem) + ' ' + t('spent', stays=stays))
                 return None
-            trace('refused', f'rifiutato: {problem}.')
+            trace('refused', t('refused', why=problem))
             self._to_operator(number, f'{refusal}: {problem}.', 'operator_decision')
             return None
         if record['hash'] != self._request_hash(history, comments):
-            trace('refused', 'rifiutato: il testo dell\'issue è cambiato dopo il controllo di '
-                  f'prontezza, quindi {what} a un input superato. Il comando è speso; {stays}')
+            trace('refused', t('refused', why=t('text_changed', what=what)) + ' '
+                  + t('spent', stays=stays))
             return None
         return record
 

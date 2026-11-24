@@ -644,7 +644,9 @@ identity (#595) carry `role: coordinator` and, as `cap`, the cap of the code (`M
 `[roles.coordinator]` on, the others only with `[delegations] capacity` on; the latest grant of a
 key replaces the earlier ones whatever its switch, so one switched off restores none of them. A
 [delegated merge](guide.md#delegated-merge) (#486, `/devloop merge <sha> <reason>`) has its
-record on the PR, under the title "Merge delegato al supervisore", once the merge ran: outcome
+record on the PR, under the title "Merge delegated to the supervisor" ("Merge delegato al
+supervisore" in Italian, the project's [language](reference.md#language-of-the-texts) choosing,
+#633), once the merge ran: outcome
 `merged`, with the `head`, the `opinion` of the advisory review, the delegated merges of the UTC
 day with this one (`daily`), the cap of the day (`daily_cap`, extensions included) and what
 remains (`daily_left`), after a `delegated_merge` event in the turn journal; a refusal is
@@ -654,7 +656,8 @@ of that day with it, or `refused`; the `granted` records of a day are what raise
 the same figures go in a ledger `event` `delegation_grant` with the `delegation`
 `merge_budget`. A `/devloop merge` of the coordinator's identity (#529,
 [The reserved merge of the coordinator](guide.md#the-reserved-merge-of-the-coordinator)) has
-the same records, with `role: coordinator`, under the title "Merge riservato del coordinatore":
+the same records, with `role: coordinator`, under the title "Reserved merge of the coordinator"
+("Merge riservato del coordinatore" in Italian):
 `merged` carries the coordinator's own daily figures (`daily`, `daily_cap`, `daily_left`), after
 a `coordinator_merge` event in the turn journal, and, when the trust policy or `docs/adr/` asked
 for one, the id of the operator's `/devloop approve` that covered it (`approval`), and, for a PR

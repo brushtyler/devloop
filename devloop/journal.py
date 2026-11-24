@@ -129,6 +129,7 @@ import time
 from pathlib import Path
 
 from .github import GitHubError
+from .i18n import ENGLISH, Catalog
 
 JOURNAL = 'turn-journal.jsonl'
 SNAPSHOT = 'turn-journal-state.json'
@@ -218,34 +219,97 @@ def reconcile_command(body):
     return turn, outcome, note
 
 
-def describe_turn(turn):
-    """A short Italian description of a turn of ``TurnJournal.turns``."""
+# The texts of the journal that devloop publishes (#633): the turns that block a work, in its
+# ``uncertain_turn`` escalation, and why a ``/devloop reconcile`` is refused, in the project's
+# ``language`` (``i18n``); English for a language without translation. Turn ids, outcomes and
+# commands are never translated.
+TEXTS = Catalog(
+    en={
+        'legacy': ('`{turn}`: open turns imported from `{legacy}` on #{number} ({detail}), '
+                   'without a known outcome'),
+        'legacy_unlinked': (': which work it belongs to could not be read on GitHub yet, and '
+                            'until it is read it blocks every new turn'),
+        'turn': '`{turn}`: turn `{kind}` of `{agent}` on #{number}, started {at}',
+        'no_outcome': (', ended without its outcome being written: it becomes `{uncertain}` at '
+                       'the next tick, and is reconciled from there'),
+        'blocked': ('the work of issue #{issue} has turns without a recorded outcome '
+                    '(`{uncertain}`, or ended without their outcome being written), and the '
+                    'block on uncertain outcomes (`block_uncertain_turns`) is on. No new turn '
+                    'starts, and none is run again automatically, until a trusted user '
+                    'reconciles them:{listed}\n\nFor each one, a comment whose first line is '
+                    '`{command} <turn> <{outcomes}>` and, in the following lines, the required '
+                    'note with the reason. The turn stays charged.'),
+        'bad_outcome': 'outcome `{outcome}` not admitted: use one of {outcomes}',
+        'no_note': 'the note with the reason is missing, required after the first line',
+        'unknown_turn': 'the turn `{turn}` is not in the journal',
+        'not_uncertain': 'the turn `{turn}` is not uncertain (outcome: `{outcome}`)',
+        'running': 'running',
+        'reconciled': ('the turn `{turn}` was already reconciled as `{outcome}` by `{by}` '
+                       '(comment {comment}): a different outcome is refused'),
+        # The dispatcher's answer to a refused ``/devloop reconcile``.
+        'reconcile_title': 'Reconciliation not applied',
+        'reconcile_refused': ('The command `{command}` of comment {comment} of `{by}` was not '
+                              'applied: {why}.'),
+        'reconcile_first_line': ('the first line must be `/devloop reconcile <turn> <outcome>`, '
+                                 'with the id of a turn as the escalation gives it'),
+        'reconcile_outcome': ('outcome missing or not admitted: use `returned`, `failed` or '
+                              '`not_dispatched`'),
+    },
+    it={
+        'legacy': ('`{turn}`: turni aperti importati da `{legacy}` su #{number} ({detail}), '
+                   'senza esito noto'),
+        'legacy_unlinked': (': non si è ancora potuto leggere su GitHub a quale lavoro '
+                            'appartiene, e finché non lo si legge blocca ogni nuovo turno'),
+        'turn': '`{turn}`: turno `{kind}` di `{agent}` su #{number}, iniziato {at}',
+        'no_outcome': (', terminato senza che il suo esito sia stato scritto: diventa '
+                       '`{uncertain}` al prossimo tick, e da lì si riconcilia'),
+        'blocked': ('il lavoro dell\'issue #{issue} ha turni senza esito registrato '
+                    '(`{uncertain}`, o terminati senza che il loro esito sia stato scritto), e '
+                    'il blocco sugli esiti incerti (`block_uncertain_turns`) è attivo. Nessun '
+                    'nuovo turno parte, e nessuno viene ripetuto in automatico, finché un utente '
+                    'fidato non li riconcilia:{listed}\n\nPer ognuno, un commento con prima riga '
+                    '`{command} <turno> <{outcomes}>` e, nelle righe successive, la nota '
+                    'obbligatoria con il motivo. Il turno resta addebitato.'),
+        'bad_outcome': 'esito `{outcome}` non ammesso: usare uno fra {outcomes}',
+        'no_note': 'manca la nota con il motivo, obbligatoria dopo la prima riga',
+        'unknown_turn': 'il turno `{turn}` non è nel journal',
+        'not_uncertain': 'il turno `{turn}` non è incerto (esito: `{outcome}`)',
+        'running': 'in corso',
+        'reconciled': ('il turno `{turn}` è già stato riconciliato come `{outcome}` da `{by}` '
+                       '(commento {comment}): un esito diverso è rifiutato'),
+        'reconcile_title': 'Riconciliazione non applicata',
+        'reconcile_refused': ('Il comando `{command}` del commento {comment} di `{by}` non è '
+                              'stato applicato: {why}.'),
+        'reconcile_first_line': ('la prima riga deve essere `/devloop reconcile <turno> <esito>`, '
+                                 'con l\'id di un turno come lo riporta l\'escalation'),
+        'reconcile_outcome': ('esito mancante o non ammesso: usare `returned`, `failed` o '
+                              '`not_dispatched`'),
+    })
+
+
+def describe_turn(turn, language=ENGLISH):
+    """A short description of a turn of ``TurnJournal.turns``, in ``language`` (#633)."""
+    t = TEXTS.texts(language)
     if turn.get('legacy') is not None:
-        text = (f'`{turn["turn"]}`: turni aperti importati da `{LEGACY}` su #{turn["number"]} '
-                f'({turn["legacy"]}), senza esito noto')
+        text = t('legacy', turn=turn['turn'], legacy=LEGACY, number=turn['number'],
+                 detail=turn['legacy'])
         if turn.get('issue') is None:
-            text += (': non si è ancora potuto leggere su GitHub a quale lavoro appartiene, e '
-                     'finché non lo si legge blocca ogni nuovo turno')
+            text += t('legacy_unlinked')
         return text
-    text = (f'`{turn["turn"]}`: turno `{turn["kind"]}` di `{turn["agent"]}` su '
-            f'#{turn["number"]}, iniziato {turn["at"]}')
+    text = t('turn', turn=turn['turn'], kind=turn['kind'], agent=turn['agent'],
+             number=turn['number'], at=turn['at'])
     if turn.get('outcome') is None:
-        text += (', terminato senza che il suo esito sia stato scritto: diventa '
-                 f'`{UNCERTAIN}` al prossimo tick, e da lì si riconcilia')
+        text += t('no_outcome', uncertain=UNCERTAIN)
     return text
 
 
-def blocked_text(issue, turns):
-    """Why a new turn of the work of issue ``issue`` is refused, in Italian: its uncertain
-    ``turns`` and how a trusted user reconciles them."""
-    listed = ''.join(f'\n- {describe_turn(t)}' for t in turns)
-    return (f'il lavoro dell\'issue #{issue} ha turni senza esito registrato (`{UNCERTAIN}`, o '
-            'terminati senza che il loro esito sia stato scritto), e '
-            'il blocco sugli esiti incerti (`block_uncertain_turns`) è attivo. Nessun nuovo turno '
-            'parte, e nessuno viene ripetuto in automatico, finché un utente fidato non li '
-            f'riconcilia:{listed}\n\nPer ognuno, un commento con prima riga '
-            f'`{RECONCILE_COMMAND} <turno> <{"|".join(RECONCILED_OUTCOMES)}>` e, nelle righe '
-            'successive, la nota obbligatoria con il motivo. Il turno resta addebitato.')
+def blocked_text(issue, turns, language=ENGLISH):
+    """Why a new turn of the work of issue ``issue`` is refused, in ``language`` (#633): its
+    uncertain ``turns`` and how a trusted user reconciles them."""
+    listed = ''.join(f'\n- {describe_turn(turn, language)}' for turn in turns)
+    return TEXTS.texts(language)('blocked', issue=issue, uncertain=UNCERTAIN, listed=listed,
+                                 command=RECONCILE_COMMAND,
+                                 outcomes='|'.join(RECONCILED_OUTCOMES))
 
 
 class TurnJournal:
@@ -711,31 +775,31 @@ class TurnJournal:
             if number in self._state()[1]:
                 self._append('settled', {'number': number})
 
-    def reconcile(self, turn, outcome, *, by, comment, note):
+    def reconcile(self, turn, outcome, *, by, comment, note, language=ENGLISH):
         """Apply a trusted user's reconciliation of the uncertain ``turn``: True when recorded,
         False when the same outcome was recorded already. Raises ``ValueError`` with the reason,
-        in Italian, when it is refused: an unknown turn, one that is not uncertain, an outcome
-        not admitted, no note, or a turn already reconciled with another outcome."""
+        in ``language`` (#633), when it is refused: an unknown turn, one that is not uncertain,
+        an outcome not admitted, no note, or a turn already reconciled with another outcome."""
+        t = TEXTS.texts(language)
         if outcome not in RECONCILED_OUTCOMES:
-            raise ValueError(f'esito `{outcome}` non ammesso: usare uno fra '
-                             + ', '.join(f'`{o}`' for o in RECONCILED_OUTCOMES))
+            raise ValueError(t('bad_outcome', outcome=outcome,
+                               outcomes=', '.join(f'`{o}`' for o in RECONCILED_OUTCOMES)))
         if not (note or '').strip():
-            raise ValueError('manca la nota con il motivo, obbligatoria dopo la prima riga')
+            raise ValueError(t('no_note'))
         with self._lock:
             self._load()
             current = self._state()[0].get(turn)
             if current is None:
-                raise ValueError(f'il turno `{turn}` non è nel journal')
+                raise ValueError(t('unknown_turn', turn=turn))
             if current['outcome'] != UNCERTAIN:
-                raise ValueError(f'il turno `{turn}` non è incerto (esito: '
-                                 f'`{current["outcome"] or "in corso"}`)')
+                raise ValueError(t('not_uncertain', turn=turn,
+                                   outcome=current['outcome'] or t('running')))
             done = current['reconciled']
             if done is not None:
                 if done['outcome'] == outcome:
                     return False
-                raise ValueError(f'il turno `{turn}` è già stato riconciliato come '
-                                 f'`{done["outcome"]}` da `{done["by"]}` (commento '
-                                 f'{done["comment"]}): un esito diverso è rifiutato')
+                raise ValueError(t('reconciled', turn=turn, outcome=done['outcome'],
+                                   by=done['by'], comment=done['comment']))
             self._append('reconciled', {'turn': turn, 'outcome': outcome, 'by': by,
                                         'comment': comment, 'note': note.strip()})
             return True

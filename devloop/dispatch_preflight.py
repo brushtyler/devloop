@@ -14,6 +14,7 @@ from .apps import DISPATCHER, ISSUE_COMMENT
 from .context import (APPROVE_COMMAND, _render_issue_comments, _template,
                       format_operator_decisions, prompt_values, trust_policy_rule)
 from .dispatch_actions import Models, ready_approval
+from .dispatch_supervision import TEXTS as SUPERVISION_TEXTS
 from .dispatch_supervision import UntrustedChange
 from .i18n import ENGLISH, Catalog
 from .markdown import (TEXTS, carries_record, read_marker, render_approve_refused,
@@ -467,10 +468,9 @@ class PreflightMixin:
             author.comment(number, render_preflight(record, head, note, refused,
                                                     language=language))
             self.gh.comment(number, render_escalation(
-                'Il controllo di prontezza ha trovato solo lacune con un default proposto '
-                '(`default_available`): il supervisore può accettarli con '
-                f'`/devloop {ACCEPT_DEFAULTS}`, o decidere diversamente con `/devloop {DECIDE} '
-                '<decisioni>`.', cls=cls, supervised=supervised))
+                SUPERVISION_TEXTS.texts(language)('preflight_defaults', accept=ACCEPT_DEFAULTS,
+                                                  decide=DECIDE),
+                cls=cls, supervised=supervised, language=language))
             self.gh.edit_labels(number, add=[lb.needs_supervisor])
             self.log(f'  not ready: {len(record["gaps"])} gap(s), to the supervisor')
             return

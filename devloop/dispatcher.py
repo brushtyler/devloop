@@ -214,9 +214,11 @@ from .dispatch_base import BaseMixin, MainAlerts
 from .dispatch_conclave import ConclaveMixin
 from .dispatch_merge import MergeMixin
 from .dispatch_preflight import PreflightMixin
+from .dispatch_supervision import TEXTS as SUPERVISION_TEXTS
 from .dispatch_supervision import SupervisionMixin, UntrustedChange, budget_fields
 from .generated import changed_by_tests, generated_files
 from .github import GitHubError, GitHubUncertain, author_login
+from .journal import TEXTS as JOURNAL_TEXTS
 from .journal import (CLOSED, MERGED, RECONCILE_COMMAND, JournalError, TurnBlocked, blocked_text,
                       reconcile_command)
 from .ledger import attempt_branch, comment_ref, fix_register, open_turns, parse_branch
@@ -2111,16 +2113,18 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         class in ``auto`` stays with the operator, and with ``retry`` (``_retry_payload``) the
         step a trusted user may run again with ``/devloop retry`` (#321)."""
         lb = self.cfg.labels
+        language = self.cfg.language
         if supervised:
-            self.gh.comment(number, render_escalation(reason, detail, cls, supervised))
+            self.gh.comment(number, render_escalation(reason, detail, cls, supervised,
+                                                      language=language))
             self.gh.edit_labels(number, add=[lb.needs_supervisor],
                                 remove=[label for label in remove if label != lb.ready])
         else:
             if why:
-                reason = (reason.rstrip() + f'\n\nIn modalità di merge `auto` questa '
-                          f'escalation andrebbe al supervisore, ma resta all\'operatore: {why}.')
+                reason = (reason.rstrip() + '\n\n'
+                          + SUPERVISION_TEXTS.texts(language)('why_operator', why=why))
             self.gh.comment(number, render_escalation(reason, detail, cls, retry=retry,
-                                                      extra=extra))
+                                                      extra=extra, language=language))
             self.gh.edit_labels(number, add=[lb.needs_operator], remove=remove)
         if lb.ready_to_merge in remove:
             # An escalation that takes the readiness away voids the receipt of the promotion
@@ -2200,10 +2204,10 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                                                      exc)
                 if supervised:
                     cls = BUDGET_GRANTABLE
-                    reason += ('\n\nIl supervisore può estendere una volta l\'envelope di questa '
-                               'storia, solo in turni e tempo, con `/devloop grant-budget '
-                               '<motivo>`, dove il motivo riporta o cita l\'analisi delle '
-                               'cause: ' + extension_text(supervised['extension']) + '.')
+                    language = self.cfg.language
+                    reason += '\n\n' + SUPERVISION_TEXTS.texts(language)(
+                        'budget_grantable',
+                        extension=extension_text(supervised['extension'], language))
             # To the operator the step stays recorded too, for a trusted user's retry (#321).
             retry = None if supervised else self._retry_payload(action.kind, pr, reviewer, key)
             if retry and retry['step'] == 'preflight':
@@ -2459,7 +2463,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         if budget.enabled and kind not in OUTSIDE:
             def reserve(journal):
                 booking = budget_reserve(budget, journal, repo=self.cfg.repo, issue=issue,
-                                         kind=kind, agent=candidate)
+                                         kind=kind, agent=candidate, language=self.cfg.language)
                 self.log(f'  turn {kind} of {candidate.key} on #{number} booked in story '
                          f'{booking["story"]}')
                 return booking
@@ -2490,7 +2494,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         try:
             budget_reserve(budget, self.ledger.journal, repo=self.cfg.repo,
                            issue=self._work_issue(number), kind=kind, agent=agent,
-                           check_only=True)
+                           check_only=True, language=self.cfg.language)
         except BudgetRefused as exc:
             self.log(f'  turn {kind} refused on #{number}: not covered by the budget envelope '
                      f'({exc.category})')
@@ -2721,7 +2725,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         if held:
             self.log(f'  turn refused on #{number}: turns of issue #{issue} without a reconciled '
                      'outcome: ' + ', '.join(t['turn'] for t in held))
-            raise TurnBlocked(blocked_text(issue, held), held)
+            raise TurnBlocked(blocked_text(issue, held, self.cfg.language), held)
 
     def _link_legacy(self):
         """Link each legacy turn imported from ``ledger-open-turns.json`` (#362) to the issue of
@@ -3018,26 +3022,28 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                      'a trusted user')
             return
         turn, outcome, note = command
+        # The answer and its reasons in the project's language (#633).
+        language = self.cfg.language
+        t = JOURNAL_TEXTS.texts(language)
         try:
             if turn is None:
-                raise ValueError('la prima riga deve essere `/devloop reconcile <turno> <esito>`, '
-                                 'con l\'id di un turno come lo riporta l\'escalation')
+                raise ValueError(t('reconcile_first_line'))
             if outcome is None:
-                raise ValueError('esito mancante o non ammesso: usare `returned`, `failed` o '
-                                 '`not_dispatched`')
+                raise ValueError(t('reconcile_outcome'))
             if dry_run:
                 self.log(f'[dry-run] #{number}: {login} reconciles {turn} as {outcome}')
                 return
-            applied = journal.reconcile(turn, outcome, by=login, comment=ident, note=note)
+            applied = journal.reconcile(turn, outcome, by=login, comment=ident, note=note,
+                                        language=language)
         except ValueError as exc:
             self.log(f'  #{number}: `{RECONCILE_COMMAND}` of comment {ident} by {login} refused: '
                      f'{exc}')
             if not dry_run:
                 journal.refuse(ident, login, turn, str(exc))
                 self.gh.comment(number, publishable(
-                    dispatcher_header() + '\n## Riconciliazione non applicata\n\n'
-                    f'Il comando `{RECONCILE_COMMAND}` del commento {ident} di `{login}` non è '
-                    f'stato applicato: {exc}.'))
+                    dispatcher_header() + f'\n## {t("reconcile_title")}\n\n'
+                    + t('reconcile_refused', command=RECONCILE_COMMAND, comment=ident, by=login,
+                        why=exc)))
             return
         self.log(f'  #{number}: {turn} reconciled as {outcome} by {login} (comment {ident})'
                  if applied else f'  #{number}: {turn} already reconciled as {outcome}')
@@ -3551,7 +3557,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                 # The reviewer's record asks for the decision; this one classifies it (#182).
                 self.gh.comment(pr.number, render_escalation(
                     'Un reviewer chiede una decisione dell\'operatore: il motivo è nella sua '
-                    'review.', cls='reviewer_decision'))
+                    'review.', cls='reviewer_decision', language=self.cfg.language))
             self.gh.edit_labels(pr.number, add=[lb.needs_operator], remove=transient)
         elif verdict == UNPROVEN:
             # #481: a reviewer's request for changes had no evidence. Nothing to fix, and no
@@ -3577,12 +3583,13 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                 return
             if announce:
                 if why:
-                    reason += ('\n\nIn modalità di merge `auto` il supervisore potrebbe concedere '
-                               f'un altro round, ma l\'escalation resta all\'operatore: {why}.')
+                    reason += '\n\n' + SUPERVISION_TEXTS.texts(self.cfg.language)('why_round',
+                                                                                  why=why)
                 # The head and the label to resume, for a trusted user's grant-round (#553).
                 self.gh.comment(pr.number, render_escalation(
                     reason, cls='round_limit',
-                    extra={'head': pr.head_sha, 'resume': self._round_resume(pr)}))
+                    extra={'head': pr.head_sha, 'resume': self._round_resume(pr)},
+                    language=self.cfg.language))
             self.gh.edit_labels(pr.number, add=[lb.needs_operator], remove=transient)
         else:
             # A CI failure on a ready PR (#248): the dispatcher's own operator label goes too.

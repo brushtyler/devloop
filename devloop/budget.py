@@ -70,6 +70,7 @@ import time
 
 from core import budget as core
 
+from .i18n import ENGLISH, ITALIAN, Catalog
 from .journal import FAILED, IMPLEMENTATION, NOT_DISPATCHED, RETURNED, UNCERTAIN, TurnBlocked
 from .supervision import BUDGET_TOLERANCE_PERCENT
 
@@ -87,6 +88,122 @@ NO_USAGE = {'metered_usd': None, 'cli_estimate_usd': None}
 # The statuses of a booked turn with a confirmed outcome: consumed. The others are reserved.
 CONFIRMED = ('returned', 'terminated', 'not_dispatched')
 NOT_ATTESTED = 'non attestato'  # a value no turn attests: never 0
+
+# The texts of the budget that devloop publishes (#633): the refusal of a turn in its escalation,
+# the extension and why it is not granted, in the project's ``language`` (``i18n``); English for
+# a language without translation. ``devloop status`` keeps the Italian ones. Categories, commands
+# and keys are never translated.
+TEXTS = Catalog(
+    en={
+        'turns': 'turns',
+        'turns_of': 'turns `{name}`',
+        'phase': 'phase `{name}`',
+        'time': 'time',
+        'no_cap': 'no cap',
+        'count': '{label} {total} of {cap} (consumed {consumed}, reserved {reserved}{available})',
+        'available': ', available {available}',
+        'not_attested': 'not attested',
+        'at_least': 'at least {value}',
+        'dollars': ('`{kind}` consumed {consumed}{gap}, reserved {reserved}, available '
+                    '{available} of {cap}'),
+        'unattested_gap': ' (turns without an attested value: {n})',
+        'time_text': ('time elapsed {consumed} s of {cap} s, available {available} s, deadline '
+                      '{deadline}'),
+        'extended': 'caps already extended once by the supervisor (`grant-budget`): {extension}',
+        'no_story': ('issue #{issue} belongs to no story of the journal: a story is born at the '
+                     'takeover with `story_identity` on, and an issue taken over before stays '
+                     'outside the budget, without migration (`SCOPE_REQUIRED`). With the budget '
+                     'on none of its turns starts, and a turn without a story is charged to no '
+                     'envelope; the operator decides'),
+        'where': 'the turn `{kind}` of `{agent}` (model `{model}`) on issue #{issue}',
+        'scope': '{where} is not covered by the budget envelope: {no_story}',
+        'lapsed': ('. The extension granted by the supervisor (`grant-budget`: {extension}) had '
+                   'not been used by any turn yet: it lapses now, without spending the one '
+                   'extension of the story, and another grant may give it under the same '
+                   'conditions'),
+        'later': (' The current configuration gives it {configured} turns, which hold for new '
+                  'stories only.'),
+        'role': ('{where} is not covered by the budget envelope of the story `{story}` (root '
+                 '#{root}): the role `{kind}` has no cap in the envelope fixed at its first '
+                 'booking, because it was configured after it (`{category}`).{later} The story '
+                 'keeps its envelope, and no default cap is added: it would be a value of the '
+                 'budget. No turn starts; the operator decides (ADR 0004, D2)'),
+        'kept': (' The current configuration has different limits, which hold for new stories '
+                 'only: this story keeps those fixed at its first booking.'),
+        'refused': ('{where} is not covered by the budget envelope of the story `{story}` (root '
+                    '#{root}): `{category}`, {message}. State of the budget of the story at the '
+                    'refusal: {state}.{kept} No turn starts, and no booking is refunded: a turn '
+                    'that failed, was not dispatched or is uncertain stays charged. An uncertain '
+                    'turn is reconciled with `/devloop reconcile`; the values of the envelope '
+                    'and its extensions are decisions of the operator (ADR 0004, D2), except the '
+                    'one extension in turns and time the supervisor may grant with the '
+                    'delegation `[delegations] budget` (ADR 0005)'),
+        'already_extended': ('the story `{story}` already had its one extension ({extension}): '
+                             'a second one is the operator\'s'),
+        'not_limit': ('the turn is refused as `{category}`, not for a limit reached: an '
+                      'extension does not solve it'),
+        'covered': 'the envelope of the story already covers the turn, without extension',
+        'not_enough': ('with the extension ({extension}: {percent}% of every turn cap and of '
+                       'the time, rounded down, never dollars nor tokens) the envelope would '
+                       'still not cover the turn `{kind}` (`{category}`): the extension is not '
+                       'granted and the story keeps it'),
+    },
+    it={
+        'turns': 'turni',
+        'turns_of': 'turni `{name}`',
+        'phase': 'fase `{name}`',
+        'time': 'tempo',
+        'no_cap': 'nessun tetto',
+        'count': ('{label} {total} di {cap} (consumati {consumed}, prenotati '
+                  '{reserved}{available})'),
+        'available': ', disponibili {available}',
+        'not_attested': NOT_ATTESTED,
+        'at_least': 'almeno {value}',
+        'dollars': ('`{kind}` consumati {consumed}{gap}, prenotati {reserved}, disponibili '
+                    '{available} di {cap}'),
+        'unattested_gap': ' (turni senza valore attestato: {n})',
+        'time_text': ('tempo trascorso {consumed} s di {cap} s, disponibili {available} s, '
+                      'scadenza {deadline}'),
+        'extended': 'tetti già estesi una volta dal supervisore (`grant-budget`): {extension}',
+        'no_story': ('l\'issue #{issue} non appartiene a nessuna storia del journal: una storia '
+                     'nasce alla presa in carico con `story_identity` acceso, e un\'issue presa '
+                     'in carico prima resta esclusa dal budget, senza migrazione '
+                     '(`SCOPE_REQUIRED`). Con il budget acceso nessun suo turno parte, e un turno '
+                     'senza storia non si addebita a nessun envelope; decide l\'operatore'),
+        'where': ('il turno `{kind}` di `{agent}` (modello `{model}`) sull\'issue #{issue}'),
+        'scope': '{where} non è coperto dall\'envelope di budget: {no_story}',
+        'lapsed': ('. L\'estensione concessa dal supervisore (`grant-budget`: {extension}) non '
+                   'era ancora stata usata da nessun turno: decade ora, senza spendere l\'unica '
+                   'estensione della storia, e un\'altra concessione può darla alle stesse '
+                   'condizioni'),
+        'later': (' La configurazione attuale gli dà {configured} turni, che valgono solo per '
+                  'le storie nuove.'),
+        'role': ('{where} non è coperto dall\'envelope di budget della storia `{story}` (radice '
+                 '#{root}): il ruolo `{kind}` non ha un tetto nell\'envelope fissato alla sua '
+                 'prima prenotazione, perché è stato configurato dopo (`{category}`).{later} La '
+                 'storia conserva il suo envelope, e nessun tetto predefinito si aggiunge: '
+                 'sarebbe un valore di budget. Nessun turno parte; decide l\'operatore (ADR '
+                 '0004, D2)'),
+        'kept': (' La configurazione attuale ha limiti diversi, che valgono solo per le storie '
+                 'nuove: questa storia conserva quelli fissati alla sua prima prenotazione.'),
+        'refused': ('{where} non è coperto dall\'envelope di budget della storia `{story}` '
+                    '(radice #{root}): `{category}`, {message}. Stato del budget della storia '
+                    'al rifiuto: {state}.{kept} Nessun turno parte, e nessuna prenotazione viene '
+                    'rimborsata: un turno fallito, non avviato o incerto resta addebitato. Un '
+                    'turno incerto si riconcilia con `/devloop reconcile`; i valori '
+                    'dell\'envelope e le sue estensioni sono decisioni dell\'operatore (ADR '
+                    '0004, D2), salvo l\'unica estensione in turni e tempo che il supervisore '
+                    'può concedere con la delega `[delegations] budget` (ADR 0005)'),
+        'already_extended': ('la storia `{story}` ha già avuto la sua unica estensione '
+                             '({extension}): una seconda è dell\'operatore'),
+        'not_limit': ('il turno è rifiutato come `{category}`, non per un limite raggiunto: '
+                      'un\'estensione non lo risolve'),
+        'covered': 'l\'envelope della storia copre già il turno, senza estensione',
+        'not_enough': ('con l\'estensione ({extension}: il {percent}% di ogni tetto di turni e '
+                       'del tempo, arrotondato per difetto, mai dollari né token) l\'envelope non '
+                       'coprirebbe comunque il turno `{kind}` (`{category}`): l\'estensione non '
+                       'si concede e la storia la conserva'),
+    })
 
 
 class BudgetRefused(TurnBlocked):
@@ -220,12 +337,13 @@ def envelope_of(budget, journal, story, turns):
     return base, grant, extended(base, grant['extension'] if grant else None)
 
 
-def extension_text(extension):
-    """The extension of an envelope (``increments``) in Italian, for comments."""
-    parts = [f'turni +{extension["turns"]}']
-    parts += [f'turni `{r}` +{n}' for r, n in extension['role_turns'].items()]
-    parts += [f'fase `{p}` +{n}' for p, n in extension['phase_turns'].items()]
-    parts.append(f'tempo +{extension["wall_seconds"]} s')
+def extension_text(extension, language=ENGLISH):
+    """The extension of an envelope (``increments``) in ``language`` (#633), for comments."""
+    t = TEXTS.texts(language)
+    parts = [f'{t("turns")} +{extension["turns"]}']
+    parts += [f'{t("turns_of", name=r)} +{n}' for r, n in extension['role_turns'].items()]
+    parts += [f'{t("phase", name=p)} +{n}' for p, n in extension['phase_turns'].items()]
+    parts.append(f'{t("time")} +{extension["wall_seconds"]} s')
     return ', '.join(parts)
 
 
@@ -311,12 +429,12 @@ def view(budget, story, current, now, role=None, extension=None):
         'extension': extension}
 
 
-def _count_text(label, count):
-    cap = 'nessun tetto' if count['cap'] is None else count['cap']
+def _count_text(t, label, count):
+    cap = t('no_cap') if count['cap'] is None else count['cap']
     available = ('' if count['available'] is None
-                 else f', disponibili {count["available"]}')
-    return (f'{label} {count["consumed"] + count["reserved"]} di {cap} (consumati '
-            f'{count["consumed"]}, prenotati {count["reserved"]}{available})')
+                 else t('available', available=count['available']))
+    return t('count', label=label, total=count['consumed'] + count['reserved'], cap=cap,
+             consumed=count['consumed'], reserved=count['reserved'], available=available)
 
 
 def usd(value):
@@ -332,35 +450,38 @@ def consumed_usd(dollars):
     return usd(dollars['consumed'])
 
 
-def describe(found):
-    """The state of the budget of a story (``view``) on one line, in Italian, as the refusal
-    of a turn and ``devloop status`` show it."""
-    parts = [_count_text('turni', found['turns'])]
-    parts += [_count_text(f'turni `{name}`', c) for name, c in found['roles'].items()]
-    parts += [_count_text(f'fase `{name}`', c) for name, c in found['phases'].items()]
+def describe(found, language=ENGLISH):
+    """The state of the budget of a story (``view``) on one line, in ``language`` (#633), as
+    the refusal of a turn and, in Italian, ``devloop status`` show it."""
+    t = TEXTS.texts(language)
+
+    def dollars(value):
+        return t('not_attested') if value is None else usd(value)
+
+    parts = [_count_text(t, t('turns'), found['turns'])]
+    parts += [_count_text(t, t('turns_of', name=name), c) for name, c in found['roles'].items()]
+    parts += [_count_text(t, t('phase', name=name), c) for name, c in found['phases'].items()]
     for kind, d in found['usd'].items():
-        gap = (f' (turni senza valore attestato: {d["unattested"]})' if d['unattested']
-               else '')
-        parts.append(f'`{kind}` consumati {consumed_usd(d)}{gap}, prenotati '
-                     f'{usd(d["reserved"])}, disponibili {usd(d["available"])} di '
-                     f'{usd(d["cap"])}')
-    t = found['time']
-    parts.append(f'tempo trascorso {t["consumed"]} s di {t["cap"]} s, disponibili '
-                 f'{t["available"]} s, scadenza {t["deadline_at"]}')
+        gap = t('unattested_gap', n=d['unattested']) if d['unattested'] else ''
+        consumed = dollars(d['consumed'])
+        if d['consumed'] is not None and d['unattested']:
+            consumed = t('at_least', value=consumed)
+        parts.append(t('dollars', kind=kind, consumed=consumed, gap=gap,
+                       reserved=dollars(d['reserved']), available=dollars(d['available']),
+                       cap=dollars(d['cap'])))
+    time_ = found['time']
+    parts.append(t('time_text', consumed=time_['consumed'], cap=time_['cap'],
+                   available=time_['available'], deadline=time_['deadline_at']))
     if found.get('extension'):
-        parts.append('tetti già estesi una volta dal supervisore (`grant-budget`): '
-                     + extension_text(found['extension']))
+        parts.append(t('extended', extension=extension_text(found['extension'], language)))
     return '; '.join(parts)
 
 
-def no_story(issue):
+def no_story(issue, language=ENGLISH):
     """Why issue ``issue``, held by no story of the journal, gets no turn with the budget on
-    (#396): the refusal (``SCOPE_REQUIRED``) and ``devloop status`` say the same."""
-    return (f'l\'issue #{issue} non appartiene a nessuna storia del journal: una storia nasce '
-            'alla presa in carico con `story_identity` acceso, e un\'issue presa in carico prima '
-            'resta esclusa dal budget, senza migrazione (`SCOPE_REQUIRED`). Con il budget acceso '
-            'nessun suo turno parte, e un turno senza storia non si addebita a nessun envelope; '
-            'decide l\'operatore')
+    (#396), in ``language`` (#633): the refusal (``SCOPE_REQUIRED``) and ``devloop status`` say
+    the same."""
+    return TEXTS.texts(language)('no_story', issue=issue)
 
 
 def of_issue(budget, journal, repo, issue):
@@ -390,15 +511,16 @@ def status_lines(budget, journal, repo, issues):
     for issue in dict.fromkeys(i for i in issues if i is not None):
         found = of_issue(budget, journal, repo, issue)
         if found is None:
-            lines.append(f'budget #{issue}: {no_story(issue)}')
+            lines.append(f'budget #{issue}: {no_story(issue, ITALIAN)}')
         elif found['story'] not in seen:
             seen.add(found['story'])
             lines.append(f'budget {found["story"]} (radice #{found["issue"]}, al '
-                         f'{found["at"]}): {describe(found)}')
+                         f'{found["at"]}): {describe(found, ITALIAN)}')
     return lines
 
 
-def reserve(budget, journal, *, repo, issue, kind, agent, extension=None, check_only=False):
+def reserve(budget, journal, *, repo, issue, kind, agent, extension=None, check_only=False,
+            language=ENGLISH):
     """The booking of a turn of ``kind`` of ``agent`` (``AgentConfig``) on the work of issue
     ``issue`` of ``repo``, in the envelope of its story, for ``TurnJournal.intent``; raises
     ``BudgetRefused`` when the envelope does not cover it. Called under the journal's lock.
@@ -415,11 +537,15 @@ def reserve(budget, journal, *, repo, issue, kind, agent, extension=None, check_
 
     A role without a cap in the envelope, configured after the first booking of the story, is
     refused as ``ROLE_NOT_IN_ENVELOPE`` (#396): the story keeps its envelope, with no default
-    cap added."""
+    cap added.
+
+    ``language``: the project's (#633), of the message of a refusal; the message of
+    ``core.budget`` it quotes stays in English."""
+    t = TEXTS.texts(language)
     found = journal.story_of(repo, issue)
-    where = f'il turno `{kind}` di `{agent.key}` (modello `{agent.model}`) sull\'issue #{issue}'
+    where = t('where', kind=kind, agent=agent.key, model=agent.model, issue=issue)
     if found is None:
-        raise BudgetRefused(f'{where} non è coperto dall\'envelope di budget: {no_story(issue)}',
+        raise BudgetRefused(t('scope', where=where, no_story=no_story(issue, language)),
                             'SCOPE_REQUIRED', kind=kind, agent=agent.key)
     story = found[0]
     turns = journal.turns()
@@ -437,45 +563,28 @@ def reserve(budget, journal, *, repo, issue, kind, agent, extension=None, check_
 
     def refused(message, category):
         if booked and journal.lapse(story['story'], grant.get('comment'), category):
-            message += (f'. L\'estensione concessa dal supervisore (`grant-budget`: '
-                        f'{extension_text(grant["extension"])}) non era ancora stata usata da '
-                        'nessun turno: decade ora, senza spendere l\'unica estensione della '
-                        'storia, e un\'altra concessione può darla alle stesse condizioni')
+            message += t('lapsed', extension=extension_text(grant['extension'], language))
         return BudgetRefused(message, category, story=story['story'], kind=kind,
                              agent=agent.key)
 
     if kind not in dict(envelope.role_turns):
         configured = dict(budget.role_turns).get(kind)
-        later = ('' if configured is None else
-                 f' La configurazione attuale gli dà {configured} turni, che valgono solo per '
-                 'le storie nuove.')
-        raise refused(
-            f'{where} non è coperto dall\'envelope di budget della storia `{story["story"]}` '
-            f'(radice #{story["issue"]}): il ruolo `{kind}` non ha un tetto nell\'envelope '
-            'fissato alla sua prima prenotazione, perché è stato configurato dopo '
-            f'(`{ROLE_NOT_IN_ENVELOPE}`).{later} La storia conserva il suo envelope, e nessun '
-            'tetto predefinito si aggiunge: sarebbe un valore di budget. Nessun turno parte; '
-            'decide l\'operatore (ADR 0004, D2)', ROLE_NOT_IN_ENVELOPE)
+        later = '' if configured is None else t('later', configured=configured)
+        raise refused(t('role', where=where, story=story['story'], root=story['issue'],
+                        kind=kind, category=ROLE_NOT_IN_ENVELOPE, later=later),
+                      ROLE_NOT_IN_ENVELOPE)
     current = state(story, turns, journal.live(), start, envelope.wall_seconds)
     rule = budget.rule(agent.key)
     try:
         row = core.check_capacity({'policy': policy(envelope, agent.kind, rule), 'binding': {}},
                                   current, kind, IMPLEMENTATION, agent.kind, now=now)
     except core.Refused as exc:
-        kept = ('' if limits(base, start) == limits(budget, start) else
-                ' La configurazione attuale ha limiti diversi, che valgono solo per le storie '
-                'nuove: questa storia conserva quelli fissati alla sua prima prenotazione.')
+        kept = '' if limits(base, start) == limits(budget, start) else t('kept')
         state_now = view(envelope, story, current, journal.seconds(), kind, extension=granted)
-        raise refused(
-            f'{where} non è coperto dall\'envelope di budget della storia `{story["story"]}` '
-            f'(radice #{story["issue"]}): `{exc.category}`, {exc.message}. Stato del budget '
-            f'della storia al rifiuto: {describe(state_now)}.{kept} '
-            'Nessun turno parte, e nessuna '
-            'prenotazione viene rimborsata: un turno fallito, non avviato o incerto resta '
-            'addebitato. Un turno incerto si riconcilia con `/devloop reconcile`; i valori '
-            'dell\'envelope e le sue estensioni sono decisioni dell\'operatore (ADR 0004, D2), '
-            'salvo l\'unica estensione in turni e tempo che il supervisore può concedere con la '
-            'delega `[delegations] budget` (ADR 0005)', exc.category) from exc
+        raise refused(t('refused', where=where, story=story['story'], root=story['issue'],
+                        category=exc.category, message=exc.message,
+                        state=describe(state_now, language), kept=kept),
+                      exc.category) from exc
     booking = {'story': story['story'], 'role': kind, 'phase': IMPLEMENTATION,
                'engine': agent.kind, 'envelope': limits(base, start)}
     for key in ('usage_model', 'conservative_usage'):
@@ -484,44 +593,40 @@ def reserve(budget, journal, *, repo, issue, kind, agent, extension=None, check_
     return booking
 
 
-def grantable(budget, journal, *, repo, issue, kind, agent):
+def grantable(budget, journal, *, repo, issue, kind, agent, language=ENGLISH):
     """``(story, extension, why)`` of the one extension of the envelope of the story of issue
     ``issue`` of ``repo`` (#411, ADR 0005, P5-7), for a turn of ``kind`` of ``agent``
     (``AgentConfig``) that it refuses: ``extension`` (``increments`` of the frozen envelope)
-    when the delegation can apply, otherwise None and ``why``, in Italian. ``story``: the id of
-    the story, None for an issue of no story. It only reads the journal.
+    when the delegation can apply, otherwise None and ``why``, in ``language`` (#633).
+    ``story``: the id of the story, None for an issue of no story. It only reads the journal.
 
     The extension applies only when the story was never extended, the envelope refuses the turn
     now at a limit (``LIMIT_REACHED``), and the envelope with the extension would cover it now:
     an extension that adds nothing to the exhausted limit (25% of 3 turns, rounded down, is 0),
     a limit in dollars, which it never extends, or an outcome still uncertain make it useless,
     so it is not granted and the story keeps its extension."""
+    t = TEXTS.texts(language)
     found = journal.story_of(repo, issue)
     if found is None:
-        return None, None, no_story(issue)
+        return None, None, no_story(issue, language)
     story = found[0]['story']
     grant = journal.extension(story)
     if grant is not None:
-        return story, None, (f'la storia `{story}` ha già avuto la sua unica estensione '
-                             f'({extension_text(grant["extension"])}): una seconda è '
-                             'dell\'operatore')
+        return story, None, t('already_extended', story=story,
+                              extension=extension_text(grant['extension'], language))
     try:
         reserve(budget, journal, repo=repo, issue=issue, kind=kind, agent=agent,
-                check_only=True)
+                check_only=True, language=language)
     except BudgetRefused as exc:
         if exc.category != 'LIMIT_REACHED':
-            return story, None, (f'il turno è rifiutato come `{exc.category}`, non per un '
-                                 'limite raggiunto: un\'estensione non lo risolve')
+            return story, None, t('not_limit', category=exc.category)
     else:
-        return story, None, 'l\'envelope della storia copre già il turno, senza estensione'
+        return story, None, t('covered')
     extension = increments(frozen(budget, found[0], journal.turns()))
     try:
         reserve(budget, journal, repo=repo, issue=issue, kind=kind, agent=agent,
-                extension=extension)
+                extension=extension, language=language)
     except BudgetRefused as exc:
-        return story, None, (
-            f'con l\'estensione ({extension_text(extension)}: il {BUDGET_TOLERANCE_PERCENT}% '
-            'di ogni tetto di turni e del tempo, arrotondato per difetto, mai dollari né token) '
-            f'l\'envelope non coprirebbe comunque il turno `{kind}` (`{exc.category}`): '
-            'l\'estensione non si concede e la storia la conserva')
+        return story, None, t('not_enough', extension=extension_text(extension, language),
+                              percent=BUDGET_TOLERANCE_PERCENT, kind=kind, category=exc.category)
     return story, extension, ''

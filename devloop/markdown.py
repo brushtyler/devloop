@@ -1123,11 +1123,6 @@ def render_fix(fix, head, round_no, language=ENGLISH):
     return publishable(head + '\n' + '\n'.join(parts), 'fix', payload)
 
 
-# What resumes an issue the readiness check blocked, as the escalations to the operator still
-# say it (``dispatch_supervision``): in Italian until #628 translates them.
-PREFLIGHT_RESUME = TEXTS.tables[ITALIAN]['preflight_resume']
-
-
 def preflight_resume(language=ENGLISH):
     """What resumes an issue the readiness check blocked, in ``language`` (#632)."""
     return TEXTS.texts(language)('preflight_resume')
@@ -1192,52 +1187,113 @@ def render_preflight(record, head, note='', refused=(), language=ENGLISH):
     return publishable(head + '\n' + '\n'.join(parts), 'preflight', record)
 
 
-RESUME = ('Per riprendere: correggere la causa, **rimuovere `agent:needs-operator`** e impostare la '
-          'label del passo da eseguire (`agent:ready` sulla issue, `agent:review` o '
-          '`agent:changes` sulla PR).')
+# The frame of an escalation and of the dispatcher's answers to the commands on it (#633), in the
+# project's ``language`` (``i18n``); English for a language without translation. The reason is
+# the caller's. Escalations are read only through their ``notice`` marker, never by title.
+ESCALATION_TEXTS = Catalog(
+    en={
+        'operator_title': 'The operator is needed',
+        'supervisor_title': 'Escalation to the supervisor',
+        'class_line': '**Class:** `{cls}` ({described}), {severity}.',
+        'critical': 'critical',
+        'non_critical': 'non-critical',
+        'resume': ('To resume: fix the cause, **remove `agent:needs-operator`** and set the '
+                   'label of the step to run (`agent:ready` on the issue, `agent:review` or '
+                   '`agent:changes` on the PR).'),
+        'supervisor_resume': (
+            'Non-critical escalation: the supervisor decides (merge mode `auto`). Commands, as '
+            'the first line of a comment, from the identity of `[roles].supervisor` or from a '
+            'trusted user:\n\n'
+            '- `/devloop retry`: runs the failed step again, without counting a round (at most '
+            '{retries} times per step and input, then the escalation goes to the operator);\n'
+            '- `/devloop accept-defaults`: accepts the defaults proposed by the readiness check '
+            'and puts the issue back in the queue;\n'
+            '- `/devloop decide <decisions>`: decides the gaps of the readiness check, also '
+            'differently from the defaults (the text is the rest of the comment), and puts the '
+            'issue back in the queue;\n'
+            '- `/devloop grant-round <reason>`: grants one more review round to a PR at the '
+            'round limit (`round_grantable`), within the caps of the delegation; the reason, '
+            'which may go on in the following lines, gives or cites the analysis of the '
+            'causes;\n'
+            '- `/devloop grant-budget <reason>`: extends once the budget envelope of the story, '
+            'in turns and time only (`budget_grantable`), within the caps of the delegation; the '
+            'reason, as for `grant-round`, gives or cites the analysis of the causes;\n'
+            '- `/devloop escalate <reason>`: hands the escalation to the operator '
+            '(`agent:needs-operator`).'),
+        'operator_retry': ('Otherwise, a trusted user may run the step `{step}` again with a '
+                           'comment whose first line is `/devloop retry`: devloop removes '
+                           '`agent:needs-operator` and runs the step again, at most {retries} '
+                           'times per step and input (the supervisor\'s retries count too).'),
+        'supervision_title': 'Decision of the supervisor',
+    },
+    it={
+        'operator_title': 'Serve un intervento dell\'operatore',
+        'supervisor_title': 'Escalation al supervisore',
+        'class_line': '**Classe:** `{cls}` ({described}), {severity}.',
+        'critical': 'critica',
+        'non_critical': 'non critica',
+        'resume': ('Per riprendere: correggere la causa, **rimuovere `agent:needs-operator`** e '
+                   'impostare la label del passo da eseguire (`agent:ready` sulla issue, '
+                   '`agent:review` o `agent:changes` sulla PR).'),
+        'supervisor_resume': (
+            'Escalation non critica: decide il supervisore (modalità di merge `auto`). Comandi, '
+            'come prima riga di un commento, dall\'identità di `[roles].supervisor` o da un '
+            'utente fidato:\n\n'
+            '- `/devloop retry`: ripete il passo fallito, senza contare un round (al massimo '
+            '{retries} volte per passo e input, poi l\'escalation passa all\'operatore);\n'
+            '- `/devloop accept-defaults`: accetta i default proposti dal controllo di prontezza '
+            'e rimette l\'issue in coda;\n'
+            '- `/devloop decide <decisioni>`: decide le lacune del controllo di prontezza anche '
+            'diversamente dai default (il testo è il resto del commento) e rimette l\'issue in '
+            'coda;\n'
+            '- `/devloop grant-round <motivo>`: concede un round di review in più a una PR al '
+            'limite dei round (`round_grantable`), entro i tetti della delega; il motivo, che può '
+            'continuare nelle righe successive, riporta o cita l\'analisi delle cause;\n'
+            '- `/devloop grant-budget <motivo>`: estende una volta l\'envelope di budget della '
+            'storia, solo in turni e tempo (`budget_grantable`), entro i tetti della delega; il '
+            'motivo, come per `grant-round`, riporta o cita l\'analisi delle cause;\n'
+            '- `/devloop escalate <motivo>`: passa l\'escalation all\'operatore '
+            '(`agent:needs-operator`).'),
+        'operator_retry': ('In alternativa, un utente fidato può ripetere il passo `{step}` con '
+                           'un commento che abbia `/devloop retry` come prima riga: devloop '
+                           'toglie `agent:needs-operator` e ripete il passo, al massimo {retries} '
+                           'volte per passo e input (contando anche i retry del supervisore).'),
+        'supervision_title': 'Decisione del supervisore',
+    })
 
 
-SUPERVISOR_RESUME = (
-    'Escalation non critica: decide il supervisore (modalità di merge `auto`). Comandi, come prima '
-    'riga di un commento, dall\'identità di `[roles].supervisor` o da un utente fidato:\n\n'
-    '- `/devloop retry`: ripete il passo fallito, senza contare un round (al massimo 2 volte per '
-    'passo e input, poi l\'escalation passa all\'operatore);\n'
-    '- `/devloop accept-defaults`: accetta i default proposti dal controllo di prontezza e rimette '
-    'l\'issue in coda;\n'
-    '- `/devloop decide <decisioni>`: decide le lacune del controllo di prontezza anche '
-    'diversamente dai default (il testo è il resto del commento) e rimette l\'issue in coda;\n'
-    '- `/devloop grant-round <motivo>`: concede un round di review in più a una PR al limite dei '
-    'round (`round_grantable`), entro i tetti della delega; il motivo, che può continuare nelle '
-    'righe successive, riporta o cita l\'analisi delle cause;\n'
-    '- `/devloop grant-budget <motivo>`: estende una volta l\'envelope di budget della storia, solo '
-    'in turni e tempo (`budget_grantable`), entro i tetti della delega; il motivo, come per '
-    '`grant-round`, riporta o cita l\'analisi delle cause;\n'
-    '- `/devloop escalate <motivo>`: passa l\'escalation all\'operatore (`agent:needs-operator`).')
+def resume_text(language=ENGLISH):
+    """How the operator resumes an escalation, in ``language`` (#633)."""
+    return ESCALATION_TEXTS.texts(language)('resume')
 
 
-def operator_retry_text(step):
+# The Italian text of before, for the texts of the dispatcher that #628 has not translated yet.
+RESUME = resume_text(ITALIAN)
+
+
+def operator_retry_text(step, language=ENGLISH):
     """How a trusted user runs again the step ``step`` of an escalation to the operator
-    (#321)."""
-    return (f'In alternativa, un utente fidato può ripetere il passo `{step}` con un commento che '
-            'abbia `/devloop retry` come prima riga: devloop toglie `agent:needs-operator` e '
-            f'ripete il passo, al massimo {MAX_RETRIES} volte per passo e input (contando anche i '
-            'retry del supervisore).')
+    (#321), in ``language`` (#633)."""
+    return ESCALATION_TEXTS.texts(language)('operator_retry', step=step, retries=MAX_RETRIES)
 
 
-def render_escalation(reason, detail='', cls='failure', supervised=None, retry=None, extra=None):
+def render_escalation(reason, detail='', cls='failure', supervised=None, retry=None, extra=None,
+                      language=ENGLISH):
     """An escalation (#182: of class ``cls``). ``supervised``, for a non-critical one the
     supervisor decides, holds the step, the key of its input and what a retry resumes; without
     it the escalation goes to the operator. ``retry``, for an escalation to the operator, holds
     the same for a step that a trusted user may run again with ``/devloop retry`` (#321).
     ``extra``: more fields of the marker, such as the conclave decision a veto annulled
-    (#142)."""
-    title = 'Escalation al supervisore' if supervised else 'Serve un intervento dell\'operatore'
-    resume = SUPERVISOR_RESUME if supervised else RESUME
+    (#142). ``language``: the project's (#633), of the title, the class and how to resume; the
+    ``reason`` is the caller's, the marker the same."""
+    t = ESCALATION_TEXTS.texts(language)
+    title = t('supervisor_title' if supervised else 'operator_title')
+    resume = (t('supervisor_resume', retries=MAX_RETRIES) if supervised else t('resume'))
     if retry and not supervised:
-        resume += '\n\n' + operator_retry_text(retry['step'])
+        resume += '\n\n' + operator_retry_text(retry['step'], language)
     body = (dispatcher_header() + f'\n## {title}\n\n' + reason.strip() + '\n\n'
-            + f'**Classe:** `{cls}` ({describe(cls)}), '
-            + ('critica' if critical(cls) else 'non critica') + '.\n\n'
+            + t('class_line', cls=cls, described=describe(cls, language=language),
+                severity=t('non_critical' if not critical(cls) else 'critical')) + '\n\n'
             + resume + '\n')
     if detail:
         body += '\n```text\n' + detail.strip()[-6000:].replace('```', "'''") + '\n```\n'
@@ -1311,11 +1367,14 @@ def render_operator_merge(head, labeled, promotion, reasons, label):
                                         'labeled': labeled, 'promotion': promotion})
 
 
-def render_supervision(record, text, title='Decisione del supervisore', records=()):
+def render_supervision(record, text, title=None, records=(), language=ENGLISH):
     """The dispatcher's trace of a supervisor command (#182), or of a command on an escalation
     to the operator (#321, with its own ``title``): what was asked, by whom, and the outcome,
     in a ``supervision`` marker. ``records``: more ``(kind, payload)`` markers of the same
     comment, such as the ``finding`` record of the coordinator's closures (#606), written
-    together with the trace that spends their command."""
+    together with the trace that spends their command. Without ``title``, the supervisor's
+    decision in ``language`` (#633); ``text`` is the caller's, in the same language."""
+    if title is None:
+        title = ESCALATION_TEXTS.texts(language)('supervision_title')
     return publishable(dispatcher_header() + f'\n## {title}\n\n{text.strip()}',
                        'supervision', record, records)
