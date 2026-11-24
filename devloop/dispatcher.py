@@ -825,7 +825,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         """Closures asked with ``FINDING_COMMAND`` lines and not recorded yet, one per open
         finding, from comments trusted users wrote in person. A command from anyone else,
         malformed, or naming a finding that never existed is ignored and logged; one naming a
-        finding already closed has nothing left to do."""
+        finding already closed has nothing left to do. The coordinator's lines are none of this
+        reader's (#606): its closures are commands of an ``open_findings`` escalation."""
         open_keys = {f['key'] for f in state.open}
         pending = {}
         for comment in comments:
@@ -833,6 +834,10 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             if body.lstrip().startswith('> [!NOTE]'):
                 continue  # text devloop or its agents published: never a command
             login = (comment.get('author') or {}).get('login')
+            if self._is_coordinator(login):
+                # The coordinator's closures are commands of an ``open_findings`` escalation
+                # (#606, ``_coordinator_findings``), recorded there after their checks.
+                continue
             for line, parsed in finding_commands(body):
                 why = ('the author is not a trusted user' if login not in self.cfg.trusted_users
                        else 'malformed, expected `/devloop finding <round/reviewer/ID> '

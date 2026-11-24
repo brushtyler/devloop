@@ -6173,7 +6173,7 @@ class RoleRunbookTests(unittest.TestCase):
         who = self.part(text, 'Who you are')
         for phrase in ('**responsible for the operations**', '**You decide**',
                        '**You do not decide**', '**You talk with**',
-                       '`/devloop authorize`, from #607', '`open_findings`, from #606',
+                       '`/devloop authorize`, from #607', '`open_findings`, #606',
                        '(`review_level`)', 'in place of an unavailable member (#605)',
                        '`capacity` and `grant-budget` within the caps (from #595)',
                        '`[direction] issue`, from #604', 'the issues opened by the supervisor',
@@ -6229,7 +6229,9 @@ class RoleRunbookTests(unittest.TestCase):
                 'The authorization holds for the text you read',
                 '`trust_policy` other than `none`',
                 'A priority label the operator put on an issue wins',
-                '**Open findings** (`open_findings`, point 3, from #606)',
+                '**Open findings** (`open_findings`, point 3, #606;',
+                '`/devloop finding <round/reviewer/ID> resolved|withdrawn <reason>`',
+                'you close a finding, you never override a verdict',
                 '**The conclave** (point 3, #605)'):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, tasks)

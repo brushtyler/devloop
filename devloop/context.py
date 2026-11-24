@@ -467,10 +467,11 @@ def format_previous_rounds(reviews, fixes, closures=()):
                     f'- {r["finding_id"]}: {r["action"]}: {without_attribution(r["note"])}'
                     for r in fix['responses']))
     if closures:
-        parts.append('### Findings closed by CI or by the operator\n\n' + '\n'.join(
-            f'- {c["key"]}: {c["status"]} by '
-            + ('CI' if c['by'] == CI else f'the operator ({c["author"]})') + f': {c["reason"]}'
-            for c in closures))
+        parts.append('### Findings closed by CI, by the operator or by the coordinator\n\n'
+                     + '\n'.join(
+                         f'- {c["key"]}: {c["status"]} by '
+                         + ('CI' if c['by'] == CI else f'the {c["by"]} ({c["author"]})')
+                         + f': {c["reason"]}' for c in closures))
     return '\n\n'.join(parts)
 
 

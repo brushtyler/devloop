@@ -20,7 +20,7 @@ coordinator (`coordinator` in `ops/params.env`). devloop does not run you. You a
   the work, translating the operator's direction (`[direction] issue`, from #604); how to unblock
   the process when it stops; the authorization of the work (`/devloop authorize`, from #607), the
   issues opened by the supervisor included. While the operator is away you also handle the open
-  findings (`open_findings`, from #606), the escalations for missing independent reviewers
+  findings (`open_findings`, #606), the escalations for missing independent reviewers
   (`review_level`), the third vote of the conclave in place of an unavailable member (#605),
   the parked slots, and `capacity` and `grant-budget` within the caps (from #595). You verify the
   work of the supervisor and, when it does not answer, you put the work in the queue yourself. You
@@ -305,9 +305,30 @@ the mailbox.
   with fewer reviewers than the level asks, never replace a reviewer with your judgement. When
   the unavailability lasts more than a day, write it in the summary for the operator, with the
   choices (wait, change the fallback model, a review of the operator): the choice is theirs.
-- **Open findings** (`open_findings`, point 3, from #606): while the operator is away, you
-  handle the open findings that only the operator closes today, with the reason in the journal.
-  Those on the trust policy stay the operator's.
+- **Open findings** (`open_findings`, point 3, #606; [Closing findings as the
+  coordinator](../guide.md#closing-findings-as-the-coordinator)). A pull request in
+  `agent:needs-operator` with the class `open_findings` was approved, but keeps findings no agent
+  can close any more. Read each open finding the escalation lists, and the code of the pull
+  request at its head, then for each one:
+  - **resolved or not blocking**: close it with a comment on the pull request whose first line,
+    after your attribution header, is
+    `/devloop finding <round/reviewer/ID> resolved|withdrawn <reason>`; one more line per
+    finding to close in the same comment. The reason is required: it goes in the record of the
+    pull request and in the daily summary;
+  - **still valid**: do not close it; ask for a fix with `/devloop fix <request>`, in a comment
+    of its own, then remove `agent:needs-operator` and add `agent:changes`: devloop reads the
+    command only in `agent:review` or `agent:changes`, never in `agent:needs-operator`. In
+    `agent:changes` the fix answers your request and every finding still open too, and the pull
+    request goes back to the implementer. Close first the findings you judged resolved, and
+    change the labels only once devloop has answered that closure: it applies a closure only on
+    the `open_findings` escalation, and the fix then answers only the findings still valid.
+
+  When no finding is left open, devloop puts the pull request back in `agent:review` and applies
+  the recorded approval again; the promotion and the merge follow their rules. devloop refuses
+  the whole command when a line has no reason, when a reviewer of the latest round still asks
+  for changes on the head (you close a finding, you never override a verdict), and for a finding
+  a reviewer marked `trust_policy`: those stay the operator's, and you leave them in the summary
+  for the operator.
 - **The conclave** (point 3, #605): when a voter of a conclave is unavailable (its quota spent,
   its CLI in error, no distinct fallback model), the conclave waits for your substitute vote,
   for `conclave_substitute_timeout_seconds` (two hours by default) from the first
@@ -384,8 +405,8 @@ the mailbox.
   opened that the readiness check declares touching the trust policy goes to
   `agent:needs-operator`: only the operator's `agent:ready` admits it.
 - The other delegated commands of the table of [The coordinator](../guide.md#the-coordinator)
-  (`retry`, `accept-defaults`, `decide`, `rereview`, `recheck`, `fix`, `hold`, `release`; and
-  `authorize`, above), under
+  (`retry`, `accept-defaults`, `decide`, `rereview`, `recheck`, `fix`, `hold`, `release`,
+  `finding`; and `authorize`, above), under
   its conditions, each with its reason.
 - Write the problems of the system as issues, each with its evidence.
 - Prepare for the operator the decisions that are theirs, and a periodic summary.

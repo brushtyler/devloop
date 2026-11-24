@@ -1261,7 +1261,7 @@ next to the review; one for the trust policy gets none (#434, see
 | `round_limit` | The limit of review rounds, when the supervisor may not grant another one | Yes |
 | `operator_decision` | A readiness check with an `operator_decision` or `tool_unavailable` gap, or a split | Yes |
 | `untrusted` | The issue text changed after `agent:ready` by someone outside `trusted_users` | Yes |
-| `reviewer_decision`, `open_findings` | A reviewer asks for a decision; an approval leaves open findings only the operator can close (`ci` findings with the head's CI still running, or passed during the review, wait for it instead) | Yes |
+| `reviewer_decision`, `open_findings` | A reviewer asks for a decision; an approval leaves open findings no agent can close any more, which the operator closes, or the coordinator but for those on the trust policy ([Closing findings as the coordinator](#closing-findings-as-the-coordinator)) (`ci` findings with the head's CI still running, or passed during the review, wait for it instead) | Yes |
 | `review_level`, `level_zero` | Not enough independent reviewers; a level-0 head that cannot be promoted | Yes |
 | `sync_sensitive`, `protected_paths` | A sync conflict on a sensitive or operator-only path; a change to `protected_paths` | Yes |
 | `tests_failed`, `blocked`, `interrupted`, `unattributable`, `lost_meta`, `inconsistent`, `configuration`, `failure` | Tests still failing (or no change), an agent that declared itself blocked, an interrupted implementation, findings without an owner, a lost PR marker, an inconsistent PR state, a configuration to decide (a turn refused for an entry of the directories of the CLIs that is not in the [list](#agent-user), #517, also in a sync), a `gh`, git or dispatcher error | Yes |
@@ -2012,9 +2012,10 @@ of ADR 0002:
 | labels | Delegated: its `agent:ready` added again and (#595) its priority labels count, as the supervisor's, only on issues opened by a trusted user or by a devloop app; its dependency and implementer labels never count ([Labels from the supervisor](#labels-from-the-supervisor)) |
 | `approve`, `merge-budget`, `reconcile`, `trusted_users` and the keys of trust | Reserved to the operator in person: never the coordinator's. On an escalation they are answered as not applicable and spent; elsewhere they are ignored and logged, as anyone else's; `trusted_users` and the overlay are the operator's |
 | `merge` | The coordinator's reserved merge (#529): [The reserved merge of the coordinator](#the-reserved-merge-of-the-coordinator) |
+| `finding` | Delegated (#606): the closure of findings on an `open_findings` escalation to the operator, never of a finding a reviewer marked `trust_policy`, nor while a reviewer asks for changes on the head ([Closing findings as the coordinator](#closing-findings-as-the-coordinator)) |
 | `authorize` | Delegated (#607): `/devloop authorize [priority:<p>]`, the authorization of an issue of a trusted user or of a devloop app, bound to its title and body, without which the supervisor's `agent:ready` does not start it; only the coordinator's counts, any other identity's is refused and recorded ([Authorization by the coordinator](#authorization-by-the-coordinator)); never a command of an escalation |
 | `vote` | Delegated (#605): the substitute vote in place of an unavailable member, only on a conclave waiting for it, bound to its comment and to the SHA-256 of its proposal, before its deadline ([Conclave on a block](#conclave-on-a-block)); elsewhere ignored, and never a command of an escalation |
-| any other (`escalate`, `finding`, `veto`, ...) | Refused: on an escalation answered as not applicable and spent, elsewhere ignored and logged |
+| any other (`escalate`, `veto`, ...) | Refused: on an escalation answered as not applicable and spent, elsewhere ignored and logged |
 
 The coordinator writes as an agent, with the attribution header of AGENTS.md: its commands are
 read on the first line after the header. Like the supervisor's, its comments never reach a
@@ -2079,6 +2080,61 @@ merge recorded in the [turn journal](protocol.md#turn-journal) (`coordinator_mer
 before the merge: without a journal that can be read no reserved merge runs. The
 [daily summary](#daily-summary) lists them, merged or refused, under "Merge riservati del
 coordinatore".
+
+#### Closing findings as the coordinator
+
+When every reviewer of a round approves but a finding no agent can close any more is still open
+(another reviewer's, or one of an earlier round), the PR goes to `agent:needs-operator` with the
+class `open_findings` ([Findings and who closes them](protocol.md#findings-and-who-closes-them)).
+The coordinator handles these findings, except those on the trust policy
+([ADR 0002, second precision of 2026-11-23](../adr/0002-ruoli-e-responsabilita.md#seconda-precisazione-del-2026-11-23-modello-operativo-dei-ruoli-597),
+point 3, #606). With `[roles.coordinator]`, it reads each open finding and the code of the PR,
+and for each one:
+
+- **resolved or not blocking**: it closes it with the form of the operator's closure, as the
+  first line after the attribution header of a comment on the PR; more lines below close more
+  findings, one per line:
+
+  ```text
+  /devloop finding <round/reviewer/ID> resolved|withdrawn <reason>
+  ```
+
+- **still valid**: it does not close it and asks for a fix with `/devloop fix <request>`, in a
+  comment of its own, then removes `agent:needs-operator` and adds `agent:changes`. devloop
+  reads a fix command only on a PR in `agent:review` or `agent:changes`, never in
+  `agent:needs-operator` ([Fix requested by the operator or the supervisor](#fix-requested-by-the-operator-or-the-supervisor));
+  in `agent:changes` the fix answers the request and every finding still open too, and sends
+  the PR back to the implementer. The findings judged resolved are closed first, and the labels
+  change only once devloop has answered that closure: a closure applies only on the
+  `open_findings` escalation, and the fix then answers only the findings still valid.
+
+The dispatcher applies the command as a command of the escalation, with the PR and its thread
+read again, whole or not at all. It refuses it, answered and spent, with the PR left with the
+operator, when:
+
+- a line has no reason, an unknown status or a key not of the form `round/reviewer/ID`: every
+  closure needs its reason;
+- a reviewer of the latest round does not approve the PR's head (a `request_changes` still
+  standing, or a decision asked), or that round is not of the head: the coordinator closes a
+  finding, it never overrides a verdict;
+- a finding was opened, or kept `unresolved`, by a review with `operator_reason`
+  `trust_policy`: findings on the trust policy stay the operator's;
+- a finding is not open on the PR, or the escalation is not `open_findings` (on an escalation
+  to the supervisor it is refused, never run as another command).
+
+Only the coordinator's identity writes it as a command: the same line from the supervisor or
+anyone else is ignored there, and a trusted user's stays the
+[operator's closure](protocol.md#closing-a-finding-as-the-operator), read once the PR is back in
+`agent:review`.
+
+The closures are a `finding` record of the dispatcher with `by: coordinator`, the author, the
+reason and the head, in the same comment as the `supervision` record of the command (outcome
+`closed`): the [PR receipt](protocol.md#pr-receipt) and the prompts of later turns show them, and
+the [daily summary](#daily-summary) lists each one with its reason under "Finding chiusi dal
+coordinatore". When no finding is left open, the PR goes back to `agent:review`, where the
+recorded approval is applied again without a new review: promotion and merge follow their rules.
+With findings still open it stays in `agent:needs-operator`, and the escalation still takes the
+coordinator's next command.
 
 ### Advisory review for the operator
 
@@ -2635,6 +2691,11 @@ and writes nothing without `--publish`. The summary lists:
   of their own with the same columns: every `/devloop merge` of the coordinator's identity the
   dispatcher answered that day, merged or refused, and, once merged, how many of the
   coordinator's daily cap it took;
+- the findings the coordinator closed (#606,
+  [Closing findings as the coordinator](#closing-findings-as-the-coordinator)), under "Finding
+  chiusi dal coordinatore": one row per finding of each `/devloop finding` applied that day, with
+  the UTC time, the PR, the key, `risolto` or `ritirato`, the author and the first line of the
+  reason;
 - the substitute votes of the coordinator in a conclave (#605, [Conclave on a
   block](#conclave-on-a-block)), under "Voti sostitutivi del coordinatore nel conclave": from
   the dispatcher's `conclave` records, each vote recorded that day, with its UTC time, the issue
