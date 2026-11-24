@@ -26,6 +26,19 @@ unreadable CI leaves ``base_broken``, and while its record holds the snapshot re
 at each tick (``Snapshot.base_waits``, ``PullRequest.base_broken``): once it is green the step
 escalates ``host_tests`` (action ``host_tests``, ``_do_host_tests``) instead of waiting further.
 
+**Tests red only under load (#598).** The base runs right after the branch, on the same host
+under the same load: a test that fails only under load fails there too. So before the step of
+a writing turn is ``base_broken`` or ``host_tests`` the dispatcher waits ``FLAKY_RETRY_PAUSE``
+seconds and runs once again, on the branch as it is, only its failed tests, one module at a
+time, each with its own ``test_timeout_seconds`` (``localtests.case_commands``: a failed fixture
+of a class or of a module runs its class or its module; the other actions go on). When they all
+pass the tests are unstable, not the host nor the base: the step goes on as after passing tests,
+with no new turn of the agent nor an attempt of correction spent. The failed verification stays
+in the ledger, and the retry is a verification of its own whose ``retried`` names the tests,
+which its comment calls unstable (``_retry_alone``). When the retry fails too, ``host_tests`` or
+``base_broken`` as above: a ``host_tests`` reached during the wait for the base branch, once
+its CI is green, comes after that failed retry too.
+
 A failure only on the branch, identities that cannot be told (a timeout, an
 output without them, a module that does not start), a project whose test selection is not
 ``python-unittest-modules`` (the check reads what unittest prints), or any error of the check
@@ -44,10 +57,11 @@ no alert. It is only a report: the merges go on as before.
 import json
 import os
 import threading
+import time
 from pathlib import Path
 
 from .github import GitHubError
-from .localtests import UNITTEST_MODULES, case_modules, module_command
+from .localtests import UNITTEST_MODULES, case_commands, case_modules, module_command
 from .markdown import dispatcher_header, publishable
 from .outbox import SENT as PUBLISHED
 from .ports import summarize_checks
@@ -56,6 +70,9 @@ from .workspace import WorkspaceError
 
 # The failed tests a record and its comment list at most; the count is always the whole.
 MAX_CASES_LISTED = 30
+# The seconds the dispatcher waits before it runs again alone the failed tests of a step that
+# would escalate ``host_tests`` (#598), so that the load of the run that failed has passed.
+FLAKY_RETRY_PAUSE = 5
 # How many commits of the first-parent chain of the base branch the alert of a red CI walks back
 # to find the latest green one, reading the checks of each (#459).
 MAIN_HISTORY = 10
@@ -155,6 +172,8 @@ class BaseMixin:
     """The checks of the base branch's health (#459). They use the dispatcher state and its
     other methods through ``self``."""
 
+    flaky_retry_pause = FLAKY_RETRY_PAUSE
+
     # Tests red on the base too ------------------------------------------------
     def _base_broken(self, path, tail=''):
         """``BaseBroken`` when every test that failed in the latest local run in ``path`` fails
@@ -206,6 +225,28 @@ class BaseMixin:
         self.log(f'  all {len(cases)} failed tests fail on the base commit {base[:12]} too: '
                  'base_broken')
         return BaseBroken(base, cases, tail)
+
+    def _retry_alone(self, where, path, attempt, broken):
+        """Run once again alone, after ``flaky_retry_pause`` seconds, the failed tests of
+        ``broken`` (a ``BaseBroken`` or a ``HostTests``) on the branch in ``path`` (#598), one
+        module at a time, each with its own time limit: ``(passed, entry)``, with the ledger
+        record of that verification of ``attempt`` (None without a ledger), whose ``retried``
+        names those tests. A test command that cannot run counts as failed."""
+        time.sleep(self.flaky_retry_pause)
+        try:
+            passed, _, entry = self._run_tests(where, path, attempt, case_commands(broken.cases),
+                                               retried=broken.cases)
+        except WorkspaceError as exc:
+            self.log(f'  the failed tests not run again alone: {exc}')
+            return False, None
+        listed = ', '.join(broken.cases[:MAX_CASES_LISTED])
+        if passed:
+            kind = 'host_tests' if isinstance(broken, HostTests) else 'base_broken'
+            self.log(f'  the {len(broken.cases)} failed tests pass run again alone: unstable '
+                     f'tests, not {kind}: {listed}')
+        else:
+            self.log(f'  the {len(broken.cases)} failed tests fail run again alone too')
+        return passed, entry
 
     def _base_ci_green(self, base):
         """The link to the checks of commit ``base`` when they all succeeded (#497), else '': a

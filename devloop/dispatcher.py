@@ -2602,21 +2602,36 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                                  self.cfg.tests)
         return (module_command(modules) if modules else None), {'mode': mode, 'modules': modules}
 
-    def _run_tests(self, where, path, attempt, command):
+    def _run_tests(self, where, path, attempt, command, retried=None):
         """Run ``command``, recording it in the ledger with the tree tested; returns
-        ``(passed, tail, entry)``. The test of a fix is a section of its register (#355)."""
+        ``(passed, tail, entry)``. The test of a fix is a section of its register (#355).
+        ``command`` may be a list of commands (#598): each runs with its own
+        ``test_timeout_seconds``, stopping at the first that fails, whose tail is returned; the
+        ledger records them joined by ``&&``. ``retried``: the failed tests that ``command`` runs
+        again alone (#598), recorded."""
+        commands = command if isinstance(command, list) else [command]
         if self.ledger is None or where is None:
-            return (*self.ws.run_tests(path, command, self.cfg.test_timeout_seconds), None)
+            return (*self._run_each(path, commands), None)
         before = self.ws.tree(path)
         started = time.monotonic()
-        passed, tail = self.ws.run_tests(path, command, self.cfg.test_timeout_seconds)
+        passed, tail = self._run_each(path, commands)
         duration = int((time.monotonic() - started) * 1000)
         after = self.ws.tree(path)
         entry = self.ledger.verification(where[0], kind=where[1], attempt=attempt,
-                                         command=command, passed=passed,
+                                         command=' && '.join(commands), passed=passed,
                                          duration_ms=duration, tree_before=before,
-                                         tree_after=after, register=fix_register(where))
+                                         tree_after=after, register=fix_register(where),
+                                         retried=retried)
         return passed, tail, entry
+
+    def _run_each(self, path, commands):
+        """``(passed, tail)`` of ``commands`` run one after the other in ``path``, each with its
+        own ``test_timeout_seconds``, stopping at the first that fails."""
+        for command in commands:
+            passed, tail = self.ws.run_tests(path, command, self.cfg.test_timeout_seconds)
+            if not passed:
+                break
+        return passed, tail
 
     def _verify(self, where, path, attempt):
         """Run the local tests (``_local_tests``); returns ``(passed, tail, entry, record)``.
@@ -3082,6 +3097,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         fail on the base commit of the branch too is not retried: the reason to escalate is then
         a ``BaseBroken`` (``dispatch_base``), and the step waits for the base branch to advance;
         a ``HostTests`` when they pass in the CI of that commit (#497), escalated to the operator.
+        Neither holds when the failed tests pass once run again alone on the branch (#598,
+        ``_retry_alone``): then the turn succeeds, with the record of that retry as the passing
+        test.
         ``prompt`` is the text, or a function of the attempt (0 first) that renders it, so that
         each attempt gets what its worktree holds then (#203).
         Returns the output, ``None`` on success or a reason to escalate, the agent configuration
@@ -3122,6 +3140,14 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             if passed:
                 return result, None, used, tested, local
             broken = self._base_broken(path, tail) if base_check else None
+            if broken is not None:
+                # Before the failure of the host or of the base, its tests once again alone
+                # (#598): when they pass they are unstable under load, and the step goes on as
+                # after passing tests. A base_broken retried here is a host_tests that its wait
+                # may escalate later, when the CI of the base turns green (``_do_host_tests``).
+                passed, tested = self._retry_alone(where, path, attempt + 1, broken)
+                if passed:
+                    return result, None, used, tested, local
             if broken is not None:
                 return result, broken, used, None, local
             failures += ('\n\n## Test failures after your previous attempt\n\nThe test command '

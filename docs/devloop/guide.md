@@ -915,6 +915,20 @@ modules, one at a time, on the base commit of the branch, in a disposable worktr
   reads the CI of the same commit again at each tick, and once it is green the step escalates
   `host_tests` as above, without waiting for `main` to move (the blocks of the issue hold that
   escalation as they hold its restart);
+- **the same, but the failed tests pass once run again alone** (#598): the base runs right after
+  the branch, on the same host and under the same load, so a test that fails only under load
+  (the local tests of several actions run in parallel) fails there too. Before escalating
+  `host_tests`, and before waiting as `base_broken`, devloop waits 5 seconds and runs once
+  again, on the branch as it is, only the failed tests, one module at a time, each with its own
+  `test_timeout_seconds` (a failed `setUpClass` or `tearDownClass` runs its whole class, a
+  failed `setUpModule` or `tearDownModule` its whole module); the other actions go on.
+  When they all pass the tests are unstable, not the host nor `main`: the step goes on as after
+  passing tests, without another turn of the agent and without spending an attempt of
+  correction. The failed verification stays in the [ledger](protocol.md#evidence-and-telemetry),
+  and the retry is a `verification` of its own whose comment names the unstable tests, so that
+  the supervisor can open an issue to fix them. When they fail again, the step escalates
+  `host_tests` or waits as `base_broken`, as above: so the `host_tests` that comes from that
+  wait, once the CI of the base commit is green, follows a failed retry too;
 - **a test fails only on the branch**, or the failed tests cannot be identified (a timeout, an
   output without them, a module that does not start, whose id unittest makes up the same whatever
   the error, a project whose `[tests].selection` is not
