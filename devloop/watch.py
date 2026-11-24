@@ -65,6 +65,7 @@ from .authorization import valid_authorization
 from .dispatch_actions import ready_approval
 from .dispatcher import label_admitters
 from .github import GitHubError, GitHubNotFound, author_login
+from .ledger import TITLES as ledger_titles
 from .markdown import read_marker
 from .planning import label_names
 
@@ -77,7 +78,9 @@ EXPIRED = object()  # a round that ended after the timeout
 ERROR_ROUNDS = 3
 ERROR_LINE = 'watch error: 3 consecutive rounds could not read GitHub, the last valid state is kept'
 VERDICTS = ('APPROVED', 'CHANGES_REQUESTED')
-LEDGER_TITLE = '## Registro devloop'
+# The titles of the ledger records in every language of the dispatcher's texts (#631): a record
+# written before a change of ``language`` is still left out.
+LEDGER_TITLES = ledger_titles
 # Comments are read from this long before the previous round, against clock skew; their ids keep
 # them from being reported twice.
 COMMENT_MARGIN = timedelta(minutes=5)
@@ -705,7 +708,8 @@ class Watcher:
         return EXTERNAL if kind == 'issue' else None
 
     def _comment_line(self, kind, number, login, body):
-        if read_marker(body, 'ledger') is not None or first_line(body).startswith(LEDGER_TITLE):
+        if (read_marker(body, 'ledger') is not None
+                or first_line(body).startswith(LEDGER_TITLES)):
             return None  # the ledger (#133): recorded on GitHub, too frequent to report
         review = read_marker(body, 'review')
         if review is not None:

@@ -848,7 +848,7 @@ class RestartTests(unittest.TestCase):
             self.assertEqual(box.resume(), [])
             [(number, body)] = gh.comments
             self.assertEqual(number, 7)
-            self.assertIn('Turno in corso', body)
+            self.assertIn('Turn in progress', body)
             # The turn of the journal is left without outcome: the tick makes it uncertain.
             self.assertEqual(box.journal.pending(), [7])
 

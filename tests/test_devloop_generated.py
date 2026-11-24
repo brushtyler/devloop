@@ -132,17 +132,18 @@ class LimitTests(unittest.TestCase):
 
     def test_the_verification_record_fits_github(self):
         gh = LedgerGH()
-        entry = Ledger(gh).verification(7, kind='implement', attempt=1, command='t',
-                                        passed=True, duration_ms=1, tree_before='a',
-                                        tree_after='b', changed_by_tests=MANY)
+        ledger = Ledger(gh, language='Italian')
+        entry = ledger.verification(7, kind='implement', attempt=1, command='t',
+                                    passed=True, duration_ms=1, tree_before='a',
+                                    tree_after='b', changed_by_tests=MANY)
         self.assertEqual(entry.record['changed_by_tests'], MANY[:MAX_LISTED])
         self.assertEqual(entry.record['changed_by_tests_omitted'], len(MANY) - MAX_LISTED)
         body = gh.thread[7][-1]['body']
         self.assertLess(len(body), 20000)
         self.assertIn(f'- … e altri {len(MANY) - MAX_LISTED}', body)
-        few = Ledger(gh).verification(7, kind='implement', attempt=1, command='t', passed=True,
-                                      duration_ms=1, tree_before='a', tree_after='b',
-                                      changed_by_tests=[PYC])
+        few = Ledger(gh, language='Italian').verification(
+            7, kind='implement', attempt=1, command='t', passed=True, duration_ms=1,
+            tree_before='a', tree_after='b', changed_by_tests=[PYC])
         self.assertNotIn('changed_by_tests_omitted', few.record)
         self.assertNotIn('e altri', gh.thread[7][-1]['body'])
 

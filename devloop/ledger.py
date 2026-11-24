@@ -33,9 +33,12 @@ A fix has a register of its own too (#355), a ``fix`` record with the same rules
 tests, each in a section. It is written with the first turn, ``open``, before the CLI starts.
 Its sections read with ``register`` set to ``FIX``.
 
-A value the CLI or GitHub did not attest is null, never 0, and reads ``non riportato``. Nothing
+A value the CLI or GitHub did not attest is null, never 0, and reads ``not reported``. Nothing
 is reconstructed from what agents wrote: data missing for work started before these records is
 missing.
+
+The readable part of a record follows the project's ``language`` (#631, ``i18n``): Italian or
+English, English for any other language. Its marker does not, so reads never depend on it.
 """
 
 import hashlib
@@ -49,12 +52,12 @@ from .agents import TELEMETRY_FIELDS
 from .budget import observed
 from .generated import capped
 from .github import GitHubError
+from .i18n import ENGLISH, Catalog
 from .journal import (FAILED, LEGACY, MAX_BYTES, NOT_DISPATCHED, RETURNED, JournalError,
                       TurnJournal)
 from .markdown import dispatcher_header, publishable, read_marker
 from .ports import Tracker
 
-NOT_REPORTED = 'non riportato'
 # The trace of the turns left open before #362, in state_dir: imported once by the journal.
 PENDING = LEGACY
 # The journal's outcome of a turn closed as ``close_turn`` says.
@@ -181,11 +184,16 @@ class Ledger:
     lasts as long as the process.
 
     ``signed`` tells whether a login signs as the dispatcher: only a register it signed is
-    edited. The dispatcher sets it to its own check; without it every author counts."""
+    edited. The dispatcher sets it to its own check; without it every author counts.
+
+    ``language``: the project's (``Config.language``, #631), the language of the readable part
+    of the records it writes (``render``); the dispatcher sets it to its configuration's."""
 
     def __init__(self, gh: Tracker, clock=time.time, monotonic=time.monotonic, state_dir=None,
-                 signed=None, read_only=False, journal_max_bytes=MAX_BYTES, repo_aliases=None):
+                 signed=None, read_only=False, journal_max_bytes=MAX_BYTES, repo_aliases=None,
+                 language=ENGLISH):
         self.gh = gh
+        self.language = language
         self._clock = clock
         self._monotonic = monotonic
         # ``repo_aliases``: ``{former name: name}`` of a renamed repository (#540): the records
@@ -209,8 +217,11 @@ class Ledger:
     def _now(self):
         return timestamp(self._clock)
 
+    def _render(self, record, story=None):
+        return render(record, story=story, language=self.language)
+
     def _post(self, number, record):
-        return Entry(number, self.gh.comment(number, render(record)), record)
+        return Entry(number, self.gh.comment(number, self._render(record)), record)
 
     def _edit(self, entry, **changes):
         record = dict(entry.record, **changes)
@@ -220,7 +231,7 @@ class Ledger:
             return
         if entry.comment_id is None:
             raise GitHubError(f'ledger record on #{entry.number}: comment id unknown, not edited')
-        self.gh.edit_comment(entry.comment_id, render(record))
+        self.gh.edit_comment(entry.comment_id, self._render(record))
         entry.record = record
 
     # Round registers (#325) ------------------------------------------------
@@ -264,7 +275,7 @@ class Ledger:
                 record = ({'type': 'fix', 'round': fix.round} if fix
                           else {'type': 'round', 'round': round_no})
                 record['records'] = [dict(section, section=1)]
-                comment_id = self.gh.comment(number, render(record))
+                comment_id = self.gh.comment(number, self._render(record))
                 if fix:
                     fix.comment_id = comment_id
                 return comment_id, 1
@@ -273,7 +284,7 @@ class Ledger:
                 raise GitHubError(f'{name} on #{number}: comment id unknown, not edited')
             n = max((s['section'] for s in record['records']), default=0) + 1
             record = dict(record, records=record['records'] + [dict(section, section=n)])
-            self.gh.edit_comment(comment['id'], render(record))
+            self.gh.edit_comment(comment['id'], self._render(record))
             return comment['id'], n
 
     def _edit_section(self, entry, changes):
@@ -292,7 +303,7 @@ class Ledger:
                 raise GitHubError(f'{name} on #{entry.number}: comment id unknown, not edited')
             record = dict(record, records=[dict(s, **changes) if s['section'] == entry.section
                                            else s for s in sections])
-            self.gh.edit_comment(comment['id'], render(record))
+            self.gh.edit_comment(comment['id'], self._render(record))
 
     # Writes ----------------------------------------------------------------
     def request(self, number, *, title, body, labeled, comments, story_repo=None,
@@ -317,7 +328,7 @@ class Ledger:
         if story_repo is None:
             return self._post(number, record)
         story = story_marker(self.journal.story(story_repo, number, record['hash']), number)
-        return Entry(number, self.gh.comment(number, render(record, story=story)), record)
+        return Entry(number, self.gh.comment(number, self._render(record, story=story)), record)
 
     # Stories (#363) --------------------------------------------------------
     def story_of(self, number, comments, repo):
@@ -368,7 +379,7 @@ class Ledger:
         step 3 of ADR 0001, and until then no issue gets the marker of a child."""
         current = self.journal.child(story, repo, number)
         mark = story_marker(current, number)
-        text = '\n'.join(_render_story(mark))
+        text = '\n'.join(_render_story(TEXTS.texts(self.language), mark))
         return self.gh.comment(number, publishable(dispatcher_header() + '\n' + text,
                                                    'story', mark))
 
@@ -561,153 +572,292 @@ def collect(comments, signed):
 
 
 # Rendering ---------------------------------------------------------------
-def _value(value):
+# The readable part of the records, in the project's ``language`` (#631, ``i18n``); English
+# for a language without translation. The markers, and so every read, do not depend on it.
+TEXTS = Catalog(
+    en={
+        'title': '## devloop ledger',
+        'not_reported': 'not reported',
+        'turn': 'turn `{kind}` of `{agent}`',
+        'turn_open': ('Turn in progress: the record is written before the CLI starts. End, '
+                      'outcome and telemetry are added when it closes.'),
+        'turn_incomplete': ('**Incomplete turn:** no closing recorded (crash of the dispatcher '
+                            'or failed final write). End, outcome and telemetry stay not '
+                            'reported.'),
+        'operator_login': 'the operator\'s `gh` login',
+        'identity': 'GitHub identity',
+        'model': 'Configured model',
+        'effort': 'Configured effort',
+        'fallback_for': 'Fallback model for',
+        'attempt': 'Attempt',
+        'role': 'Role',
+        'model_real': 'Real model (attested by the CLI)',
+        'started_at': 'Start',
+        'ended_at': 'End',
+        'duration_ms': 'Duration (ms)',
+        'outcome': 'Outcome',
+        'last_command': 'Last command (exposed by the CLI)',
+        'denied_command': 'Denied command (reported by agy)',
+        'error': 'Error',
+        'telemetry': '**Telemetry** (declared by the CLI, not authenticated):',
+        'request': 'request snapshot',
+        'request_note': ('Snapshot **at the takeover** of the issue (`agent:ready` → '
+                         '`agent:working`), not at the time of the label.'),
+        'hash': 'Hash of title and body (SHA-256)',
+        'labeled_by': 'Label added by',
+        'labeled_at': 'Label added at',
+        'comments': 'Trusted comments considered',
+        'implementer': 'Implementer chosen',
+        'taken_at': 'Taken over at',
+        'verification': 'local verification',
+        'verification_section': 'Local verification',
+        'verification_note': ('Command run by the dispatcher. The commit is given only if the '
+                              'tree tested, before and after the test, is the one committed.'),
+        'kind': 'Step',
+        'command': 'Command',
+        'tree_before': 'Tree before',
+        'tree_after': 'Tree after',
+        'commit': 'Commit',
+        'at': 'Run at',
+        'unstable': ('**Unstable tests**: failed in the attempt and on the base commit, they '
+                     'pass when run again alone. The step goes on; the test must be fixed:'),
+        'still_failing': '**Tests run again alone**, they still fail:',
+        'changed_by_tests': ('**Files changed by the test**: their content after the test is '
+                             'not the one before, and ends up in the commit that follows:'),
+        'changed_by_tests_omitted': '… and {count} more',
+        'event': 'event `{event}`',
+        'event_section': 'Event `{event}`',
+        'checks': '| Check | Outcome | Actions run |',
+        'round': 'round {round}',
+        'round_note': ('One register per round: each review turn and the CI event of the round '
+                       'have their own section. The section of a turn is written before the '
+                       'CLI starts and completed when it ends.'),
+        'section_turn': 'Turn `{kind}` of `{agent}`',
+        'fix_of_round': 'fix of round {round}',
+        'fix_first': 'fix before any review',
+        'fix_note': ('One register per fix: each turn, the merge of the base made before the '
+                     'fix and each local verification have their own section. The section of a '
+                     'turn is written before the CLI starts and completed when it ends.'),
+        'story': 'story',
+        'story_section': '### Story',
+        'story_root': ('This issue is the root of story `{story}`, assigned by the dispatcher '
+                       'at the takeover. The hashes are those of the `request` records of the '
+                       'root, from the first.'),
+        'story_child': ('This issue is a child of story `{story}` of root #{root}: it inherits '
+                        'it only from this marker of the dispatcher.'),
+        'story_id': 'Story',
+        'repo': 'Repository',
+        'hashes': 'Hashes of the requests (SHA-256)',
+        'root': 'Root',
+    },
+    it={
+        'title': '## Registro devloop',
+        'not_reported': 'non riportato',
+        'turn': 'turno `{kind}` di `{agent}`',
+        'turn_open': ('Turno in corso: il record è scritto prima di avviare la CLI. Fine, esito '
+                      'e telemetria si aggiungono alla chiusura.'),
+        'turn_incomplete': ('**Turno incompleto:** nessuna chiusura registrata (crash del '
+                            'dispatcher o scrittura finale fallita). Fine, esito e telemetria '
+                            'restano non riportati.'),
+        'operator_login': 'login `gh` dell\'operatore',
+        'identity': 'Identità GitHub',
+        'model': 'Modello configurato',
+        'effort': 'Effort configurato',
+        'fallback_for': 'Modello di fallback per',
+        'attempt': 'Tentativo',
+        'role': 'Ruolo',
+        'model_real': 'Modello reale (attestato dalla CLI)',
+        'started_at': 'Inizio',
+        'ended_at': 'Fine',
+        'duration_ms': 'Durata (ms)',
+        'outcome': 'Esito',
+        'last_command': 'Ultimo comando (esposto dalla CLI)',
+        'denied_command': 'Comando negato (riportato da agy)',
+        'error': 'Errore',
+        'telemetry': '**Telemetria** (dichiarata dalla CLI, non autenticata):',
+        'request': 'snapshot della richiesta',
+        'request_note': ('Snapshot **alla presa in carico** dell\'issue (`agent:ready` → '
+                         '`agent:working`), non all\'istante della label.'),
+        'hash': 'Hash di titolo e corpo (SHA-256)',
+        'labeled_by': 'Label messa da',
+        'labeled_at': 'Label messa il',
+        'comments': 'Commenti fidati considerati',
+        'implementer': 'Implementer scelto',
+        'taken_at': 'Presa in carico',
+        'verification': 'verifica locale',
+        'verification_section': 'Verifica locale',
+        'verification_note': ('Comando eseguito dal dispatcher. Il commit è indicato solo se '
+                              'l\'albero testato, prima e dopo il test, coincide con quello '
+                              'committato.'),
+        'kind': 'Passo',
+        'command': 'Comando',
+        'tree_before': 'Albero prima',
+        'tree_after': 'Albero dopo',
+        'commit': 'Commit',
+        'at': 'Eseguita il',
+        'unstable': ('**Test instabili**: falliti nel tentativo e sul commit base, passano '
+                     'rilanciati da soli. Il passo prosegue; il test va corretto:'),
+        'still_failing': '**Test rilanciati da soli**, falliscono ancora:',
+        'changed_by_tests': ('**File modificati dal test**: il loro contenuto dopo il test non è '
+                             'quello di prima, e finisce nel commit che segue:'),
+        'changed_by_tests_omitted': '… e altri {count}',
+        'event': 'evento `{event}`',
+        'event_section': 'Evento `{event}`',
+        'checks': '| Check | Esito | Run di Actions |',
+        'round': 'round {round}',
+        'round_note': ('Un solo registro per round: ogni turno di review e l\'evento della CI '
+                       'del round hanno la loro sezione. La sezione di un turno è scritta prima '
+                       'di avviare la CLI e completata quando finisce.'),
+        'section_turn': 'Turno `{kind}` di `{agent}`',
+        'fix_of_round': 'correzione del round {round}',
+        'fix_first': 'correzione prima di ogni review',
+        'fix_note': ('Un solo registro per correzione: ogni turno, il merge della base fatto '
+                     'prima della correzione e ogni verifica locale hanno la loro sezione. La '
+                     'sezione di un turno è scritta prima di avviare la CLI e completata quando '
+                     'finisce.'),
+        'story': 'storia',
+        'story_section': '### Storia',
+        'story_root': ('Questa issue è la radice della storia `{story}`, assegnata dal '
+                       'dispatcher alla presa in carico. Gli hash sono quelli dei record '
+                       '`request` della radice, dal primo.'),
+        'story_child': ('Questa issue è figlia della storia `{story}` della radice #{root}: la '
+                        'eredita solo da questo marker del dispatcher.'),
+        'story_id': 'Storia',
+        'repo': 'Repository',
+        'hashes': 'Hash delle richieste (SHA-256)',
+        'root': 'Radice',
+    })
+# The first line of a record in every language (``watch`` leaves them out, #133): a record
+# written before a change of ``language`` is still recognised.
+TITLES = TEXTS.variants('title')
+
+
+def _title(t, key, **fields):
+    return f'{t("title")}: {t(key, **fields)}'
+
+
+def _value(t, value):
     if value is None:
-        return NOT_REPORTED
+        return t('not_reported')
     if isinstance(value, list):
-        return ', '.join(f'`{v}`' for v in value) if value else NOT_REPORTED
+        return ', '.join(f'`{v}`' for v in value) if value else t('not_reported')
     return f'`{value}`'
 
 
-def _rows(pairs):
-    return '\n'.join(f'- **{name}:** {_value(value)}' for name, value in pairs)
+def _rows(t, pairs):
+    return '\n'.join(f'- **{name}:** {_value(t, value)}' for name, value in pairs)
 
 
-_TURN_NOTE = {
-    'open': ('Turno in corso: il record è scritto prima di avviare la CLI. Fine, esito e '
-             'telemetria si aggiungono alla chiusura.'),
-    'closed': '',
-    'incomplete': ('**Turno incompleto:** nessuna chiusura registrata (crash del dispatcher o '
-                   'scrittura finale fallita). Fine, esito e telemetria restano non riportati.'),
-}
+def _labelled(t, r, keys):
+    """The rows of ``keys`` of ``r``, each named by the text of its key."""
+    return [(t(key), r.get(key)) for key in keys]
 
 
-def _render_turn(r, title=None):
+_TURN_NOTE = {'open': 'turn_open', 'closed': None, 'incomplete': 'turn_incomplete'}
+
+
+def _render_turn(t, r, title=None):
     telemetry = r.get('telemetry') or {}
-    parts = [title or f'## Registro devloop: turno `{r["kind"]}` di `{r["agent"]}`', '']
+    parts = [title or _title(t, 'turn', kind=r['kind'], agent=r['agent']), '']
     if _TURN_NOTE[r['state']]:
-        parts += [_TURN_NOTE[r['state']], '']
-    identity = r.get('identity') or 'login `gh` dell\'operatore'
-    parts.append(f'- **Identità GitHub:** {identity}')
-    rows = [('Modello configurato', r.get('model')), ('Effort configurato', r.get('effort'))]
+        parts += [t(_TURN_NOTE[r['state']]), '']
+    identity = r.get('identity') or t('operator_login')
+    parts.append(f'- **{t("identity")}:** {identity}')
+    rows = _labelled(t, r, ('model', 'effort'))
     if r.get('fallback_for'):
-        rows.append(('Modello di fallback per', r['fallback_for']))
+        rows.append((t('fallback_for'), r['fallback_for']))
     if r.get('attempt'):
-        rows.append(('Tentativo', r['attempt']))
+        rows.append((t('attempt'), r['attempt']))
     if r.get('role') == 'findings':
         # #416: its verdict does not count for the quorum.
-        rows.append(('Ruolo', 'finding-only'))
-    rows += [('Modello reale (attestato dalla CLI)', r.get('model_real')),
-             ('Inizio', r.get('started_at')), ('Fine', r.get('ended_at')),
-             ('Durata (ms)', r.get('duration_ms')), ('Esito', r.get('outcome'))]
-    parts.append(_rows(rows))
-    for key, label in (('last_command', 'Ultimo comando (esposto dalla CLI)'),
-                       ('denied_command', 'Comando negato (riportato da agy)')):
+        rows.append((t('role'), 'finding-only'))
+    rows += _labelled(t, r, ('model_real', 'started_at', 'ended_at', 'duration_ms', 'outcome'))
+    parts.append(_rows(t, rows))
+    for key in ('last_command', 'denied_command'):
         if r.get(key):
             command = ' '.join(str(r[key]).split())
             fence = '`' * (max((len(run) for run in re.findall('`+', command)), default=0) + 1)
-            parts.append(f'- **{label}:** {fence} {command} {fence}')
+            parts.append(f'- **{t(key)}:** {fence} {command} {fence}')
     if r.get('error'):
-        parts.append(f'- **Errore:** {" ".join(str(r["error"]).split())}')
-    parts += ['', '**Telemetria** (dichiarata dalla CLI, non autenticata):', '',
-              _rows([(k, telemetry.get(k)) for k in TELEMETRY_FIELDS])]
+        parts.append(f'- **{t("error")}:** {" ".join(str(r["error"]).split())}')
+    parts += ['', t('telemetry'), '',
+              _rows(t, [(k, telemetry.get(k)) for k in TELEMETRY_FIELDS])]
     return parts
 
 
-def _render_request(r):
-    return ['## Registro devloop: snapshot della richiesta', '',
-            'Snapshot **alla presa in carico** dell\'issue (`agent:ready` → `agent:working`), '
-            'non all\'istante della label.', '',
-            _rows([('Hash di titolo e corpo (SHA-256)', r.get('hash')),
-                   ('Label messa da', r.get('labeled_by')), ('Label messa il', r.get('labeled_at')),
-                   ('Commenti fidati considerati', r.get('comments')),
-                   *([('Implementer scelto', r['implementer'])] if 'implementer' in r else []),
-                   ('Presa in carico', r.get('taken_at'))])]
+def _render_request(t, r):
+    keys = ('hash', 'labeled_by', 'labeled_at', 'comments',
+            *(('implementer',) if 'implementer' in r else ()), 'taken_at')
+    return [_title(t, 'request'), '', t('request_note'), '', _rows(t, _labelled(t, r, keys))]
 
 
-def _render_verification(r, title=None):
-    parts = [title or '## Registro devloop: verifica locale', '',
-             'Comando eseguito dal dispatcher. Il commit è indicato solo se l\'albero testato, '
-             'prima e dopo il test, coincide con quello committato.', '',
-             _rows([('Passo', r.get('kind')), ('Tentativo', r.get('attempt')),
-                    ('Comando', r.get('command')), ('Esito', r.get('outcome')),
-                    ('Durata (ms)', r.get('duration_ms')), ('Albero prima', r.get('tree_before')),
-                    ('Albero dopo', r.get('tree_after')), ('Commit', r.get('commit')),
-                    ('Eseguita il', r.get('at'))])]
+def _render_verification(t, r, title=None):
+    parts = [title or _title(t, 'verification'), '', t('verification_note'), '',
+             _rows(t, _labelled(t, r, ('kind', 'attempt', 'command', 'outcome', 'duration_ms',
+                                       'tree_before', 'tree_after', 'commit', 'at')))]
     if isinstance(r.get('retried'), list):
         # #598: the failed tests of the attempt, which failed on the base commit too, run
         # again alone before the escalation host_tests or the wait base_broken.
         cases = ''.join(f'\n- `{str(c).replace("`", "")}`' for c in r['retried'])
-        parts += ['', ('**Test instabili**: falliti nel tentativo e sul commit base, passano '
-                       'rilanciati da soli. Il passo prosegue; il test va corretto:'
-                       if r.get('outcome') == 'pass' else
-                       '**Test rilanciati da soli**, falliscono ancora:') + cases]
+        parts += ['', t('unstable' if r.get('outcome') == 'pass' else 'still_failing') + cases]
     if isinstance(r.get('changed_by_tests'), list):
         # #627: the test changed these files, so the tree after it is not the one before.
         files = ''.join(f'\n- `{str(f).replace("`", "")}`' for f in r['changed_by_tests'])
         if isinstance(r.get('changed_by_tests_omitted'), int):
-            files += f'\n- … e altri {r["changed_by_tests_omitted"]}'
-        parts += ['', '**File modificati dal test**: il loro contenuto dopo il test non è quello '
-                      'di prima, e finisce nel commit che segue:' + files]
+            files += '\n- ' + t('changed_by_tests_omitted', count=r['changed_by_tests_omitted'])
+        parts += ['', t('changed_by_tests') + files]
     return parts
 
 
-def _render_event(r, title=None):
-    parts = [title or f'## Registro devloop: evento `{r["event"]}`', '']
+def _render_event(t, r, title=None):
+    parts = [title or _title(t, 'event', event=r['event']), '']
     shown = [(k, v) for k, v in r.items() if k not in ('type', 'event', 'checks', 'section')]
-    parts.append(_rows(shown))
+    parts.append(_rows(t, shown))
     if isinstance(r.get('checks'), list):
-        parts += ['', '| Check | Esito | Run di Actions |', '|---|---|---|']
+        parts += ['', t('checks'), '|---|---|---|']
         for c in r['checks']:
             name = str(c.get('name')).replace('|', '\\|')
-            parts.append(f'| {name} | {_value(c.get("outcome"))} | {_value(c.get("run_id"))} |')
+            parts.append(f'| {name} | {_value(t, c.get("outcome"))} | '
+                         f'{_value(t, c.get("run_id"))} |')
     return parts
 
 
-def _render_round(r):
-    parts = [f'## Registro devloop: round {r["round"]}', '',
-             'Un solo registro per round: ogni turno di review e l\'evento della CI del round '
-             'hanno la loro sezione. La sezione di un turno è scritta prima di avviare la CLI e '
-             'completata quando finisce.']
+def _render_round(t, r):
+    parts = [_title(t, 'round', round=r['round']), '', t('round_note')]
     for s in r['records']:
         parts.append('')
-        parts += _render_section(s)
+        parts += _render_section(t, s)
     return parts
 
 
-def _render_section(s):
+def _render_section(t, s):
+    number = f'### {s["section"]}.'
     if s['type'] == 'turn':
-        return _render_turn(s, f'### {s["section"]}. Turno `{s["kind"]}` di `{s["agent"]}`')
+        title = t('section_turn', kind=s['kind'], agent=s['agent'])
+        return _render_turn(t, s, f'{number} {title}')
     if s['type'] == 'verification':
-        return _render_verification(s, f'### {s["section"]}. Verifica locale')
-    return _render_event(s, f'### {s["section"]}. Evento `{s["event"]}`')
+        return _render_verification(t, s, f'{number} {t("verification_section")}')
+    return _render_event(t, s, f'{number} {t("event_section", event=s["event"])}')
 
 
-def _render_fix(r):
-    which = f'del round {r["round"]}' if r['round'] else 'prima di ogni review'
-    parts = [f'## Registro devloop: correzione {which}', '',
-             'Un solo registro per correzione: ogni turno, il merge della base fatto prima della '
-             'correzione e ogni verifica locale hanno la loro sezione. La sezione di un turno è '
-             'scritta prima di avviare la CLI e completata quando finisce.']
+def _render_fix(t, r):
+    which = _title(t, 'fix_of_round', round=r['round']) if r['round'] else _title(t, 'fix_first')
+    parts = [which, '', t('fix_note')]
     for s in r['records']:
         parts.append('')
-        parts += _render_section(s)
+        parts += _render_section(t, s)
     return parts
 
 
-def _render_story(s, title='## Registro devloop: storia'):
+def _render_story(t, s, title=None):
     """The readable part of a ``story`` marker (#363)."""
     if s['issue'] == s['root']:
-        note = (f'Questa issue è la radice della storia `{s["story"]}`, assegnata dal '
-                'dispatcher alla presa in carico. Gli hash sono quelli dei record `request` della '
-                'radice, dal primo.')
-        rows = [('Storia', s['story']), ('Repository', s['repo']),
-                ('Hash delle richieste (SHA-256)', s['hashes'])]
+        note = t('story_root', story=s['story'])
+        rows = [(t('story_id'), s['story']), (t('repo'), s['repo']), (t('hashes'), s['hashes'])]
     else:
-        note = (f'Questa issue è figlia della storia `{s["story"]}` della radice '
-                f'#{s["root"]}: la eredita solo da questo marker del dispatcher.')
-        rows = [('Storia', s['story']), ('Repository', s['repo']), ('Radice', s['root'])]
-    return [title, '', note, '', _rows(rows)]
+        note = t('story_child', story=s['story'], root=s['root'])
+        rows = [(t('story_id'), s['story']), (t('repo'), s['repo']), (t('root'), s['root'])]
+    return [title or _title(t, 'story'), '', note, '', _rows(t, rows)]
 
 
 _RENDER = {'turn': _render_turn, 'request': _render_request,
@@ -715,13 +865,14 @@ _RENDER = {'turn': _render_turn, 'request': _render_request,
            'round': _render_round, 'fix': _render_fix}
 
 
-def render(record, story=None):
-    """The comment of a ledger record: the dispatcher's header, a readable summary and the
-    marker; with ``story``, the ``story`` marker of the root of a ``request`` record (#363)
-    after it."""
-    parts = _RENDER[record['type']](record)
+def render(record, story=None, language=ENGLISH):
+    """The comment of a ledger record: the dispatcher's header, a readable summary in
+    ``language`` (the project's, #631) and the marker; with ``story``, the ``story`` marker of
+    the root of a ``request`` record (#363) after it."""
+    t = TEXTS.texts(language)
+    parts = _RENDER[record['type']](t, record)
     if story is None:
         return publishable(dispatcher_header() + '\n' + '\n'.join(parts), 'ledger', record)
-    parts += [''] + _render_story(story, '### Storia')
+    parts += [''] + _render_story(t, story, t('story_section'))
     return publishable(dispatcher_header() + '\n' + '\n'.join(parts), 'ledger', record,
                        records=[('story', story)])

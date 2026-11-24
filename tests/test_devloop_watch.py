@@ -512,6 +512,9 @@ class ChangesTest(unittest.TestCase):
         gh.comment(103, 10, DISPATCH, '> [!NOTE]\n\n## Registro devloop\n\n'
                    + marker('ledger', {'type': 'event', 'event': 'ci_round'}))
         gh.comment(104, 10, OPERATOR, '> [!NOTE]\n> **Agent:** Claude Code\n\nPublished\n')
+        # A record in the other language (#631), recognised by its title alone, is left out too.
+        gh.comment(105, 10, DISPATCH, '> [!NOTE]\n\n## devloop ledger: round 1\n\nx')
+        gh.comment(106, 10, DISPATCH, '> [!NOTE]\n\n## Registro devloop: round 1\n\nx')
         self.assertEqual(self.news(), [
             'PR #10 operator comment by brushtyler: Please rebase',
             'issue #5 comment by dl-claude[bot]: ## Correzioni',

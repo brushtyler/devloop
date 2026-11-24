@@ -2405,8 +2405,9 @@ comment text are cut short and control characters removed. What it reports:
 | Native `APPROVED` or `CHANGES_REQUESTED` review of a trusted user | `PR #N review by brushtyler: APPROVED @abc1234` |
 | Comment of a trusted user or of a devloop app; one a trusted user wrote in person (no attribution header) is an `operator comment` | `issue #N operator comment by brushtyler: first line` |
 
-The [ledger](protocol.md#evidence-and-telemetry) records (`## Registro devloop`) are not reported: they are
-too frequent. Trust follows [AGENTS.md](../../AGENTS.md): an issue or PR counts if its author is in
+The [ledger](protocol.md#evidence-and-telemetry) records (`## devloop ledger`, or `## Registro devloop`
+in Italian, whatever the [language](reference.md#language-of-the-texts) of the project today) are not
+reported: they are too frequent. Trust follows [AGENTS.md](../../AGENTS.md): an issue or PR counts if its author is in
 `trusted_users` or is one of devloop's apps (the `[apps]` logins of the agents and the
 dispatcher; not the [merger app](reference.md#the-merger-app), which only merges: its comments and the
 `review` records naming it are ignored). Anyone else's issue or PR

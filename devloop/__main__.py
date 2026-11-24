@@ -460,7 +460,8 @@ def build(args):
     # The records written before a rename of the repository stay its own (#540).
     ledger = Ledger(None, state_dir=state, read_only=read_only,
                     journal_max_bytes=cfg.journal_max_mib * MIB,
-                    repo_aliases=dict.fromkeys(cfg.repo_aliases, cfg.repo))
+                    repo_aliases=dict.fromkeys(cfg.repo_aliases, cfg.repo),
+                    language=cfg.language)
     # With publication_outbox (#385), every client's comments, native reviews and pull requests
     # are in that journal before they are sent; never from status or a dry run, which do not
     # write it.
