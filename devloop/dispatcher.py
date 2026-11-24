@@ -1407,10 +1407,13 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                          trace_only=not pending['resume'])
                     if pending else self._supervisor_view(number, comments, operator))
             if view is not None:
-                found.append(dict(view, number=number, pr=is_pr))
+                # ``coordinator``: the command is the coordinator's, whose grant-budget on a
+                # budget escalation to the operator runs the step (#595, ``runs_issue_step``).
+                found.append(dict(view, number=number, pr=is_pr,
+                                  coordinator=self._is_coordinator(view.get('by'))))
         # A retry of an issue's step, or an extension of the budget envelope that runs it
-        # (#411), waits while the issue is blocked (#277), as a ready issue does: ``blocked_by``
-        # holds its open blocks.
+        # (#411, #595), waits while the issue is blocked (#277), as a ready issue does:
+        # ``blocked_by`` holds its open blocks.
         retries = [item for item in found if runs_issue_step(item)]
         views = self._dependency_view([item['number'] for item in retries]) if retries else {}
         for item in retries:

@@ -1433,7 +1433,9 @@ merged devloop PR resolved, the story never extended, an extension that covers t
 daily cap of the grants (`max_grants_per_day`) not reached. The escalation records the story,
 the kind and the agent of the refused turn for this; one written before #595 does not, and the
 command is refused. Granted, the extension is recorded as above, with `role: coordinator` in its
-`supervision` record, and the item resumes as after a retry, leaving `agent:needs-operator`. A
+`supervision` record, and the item resumes as after a retry, leaving `agent:needs-operator`; on
+an issue, as above, the command takes a free PR slot (`max_open_prs`, and none while
+`max_parked_prs` is reached) and waits, unspent, while the issue is blocked by an open issue. A
 refusal is answered, spent, and leaves the item with the operator. A second extension of a story
 stays the operator's. If the dispatcher stops after the journal recorded the coordinator's
 extension, the next tick completes the records only, and the item stays in

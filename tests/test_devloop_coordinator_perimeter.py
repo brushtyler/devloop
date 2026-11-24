@@ -25,13 +25,15 @@ from devloop import budget, supervision
 from devloop.budget import BudgetRefused
 from devloop.config import DelegationPolicy, MergePolicy
 from devloop.dispatcher import Dispatcher
-from devloop.planning import Action, plan
-from test_devloop import CFG, SHA2, FakeIdentities, FakeRunner, FakeWS, pr, raw_review
+from devloop.planning import Action, plan, runs_issue_step
+from test_devloop import (CFG, SHA2, FakeIdentities, FakeRunner, FakeWS, implemented, pr,
+                          raw_review)
 from test_devloop_capacity import OFF as CAPACITY_OFF
 from test_devloop_capacity import ON as CAPACITY_ON
 from test_devloop_capacity import REASON as CAPACITY_REASON
 from test_devloop_capacity import CapacityCase
 from test_devloop_coordinator import COORDINATOR, coordinated, declared
+from test_devloop_dependencies import block
 from test_devloop_grant_budget import EXTENSION, REASON, BudgetCase
 from test_devloop_grant_budget import OFF as BUDGET_OFF
 from test_devloop_grant_budget import ON as BUDGET_ON
@@ -289,6 +291,83 @@ class GrantBudgetTests(BudgetCase):
         self.gh.command(100, '/devloop grant-budget ' + REASON, login=COORDINATOR)
         self.assertEqual(self.tick(d), [])
         self.assertEqual(self.decisions(100), [])
+
+
+class IssueGrantBudgetTests(BudgetCase):
+    """The coordinator's ``/devloop grant-budget`` on an issue's ``budget`` escalation to the
+    operator runs the refused step, as the step itself would: it waits while the issue is
+    blocked and takes a free PR slot."""
+
+    def escalate(self):
+        d = self.make(coordinated(BUDGET_OFF), implemented(), has_pr=False)
+        self.ws.commit_tree = lambda path, commit: 'e' * 40
+        self.spend(d, 4, kind='implement', agent=CFG.implementer)
+        self.assertEqual(self.tick(d), [('implement', 7)])
+        record = self.escalations(7)[-1]
+        self.assertEqual((record['class'], record['to'], record['step']),
+                         ('budget', 'operator', 'implement'))
+        self.assertIn(HUMAN, self.gh.labels[7])
+        return d
+
+    def assert_nothing_spent(self, d):
+        self.assertIsNone(d.ledger.journal.extension(self.story))
+        self.assertEqual(d.ledger.journal.grants(), [])
+        self.assertEqual(self.runner.calls, [])
+        self.assertEqual(self.gh.created, [])
+
+    def test_the_step_runs(self):
+        d = self.escalate()
+        self.gh.command(7, '/devloop grant-budget ' + REASON, login=COORDINATOR)
+        self.assertTrue(runs_issue_step(d.snapshot().supervised[0]))
+        self.assertEqual(self.tick(d), [('supervise', 7)])
+        decision = self.decisions(7)[-1]
+        self.assertEqual((decision['by'], decision['outcome'], decision['class']),
+                         (COORDINATOR, 'granted', 'budget'))
+        # The implementation runs at once, within the extended envelope.
+        self.assertEqual(len(self.runner.calls), 1)
+        self.assertNotIn(HUMAN, self.gh.labels[7])
+
+    def test_a_blocked_issue_waits_and_takes_no_slot(self):
+        d = self.escalate()
+        pair = block(1)
+        self.gh.issue_dependencies = lambda n: (
+            {'author': 'brushtyler', 'blocked_by': [dict(pair[0])], 'added': [dict(pair[1])]}
+            if n == 7 else {'author': 'brushtyler', 'blocked_by': [], 'added': []})
+        self.gh.command(7, '/devloop grant-budget ' + REASON, login=COORDINATOR)
+        snap = d.snapshot()
+        self.assertEqual(snap.supervised[0]['blocked_by'], ['#1'])
+        self.assertEqual(plan(snap, d.cfg), [])
+        self.assertEqual(self.tick(d), [])
+        self.assertIn('  issue #7: the extension waits, blocked by #1', self.logs)
+        self.assertEqual(self.decisions(7), [])
+        self.assertIn(HUMAN, self.gh.labels[7])
+        self.assert_nothing_spent(d)
+
+    def test_the_grant_takes_a_free_pr_slot(self):
+        d = self.escalate()
+        self.gh.command(7, '/devloop grant-budget ' + REASON, login=COORDINATOR)
+        snap = d.snapshot()
+        snap.ready_issues.append({'number': 8, 'title': 'Issue 8', 'labels': {READY},
+                                  'labeler': 'brushtyler', 'admitted': True, 'merged': [],
+                                  'blocked_by': []})
+        one = dataclasses.replace(d.cfg, max_open_prs=1)
+        self.assertEqual([(a.kind, a.number) for a in plan(snap, one)], [('supervise', 7)])
+        self.assertEqual(plan(snap, dataclasses.replace(d.cfg, max_open_prs=0)), [])
+        self.assertEqual(plan(snap, dataclasses.replace(d.cfg, max_parked_prs=0)), [])
+
+    def test_the_operators_command_is_only_answered(self):
+        # A trusted user's grant-budget on a budget escalation runs nothing: it takes no slot
+        # and does not wait on the blocks.
+        d = self.escalate()
+        self.gh.command(7, '/devloop grant-budget ' + REASON, login='brushtyler')
+        (item,) = d.snapshot().supervised
+        self.assertFalse(item['coordinator'])
+        self.assertFalse(runs_issue_step(item))
+        self.assertNotIn('blocked_by', item)
+        self.assertEqual(self.tick(d), [('supervise', 7)])
+        self.assertEqual(self.decisions(7)[-1]['outcome'], 'refused')
+        self.assertIn(HUMAN, self.gh.labels[7])
+        self.assert_nothing_spent(d)
 
 
 class PriorityTests(unittest.TestCase):
