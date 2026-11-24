@@ -24,13 +24,16 @@ the attribution header:
   refused, only on a ``budget_grantable`` escalation (#411, ADR 0005, P5-7): its turn caps and
   its time, by ``BUDGET_TOLERANCE_PERCENT`` of their values, never its dollars nor tokens. The
   reason carries the analysis of the causes, as for ``grant-round``. A delegation of the
-  operator, off by default (``[delegations] budget``), within the daily cap below;
+  operator, off by default (``[delegations] budget``), within the daily cap below. The
+  coordinator's identity grants it too (#595), also on a ``budget`` escalation to the operator,
+  under the same conditions and caps;
 - ``/devloop capacity <key> <value> <duration> <reason>``: a temporary capacity limit (#412, ADR
   0005, P5-8), only on the issue of the daily summary (``[report] issue``), never on an
   escalation: ``max_open_prs`` or ``max_parked_prs`` set to ``value`` for ``duration`` (``<N>h``
   or ``<N>m``), within the caps below, then the configured value again. The reason carries the
   analysis of the causes, as for ``grant-round``. A delegation of the operator, off by default
-  (``[delegations] capacity``);
+  (``[delegations] capacity``); for the coordinator's identity (#595) it is on with
+  ``[roles.coordinator]``, under the same caps;
 - ``/devloop merge <sha> <reason>``: merge a ready PR whose merge is the operator's (an
   ``operator_merge``, #248), only from the supervisor's identity and only when every condition
   of the delegation holds on ``sha``, its head (#486, ADR 0005, precision of 2026-11-21). A
@@ -203,10 +206,15 @@ LONG_TEXT = (DECIDE, GRANT_ROUND, GRANT_BUDGET, CAPACITY, MERGE, MERGE_BUDGET, R
 # refused (it fails closed). A constant of the code, like the trust rule: the configuration
 # cannot widen it. ``merge`` is the coordinator's reserved merge (#529, point 3b of #524), under
 # conditions of its own (``MergeMixin._delegated_merge``). The resume with the labels
-# (``agent:ready`` added again) is in ``Dispatcher._admitters``.
+# (``agent:ready`` added again) and its priority labels (#595) are in ``Dispatcher._admitters``.
+# ``capacity`` and ``grant-budget`` are delegated since #595 (ADR 0002, precision of 2026-11-23):
+# ``capacity`` within the caps of the supervisor's delegation, on with ``[roles.coordinator]``
+# whatever ``[delegations] capacity`` says (``_capacity_command``); ``grant-budget`` the one
+# extension of a story, on a ``budget_grantable`` escalation as the supervisor's and on a
+# ``budget`` escalation to the operator (``_operator_grant_budget``).
 COORDINATOR_DELEGATED = (RETRY, REREVIEW, 'recheck', 'fix', 'hold', 'release', GRANT_ROUND,
-                         ACCEPT_DEFAULTS, DECIDE, MERGE)
-COORDINATOR_RESERVED = ('approve', MERGE_BUDGET, GRANT_BUDGET, CAPACITY, 'reconcile')
+                         GRANT_BUDGET, CAPACITY, ACCEPT_DEFAULTS, DECIDE, MERGE)
+COORDINATOR_RESERVED = ('approve', MERGE_BUDGET, 'reconcile')
 # The name of a command of the coordinator's identity outside ``COMMANDS`` (#528), such as
 # ``reconcile`` or ``veto``: refused on an escalation, with its name in the record of the
 # refusal, so it is kept to a plain word that fits a code span.

@@ -503,8 +503,23 @@ With `[roles].supervisor` set and a GitHub App for that agent in `[apps]`, or wi
 issues and sets their priority with its own identity (#178): `agent:ready`, the `priority:*`
 labels and those in `priority_labels` count also when the supervisor's app added them, but
 **only on issues opened by a user in `trusted_users` or by one of devloop's apps** (the agents',
-the dispatcher's and the supervisor's). On an issue opened by anyone else only a trusted user's label counts, as
+the dispatcher's, the supervisor's and, with `[roles.coordinator]`, the coordinator's). On an issue opened by anyone else only a trusted user's label counts, as
 in [AGENTS.md](../../AGENTS.md) ("Contenuti di autori non fidati").
+
+With `[roles.coordinator]` ([The coordinator](#the-coordinator)) the coordinator's `agent:ready`
+and priority labels count on the same issues as the supervisor's (#595); its dependency and
+implementer labels never do. The issues the coordinator opens are devloop's: the supervisor and
+the coordinator may queue them. One exception holds them for the operator: when the
+[readiness check](#readiness-check-before-implementation) of an issue the coordinator opened
+declares the trust policy touched (`trust_policy` other than `none`, or not declared) and the
+latest `agent:ready` is not a trusted user's, the check fails with a gap of kind
+`operator_decision` and the issue goes to `agent:needs-operator` without starting. The operator
+admits it by adding `agent:ready` again in person: a new check runs, and the gap is gone. The
+rule holds for a passed check reused too: if the coordinator or the supervisor adds `agent:ready`
+again after the operator's, the passed check reads as failed with that gap, and the issue goes
+back to `agent:needs-operator` before the implementation. Without
+a readiness check (`preflight` not set) nothing would say whether such an issue touches the trust
+policy, so on the coordinator's issues only the trusted users' labels count.
 
 As for the other label checks, the latest `labeled` event of the label decides: a trusted
 user's `agent:ready` later replaced by the supervisor's on a stranger's issue no longer admits
@@ -1407,10 +1422,30 @@ refusal of a booking makes it lapse: the read-only check of the envelope before 
 or an advisory review, and `devloop tick --dry-run`, refuse the turn and leave the extension
 booked.
 
+**The coordinator** (#595, [ADR 0002, precision of 2026-11-23](../adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-23-compiti-del-coordinatore-594)).
+With `[roles.coordinator]` the coordinator's identity writes the same command, with the same
+reason. On a `budget_grantable` escalation it counts as the supervisor's. On a `budget`
+escalation to the operator, the coordinator grants the same one extension whatever
+`[delegations] budget` and the merge mode say, when the latest record that put the item in
+`agent:needs-operator` is that escalation and every condition holds, each verified then: the
+input of the refused turn unchanged (the PR's head, the issue's base and request), an issue no
+merged devloop PR resolved, the story never extended, an extension that covers the turn and the
+daily cap of the grants (`max_grants_per_day`) not reached. The escalation records the story,
+the kind and the agent of the refused turn for this; one written before #595 does not, and the
+command is refused. Granted, the extension is recorded as above, with `role: coordinator` in its
+`supervision` record, and the item resumes as after a retry, leaving `agent:needs-operator`; on
+an issue, as above, the command takes a free PR slot (`max_open_prs`, and none while
+`max_parked_prs` is reached) and waits, unspent, while the issue is blocked by an open issue. A
+refusal is answered, spent, and leaves the item with the operator. A second extension of a story
+stays the operator's. If the dispatcher stops after the journal recorded the coordinator's
+extension, the next tick completes the records only, and the item stays in
+`agent:needs-operator`: a `/devloop retry` resumes it, in the extended envelope.
+
 **Revocation.** `budget = false` revokes the delegation from the next tick, as for `rounds`: a
 refused turn goes to the operator, and a `grant-budget` on an escalation already with the
 supervisor is refused and hands the item to the operator. A trusted user's `grant-budget` on an
-escalation to the operator does not apply.
+escalation to the operator does not apply; the coordinator's applies as described above, until
+`[roles.coordinator]` is removed.
 
 **Trace.** Every command applied leaves a dispatcher record, described in
 [Supervision trace](protocol.md#supervision-trace).
@@ -1456,7 +1491,8 @@ expires the next tick plans with the configured value again, and the log says
 `capacity: <key> back to the configured <value>`. A later command on the same key replaces the
 earlier one, even when it ends sooner. A grant whose value is above a cap the operator lowered
 afterwards stops applying. When the issue cannot be read, the configured values apply. A command
-from anyone but the supervisor's identity or a trusted user is ignored and only logged;
+from anyone but the supervisor's identity, a trusted user or (for `capacity` only) the
+coordinator's identity is ignored and only logged;
 `/devloop merge-budget` is answered as in [Delegated merge](#delegated-merge), any other
 `/devloop` command on the issue as not applicable.
 
@@ -1476,8 +1512,21 @@ more than 9 digits, makes the command malformed: it is refused, and the tick goe
 `devloop status` reads the issue like a dry run, without answering any command, and shows the
 counters and the `next:` lines with the limits in force, the same a tick plans with.
 
+**The coordinator** (#595, [ADR 0002, precision of 2026-11-23](../adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-23-compiti-del-coordinatore-594)).
+With `[roles.coordinator]` the coordinator's identity writes the same command, on the same issue,
+under the same rules: the caps of the code (`MAX_CAPACITY`, `MAX_CAPACITY_HOURS`) and the lower
+ones of `[delegations]`, every grant counted against `max_grants_per_day`, merge mode `"auto"`.
+For the coordinator the delegation is on with `[roles.coordinator]`, whatever `[delegations]
+capacity` says: that key stays the switch of the supervisor's. Its records carry
+`role: coordinator`, and its limits are in force only while `[roles.coordinator]` is on; the
+supervisor's and the trusted users' only while `capacity = true`. The latest grant of a key
+is the one checked: when its switch is off, the configured value applies, never an earlier grant
+it replaced. Its `/devloop merge-budget`
+stays the operator's: it is ignored and logged.
+
 **Revocation.** `capacity = false` revokes the delegation from the next tick: the limits in force
-stop applying, and the commands written from then on are refused as not applicable.
+stop applying, and the commands written from then on are refused as not applicable. Removing
+`[roles.coordinator]` does the same for the coordinator's limits.
 
 #### Delegated merge
 
@@ -1768,7 +1817,9 @@ which counts with `[roles.coordinator]` in the local overlay, **off by default**
 the coordinator's app is anyone else's.
 
 With the table, the commands of the coordinator's identity have a **closed perimeter**, fixed in
-the code:
+the code. `capacity`, `grant-budget` and the priority labels joined it with #595, as the operator
+decided in the [precision of 2026-11-23](../adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-23-compiti-del-coordinatore-594)
+of ADR 0002:
 
 | Command | From the coordinator |
 |---|---|
@@ -1778,8 +1829,10 @@ the code:
 | `fix` | Delegated: as a trusted user's ([Fix requested by the operator or the supervisor](#fix-requested-by-the-operator-or-the-supervisor)) |
 | `hold`, `release` | Delegated: as a trusted user's, in merge mode `auto` ([Holding a merge](#holding-a-merge)) |
 | `grant-round` | Delegated: as a trusted user's, on a `round_grantable` escalation to the supervisor within the caps of the delegation ([Granting a review round](#granting-a-review-round)), and on a `round_limit` escalation to the operator at most **one** round per PR, beyond those caps; a further round on the same PR is the operator's ([Granting a review round on an escalation to the operator](#granting-a-review-round-on-an-escalation-to-the-operator), #553) |
-| resume with the labels | Delegated: its `agent:ready` added again counts, as the supervisor's, only on issues opened by a trusted user or by a devloop app; its priority, dependency and implementer labels never count |
-| `approve`, `merge-budget`, `grant-budget`, `capacity`, `reconcile`, `trusted_users` and the keys of trust | Reserved to the operator in person: never the coordinator's. On an escalation they are answered as not applicable and spent; elsewhere they are ignored and logged, as anyone else's; `trusted_users` and the overlay are the operator's |
+| `capacity` | Delegated (#595): a temporary capacity limit on `[report] issue`, as the supervisor's, within the same caps and counted in `max_grants_per_day`, in merge mode `auto`; on with `[roles.coordinator]`, whatever `[delegations] capacity` says ([Temporary capacity limits](#temporary-capacity-limits)) |
+| `grant-budget` | Delegated (#595): the one extension of a story's budget envelope, under the conditions and caps of the supervisor's, on a `budget_grantable` escalation to the supervisor and on a `budget` escalation to the operator; a second extension stays the operator's ([Extending the budget envelope](#extending-the-budget-envelope)) |
+| labels | Delegated: its `agent:ready` added again and (#595) its priority labels count, as the supervisor's, only on issues opened by a trusted user or by a devloop app; its dependency and implementer labels never count ([Labels from the supervisor](#labels-from-the-supervisor)) |
+| `approve`, `merge-budget`, `reconcile`, `trusted_users` and the keys of trust | Reserved to the operator in person: never the coordinator's. On an escalation they are answered as not applicable and spent; elsewhere they are ignored and logged, as anyone else's; `trusted_users` and the overlay are the operator's |
 | `merge` | The coordinator's reserved merge (#529): [The reserved merge of the coordinator](#the-reserved-merge-of-the-coordinator) |
 | any other (`escalate`, `finding`, `veto`, ...) | Refused: on an escalation answered as not applicable and spent, elsewhere ignored and logged |
 

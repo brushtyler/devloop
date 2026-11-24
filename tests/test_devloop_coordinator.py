@@ -7,8 +7,10 @@ coordinator is an agent with a role app of its own, ``[apps.coordinator]``, turn
 - the delegated commands (``retry``, ``rereview``, ``recheck``, ``fix``, ``hold``, ``release``,
   ``grant-round`` within the caps, ``accept-defaults``, ``decide`` outside the trust policy, the
   credentials and the budget, the resume with the labels) count as a trusted user's;
-- the commands reserved to the operator (``approve``, ``merge-budget``, ``grant-budget``,
-  ``capacity``, ``reconcile``, ``trusted_users`` and the keys of trust) never count;
+  ``capacity``, ``grant-budget`` and the priority labels too since #595
+  (``test_devloop_coordinator_perimeter``);
+- the commands reserved to the operator (``approve``, ``merge-budget``, ``reconcile``,
+  ``trusted_users`` and the keys of trust) never count;
 - any other command is refused; ``merge`` is the coordinator's reserved merge (#529,
   ``test_devloop_coordinator_merge``).
 """
@@ -127,9 +129,10 @@ class ConfigTests(unittest.TestCase):
     def test_the_perimeter_is_closed(self):
         self.assertEqual(set(supervision.COORDINATOR_DELEGATED),
                          {'retry', 'rereview', 'recheck', 'fix', 'hold', 'release',
-                          'grant-round', 'accept-defaults', 'decide', 'merge'})
+                          'grant-round', 'grant-budget', 'capacity', 'accept-defaults',
+                          'decide', 'merge'})
         self.assertEqual(set(supervision.COORDINATOR_RESERVED),
-                         {'approve', 'merge-budget', 'grant-budget', 'capacity', 'reconcile'})
+                         {'approve', 'merge-budget', 'reconcile'})
         self.assertFalse(set(supervision.COORDINATOR_DELEGATED)
                          & set(supervision.COORDINATOR_RESERVED))
         for command in supervision.COORDINATOR_DELEGATED:
@@ -163,10 +166,11 @@ class IdentityTests(unittest.TestCase):
         self.assertTrue(d._coordinator_may(COORDINATOR, 'retry'))
         self.assertFalse(d._coordinator_may(COORDINATOR, 'approve'))
         self.assertFalse(d._coordinator_may('stranger', 'retry'))
-        # Never a trusted user nor the supervisor.
+        # Never a trusted user nor the supervisor; one of devloop's apps since #595.
         self.assertFalse(d._may_hold(COORDINATOR))
         self.assertNotIn(COORDINATOR, d.cfg.trusted_users)
-        self.assertNotIn(COORDINATOR, d._devloop_logins())
+        self.assertIn(COORDINATOR, d._devloop_logins())
+        self.assertNotIn(COORDINATOR, self.make(declared(CFG))._devloop_logins())
 
 
 class OffByDefaultTests(Case):
@@ -180,8 +184,9 @@ class OffByDefaultTests(Case):
                 self.assertIsNone(d._coordinator_login())
                 self.assertFalse(d._coordinator_may(COORDINATOR, 'retry'))
                 for author in ('brushtyler', 'stranger'):
-                    self.assertEqual(d._admitters(author, ready=True), d._admitters(author))
-                    self.assertNotIn(COORDINATOR, d._admitters(author, ready=True))
+                    self.assertEqual(d._admitters(author, coordinator=True),
+                                     d._admitters(author))
+                    self.assertNotIn(COORDINATOR, d._admitters(author, coordinator=True))
 
     def test_its_commands_are_ignored_as_anyone_elses(self):
         d = self.make(declared(AUTO), crash(), raw_review())
@@ -240,9 +245,11 @@ class RefusedEscalationTests(EscalationCase):
     spent, and the item stays where it is."""
 
     COMMANDS = {
+        # Delegated since #595, but not on this escalation: a capacity only on the summary
+        # issue, a grant-budget only on a budget escalation.
+        'capacity': ('/devloop capacity max_open_prs 3 2h motivo',
+                     'vale solo sulla issue del riepilogo'),
         # Reserved to the operator in person.
-        'grant-budget': ('/devloop grant-budget motivo', 'riservato all\'operatore'),
-        'capacity': ('/devloop capacity max_open_prs 3 2h motivo', 'riservato all\'operatore'),
         'merge-budget': ('/devloop merge-budget 2 motivo', 'riservato all\'operatore'),
         # Reserved too, and no supervisor command (#528): read for the coordinator alone.
         'reconcile': ('/devloop reconcile t1 failed\nNota.', 'riservato all\'operatore'),
@@ -281,6 +288,21 @@ class RefusedEscalationTests(EscalationCase):
                 self.assertEqual(self.gh.labels[100], {HUMAN})
                 self.assertEqual(self.tick(d), [])
 
+    def test_grant_budget_only_on_a_budget_escalation(self):
+        # Delegated since #595 (test_devloop_coordinator_perimeter): on a tool_failure it is
+        # refused as a trusted user's would be, not as reserved.
+        for cfg, label, why in ((AUTO, SUPER, 'vale solo per un\'escalation `budget_grantable`'),
+                                (STRICT, HUMAN, 'solo su un\'escalation `budget`')):
+            with self.subTest(label=label):
+                d = self.make(coordinated(cfg), crash(), raw_review())
+                self.fail_review(d, label)
+                self.gh.command(100, '/devloop grant-budget motivo', login=COORDINATOR)
+                self.assertEqual(self.tick(d), [('supervise', 100)])
+                body = self.answer('grant-budget')
+                self.assertIn(why, body)
+                self.assertNotIn('riservato', body)
+                self.assertEqual(self.gh.labels[100], {label})
+
     def test_the_delegated_commands_of_other_readers_are_not_refused(self):
         # recheck, fix, hold and release are read elsewhere: on an escalation nothing answers
         # them as refused, as for a trusted user's.
@@ -318,7 +340,7 @@ class RefusedEscalationTests(EscalationCase):
         d = self.make(coordinated(STRICT), crash(), raw_review())
         self.fail_review(d, HUMAN)
         self.gh.command(100, '/devloop retry', login='brushtyler')
-        self.gh.command(100, '/devloop grant-budget motivo', login=COORDINATOR)
+        self.gh.command(100, '/devloop merge-budget 2 motivo', login=COORDINATOR)
         self.assertEqual(self.tick(d), [('supervise', 100)])
         self.assertEqual(self.decisions(100)[-1]['by'], 'brushtyler')
         self.assertEqual(self.gh.labels[100], {REVIEW})
@@ -529,13 +551,14 @@ class RecheckTests(recheck_tests.Case):
         self.gh.relabel(COORDINATOR)
         self.assertEqual(self.planned(d, cfg), [])
 
-    def test_only_agent_ready_and_only_on_issues_of_trusted_authors(self):
+    def test_only_agent_ready_and_priority_and_only_on_issues_of_trusted_authors(self):
         d = self.make(cfg=coordinated(recheck_tests.CFG))
-        self.assertIn(COORDINATOR, d._admitters('brushtyler', ready=True))
-        # Its priority, dependency and implementer labels never count.
+        # agent:ready and, since #595, the priority labels.
+        self.assertIn(COORDINATOR, d._admitters('brushtyler', coordinator=True))
+        # Its dependency and implementer labels never count.
         self.assertNotIn(COORDINATOR, d._admitters('brushtyler'))
         # Never on an issue of an untrusted author.
-        self.assertNotIn(COORDINATOR, d._admitters('stranger', ready=True))
+        self.assertNotIn(COORDINATOR, d._admitters('stranger', coordinator=True))
 
 
 class FixTests(fix_tests.Case):
@@ -604,13 +627,12 @@ class ReservedTests(unittest.TestCase):
         self.assertEqual(refused['id'], 5001)
         self.assertIn('un\'app', why)
 
-    def test_capacity_and_merge_budget_on_the_summary_issue(self):
+    def test_merge_budget_on_the_summary_issue(self):
+        # ``capacity`` is delegated since #595 (test_devloop_coordinator_perimeter).
         d = self.make()
-        comments = [self.comment(header() + '/devloop capacity max_open_prs 3 2h motivo'),
-                    self.comment(header() + '/devloop merge-budget 3 motivo', ident=5002)]
+        comments = [self.comment(header() + '/devloop merge-budget 3 motivo', ident=5002)]
         self.assertEqual(d._capacity_commands(316, comments), 0)
         self.assertEqual(self.gh.comments, [])
-        self.assertTrue(self.logged('ignored `/devloop capacity`'))
         self.assertTrue(self.logged('ignored `/devloop merge-budget`'))
 
     def test_reconcile(self):
@@ -633,7 +655,9 @@ class ReservedTests(unittest.TestCase):
         self.assertEqual(cfg.trusted_users, CFG.trusted_users)
         self.assertEqual(cfg.review_policy, config.parse_config(DATA).review_policy)
         d = self.make(cfg)
-        self.assertNotIn(COORDINATOR, d._devloop_logins())
+        # One of devloop's apps since #595, never a trusted user: its approve stays refused
+        # (test_approve).
+        self.assertNotIn(COORDINATOR, d.cfg.trusted_users)
 
     def test_finding_and_veto_not_listed(self):
         d = self.make()
