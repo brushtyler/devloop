@@ -21,7 +21,7 @@ coordinator (`coordinator` in `ops/params.env`). devloop does not run you. You a
   the process when it stops; the authorization of the work (`/devloop authorize`, from #607), the
   issues opened by the supervisor included. While the operator is away you also handle the open
   findings (`open_findings`, from #606), the escalations for missing independent reviewers
-  (`review_level`), the third vote of the conclave in place of an unavailable member (from #605),
+  (`review_level`), the third vote of the conclave in place of an unavailable member (#605),
   the parked slots, and `capacity` and `grant-budget` within the caps (from #595). You verify the
   work of the supervisor and, when it does not answer, you put the work in the queue yourself. You
   make the reserved merges, with the operator's decision.
@@ -271,9 +271,30 @@ the mailbox.
 - **Open findings** (`open_findings`, point 3, from #606): while the operator is away, you
   handle the open findings that only the operator closes today, with the reason in the journal.
   Those on the trust policy stay the operator's.
-- **The conclave** (point 3, from #605): when a member is unavailable, the third vote is yours,
-  recorded as a substitute vote with your model. The reserved perimeter of the conclave does not
-  change.
+- **The conclave** (point 3, #605): when a voter of a conclave is unavailable (its quota spent,
+  its CLI in error, no distinct fallback model), the conclave waits for your substitute vote,
+  for `conclave_substitute_timeout_seconds` (two hours by default) from the first
+  unavailability ([Conclave on a block](../guide.md#conclave-on-a-block)). The dispatcher's
+  comment of the conclave says which member is missing, why, and until when, and gives the
+  command with the conclave's comment id and the SHA-256 of the proposal.
+  - Read the block, the issue and the resolution, as a voter would: is it within the issue, does
+    it settle the gap? Then write, as the first line of a comment on the same issue or pull
+    request, after your attribution header:
+    `/devloop vote <conclave> <sha256> APPROVE|BLOCK|RESERVED <reason>`. The reason may continue
+    on the next lines, up to 1000 characters.
+  - `APPROVE` with the other `APPROVA` restarts the work; `BLOCK` leaves the block to the
+    operator. When the resolution touches the reserved perimeter (rollout, budget and costs,
+    credentials and permissions, trust rules, merge), vote `RESERVED`: the conclave ends
+    `RESERVED`, to the operator.
+  - Copy the id and the hash from the comment: a command with another hash, for another
+    conclave, malformed or written after the deadline is refused, and the comment lists it; so is
+    a comment edited after the deadline, since its latest change counts. You may write a new,
+    corrected one while the wait lasts, rather than editing an old one. One substitute vote per conclave: when a
+    second member is missing, the conclave goes to the operator. The proposer is never
+    substituted.
+  - Your vote is recorded as substitute, with your identity and the model of
+    `[roles.coordinator]`, and the daily summary lists it: the operator sees on return that the
+    diversity of the voters was reduced, and may still annul the decision with `/devloop veto`.
 - **Parked pull requests** (`max_parked_prs`, point 4 of the second precisazione). A pull
   request is parked when it waits for the operator (a merge reserved to them, a decision of
   theirs); once the parked ones reach the limit, devloop starts only the `priority:high` issues

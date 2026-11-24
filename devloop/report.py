@@ -24,6 +24,10 @@ Days are UTC days:
 - the reserved merges of the coordinator (#529): every ``merge`` of the coordinator's identity
   the dispatcher answered that day (its ``supervision`` record with ``role: coordinator``),
   apart from the delegated merges, with the same columns and the coordinator's own cap;
+- the substitute votes of the coordinator in a conclave (#605): every ``conclave`` record of the
+  dispatcher whose substitute vote was recorded that day, with the time, the issue or PR, the
+  member it replaced, the coordinator's identity and model and its vote, so that the operator
+  sees when the diversity of the voters was reduced;
 - the auto-pins that did not move ``current`` (#453): the ``pin`` record of the dispatcher's alert
   on ``[run].alert_issue``, one per commit, with the time, the commit of ``origin/<base_branch>``
   left behind and the reason the alert shows (the step of the smoke test, or the first line of
@@ -130,6 +134,9 @@ class Summary:
     coordinator: list = field(default_factory=list)
     # (time, number, ref, commit, reason): the auto-pins that did not move ``current`` (#453)
     pins: list = field(default_factory=list)
+    # (time, number, member, by, kind and model, verdict): the substitute votes of the
+    # coordinator in a conclave (#605), where the diversity of the voters was reduced
+    substitutes: list = field(default_factory=list)
     opened: list = field(default_factory=list)       # PR numbers
     merged: list = field(default_factory=list)       # PR numbers
     rounds: int = 0
@@ -140,7 +147,8 @@ class Summary:
 
     def empty(self):
         return not (self.actions or self.merges or self.escalations or self.ci or self.grants
-                    or self.delegated or self.coordinator or self.pins or self.opened
+                    or self.delegated or self.coordinator or self.pins or self.substitutes
+                    or self.opened
                     or self.merged or self.rounds)
 
 
@@ -265,6 +273,12 @@ class Records:
                     out.pins.append((_hour(pin['at']), number, pin['ref'], pin['sha'],
                                      first_line(pin['reason'])))
                 continue
+            conclave = read_marker(body, 'conclave')
+            if conclave is not None:
+                row = _substitute_row(number, conclave)
+                if row is not None and _day_of(row[0]) == day:
+                    out.substitutes.append((_hour(row[0]), *row[1:]))
+                continue
             supervision = read_marker(body, 'supervision')
             if supervision is not None:
                 if supervision['command'] in GRANT_COMMANDS and _day_of(created) == day:
@@ -289,7 +303,7 @@ class Records:
                 out.merges.append((_hour(merged), number, None, None))
         out.merged = sorted(merged_numbers | by_devloop)
         for rows in (out.actions, out.merges, out.escalations, out.ci, out.grants, out.delegated,
-                     out.coordinator, out.pins):
+                     out.coordinator, out.pins, out.substitutes):
             rows.sort(key=lambda row: (row[0], row[1]))
         return out
 
@@ -386,6 +400,18 @@ def _delegated_row(at, number, record):
             first_line(record.get('reason')), outcome, cap)
 
 
+def _substitute_row(number, record):
+    """``(at, number, member, by, model, verdict)`` of the coordinator's substitute vote in the
+    ``conclave`` record ``record`` (#605), ``at`` the time it was recorded; None without one."""
+    substitute = record.get('substitute')
+    if not substitute or substitute['state'] != 'voted' or not substitute['at']:
+        return None
+    profile = record['votes'][substitute['index']].get('profile') or {}
+    model = f'{profile.get("kind") or NOT_REPORTED} {profile.get("model") or NOT_REPORTED}'
+    return (substitute['at'], number, substitute['member'], substitute['by'] or NOT_REPORTED,
+            model, substitute['verdict'])
+
+
 def _cell(value):
     return str(value).replace('|', '\\|').replace('\n', ' ')
 
@@ -443,6 +469,15 @@ def render(summary):
         for at, number, command, by, reason, outcome, cap in rows:
             parts.append(f'| {at} | #{number} | `{command}` | `{_code(by)}` | {_cell(reason)} '
                          f'| {_cell(outcome)} | {_cell(cap)} |')
+        parts.append('')
+    if summary.substitutes:
+        parts += ['### Voti sostitutivi del coordinatore nel conclave', '',
+                  'Un membro del conclave era indisponibile: la diversità dei votanti è ridotta.',
+                  '', '| Ora (UTC) | Numero | Al posto di | Coordinatore | Modello | Voto |',
+                  '|---|---|---|---|---|---|']
+        for at, number, member, by, model, verdict in summary.substitutes:
+            parts.append(f'| {at} | #{number} | `{_code(member)}` | `{_code(by)}` '
+                         f'| `{_code(model)}` | `{_code(verdict)}` |')
         parts.append('')
     if summary.pins:
         parts += ['### Pin automatico non riuscito', '']

@@ -22,7 +22,11 @@ an implementer key (#499), and the implementer chosen for an issue must not be t
 different from each other and with different `(kind, model, effort)`, reviewer keys or keys
 without a role, never an implementer key (#499); anything else stops devloop
 at startup. Their fallback models are checked when each call runs: one whose tuple coincides with
-another member's is not used. The prompts of `implement`, `fix` and `review`
+another member's is not used. `conclave_substitute_timeout_seconds` (an integer of at least 1,
+default 7200, in the local overlay) is how long a conclave waits, from the first unavailability
+of a voter, for the coordinator's substitute vote; it counts only with `[roles.coordinator]`
+([Substitute vote of the coordinator](guide.md#conclave-on-a-block), #605). The prompts of
+`implement`, `fix` and `review`
 (`devloop/prompts/`) end with `$conclave`: the verified resolution of the latest `UNANIMOUS`
 decision on the issue or its PR, or nothing ([After a unanimous
 decision](guide.md#after-a-unanimous-decision)). Among the limits, `agent_stall_seconds` (an integer of at least 1, default 900)
