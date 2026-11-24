@@ -1125,6 +1125,9 @@ class FakeWS:
         self.spans.append(since)
         return self.files
 
+    def binary_files(self, path, since):
+        return []  # the binary files of a commit (#627)
+
     def push(self, path, branch, replace=False, auth=None):
         self.pushes.append((branch, replace))
         self.auths.append(auth)

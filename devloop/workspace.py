@@ -621,6 +621,19 @@ class Workspace:
         out = self._git('diff', '--name-only', '-z', '--no-renames', span, cwd=path)
         return [name for name in out.split('\0') if name]
 
+    def binary_files(self, path, since):
+        """The paths added or changed since commit ``since`` whose content git sees as binary
+        (#627): ``-`` for the lines of ``--numstat``. Deleted files are not among them."""
+        out = self._git('diff', '--numstat', '-z', '--no-renames', '--diff-filter=d',
+                        f'{since}..HEAD', cwd=path)
+        found = []
+        for line in out.split('\0'):
+            added, _, rest = line.partition('\t')
+            deleted, _, name = rest.partition('\t')
+            if name and added == '-' and deleted == '-':
+                found.append(name)
+        return found
+
     def worktree_changes(self, path):
         """Every path in which the content of ``path`` now differs from its merge base with
         ``origin/<base>`` (#169): the branch's commits, the index, unstaged changes and new files
@@ -864,12 +877,14 @@ class Workspace:
     def tree(self, path):
         """The tree :meth:`commit_all` would commit now in ``path``: everything ``git add -A``
         stages, written from a copy of the index, so that the real index, a merge in progress
-        included, stays as it is."""
+        included, stays as it is. The copy keeps the modification time of the index: git reads
+        again the files racily clean against it (#627, R3-1), and a copy with a later time would
+        take a same-size change made in the tick of the index for unchanged."""
         index = Path(path) / self._git('rev-parse', '--git-path', 'index', cwd=path).strip()
         with tempfile.TemporaryDirectory() as tmp:
             copy = Path(tmp) / 'index'
             if index.exists():
-                shutil.copyfile(index, copy)
+                shutil.copy2(index, copy)
             env = {'GIT_INDEX_FILE': str(copy)}
             if not index.exists():
                 self._git('read-tree', 'HEAD', cwd=path, env=env)
@@ -879,6 +894,13 @@ class Workspace:
     def commit_tree(self, path, commit):
         """The tree of ``commit``."""
         return self._git('rev-parse', f'{commit}^{{tree}}', cwd=path).strip()
+
+    def tree_changes(self, path, old, new):
+        """The paths whose content differs between the trees ``old`` and ``new`` (#627): the
+        files a test command changed, given :meth:`tree` before and after it."""
+        out = self._git('diff-tree', '-r', '--name-only', '-z', '--no-renames', old, new,
+                        cwd=path)
+        return sorted(name for name in out.split('\0') if name)
 
     def commit_all(self, path, message, author=None):
         """Commit everything; ``author`` (``{name, email}``) is both author and committer."""

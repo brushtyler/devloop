@@ -50,6 +50,7 @@ from dataclasses import dataclass, field
 
 from .agents import TELEMETRY_FIELDS
 from .budget import observed
+from .generated import capped
 from .github import GitHubError
 from .i18n import ENGLISH, Catalog
 from .journal import (FAILED, LEGACY, MAX_BYTES, NOT_DISPATCHED, RETURNED, JournalError,
@@ -480,10 +481,13 @@ class Ledger:
             raise
 
     def verification(self, number, *, kind, attempt, command, passed, duration_ms, tree_before,
-                     tree_after, register=None, retried=None):
+                     tree_after, register=None, retried=None, changed_by_tests=None):
         """A test the dispatcher ran; with ``register``, a section of that fix register.
         ``retried``: the failed tests of the attempt that the command ran again alone (#598),
-        unstable when it passed."""
+        unstable when it passed. ``changed_by_tests``: the files whose content the command
+        changed, from ``tree_before`` to ``tree_after`` (#627), recorded when there are any:
+        those ``generated.capped`` keeps, and how many it left out in
+        ``changed_by_tests_omitted``."""
         record = {
             'type': 'verification', 'kind': kind, 'attempt': attempt, 'command': command,
             'outcome': 'pass' if passed else 'fail', 'duration_ms': duration_ms,
@@ -491,6 +495,13 @@ class Ledger:
             'at': self._now()}
         if retried is not None:
             record['retried'] = list(retried)
+        if changed_by_tests:
+            # At most what ``capped`` keeps, the others counted: a test that creates many caches
+            # must not take the comment beyond the limit of a GitHub text.
+            kept = capped(changed_by_tests)
+            record['changed_by_tests'] = kept
+            if len(kept) < len(changed_by_tests):
+                record['changed_by_tests_omitted'] = len(changed_by_tests) - len(kept)
         if register is None:
             return self._post(number, record)
         return self._section(number, record, None, register)
@@ -611,6 +622,9 @@ TEXTS = Catalog(
         'unstable': ('**Unstable tests**: failed in the attempt and on the base commit, they '
                      'pass when run again alone. The step goes on; the test must be fixed:'),
         'still_failing': '**Tests run again alone**, they still fail:',
+        'changed_by_tests': ('**Files changed by the test**: their content after the test is '
+                             'not the one before, and ends up in the commit that follows:'),
+        'changed_by_tests_omitted': '… and {count} more',
         'event': 'event `{event}`',
         'event_section': 'Event `{event}`',
         'checks': '| Check | Outcome | Actions run |',
@@ -684,6 +698,9 @@ TEXTS = Catalog(
         'unstable': ('**Test instabili**: falliti nel tentativo e sul commit base, passano '
                      'rilanciati da soli. Il passo prosegue; il test va corretto:'),
         'still_failing': '**Test rilanciati da soli**, falliscono ancora:',
+        'changed_by_tests': ('**File modificati dal test**: il loro contenuto dopo il test non è '
+                             'quello di prima, e finisce nel commit che segue:'),
+        'changed_by_tests_omitted': '… e altri {count}',
         'event': 'evento `{event}`',
         'event_section': 'Evento `{event}`',
         'checks': '| Check | Esito | Run di Actions |',
@@ -783,6 +800,12 @@ def _render_verification(t, r, title=None):
         # again alone before the escalation host_tests or the wait base_broken.
         cases = ''.join(f'\n- `{str(c).replace("`", "")}`' for c in r['retried'])
         parts += ['', t('unstable' if r.get('outcome') == 'pass' else 'still_failing') + cases]
+    if isinstance(r.get('changed_by_tests'), list):
+        # #627: the test changed these files, so the tree after it is not the one before.
+        files = ''.join(f'\n- `{str(f).replace("`", "")}`' for f in r['changed_by_tests'])
+        if isinstance(r.get('changed_by_tests_omitted'), int):
+            files += '\n- ' + t('changed_by_tests_omitted', count=r['changed_by_tests_omitted'])
+        parts += ['', t('changed_by_tests') + files]
     return parts
 
 
