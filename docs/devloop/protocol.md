@@ -274,7 +274,9 @@ A `round_grantable` escalation (#405) has the same lists and says instead that t
 may grant one more round with `/devloop grant-round <reason>`. A `budget_grantable` escalation
 (#411) of a turn the budget refused records, besides the step and its key, the `story`, the
 `extension` the supervisor may grant with `/devloop grant-budget <reason>`, and the `kind` and
-`agent` of the refused turn.
+`agent` of the refused turn. A `budget` escalation to the operator records, besides the
+`category` and the step a retry runs with its key, the `story`, `kind` and `agent` of the refused
+turn too (#595), for the extension the coordinator may grant on it.
 `devloop status` shows the counted rounds of each PR on the limit, as `rounds=<counted>/<max>`,
 with the rounds granted in `<max>` and `(+<n> granted)` after it when the supervisor granted some,
 followed by `(+<n> not counted)` when some rounds did not count. It reads them from the thread
@@ -609,7 +611,8 @@ event in the turn journal, written first, also records the story, the extension 
 the command (`reason`), which from then on are part of the envelope of the story. Here the
 ledger event comes before the `supervision` record, which spends the command: a dispatcher
 stopped after the journal and before the record, or whose write failed there, finds, for the
-story of any `budget_grantable` escalation of the thread, the `grant` of the item in the
+story of any `budget_grantable` escalation of the thread, or of a `budget` escalation that records
+one (#595), the `grant` of the item in the
 journal that no `supervision` record of the thread carries. It completes that grant before any
 other command, the latest one included, rebuilding the command from the journal (comment,
 author, text): the ledger event only if absent and the record `granted`, without checking nor
@@ -620,7 +623,9 @@ without running its step, and an issue blocked by an open issue waits, with noth
 Anywhere else, for instance on an item that the `failure` escalation of a `GitHubError` while
 the records were written handed to the operator, or behind a later escalation, only the records
 are written, with `trace_only: true`, and the item stays where it is: such a record does not end
-the operator's block. A temporary capacity limit
+the operator's block. An extension the coordinator's identity granted (#595), on a
+`budget_grantable` escalation or on a `budget` escalation to the operator, has the same record
+and ledger `event`, with `role: coordinator`. A temporary capacity limit
 set with `/devloop capacity` (#412,
 [Temporary capacity limits](guide.md#temporary-capacity-limits)) has its record on
 `[report] issue`, with no class: the analysis of the causes in `reason`, the key (`setting`), the
@@ -629,7 +634,10 @@ set with `/devloop capacity` (#412,
 `daily_cap`, `daily_left`). The latest `granted` record of a key, until its `until`, is the limit
 the dispatcher plans with; the same figures go in a ledger `event` `delegation_grant` with the
 `delegation` `capacity`, after a `grant` event in the turn journal. With the delegation off the
-command gets a `refused` record all the same, which spends it. A
+command gets a `refused` record all the same, which spends it. The records of the coordinator's
+identity (#595) carry `role: coordinator`: its limits are in force only with
+`[roles.coordinator]` on, the others only with `[delegations] capacity` on; the latest grant of a
+key replaces the earlier ones whatever its switch, so one switched off restores none of them. A
 [delegated merge](guide.md#delegated-merge) (#486, `/devloop merge <sha> <reason>`) has its
 record on the PR, under the title "Merge delegato al supervisore", once the merge ran: outcome
 `merged`, with the `head`, the `opinion` of the advisory review, the delegated merges of the UTC
