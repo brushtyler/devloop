@@ -232,6 +232,26 @@ class CommitNotBoundTests(unittest.TestCase):
         self.assertEqual(check['changed_by_tests'], ['t/__pycache__/a.pyc'])
         self.assertIsNone(check['commit'])
 
+    def test_the_tree_sees_a_racily_clean_change(self):
+        # A change of the same size in the same tick as the index (R3-1): its stat data match
+        # the index entry, and only the timestamp of the index tells git to read it again. The
+        # copy of the index keeps that timestamp, so the tree is the one commit_all commits.
+        # The tick is moved in the past, so that a copy written now falls in a later one.
+        self.git('config', 'core.trustctime', 'false')
+        index = self.root / '.git' / 'index'
+        m = self.root / 'pkg' / 'm.py'
+        stamp = m.stat().st_mtime_ns - 10 ** 10
+        os.utime(m, ns=(stamp, stamp))
+        self.git('update-index', '--refresh')  # the entry records the old tick
+        m.write_text('X = 2\n')
+        os.utime(m, ns=(stamp, stamp))
+        os.utime(index, ns=(stamp, stamp))
+        tree = self.ws.tree(self.root)
+        commit = self.ws.commit_all(self.root, 'change',
+                                    author={'name': 'Bot', 'email': 'bot@example.com'})
+        self.assertEqual(tree, self.ws.commit_tree(self.root, commit))
+        self.assertEqual(self.ws.changed_files(self.root, since='HEAD~1'), ['pkg/m.py'])
+
     def test_a_binary_regenerated_during_the_turn_is_pointed_out(self):
         # A tracked binary the agent's own tests regenerated before the dispatcher's check
         # (R1-1): the check changes nothing and the commit is bound, the binary is in it.

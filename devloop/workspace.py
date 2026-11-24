@@ -877,12 +877,14 @@ class Workspace:
     def tree(self, path):
         """The tree :meth:`commit_all` would commit now in ``path``: everything ``git add -A``
         stages, written from a copy of the index, so that the real index, a merge in progress
-        included, stays as it is."""
+        included, stays as it is. The copy keeps the modification time of the index: git reads
+        again the files racily clean against it (#627, R3-1), and a copy with a later time would
+        take a same-size change made in the tick of the index for unchanged."""
         index = Path(path) / self._git('rev-parse', '--git-path', 'index', cwd=path).strip()
         with tempfile.TemporaryDirectory() as tmp:
             copy = Path(tmp) / 'index'
             if index.exists():
-                shutil.copyfile(index, copy)
+                shutil.copy2(index, copy)
             env = {'GIT_INDEX_FILE': str(copy)}
             if not index.exists():
                 self._git('read-tree', 'HEAD', cwd=path, env=env)
