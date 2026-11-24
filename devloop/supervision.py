@@ -211,9 +211,11 @@ LONG_TEXT = (DECIDE, GRANT_ROUND, GRANT_BUDGET, CAPACITY, MERGE, MERGE_BUDGET, R
 # ``capacity`` within the caps of the supervisor's delegation, on with ``[roles.coordinator]``
 # whatever ``[delegations] capacity`` says (``_capacity_command``); ``grant-budget`` the one
 # extension of a story, on a ``budget_grantable`` escalation as the supervisor's and on a
-# ``budget`` escalation to the operator (``_operator_grant_budget``).
+# ``budget`` escalation to the operator (``_operator_grant_budget``). ``vote`` is the substitute
+# vote in a conclave waiting for it (#605, ADR 0002, second precision of 2026-11-23, point 3),
+# read only there (``ConclaveMixin._conclave_substitute``), never on an escalation.
 COORDINATOR_DELEGATED = (RETRY, REREVIEW, 'recheck', 'fix', 'hold', 'release', GRANT_ROUND,
-                         GRANT_BUDGET, CAPACITY, ACCEPT_DEFAULTS, DECIDE, MERGE)
+                         GRANT_BUDGET, CAPACITY, ACCEPT_DEFAULTS, DECIDE, MERGE, 'vote')
 COORDINATOR_RESERVED = ('approve', MERGE_BUDGET, 'reconcile')
 # The name of a command of the coordinator's identity outside ``COMMANDS`` (#528), such as
 # ``reconcile`` or ``veto``: refused on an escalation, with its name in the record of the

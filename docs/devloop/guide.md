@@ -776,6 +776,44 @@ no proposal and no votes.
 
 Every missing contribution is recorded as `missing`, with its reason.
 
+**Substitute vote of the coordinator.** With [`[roles.coordinator]`](roles/coordinator.md) (#605,
+[ADR 0002](../adr/0002-ruoli-e-responsabilita.md), second precision of 2026-11-23, point 3), a
+voter whose call fails (an exhausted quota, a CLI in error, no distinct fallback model left)
+does not close the conclave: its vote **waits for the coordinator's substitute vote**, until
+`conclave_substitute_timeout_seconds` (default 7200, two hours) from that first unavailability.
+The record says which member is missing and why, and keeps the deadline in UTC, so that it
+survives a restart; the other vote is still collected. The coordinator reads the resolution and
+votes with a comment whose first line, after its attribution header, is
+
+```text
+/devloop vote <conclave> <sha256> APPROVE|BLOCK|RESERVED <reason>
+```
+
+where `<conclave>` is the id of the conclave's comment and `<sha256>` the hash of its current
+proposal, both written in the comment while it waits. The reason may continue on the next lines,
+up to 1000 characters. The dispatcher counts the first command of the coordinator's identity,
+written after the wait started, that names this conclave and this hash, before the deadline:
+it records it as a **substitute** vote (`APPROVE` and `BLOCK` are `APPROVA` and `BLOCCA`;
+`RESERVED` flags the reserved perimeter, and the conclave ends `RESERVED`) and closes the
+conclave with the rules above. A malformed command, one for another conclave or another hash,
+or one written after the deadline is refused, and listed in the comment; the coordinator may
+write a new one while the wait lasts. A `/devloop vote` of anyone else, trusted users included,
+is ignored and only logged. Past the deadline without a vote the vote is missing, and the
+conclave closes as without a coordinator.
+
+- **The proposer is never substituted**: when the agent that stopped fails, the conclave ends
+  `BLOCKED` as before.
+- **One substitute vote per conclave**: when the second voter fails too, before or after the
+  coordinator's vote, the conclave is `BLOCKED`, to the operator.
+- **It is visible**: the vote is shown as the coordinator's in place of the member, with the
+  coordinator's identity and the agent and model of `[roles.coordinator]`; the three distinct
+  profiles rule does not apply to it, and the [daily summary](#daily-summary) lists it, so that
+  the operator sees when the diversity of the voters was reduced (for example two Claude
+  models).
+- **The operator's [veto](#veto)** annuls a decision taken with a substitute vote as any other.
+
+Without `[roles.coordinator]` a failed voter is missing at once, as before.
+
 **Record.** The dispatcher publishes one comment with its own identity on the issue or PR of the
 block, with the proposal, the votes with their reasons and the outcome, and a `conclave` marker
 (see [Conclave records](protocol.md#conclave-records)), bound to the block's durable reference,
@@ -1834,6 +1872,7 @@ of ADR 0002:
 | labels | Delegated: its `agent:ready` added again and (#595) its priority labels count, as the supervisor's, only on issues opened by a trusted user or by a devloop app; its dependency and implementer labels never count ([Labels from the supervisor](#labels-from-the-supervisor)) |
 | `approve`, `merge-budget`, `reconcile`, `trusted_users` and the keys of trust | Reserved to the operator in person: never the coordinator's. On an escalation they are answered as not applicable and spent; elsewhere they are ignored and logged, as anyone else's; `trusted_users` and the overlay are the operator's |
 | `merge` | The coordinator's reserved merge (#529): [The reserved merge of the coordinator](#the-reserved-merge-of-the-coordinator) |
+| `vote` | Delegated (#605): the substitute vote in place of an unavailable member, only on a conclave waiting for it, bound to its comment and to the SHA-256 of its proposal, before its deadline ([Conclave on a block](#conclave-on-a-block)); elsewhere ignored, and never a command of an escalation |
 | any other (`escalate`, `finding`, `veto`, ...) | Refused: on an escalation answered as not applicable and spent, elsewhere ignored and logged |
 
 The coordinator writes as an agent, with the attribution header of AGENTS.md: its commands are
@@ -2454,6 +2493,11 @@ and writes nothing without `--publish`. The summary lists:
   of their own with the same columns: every `/devloop merge` of the coordinator's identity the
   dispatcher answered that day, merged or refused, and, once merged, how many of the
   coordinator's daily cap it took;
+- the substitute votes of the coordinator in a conclave (#605, [Conclave on a
+  block](#conclave-on-a-block)), under "Voti sostitutivi del coordinatore nel conclave": from
+  the dispatcher's `conclave` records, each vote recorded that day, with its UTC time, the issue
+  or PR, the member it replaced, the coordinator's identity, its agent and model, and the vote,
+  so that the operator sees when the diversity of the voters was reduced;
 - the auto-pins that did not move `current` (#453): from the `pin` record of the alert on
   `[run].alert_issue`, one per commit, the UTC time, the commit of `origin/main` the running copy
   stays behind and the reason (the step of the smoke test, or the first line of the failed check;

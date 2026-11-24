@@ -18,20 +18,29 @@ while the issue text and, on a PR, the head it was taken on hold, and until a tr
 vetoes it (``/devloop veto``): the work it restarted is then suspended (``_do_veto``), and
 nothing produced with it is published after the veto.
 
+Since #605, with ``[roles.coordinator]`` a voter that fails leaves its vote waiting for the
+coordinator's substitute vote (``_conclave_substitute``), until
+``conclave_substitute_timeout_seconds`` from the failure: meanwhile the conclave is due only for
+a command of the coordinator's identity, or once the deadline passed (``_substitute_due``).
+
 Pure logic, the record and its rendering are in :mod:`devloop.conclave`.
 """
 
 from itertools import combinations
 
+from .activity import iso
 from .agents import AgentError
 from .conclave import (DONE, MAX_DIFF, MAX_OPTION, MAX_OPTIONS, MAX_RESOLUTION, MAX_TEXT,
-                       PENDING, UNANIMOUS, VETO_COMMAND, apply_proposal, apply_vote, calls_left,
-                       consistent, describe_block, make_stale, missing, new_record, next_call,
-                       outcome, render, resolution_section, settle_started, text_hash,
-                       veto_command)
+                       PENDING, UNANIMOUS, VETO_COMMAND, VOTE_COMMAND, apply_proposal,
+                       apply_substitute, apply_vote, await_substitute, calls_left, consistent,
+                       describe_block, expire_substitute, make_stale, missing, new_record,
+                       next_call, outcome, refuse_substitute, render, resolution_section,
+                       settle_started, substitute_problem, substitute_vote, text_hash,
+                       veto_command,
+                       vote_command, waiting_substitute)
 from .context import _template, prompt_values
 from .dispatch_actions import Models
-from .dispatch_supervision import UntrustedChange
+from .dispatch_supervision import UntrustedChange, _epoch
 from .github import GitHubError
 from .ledger import comment_ref
 from .markdown import carries_record, read_marker
@@ -97,7 +106,9 @@ class ConclaveMixin:
                     'reason': f'conclave resume: `{record["step"]}` with the unanimous '
                               'resolution'}
         what = ('opens' if record is None else
-                'proposal' if record['proposal']['state'] != DONE else 'votes')
+                'proposal' if record['proposal']['state'] != DONE else
+                'substitute vote' if (waiting_substitute(record) is not None
+                                      and next_call(record) is None) else 'votes')
         return {'number': number, 'calls': calls_left(record), 'opens': False,
                 'reason': f'conclave {what}: block of `{view["details"]["proposer"]}`'}
 
@@ -247,6 +258,11 @@ class ConclaveMixin:
                 if record['outcome'] != UNANIMOUS or record.get('resumed') is not None:
                     return None
                 return self._resume_view(number, comments, pr, block, details, comment, record)
+            if (waiting_substitute(record) is not None and next_call(record) is None
+                    and not self._substitute_due(record, comments)):
+                # Waiting for the coordinator's substitute vote (#605): nothing to do until a
+                # command of the coordinator, or the deadline.
+                return None
             members = [record['proposal']['agent'], *(v['agent'] for v in record['votes'])]
         else:
             comment, record = None, None
@@ -342,11 +358,17 @@ class ConclaveMixin:
             settle_started(record)
         if stale:
             make_stale(record, stale)
-        elif outcome(record) is None:
+        else:
+            # The coordinator's substitute vote, or the end of the wait for it (#605).
+            self._conclave_substitute(number, record, comments)
+        if not stale and outcome(record) is None:
             which = next_call(record)
             if which is not None:
+                after = max((c['id'] for c in comments if not c.get('native')
+                             and isinstance(c.get('id'), int)
+                             and not isinstance(c['id'], bool)), default=0)
                 comment = self._conclave_call(number, pr, record, comment, which, context,
-                                              details)
+                                              details, after)
                 if outcome(record) is not None:
                     # The last call is in: the frozen context must still hold now, or the
                     # outcome is BLOCKED (RESERVED still prevails), never one on an old head or
@@ -358,10 +380,13 @@ class ConclaveMixin:
         self._conclave_publish(number, comment, record, pr)
         self.log(f'  conclave: {record["outcome"] or "in progress"}')
 
-    def _conclave_call(self, number, pr, record, comment, which, context, details):
+    def _conclave_call(self, number, pr, record, comment, which, context, details, after=0):
         """Run call ``which`` (``'proposal'`` or a voter's index) of ``record``: a read-only
         turn in a disposable checkout of the block's commit, recorded as started before it
-        runs. A failure or a timeout of the agent is a missing contribution. Returns the
+        runs. A failure or a timeout of the agent is a missing contribution; with
+        ``[roles.coordinator]`` a voter's waits for the coordinator's substitute vote instead
+        (#605), until ``conclave_substitute_timeout_seconds`` from now, and only a command
+        written after comment ``after`` counts. Returns the
         comment id of the record. A call refused by the block on uncertain turns
         (``TurnBlocked``, #362), on a PR whose attempt does not hold (``JournalError``,
         #384), or not covered by the budget envelope of its story (``BudgetRefused``, #365),
@@ -411,8 +436,18 @@ class ConclaveMixin:
                                        path, label, self._conclave_allowed(record, member),
                                        where=(number, 'conclave'), note='conclave')
             except AgentError as exc:
-                missing(record, which, f'agent fallito o in timeout: {_short(exc)}')
+                why = f'agent fallito o in timeout: {_short(exc)}'
                 self.log(f'  conclave: {member["agent"]} failed: {_short(exc)}')
+                if proposal or cfg.coordinator is None:
+                    # The proposer is never substituted (#605), nor any member without a
+                    # coordinator.
+                    missing(record, which, why)
+                else:
+                    deadline = iso(self.clock() + cfg.conclave_substitute_timeout_seconds)
+                    await_substitute(record, which, why, deadline, comment, after)
+                    if waiting_substitute(record) is not None:
+                        self.log(f'  conclave: waiting for the coordinator\'s substitute vote '
+                                 f'until {deadline}')
             else:
                 # The profile it actually ran with, a fallback model included: the later calls,
                 # on this tick or the next ones, stay distinct from it.
@@ -430,11 +465,13 @@ class ConclaveMixin:
         fallback included, distinct by identity and by ``(kind, model, effort)`` from the
         profile each other member contributed with, as the record keeps it, and from the
         configured profile of each member still to be asked. The three stay distinct even when
-        a model is unavailable."""
+        a model is unavailable. The coordinator's substitute vote (#605) is outside the rule."""
+        substituted = substitute_vote(record)
         others = [item['profile'] if item['state'] == DONE and item['profile']
                   else self._profile(item['agent'], 'review')
                   for item in [record['proposal'], *record['votes']]
-                  if item is not member and item['state'] in (DONE, PENDING)]
+                  if item is not member and item is not substituted
+                  and item['state'] in (DONE, PENDING)]
 
         def allowed(candidate):
             mine = self._profile(member['agent'], 'review', candidate)
@@ -458,6 +495,81 @@ class ConclaveMixin:
         if comment is None:
             raise GitHubError(f'the conclave record of #{number} cannot be found again')
         return comment
+
+    # The substitute vote of the coordinator (#605) ------------------------------------------
+    @staticmethod
+    def _vote_commands(comments, after):
+        """``(comment, command)`` of the ``/devloop vote`` commands (``vote_command``) written
+        in ``comments`` after comment id ``after``, whoever wrote them, oldest first. devloop's
+        records and native reviews are never commands."""
+        found = []
+        for comment in comments:
+            body, ident = comment.get('body') or '', comment.get('id')
+            if (comment.get('native') or carries_record(body) or not isinstance(ident, int)
+                    or isinstance(ident, bool) or ident <= after):
+                continue
+            command = vote_command(body)
+            if command is not None:
+                found.append((comment, command))
+        return sorted(found, key=lambda entry: entry[0]['id'])
+
+    def _substitute_expired(self, substitute):
+        """Whether the deadline of the wait has passed; an unreadable one has (it fails
+        closed)."""
+        deadline = _epoch(substitute['deadline'])
+        return deadline is None or self.clock() >= deadline
+
+    def _substitute_due(self, record, comments):
+        """Whether the conclave of ``record``, waiting for the coordinator's substitute vote,
+        has something to do: a command of the coordinator's identity not spent yet, or the
+        deadline passed. A command of anyone else is never one."""
+        substitute = waiting_substitute(record)
+        return (self._substitute_expired(substitute)
+                or any(self._coordinator_may((c.get('author') or {}).get('login'), 'vote')
+                       for c, _ in self._vote_commands(comments, substitute['last'])))
+
+    def _coordinator_profile(self, login):
+        """The profile of the coordinator's substitute vote: its identity, and the agent and
+        model ``[roles.coordinator]`` declares (devloop does not run it)."""
+        actor = self.cfg.coordinator
+        return {'identity': login, 'kind': actor.kind, 'model': actor.model, 'effort': '',
+                'args': [], 'provider': actor.provider}
+
+    def _conclave_substitute(self, number, record, comments):
+        """The coordinator's substitute vote in the conclave of ``record`` (#605), from the
+        thread ``comments``, while it waits for one. The commands of the coordinator's identity
+        not spent yet, oldest first: the first that names this conclave and the hash of its
+        proposal, written before the deadline, is the vote; each one before it is refused, and
+        recorded as such. A command of anyone else is ignored and logged. Past the deadline
+        without a vote, the vote is missing and the conclave closes as before."""
+        substitute = waiting_substitute(record)
+        if substitute is None:
+            return
+        for comment, command in self._vote_commands(comments, substitute['last']):
+            ident, login = comment['id'], (comment.get('author') or {}).get('login')
+            if not self._coordinator_may(login, 'vote'):
+                self.log(f'  #{number}: ignored `{VOTE_COMMAND}` by {login}: only the '
+                         'coordinator\'s identity votes in place of a member')
+                continue
+            why = substitute_problem(record, command)
+            written, deadline = _epoch(comment.get('created_at')), _epoch(substitute['deadline'])
+            if not why and (written is None or deadline is None):
+                why = 'l\'ora del comando o la scadenza non sono leggibili'
+            elif not why and written > deadline:
+                why = f'scritto dopo la scadenza del voto sostitutivo ({substitute["deadline"]})'
+            if why:
+                refuse_substitute(record, ident, why)
+                self.log(f'  #{number}: refused `{VOTE_COMMAND}` of comment {ident}: {why}')
+                continue
+            apply_substitute(record, command, ident, login, self._coordinator_profile(login),
+                             iso(self.clock()))
+            self.log(f'  #{number}: substitute vote {command["verdict"]} of the coordinator in '
+                     f'place of `{substitute["member"]}`')
+            return
+        if self._substitute_expired(substitute):
+            expire_substitute(record)
+            self.log(f'  #{number}: no substitute vote by {substitute["deadline"]}: the block '
+                     'stays with the operator')
 
     # Decisions, resume and veto (#142) --------------------------------------------------------
     def _veto_commands(self, comments, number):

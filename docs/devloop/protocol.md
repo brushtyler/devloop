@@ -435,7 +435,8 @@ while the receipt of the round still waits for other reviewers.
 | `commit`, `head` | the commit of the block, which every call checks out; on a PR its head when the conclave opened (null on an issue) |
 | `diff_hash` | SHA-256 of the uncommitted changes of the agent that stopped, attached to the prompts: the tracked files as `git diff`, the new untracked files with their content (split at LF only, every other separator kept as it is) and the SHA-256 of their bytes |
 | `proposal` | the proposer (`agent`), `state` (`pending`, `started`, `done`, `missing`), `missing` (the reason, when missing), the `resolution` and its `hash`, the reserved fields (`reserved`, `reserved_reason`, `operator_question`, `options`) and `profile`, the profile the contribution was given with (identity, kind, model, effort and arguments, a fallback model included; null until it is done) |
-| `votes` | the two voters, each with `state`, `missing`, `vote` (`APPROVA`, `BLOCCA`), `reason`, the reserved fields, `profile` and `proposal_hash`, the hash of the text it voted on |
+| `votes` | the two voters, each with `state` (also `waiting`, #605: unavailable, waiting for the coordinator's substitute vote), `missing` (also the reason of a `waiting` vote), `vote` (`APPROVA`, `BLOCCA`), `reason`, the reserved fields, `profile` and `proposal_hash`, the hash of the text it voted on |
+| `substitute` | since #605, absent or null without a substitute vote; else the wait for the coordinator's: `index` and `member` of the vote it replaces, `why` the member is missing, `deadline` (UTC, from the first unavailability plus `conclave_substitute_timeout_seconds`), `conclave` (the comment id the command names), `state` (`waiting`, `voted`, `expired`, `void`: a second member failed or the context changed), `last` (the latest comment id already read: only later commands count), `refused` (the latest five refused commands, `{comment, why}`) and, once voted, `comment`, `by` (the coordinator's login), `verdict` (`APPROVE`, `BLOCK`, `RESERVED`) and `at`. The substituted vote records the coordinator's profile: its identity and the kind, provider and model of `[roles.coordinator]` |
 | `hash` | SHA-256 of the proposal's text: the content evaluated |
 | `stale` | why the frozen context stopped holding, `""` otherwise |
 | `outcome` | `UNANIMOUS`, `BLOCKED` or `RESERVED`; `""` while the conclave is open |
@@ -444,8 +445,9 @@ while the receipt of the round still waits for other reviewers.
 A record is read back only from the dispatcher's identity and with a valid structure, and it must
 hold together: `hash` is the hash of the recorded text, every vote was given on that hash, every
 contribution done records its `profile`, the profiles distinct two by two by identity and by
-`(kind, model, effort)`, the recorded outcome is the one its contributions give, and only a
-`UNANIMOUS` one is `resumed`. A record that does not hold is logged and
+`(kind, model, effort)` (the substitute vote of the coordinator excepted, #605), a `waiting` vote
+only while `substitute` waits for it, the recorded outcome is the one its contributions give,
+and only a `UNANIMOUS` one is `resumed`. A record that does not hold is logged and
 left to the operator: the block gets no other conclave. Each call is also a ledger `turn` of kind
 `conclave` ([Evidence and telemetry](#evidence-and-telemetry)).
 
@@ -732,7 +734,9 @@ their cap, with author, reason, `value`, `day` and `cap`), the `review` records
 of a configured reviewer written with its identity (a CI round with the dispatcher's), the `pin`
 records the dispatcher signed (#453: the alert on `[run].alert_issue` of an auto-pin that did not
 move `current`, with `sha`, `ref`, `at` and the `reason` the alert shows, never a path of the
-host), and the `pr` marker of a PR opened by the implementer it names. It reads the comments of the repository,
+host), the `conclave` records the dispatcher signed whose `substitute` is `voted` (#605: the
+substitute votes of the coordinator, on the day of their `at`, with the member replaced, `by`,
+the kind and model of the vote's profile and the `verdict`), and the `pr` marker of a PR opened by the implementer it names. It reads the comments of the repository,
 not the native reviews: a round whose reviews are native reviews is counted from its
 [round register](#round-register), once a review turn of it succeeded or its CI was recorded. The
 records of a [fix register](#fix-register) are read one by one, and open no round. The

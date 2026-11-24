@@ -602,6 +602,9 @@ class Config:
     # The three agents of the conclave on a block (#141), the agent that stopped among them, or
     # () when it is disabled.
     conclave: tuple = ()
+    # How long a conclave waits for the coordinator's substitute vote in place of an unavailable
+    # member (#605), in seconds from the first unavailability; only with ``[roles.coordinator]``.
+    conclave_substitute_timeout_seconds: int = 7200
     max_open_prs: int = 2
     # Open devloop PRs waiting for a person (``dispatcher.parked``, #199): they do not take the
     # slots of max_open_prs, and once this many are open only priority:high issues start (#274).
@@ -1885,7 +1888,8 @@ def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
     ints = {}
     for key in ('max_open_prs', 'max_parked_prs', 'max_review_rounds', 'max_actions_per_tick',
                 'max_parallel_actions', 'implement_test_retries', 'agent_timeout_seconds', 'test_timeout_seconds',
-                'agent_command_timeout_seconds', 'agent_stall_seconds', 'journal_max_mib'):
+                'agent_command_timeout_seconds', 'agent_stall_seconds', 'journal_max_mib',
+                'conclave_substitute_timeout_seconds'):
         if key in data:
             value = _require(data, key, int, 'config')
             if value < (0 if key == 'implement_test_retries' else 1):
@@ -2081,7 +2085,7 @@ OVERLAY_KEYS = {
                      'test_cmd', 'local_tests', 'ci_rerun_unrelated', 'block_uncertain_turns', 'story_identity',
                      'publication_outbox', 'attempt_identity', 'journal_max_mib',
                      'language', 'trusted_users', 'preflight',
-                     'conclave', 'max_open_prs',
+                     'conclave', 'conclave_substitute_timeout_seconds', 'max_open_prs',
                      'max_parked_prs', 'max_review_rounds', 'max_requested_fix_rounds',
                      'max_actions_per_tick',
                      'max_parallel_actions', 'implement_test_retries', 'agent_timeout_seconds',

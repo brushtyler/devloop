@@ -19,9 +19,19 @@ Since #142 (part 3 of #114) a ``UNANIMOUS`` decision unblocks the work once (``r
 step that stopped runs again from the published commit, with the resolution in its prompt
 (``resolution_section``), and the changes the agent left uncommitted are kept as evidence. A
 trusted user annuls the latest decision with ``/devloop veto`` (``veto_command``).
+
+Since #605 (ADR 0002, second precision of 2026-11-23, point 3), with ``[roles.coordinator]`` a
+voter that fails (``await_substitute``) does not close the conclave: its vote waits
+(``WAITING``) for the coordinator's substitute vote until a deadline recorded in the record
+(``substitute``). The coordinator votes with ``/devloop vote <conclave> <sha256>
+APPROVE|BLOCK|RESERVED <reason>`` (``vote_command``), bound to the conclave's comment and to the
+hash of its proposal (``apply_substitute``). One substitute vote per conclave: a second member
+that fails leaves it to the operator. Past the deadline the vote is missing
+(``expire_substitute``). The proposer is never substituted.
 """
 
 import hashlib
+import re
 
 from .markdown import dispatcher_header, publishable
 from .policy import independent, valid_profile
@@ -32,7 +42,9 @@ APPROVE, BLOCK = 'APPROVA', 'BLOCCA'
 # The state of each contribution: not started, started (the record written before the call),
 # done, or missing (with the reason).
 PENDING, STARTED, DONE, MISSING = 'pending', 'started', 'done', 'missing'
-STATES = (PENDING, STARTED, DONE, MISSING)
+# A vote whose member is unavailable, waiting for the coordinator's substitute vote (#605).
+WAITING = 'waiting'
+STATES = (PENDING, STARTED, DONE, MISSING, WAITING)
 # The steps whose block convenes a conclave: the implementer and a fixer that stop as
 # ``blocked``, a reviewer whose verdict is ``needs_operator``.
 STEPS = ('implement', 'fix', 'review')
@@ -49,6 +61,19 @@ MAX_DIFF = 20000
 # The command with which a trusted user annuls the latest decision of a conclave (#142): the
 # first line of a comment, after the attribution header.
 VETO_COMMAND = '/devloop veto'
+
+# The substitute vote of the coordinator (#605): the command, its verdicts (``APPROVE`` and
+# ``BLOCK`` are the ``APPROVA`` and ``BLOCCA`` of ``conclave_vote``; ``RESERVED`` flags the
+# reserved perimeter) and the states of the wait: waiting, voted, expired without a vote, void
+# (a second member failed, or the context changed).
+VOTE_COMMAND = '/devloop vote'
+SUBSTITUTE_VERDICTS = ('APPROVE', 'BLOCK', 'RESERVED')
+SUB_WAITING, SUB_VOTED, SUB_EXPIRED, SUB_VOID = 'waiting', 'voted', 'expired', 'void'
+SUB_STATES = (SUB_WAITING, SUB_VOTED, SUB_EXPIRED, SUB_VOID)
+# The refused commands a record keeps: the latest ones.
+MAX_REFUSED = 5
+_PROPOSAL_HASH = re.compile(r'[0-9a-f]{64}')
+_COMMENT_ID = re.compile(r'[1-9][0-9]{0,19}')
 
 STARTED_WITHOUT_RESULT = ('chiamata avviata senza un risultato durevole (riavvio o errore del '
                           'dispatcher): conta come `BLOCCA` e non si ripete')
@@ -145,10 +170,104 @@ def missing(record, which, reason):
     return record
 
 
+# The substitute vote (#605) -----------------------------------------------------------------
+def waiting_substitute(record):
+    """The ``substitute`` of ``record`` while it waits for the coordinator's vote, or None."""
+    substitute = record.get('substitute')
+    return substitute if substitute and substitute['state'] == SUB_WAITING else None
+
+
+def substitute_vote(record):
+    """The vote of ``record`` the coordinator gave in place of a member (#605), or None."""
+    substitute = record.get('substitute')
+    if substitute and substitute['state'] == SUB_VOTED:
+        return record['votes'][substitute['index']]
+    return None
+
+
+def await_substitute(record, index, reason, deadline, conclave, after):
+    """``record`` whose voter ``index`` failed for ``reason``, with a coordinator: the vote
+    waits for the coordinator's substitute vote until ``deadline`` (ISO 8601, UTC), on the
+    conclave of comment ``conclave``; ``after`` is the latest comment id read before the wait,
+    so that only a command written later counts. One substitute vote per conclave: when a
+    member is already substituted, or waits, this vote is missing, and so is the waiting one."""
+    if record.get('substitute'):
+        missing(record, index, reason)
+        if waiting_substitute(record) is not None:
+            _void(record, 'un secondo membro non ha votato: un solo voto sostitutivo per '
+                          'conclave')
+        return record
+    record['votes'][index].update(state=WAITING, missing=reason)
+    record['substitute'] = {'index': index, 'member': record['votes'][index]['agent'],
+                            'why': reason, 'deadline': deadline, 'conclave': conclave,
+                            'state': SUB_WAITING, 'last': after, 'comment': None, 'by': '',
+                            'verdict': '', 'at': '', 'refused': []}
+    return record
+
+
+def _void(record, reason, state=SUB_VOID):
+    substitute = record['substitute']
+    record['votes'][substitute['index']].update(state=MISSING,
+                                                missing=f'{substitute["why"]}; {reason}')
+    substitute['state'] = state
+
+
+def expire_substitute(record):
+    """``record`` whose substitute vote did not come before its deadline: the vote is missing,
+    and the conclave goes to the operator as before (#605)."""
+    if waiting_substitute(record) is not None:
+        _void(record, 'nessun voto sostitutivo del coordinatore entro la scadenza', SUB_EXPIRED)
+    return record
+
+
+def refuse_substitute(record, comment, why):
+    """``record`` with the command of comment ``comment`` refused for ``why``: spent, and kept
+    among the latest ``MAX_REFUSED``."""
+    substitute = record['substitute']
+    substitute['last'] = max(substitute['last'], comment)
+    substitute['refused'] = (substitute['refused']
+                             + [{'comment': comment, 'why': why}])[-MAX_REFUSED:]
+    return record
+
+
+def substitute_problem(record, command):
+    """Why the coordinator's ``command`` (``vote_command``) does not apply to the substitute
+    vote ``record`` waits for, in Italian, or ''. Who wrote it and when are the dispatcher's
+    checks."""
+    substitute = record['substitute']
+    if command['error']:
+        return command['error']
+    if command['conclave'] != substitute['conclave']:
+        return (f'il comando nomina il conclave {command["conclave"]}, non questo '
+                f'({substitute["conclave"]})')
+    if command['hash'] != record['hash']:
+        return 'lo SHA-256 non è quello della proposta corrente del conclave'
+    return ''
+
+
+def apply_substitute(record, command, comment, by, profile, at):
+    """``record`` with the coordinator's substitute vote ``command`` (``vote_command``, already
+    checked), written in comment ``comment`` by ``by`` with ``profile`` and recorded at ``at``:
+    ``APPROVE`` and ``BLOCK`` are ``APPROVA`` and ``BLOCCA``, ``RESERVED`` flags the reserved
+    perimeter, which ends the conclave ``RESERVED``."""
+    substitute = record['substitute']
+    reserved = command['verdict'] == 'RESERVED'
+    record['votes'][substitute['index']].update(
+        state=DONE, missing='', vote=APPROVE if command['verdict'] == 'APPROVE' else BLOCK,
+        reason=command['reason'], proposal_hash=record['hash'], profile=profile,
+        reserved=reserved, reserved_reason=command['reason'] if reserved else '',
+        operator_question='', options=[])
+    substitute.update(state=SUB_VOTED, comment=comment, by=by, verdict=command['verdict'],
+                      at=at, last=max(substitute['last'], comment))
+    return record
+
+
 def make_stale(record, reason):
     """``record`` whose frozen context no longer holds: every contribution not done is missing,
     and the outcome is ``BLOCKED`` (unless a member already flagged the reserved perimeter)."""
     record['stale'] = reason
+    if waiting_substitute(record) is not None:
+        _void(record, f'contesto cambiato: {reason}')
     for item in [record['proposal'], *record['votes']]:
         if item['state'] in (PENDING, STARTED):
             item.update(state=MISSING, missing=f'contesto cambiato: {reason}')
@@ -172,9 +291,10 @@ def outcome(record):
     since it may write its own question for the operator. Only a proposer that flags it ends
     the protocol at once (``apply_proposal`` marks the votes missing). Once every contribution
     is in, ``RESERVED`` prevails; then a stale context, a missing proposal, a missing vote or a
-    ``BLOCCA`` give ``BLOCKED``; two ``APPROVA`` on the proposal give ``UNANIMOUS``."""
+    ``BLOCCA`` give ``BLOCKED``; two ``APPROVA`` on the proposal give ``UNANIMOUS``. A vote
+    waiting for the coordinator's substitute vote (#605) is still due."""
     items = [record['proposal'], *record['votes']]
-    if any(item['state'] in (PENDING, STARTED) for item in items):
+    if any(item['state'] in (PENDING, STARTED, WAITING) for item in items):
         return None
     if any(item['state'] == DONE and item['reserved'] for item in items):
         return RESERVED
@@ -221,7 +341,38 @@ def _valid_item(item, vote):
             and isinstance(item.get('options'), list) and all(map(_is_str, item['options']))
             and (not vote or item['vote'] in ('', APPROVE, BLOCK))
             and (item.get('profile') is None or valid_profile(item['profile']))
-            and (item['state'] != MISSING or bool(item['missing'])))
+            and (item['state'] not in (MISSING, WAITING) or bool(item['missing'])))
+
+
+def _is_id(value):
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def valid_substitute(record):
+    """The ``substitute`` field of a record (#605): absent or None without a substitute vote,
+    else the wait and, once voted, the vote; a ``WAITING`` vote only while it waits."""
+    s = record.get('substitute')
+    waiting = [i for i, v in enumerate(record['votes']) if v['state'] == WAITING]
+    if s is None:
+        return not waiting
+    if not (isinstance(s, dict) and s.get('index') in (0, 1) and s.get('state') in SUB_STATES
+            and all(_is_str(s.get(k)) for k in ('member', 'why', 'deadline', 'by', 'verdict',
+                                                'at'))
+            and _is_id(s.get('conclave')) and _is_id(s.get('last'))
+            and (s.get('comment') is None or _is_id(s['comment']))
+            and isinstance(s.get('refused'), list)
+            and all(isinstance(r, dict) and _is_id(r.get('comment')) and _is_str(r.get('why'))
+                    for r in s['refused'])):
+        return False
+    vote = record['votes'][s['index']]
+    if s['member'] != vote['agent']:
+        return False
+    if s['state'] == SUB_WAITING:
+        return waiting == [s['index']]
+    if s['state'] == SUB_VOTED:
+        return (not waiting and vote['state'] == DONE and s['comment'] is not None
+                and s['verdict'] in SUBSTITUTE_VERDICTS)
+    return not waiting and vote['state'] == MISSING
 
 
 def valid_block(block):
@@ -261,6 +412,7 @@ def valid_record(r):
             and _valid_item(r.get('proposal'), vote=False)
             and isinstance(r.get('votes'), list) and len(r['votes']) == 2
             and all(_valid_item(v, vote=True) for v in r['votes'])
+            and valid_substitute(r)
             and r.get('outcome') in ('', *OUTCOMES))
 
 
@@ -269,11 +421,14 @@ def consistent(record):
     the hash of the proposal's text, every vote was given on that hash, and a recorded outcome
     is the one its contributions give, and every contribution records the profile it was given
     with, the three distinct by identity and by ``(kind, model, effort)``, fallback models
-    included. Returns ``(ok, why)``."""
+    included. The substitute vote of the coordinator (#605) is outside the last check: it is
+    recorded as such, with the coordinator's model. Returns ``(ok, why)``."""
     proposal = record['proposal']
     done = [item for item in [proposal, *record['votes']] if item['state'] == DONE]
     if any(item['profile'] is None for item in done):
         return False, 'un contributo non registra il profilo con cui è stato dato'
+    substituted = substitute_vote(record)
+    done = [item for item in done if item is not substituted]
     for position, a in enumerate(done):
         for b in done[position + 1:]:
             if not independent(a['profile'], b['profile']):
@@ -304,6 +459,34 @@ def veto_command(body):
     if tokens[:2] != VETO_COMMAND.split():
         return None
     return tokens[2].strip() if len(tokens) > 2 else ''
+
+
+def vote_command(body):
+    """The coordinator's substitute vote in ``body`` (#605), or None when the first line after
+    the attribution header is no ``/devloop vote``: ``{conclave, hash, verdict, reason,
+    error}``, ``conclave`` the comment id of the conclave (None when it is not one), ``reason``
+    the rest of the comment from the rest of the first line on, and ``error``, in Italian, why
+    the command is malformed ('' when it is not)."""
+    lines = (body or '').strip().splitlines()
+    while lines and (not lines[0].strip() or lines[0].strip().startswith('>')):
+        lines.pop(0)
+    tokens = lines[0].strip().split(None, 2) if lines else []
+    if tokens[:2] != VOTE_COMMAND.split():
+        return None
+    parts = (tokens[2] if len(tokens) > 2 else '').split(None, 3)
+    parts += [''] * (4 - len(parts))
+    conclave, digest, verdict = parts[:3]
+    reason = '\n'.join([parts[3], *lines[1:]]).strip()
+    command = {'conclave': int(conclave) if _COMMENT_ID.fullmatch(conclave) else None,
+               'hash': digest.lower(), 'verdict': verdict.upper(), 'reason': reason,
+               'error': ''}
+    if (command['conclave'] is None or not _PROPOSAL_HASH.fullmatch(command['hash'])
+            or command['verdict'] not in SUBSTITUTE_VERDICTS or not reason):
+        command['error'] = ('comando non ben formato: va scritto come `/devloop vote <conclave> '
+                            '<sha256> APPROVE|BLOCK|RESERVED <motivo>`')
+    elif len(reason) > MAX_TEXT:
+        command['error'] = f'il motivo supera {MAX_TEXT} caratteri'
+    return command
 
 
 def resolution_section(record, comment):
@@ -367,6 +550,8 @@ def describe_block(block):
 
 
 def _state_text(item):
+    if item['state'] == WAITING:
+        return f'*indisponibile, in attesa del voto sostitutivo:* {item["missing"]}'
     if item['state'] == MISSING:
         return f'*mancante:* {item["missing"]}'
     if item['state'] == STARTED:
@@ -379,6 +564,25 @@ def _state_text(item):
 def _reserved_lines(item):
     lines = [f'  *Perimetro riservato:* {item["reserved_reason"] or "(motivo non indicato)"}']
     return lines
+
+
+def _substitute_lines(record):
+    """The lines on the substitute vote (#605): how the wait ended without one, and the
+    commands refused."""
+    substitute = record.get('substitute')
+    if not substitute:
+        return []
+    lines = []
+    if substitute['state'] == SUB_EXPIRED:
+        lines.append(f'Nessun voto sostitutivo del coordinatore al posto di '
+                     f'`{substitute["member"]}` entro {substitute["deadline"]} (UTC).')
+    elif substitute['state'] == SUB_VOID:
+        lines.append(f'L\'attesa del voto sostitutivo al posto di `{substitute["member"]}` è '
+                     'finita senza voto.')
+    for refused in substitute['refused']:
+        lines.append(f'- Comando `{VOTE_COMMAND}` del commento {refused["comment"]} rifiutato: '
+                     f'{refused["why"]}.')
+    return [''] + lines if lines else []
 
 
 def render(record):
@@ -401,9 +605,16 @@ def render(record):
     else:
         parts.append(_state_text(proposal))
     parts += ['', '### Voti', '']
+    substituted, substitute = substitute_vote(record), record.get('substitute')
     for vote in record['votes']:
         if vote['state'] == DONE:
             line = f'- `{vote["agent"]}`: **{vote["vote"]}**'
+            if vote is substituted:
+                profile = vote['profile']
+                line += (f' (voto sostitutivo `{substitute["verdict"]}` del coordinatore '
+                         f'`{substitute["by"]}`, modello `{profile["kind"]}` '
+                         f'`{profile["model"]}`, al posto di `{vote["agent"]}`, indisponibile: '
+                         f'{substitute["why"]})')
             if vote['reason']:
                 line += ' — ' + vote['reason'].replace('\n', '\n  ')
             parts.append(line)
@@ -411,9 +622,16 @@ def render(record):
                 parts += _reserved_lines(vote)
         else:
             parts.append(f'- `{vote["agent"]}`: {_state_text(vote)}')
+    parts += _substitute_lines(record)
     parts += ['', '### Esito', '']
     result = record['outcome']
-    if not result:
+    if not result and waiting_substitute(record) is not None:
+        parts.append(f'Conclave in attesa del voto sostitutivo del coordinatore al posto di '
+                     f'`{substitute["member"]}`, fino a {substitute["deadline"]} (UTC). Il '
+                     f'coordinatore vota con `{VOTE_COMMAND} {substitute["conclave"]} '
+                     f'{record["hash"]} APPROVE|BLOCK|RESERVED <motivo>` come prima riga di un '
+                     'commento; senza un voto entro la scadenza il blocco resta all\'operatore.')
+    elif not result:
         parts.append('Conclave in corso: riprende al prossimo tick dal punto registrato.')
     else:
         parts.append(f'**{result}**: {_OUTCOME_TEXT[result]}.')
