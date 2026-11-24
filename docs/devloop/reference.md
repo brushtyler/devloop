@@ -1562,9 +1562,30 @@ body published. It covers every visible text: the output of the tests in a `host
   `role-watchdog`), a common word of devloop's own texts, a name shorter than three characters, or one of `trusted_users`. The
   name of the service follows the same conditions (its default `devloop` stays), but is replaced
   inside a path or the name of a unit too.
-- The substitutions apply to the visible text. The markers `devloop:<kind>:v1` that end a body
-  stay as they are, Base64 payload included: their records reach GitHub as devloop wrote them,
-  and a name never matches inside their Base64. Cleaning their fields is #620.
+- The markers `devloop:<kind>:v1` that end a body are JSON in Base64, which anyone decodes
+  (#620): a name never matches inside their Base64, but the free texts of their records pass
+  through the same substitutions, whatever they hold, spaces or not, and the marker is encoded
+  again. They are the reasons (`notice`, `hold`, `supervision`, `recheck`, `authorize`, `pin`,
+  the closures of a `finding`), the summary, notes, checks and finding texts of a `review`, the
+  notes and requests of a `fix`, the reasons of an acceptance map, the `host_step` and the
+  reasons of the skipped models of `pr`, `fix`, `sync` and `review`, the gaps, split and trust policy
+  reason of a `preflight` and of the decisions of a `supervision`, the error, last command,
+  denied command, test command and reason of a `ledger` record (in the sections of a register
+  too), and the vote reasons, the reserved fields, the missing reasons and `stale` of a
+  `conclave`. Everything else stays as devloop wrote it, since devloop compares it when it reads
+  the record back and a value of the host may equal it (a `SERVICE_NAME` called `fix`, an
+  `AGENT_USER` called `claude`): heads, hashes, comment ids, classes, keys, steps, agents,
+  logins, the receipts with their profiles and arguments, the criteria of a map, the test ids. A
+  marker with nothing to replace, of a kind without free texts, or that does not decode, is the
+  very same line.
+- The proposal of a conclave is bound by its hash, which the votes and the `/devloop vote`
+  commands cite. devloop redacts a new proposal before hashing it: the voters' prompts and the
+  record carry the very text the hash binds, and the publication leaves it as it is. The limit
+  of 4000 characters holds for the text as the proposer gave it, and for the redacted one: a
+  proposal beyond it stays a failed contribution, even when the redaction shortens it. A record
+  whose proposal, written before, would still change is not published: the write fails, and
+  the conclave stops there as for any failed write. Its hashes are never computed again, and
+  no approval passes to a text other than the one voted.
 - The values come from the map `redactions.json` in the `state_dir`, which
   `ops/host/setup-devloop.sh` writes from the resolved parameters (600, devloop's; it reads no
   key). The runtime values of the dispatcher prevail for its `state_dir` and its key_dir

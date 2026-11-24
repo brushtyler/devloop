@@ -16,7 +16,8 @@ _TESTS_DIR = str(Path(__file__).resolve().parent)
 if _TESTS_DIR not in sys.path:
     sys.path.insert(0, _TESTS_DIR)
 
-from devloop import agents, conclave, config, markdown, planning, review, schema, workspace  # noqa: E402,E501
+from devloop import (agents, conclave, config, markdown, planning, redact, review,  # noqa: E402
+                     schema, workspace)
 from devloop.dispatcher import Dispatcher  # noqa: E402
 from devloop.planning import Snapshot, plan  # noqa: E402
 from devloop.workspace import Workspace  # noqa: E402
@@ -438,6 +439,67 @@ class HashTests(Base):
             self.assertIn('\n' + RESOLUTION + '\n', prompt)
             self.assertIn(digest, prompt)
         self.assertEqual([v['proposal_hash'] for v in record['votes']], [digest, digest])
+
+    def redacting(self, r):
+        """The dispatcher's writes through ``r``, as devloop gives them (#583, #620)."""
+        self.d.identities.redactor = r
+        self.d.gh = redact.RedactingClient(self.gh, r)
+
+    def test_a_new_proposal_is_redacted_before_its_hash(self):
+        # #620: the voters get, and the record carries, the redacted text its hash binds; the
+        # identifiers of the record stay, a service called as the step and a user called as
+        # the agent included (R3-1).
+        r = redact.Redactor(paths=[('STATE_DIR', '/srv/u-dl/.state')],
+                            users=[('AGENT_USER', 'claude')], names=[('SERVICE_NAME', 'fix')])
+        text = 'Rilanciare i test in /srv/u-dl/.state/worktrees/pr-100.'
+        clean = 'Rilanciare i test in $STATE_DIR/worktrees/pr-100.'
+        self.make(proposal(text), vote(), vote())
+        self.redacting(r)
+        self.block_pr()
+        self.run_conclave()
+        record = self.record()
+        self.assertEqual(record['outcome'], conclave.UNANIMOUS)
+        self.assertEqual(record['proposal']['resolution'], clean)
+        self.assertEqual(record['hash'], conclave.text_hash(clean))
+        for call in self.runner.calls[1:]:
+            self.assertIn('\n' + clean + '\n', call[3])
+            self.assertIn(record['hash'], call[3])
+            self.assertNotIn('/srv/', call[3])
+        self.assertEqual((record['step'], record['block']['agent'], record['proposal']['agent']),
+                         ('fix', 'claude', 'claude'))
+        self.assertEqual(conclave.consistent(record), (True, ''))
+
+    def test_a_proposal_beyond_the_limits_stays_a_failed_contribution_once_redacted(self):
+        # #620, R1-2: the limit holds for the text the proposer gave, which the redaction
+        # would shorten below it.
+        path = '/srv/u-dl/.state/worktrees/pr-100 '
+        text = path * (conclave.MAX_RESOLUTION // len(path) + 1)
+        r = redact.Redactor(paths=[('STATE_DIR', '/srv/u-dl/.state')])
+        self.assertGreater(len(text), conclave.MAX_RESOLUTION)
+        self.assertLessEqual(len(r.redact_text(text)), conclave.MAX_RESOLUTION)
+        self.make(proposal(text), vote(), vote())
+        self.redacting(r)
+        self.block_pr()
+        self.run_conclave(times=1)
+        record = self.record()
+        self.assertEqual(record['outcome'], conclave.BLOCKED)
+        self.assertIn('oltre i limiti', record['proposal']['missing'])
+        self.assertEqual(len(self.runner.calls), 1)
+
+    def test_a_recorded_proposal_with_host_details_is_not_updated(self):
+        # #620: a proposal recorded before, which the redaction would change, stops the update
+        # of its record: its hash is not computed again, and no vote is asked on another text.
+        self.make(proposal('Rilanciare in /srv/u-dl/x.'), vote(), vote())
+        self.block_pr()
+        self.run_conclave(times=1)
+        (comment,) = [c for c in self.gh.thread[100] if markdown.read_marker(c['body'],
+                                                                              'conclave')]
+        before = comment['body']
+        self.redacting(redact.Redactor(paths=[('DEVLOOP_HOME', '/srv/u-dl')]))
+        with self.assertRaises(redact.BoundTextChanged):
+            self.run_conclave(times=1)
+        self.assertEqual(len(self.runner.calls), 1)
+        self.assertEqual(comment['body'], before)
 
     def test_a_recorded_text_that_no_longer_matches_its_hash_gets_no_vote(self):
         self.make(proposal(), vote(), vote())

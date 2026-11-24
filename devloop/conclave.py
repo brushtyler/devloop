@@ -102,7 +102,7 @@ def new_record(block, step, members, issue, issue_hash, commit, head, diff_hash)
             'votes': votes, 'stale': '', 'hash': '', 'outcome': ''}
 
 
-def _too_long(raw, main_key, main_limit):
+def too_long(raw, main_key, main_limit):
     """Why ``raw`` exceeds the limits, or ''."""
     if len(raw.get(main_key) or '') > main_limit:
         return f'`{main_key}` supera {main_limit} caratteri'
@@ -128,7 +128,7 @@ def apply_proposal(record, raw, profile=None):
     reserved perimeter ends the protocol: no proposal, and the votes are not asked. A proposal
     without text, or beyond the limits, is a failed contribution."""
     proposal = record['proposal']
-    why = _too_long(raw, 'resolution', MAX_RESOLUTION)
+    why = too_long(raw, 'resolution', MAX_RESOLUTION)
     if why:
         return missing(record, 'proposal', f'output oltre i limiti: {why}')
     if raw['reserved']:
@@ -150,7 +150,7 @@ def apply_vote(record, index, raw, proposal_hash, profile=None):
     """``record`` with the schema-valid vote ``raw`` of voter ``index``, given with ``profile``
     on the proposal whose hash is ``proposal_hash``."""
     vote = record['votes'][index]
-    why = _too_long(raw, 'reason', MAX_TEXT)
+    why = too_long(raw, 'reason', MAX_TEXT)
     if why:
         return missing(record, index, f'output oltre i limiti: {why}')
     vote.update(state=DONE, vote=raw['vote'], reason=raw['reason'].strip(),
