@@ -161,7 +161,8 @@ its periods. It only detects: it has no GitHub key and changes nothing.
   supervisor](../guide.md#labels-from-the-supervisor)) only for the authorized issues: those
   the coordinator authorized with `/devloop authorize` (#607; [Authorization by the
   coordinator](../guide.md#authorization-by-the-coordinator)), whose record of the dispatcher
-  ("Lavoro autorizzato dal coordinatore") is on the issue, or those the operator queued. With
+  ("Work authorized by the coordinator", "Lavoro autorizzato dal coordinatore" in Italian) is
+  on the issue, or those the operator queued. With
   `[roles.coordinator]` devloop ignores your `agent:ready` on an issue without an authorization
   valid for its current title and body, and writes it in the log: after a change of the text,
   ask the coordinator for a new authorization (`agent:needs-coordinator` again). The priority of

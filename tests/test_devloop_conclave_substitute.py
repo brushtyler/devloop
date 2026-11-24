@@ -425,7 +425,8 @@ class ReportTests(unittest.TestCase):
         # A forged record does not count.
         gh.add(12, 'someone-else', conclave.render(record), '2026-11-16T11:00:00Z')
         day = report.parse_day('2026-11-16')
-        summary = report.Records(gh, TRUST, day, day, REPORT_CFG.agents).summary(day)
+        summary = report.Records(gh, TRUST, day, day, REPORT_CFG.agents,
+                                 'Italian').summary(day)
         self.assertEqual(summary.substitutes,
                          [('10:30', 12, 'agy', COORDINATOR, 'claude claude-opus-5-5', 'APPROVE')])
         text = report.render(summary)

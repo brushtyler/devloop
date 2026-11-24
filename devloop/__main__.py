@@ -27,6 +27,7 @@ from .dispatcher import (Dispatcher, TickLog, Workers, ensure_labels, pr_counts_
                          pr_status_line)
 from .github import GH_TMP_DIR, GitHub, GitHubError
 from .housekeeping import Housekeeping
+from .i18n import ENGLISH, Catalog
 from .journal import MIB, TurnJournal
 from .ledger import Ledger
 from .markdown import dispatcher_header, publishable
@@ -45,6 +46,44 @@ STATE_ENV = 'DEVLOOP_STATE_DIR'
 TABLES_ALERTED = 'project-tables-alerted.json'
 # The record that the agents running as the dispatcher's user were reported on alert_issue (#490).
 AGENT_USER_ALERTED = 'agent-user-alerted'
+# The warnings of the start on alert_issue in the project's ``language`` (#635); English for a
+# language without translation.
+WARNING_TEXTS = Catalog(
+    en={
+        'tables_title': 'Tables of the project file missing',
+        'tables_pinned': 'The copy pinned at commit `{sha}`',
+        'tables_running': 'The running copy of devloop',
+        'tables_text': ('{copy} reads {listed} from the project file, but neither the project '
+                        'file nor the overlay defines them. devloop starts all the same, but with '
+                        'degraded prompts or selection of the tests.\n\nThey must be added to the '
+                        'project file (`project.toml` in the state directory), with the loop '
+                        'stopped. This warning does not repeat while the missing tables stay the '
+                        'same.'),
+        'agent_user_title': 'Agents without a dedicated user',
+        'agent_user_text': ('`[agent_user] name` is empty: the agents and the test command run as '
+                            'the dispatcher\'s user, and can read the keys of the GitHub Apps, '
+                            'the `state_dir` and the overlay. devloop goes on.\n\nTo enable the '
+                            'agent user (#415): `ops/host/migrate.md`, section "Attivazione '
+                            'dell\'utente degli agent (#415)". This warning does not repeat while '
+                            'the key stays empty.'),
+    },
+    it={
+        'tables_title': 'Tabelle del file di progetto assenti',
+        'tables_pinned': 'La copia fissata al commit `{sha}`',
+        'tables_running': 'La copia di devloop in esecuzione',
+        'tables_text': ('{copy} legge dal file di progetto {listed}, ma né il file di progetto '
+                        'né l\'overlay le definiscono. devloop parte lo stesso, ma con i prompt o '
+                        'la selezione dei test degradati.\n\nVanno aggiunte al file di progetto '
+                        '(`project.toml` nella directory di stato), a loop fermo. Questo avviso '
+                        'non si ripete finché le tabelle assenti restano le stesse.'),
+        'agent_user_title': 'Agent senza utente dedicato',
+        'agent_user_text': ('`[agent_user] name` è vuoto: gli agent e il comando dei test girano '
+                            'come l\'utente del dispatcher, e possono leggere le chiavi delle '
+                            'GitHub App, lo `state_dir` e l\'overlay. devloop continua.\n\nPer '
+                            'attivare l\'utente degli agent (#415): `ops/host/migrate.md`, '
+                            'sezione "Attivazione dell\'utente degli agent (#415)". Questo avviso '
+                            'non si ripete finché la chiave resta vuota.'),
+    })
 
 
 def main_checkout():
@@ -167,14 +206,15 @@ def record_start(dispatcher, log):
     return lambda print_: reload(print_, only_if_changed=True)
 
 
-def project_tables_warning(alert_issue, state, gh, out=None, copy=None):
+def project_tables_warning(alert_issue, state, gh, out=None, copy=None, language=ENGLISH):
     """The warning of the tables of the project file that this copy knows and the configuration
     lacks (#462, ``config.missing_project_tables``): ``warn(missing)`` writes it in the log
     each time, at the start and at each reload, and on ``alert_issue`` once for each set of
     missing tables (``TABLES_ALERTED`` in ``state``; forgotten when none is missing, so that a
     later loss is reported again). One attempt; a failure is logged and tried at the next
     call. ``copy`` (default: the installation this runs from) names the copy in the alert;
-    ``out`` (default: ``log``) writes the lines."""
+    ``out`` (default: ``log``) writes the lines; ``language``, the project's, the alert
+    (#635)."""
     path = Path(state) / TABLES_ALERTED
 
     def warn(missing):
@@ -203,14 +243,11 @@ def project_tables_warning(alert_issue, state, gh, out=None, copy=None):
             return
         sha = pin.copy_commit(INSTALL_ROOT if copy is None else copy)
         listed = ', '.join(f'`[{name}]`' for name in missing)
+        t = WARNING_TEXTS.texts(language)
         body = publishable(
-            dispatcher_header() + '\n## Tabelle del file di progetto assenti\n\n'
-            + (f'La copia fissata al commit `{sha[:12]}`' if sha else 'La copia di devloop in '
-               'esecuzione') + f' legge dal file di progetto {listed}, ma né il file di '
-            'progetto né l\'overlay le definiscono. devloop parte lo stesso, ma con i prompt o '
-            'la selezione dei test degradati.\n\nVanno aggiunte al file di progetto '
-            '(`project.toml` nella directory di stato), a loop fermo. Questo avviso non si '
-            'ripete finché le tabelle assenti restano le stesse.')
+            dispatcher_header() + f'\n## {t("tables_title")}\n\n'
+            + t('tables_text', listed=listed,
+                copy=t('tables_pinned', sha=sha[:12]) if sha else t('tables_running')))
         try:
             gh.comment(alert_issue, body)
         except Exception as exc:  # one attempt only: its class, never its output
@@ -227,13 +264,14 @@ def project_tables_warning(alert_issue, state, gh, out=None, copy=None):
     return warn
 
 
-def agent_user_warning(off, alert_issue, state, gh, out=None):
+def agent_user_warning(off, alert_issue, state, gh, out=None, language=ENGLISH):
     """The warning of the agents running as the dispatcher's user (#490): with
     ``[agent_user] name`` empty (``off``), at the start of ``tick`` and ``run``, a line in the
     log each time and a comment on ``alert_issue`` once (``AGENT_USER_ALERTED`` in ``state``;
     forgotten when an agent user is set, so that a later return to none is reported again).
     Only a warning: devloop goes on. One attempt; a failure is logged and tried at the next
-    start. ``out`` (default: ``log``) writes the lines."""
+    start. ``out`` (default: ``log``) writes the lines; ``language``, the project's, the
+    comment (#635)."""
     out = out or log
     path = Path(state) / AGENT_USER_ALERTED
     if not off:
@@ -251,13 +289,9 @@ def agent_user_warning(off, alert_issue, state, gh, out=None):
     if not alert_issue:
         out('agent_user: no [run].alert_issue is configured: no alert for the agent user')
         return
-    body = publishable(
-        dispatcher_header() + '\n## Agent senza utente dedicato\n\n'
-        '`[agent_user] name` è vuoto: gli agent e il comando dei test girano come l\'utente del '
-        'dispatcher, e possono leggere le chiavi delle GitHub App, lo `state_dir` e '
-        'l\'overlay. devloop continua.\n\nPer attivare l\'utente degli agent (#415): '
-        '`ops/host/migrate.md`, sezione "Attivazione dell\'utente degli agent (#415)". Questo '
-        'avviso non si ripete finché la chiave resta vuota.')
+    t = WARNING_TEXTS.texts(language)
+    body = publishable(dispatcher_header() + f'\n## {t("agent_user_title")}\n\n'
+                       + t('agent_user_text'))
     try:
         gh.comment(alert_issue, body)
     except Exception as exc:  # one attempt only: its class, never its output
@@ -766,7 +800,8 @@ def run_report(parser, args):
             report.build(cfg, gh, trust, state, log=log).publish(day)
             return
         day = day or report.utc_today()
-        summary = report.Records(gh, trust, day, day, cfg.review_keys()).summary(day)
+        summary = report.Records(gh, trust, day, day, cfg.review_keys(),
+                                 cfg.language).summary(day)
         print(report.render_text(summary), end='', flush=True)
     except (GitHubError, report.ReportError) as exc:
         sys.exit(f'devloop: report: {exc}')
@@ -860,7 +895,7 @@ def run_loop(cfg, state, dispatcher, timeout, reloader=None):
 
     return runloop.Loop(tick, wait_for_news, state / runloop.STOP_FILE, log=log,
                         alert=alert, alert_issue=issue, idle_timeout=timeout,
-                        workers=workers).run()
+                        workers=workers, language=cfg.language).run()
 
 
 def main(argv=None):
@@ -988,7 +1023,7 @@ def main(argv=None):
         sys.exit(f'devloop: invalid config: {exc}')
 
     if args.command == 'setup':
-        note = ensure_labels(dispatcher.gh, cfg.labels, cfg.review_policy)
+        note = ensure_labels(dispatcher.gh, cfg.labels, cfg.review_policy, cfg.language)
         if note:
             log(f'labels: {note}')
         rp = cfg.review_policy
@@ -1116,12 +1151,14 @@ def main(argv=None):
         if args.command in ('tick', 'run') and missing is not None:
             # The tables of the project file this copy knows and lacks (#462): at the start
             # and at each reload of `run`.
-            warn = project_tables_warning(cfg.run.alert_issue, state, dispatcher.gh)
+            warn = project_tables_warning(cfg.run.alert_issue, state, dispatcher.gh,
+                                          language=cfg.language)
             warn(missing)
         off = getattr(dispatcher, 'agent_user_off', None)
         if args.command in ('tick', 'run') and isinstance(off, bool):
             # Without an agent user (#490): a warning, once on alert_issue; devloop goes on.
-            agent_user_warning(off, cfg.run.alert_issue, state, dispatcher.gh)
+            agent_user_warning(off, cfg.run.alert_issue, state, dispatcher.gh,
+                               language=cfg.language)
         if args.command == 'cleanup':
             for name in dispatcher.ws.names():
                 dispatcher.ws.remove(name)

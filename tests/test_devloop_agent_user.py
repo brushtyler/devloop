@@ -1036,7 +1036,8 @@ class NoAgentUserWarningTests(unittest.TestCase):
         self.gh = SimpleNamespace(comment=lambda n, body: self.comments.append((n, body)))
 
     def warn(self, off=True, alert_issue=ALERT_ISSUE, gh=None):
-        cli.agent_user_warning(off, alert_issue, self.tmp, gh or self.gh, out=self.logs.append)
+        cli.agent_user_warning(off, alert_issue, self.tmp, gh or self.gh, out=self.logs.append,
+                               language='Italian')
 
     def test_the_warning_is_logged_each_time_and_published_once(self):
         self.warn()
@@ -1080,7 +1081,8 @@ class NoAgentUserWarningTests(unittest.TestCase):
     def start(self, *argv, off=True):
         dispatcher = SimpleNamespace(tick=mock.Mock(return_value=[]), ws=mock.Mock(),
                                      agent_user_off=off, gh=self.gh)
-        cfg = SimpleNamespace(run=config.RunPolicy(alert_issue=self.ALERT_ISSUE))
+        cfg = SimpleNamespace(run=config.RunPolicy(alert_issue=self.ALERT_ISSUE),
+                              language='English')
         with mock.patch.object(cli, 'build', return_value=(cfg, self.tmp, dispatcher)), \
                 mock.patch.object(cli, 'log', self.logs.append), \
                 mock.patch.dict('os.environ'):

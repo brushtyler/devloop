@@ -24,6 +24,8 @@ from helpers import ssdlc_project
 
 CFG = ssdlc_project.load()
 TRUST = Trust.from_config(CFG)
+# The language of the texts these tests read, the one of ``CFG`` (#635).
+IT = CFG.language
 DISPATCHER = TRUST.writers['dispatcher']
 CLAUDE = TRUST.writers['claude']
 CODEX = TRUST.writers['codex']
@@ -199,7 +201,7 @@ class SummaryTest(unittest.TestCase):
     def summary(self):
         gh = ReportGH()
         day = simulated_day(gh)
-        return gh, report.Records(gh, TRUST, day, day, CFG.agents).summary(day)
+        return gh, report.Records(gh, TRUST, day, day, CFG.agents, IT).summary(day)
 
     def test_the_summary_of_a_day_comes_from_the_records(self):
         gh, s = self.summary()
@@ -224,7 +226,7 @@ class SummaryTest(unittest.TestCase):
         gh = ReportGH()
         simulated_day(gh)
         day = report.parse_day('2026-11-15')
-        s = report.Records(gh, TRUST, day, day, CFG.agents).summary(day)
+        s = report.Records(gh, TRUST, day, day, CFG.agents, IT).summary(day)
         self.assertEqual(s.actions, [('23:30', 7, 'implement', 'claude', 'success', 3600000)])
         self.assertEqual(s.rounds, 1)  # round 2 of #13
 
@@ -249,7 +251,7 @@ class SummaryTest(unittest.TestCase):
                                            ('2026-11-16', on_the_day, [12, 15])):
                 with self.subTest(promoted=promoted, day=stamp):
                     day = report.parse_day(stamp)
-                    s = report.Records(gh, TRUST, day, day, CFG.agents).summary(day)
+                    s = report.Records(gh, TRUST, day, day, CFG.agents, IT).summary(day)
                     self.assertEqual(s.merges, merges)
                     self.assertEqual(s.merged, numbers)
 
@@ -272,7 +274,7 @@ class SummaryTest(unittest.TestCase):
         gh.add(12, DISPATCHER, idle, f'{day}T11:00:01Z')
         gh.add(13, STRANGER, register, f'{day}T10:00:01Z')
         when = report.parse_day(day)
-        s = report.Records(gh, TRUST, when, when, CFG.agents).summary(when)
+        s = report.Records(gh, TRUST, when, when, CFG.agents, IT).summary(when)
         self.assertEqual(s.actions, [('10:00', 12, 'review', 'codex', 'success', 60000),
                                      ('10:01', 12, 'review', 'claude', 'in corso', None),
                                      ('10:01', 12, 'review', 'claude', 'in corso', None)])
@@ -315,7 +317,7 @@ class SummaryTest(unittest.TestCase):
                                    model=argon, denied_permission='command'),
                f'{day}T21:00:00Z')
         when = report.parse_day(day)
-        s = report.Records(gh, TRUST, when, when, CFG.agents).summary(when)
+        s = report.Records(gh, TRUST, when, when, CFG.agents, IT).summary(when)
         self.assertEqual(s.denied, {argon: 2, hydrogen: 1})
         self.assertEqual(len(s.actions), 4)
         self.assertIn(f'- Permessi negati per modello: 3 (`{argon}`: 2, `{hydrogen}`: 1)',
@@ -352,7 +354,7 @@ class SummaryTest(unittest.TestCase):
         supervision(16, f'{day}T12:40:00Z', login=STRANGER, command='grant-budget',
                     outcome='granted', reason='forged', daily=1, daily_cap=3, daily_left=2)
         when = report.parse_day(day)
-        s = report.Records(gh, TRUST, when, when, CFG.agents).summary(when)
+        s = report.Records(gh, TRUST, when, when, CFG.agents, IT).summary(when)
         self.assertEqual(s.grants, [
             ('09:00', 12, 'grant-round', 'CI rossa per un flake.', 'concessa',
              'PR: 1 di 2 round; giorno: 2 di 3'),
@@ -394,7 +396,7 @@ class SummaryTest(unittest.TestCase):
         alert(76, f'{day}T10:00:00Z', login=STRANGER, sha='a' * 40, reason='forged')
         alert(76, f'{day}T11:00:00Z', sha='not a commit', reason='malformed')
         when = report.parse_day(day)
-        s = report.Records(gh, TRUST, when, when, CFG.agents).summary(when)
+        s = report.Records(gh, TRUST, when, when, CFG.agents, IT).summary(when)
         self.assertEqual(s.pins, [
             ('09:00', 76, 'origin/main', 'e' * 40, 'smoke test: tick --dry-run'),
             ('13:03', 76, 'origin/main', 'd' * 40,
@@ -411,7 +413,7 @@ class SummaryTest(unittest.TestCase):
         # Published in the body of [report] issue, as the rest of the day.
         publisher = report.Publisher(gh, TRUST, CFG.repo, ISSUE, agents=CFG.agents,
                                      log=lambda line: None,
-                                     clock=Clock(f'{day}T18:00:00Z'))
+                                     clock=Clock(f'{day}T18:00:00Z'), language=IT)
         gh.clock = publisher._clock
         publisher.publish()
         self.assertIn(f'`origin/main` al commit `{"d" * 12}` non è fissato', gh.body)
@@ -419,12 +421,12 @@ class SummaryTest(unittest.TestCase):
     def test_an_empty_day(self):
         gh = ReportGH()
         day = report.parse_day('2026-11-10')
-        s = report.Records(gh, TRUST, day, day, CFG.agents).summary(day)
+        s = report.Records(gh, TRUST, day, day, CFG.agents, IT).summary(day)
         self.assertTrue(s.empty())
         self.assertIn('Nessuna attività registrata da devloop.', report.render_text(s))
 
     def test_durations(self):
-        self.assertEqual([report.duration(v) for v in (None, 5000, 750000, 7380000, -1)],
+        self.assertEqual([report.duration(v, IT) for v in (None, 5000, 750000, 7380000, -1)],
                          ['non riportato', '5s', '12m 30s', '2h 03m', 'non riportato'])
 
 
@@ -437,7 +439,7 @@ class PublishCase(unittest.TestCase):
         simulated_day(self.gh)
         self.publisher = report.Publisher(self.gh, TRUST, CFG.repo, ISSUE, agents=CFG.agents,
                                           log=lambda line: None, clock=self.clock,
-                                          lock=self.tmp / report.LOCK_FILE)
+                                          lock=self.tmp / report.LOCK_FILE, language=IT)
 
     def shown(self):
         return read_marker(self.gh.body, 'report')

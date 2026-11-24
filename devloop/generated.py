@@ -8,6 +8,35 @@ whoever reviews the change sees them."""
 
 import json
 
+from .i18n import ENGLISH, Catalog
+
+# The section of the generated files in the PR and in a fix record, in the project's
+# ``language`` (#635); English for a language without translation. ``reason_*``: why a file is
+# listed.
+TEXTS = Catalog(
+    en={
+        'title': '### Generated files in the commit',
+        'intro': ('The commit holds files that look generated (cache or bytecode, such as '
+                  '`__pycache__/` and `*.pyc`), binary files or files the local tests run by '
+                  'devloop changed. devloop does not leave them out, since a tracked file may be '
+                  'wanted: whoever reviews the change checks that the issue asks for them.'),
+        'reason_generated': 'cache or bytecode',
+        'reason_binary': 'binary',
+        'reason_tests': 'changed by the local tests',
+        'more': '- … and {more} more',
+    },
+    it={
+        'title': '### File generati nel commit',
+        'intro': ('Il commit contiene file che sembrano generati (cache o bytecode, come '
+                  '`__pycache__/` e `*.pyc`), file binari o file che i test locali eseguiti da '
+                  'devloop hanno modificato. devloop non li esclude, perché un file tracciato può '
+                  'essere voluto: chi rivede la modifica verifichi che l\'issue li richieda.'),
+        'reason_generated': 'cache o bytecode',
+        'reason_binary': 'binario',
+        'reason_tests': 'modificato dai test locali',
+        'more': '- … e altri {more}',
+    })
+
 # A path under one of these directories, or with one of these suffixes, looks generated:
 # cache and bytecode of Python.
 GENERATED_DIRS = frozenset({'__pycache__'})
@@ -90,25 +119,19 @@ def generated_record(files):
     return record
 
 
-_REASON_TEXT = {'generated': 'cache o bytecode', 'binary': 'binario',
-                'tests': 'modificato dai test locali'}
-
-
-def render_generated(files):
-    """The files of :func:`generated_files` as Markdown, under their own heading: those of
-    :func:`generated_record` listed, the others counted; '' without any."""
+def render_generated(files, language=ENGLISH):
+    """The files of :func:`generated_files` as Markdown, under their own heading, in
+    ``language`` (#635): those of :func:`generated_record` listed, the others counted; ''
+    without any."""
     if not files:
         return ''
-    parts = ['### File generati nel commit', '',
-             'Il commit contiene file che sembrano generati (cache o bytecode, come '
-             '`__pycache__/` e `*.pyc`), file binari o file che i test locali eseguiti da devloop '
-             'hanno modificato. devloop non li esclude, perché un file tracciato può essere '
-             'voluto: chi rivede la modifica verifichi che l\'issue li richieda.', '']
+    t = TEXTS.texts(language)
+    parts = [t('title'), '', t('intro'), '']
     kept = _kept(files)
     for entry in kept:
         path = entry['path'].replace('`', "'").replace('\n', ' ')
-        reasons = ', '.join(_REASON_TEXT[r] for r in entry['reasons'])
+        reasons = ', '.join(t(f'reason_{r}') for r in entry['reasons'])
         parts.append(f'- `{path}` ({reasons})')
     if len(files) > len(kept):
-        parts.append(f'- … e altri {len(files) - len(kept)}')
+        parts.append(t('more', more=len(files) - len(kept)))
     return '\n'.join(parts)

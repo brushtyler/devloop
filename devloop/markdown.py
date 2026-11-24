@@ -25,7 +25,7 @@ from .config import INSTALL_ROOT
 from .generated import generated_record, render_generated
 from .github import GitHubError
 from .hoststep import render_step
-from .i18n import ENGLISH, ITALIAN, Catalog
+from .i18n import ENGLISH, Catalog
 from .journal import ATTEMPT_ID, PHASES, STORY_ID
 from .policy import EVENTS, valid_receipt
 from .review import (LEGACY_VERDICT, current_verdict, findings_only, own_open_findings,
@@ -1098,13 +1098,13 @@ def render_fix(fix, head, round_no, language=ENGLISH):
         payload['from'] = fix['from']
     if 'acceptance_map' in fix:
         # The latest map of the PR from now on (#134).
-        parts += ['', render_map(fix['acceptance_map'])]
+        parts += ['', render_map(fix['acceptance_map'], language)]
         payload['acceptance_map'] = fix['acceptance_map']
     if 'host_step' in fix:
         # The step on the host of the PR from now on (#462), '' when there is none.
         step = (fix['host_step'] or '').strip() if isinstance(fix['host_step'], str) else ''
         if step:
-            parts += ['', render_step(step)]
+            parts += ['', render_step(step, language)]
         payload['host_step'] = step
     if 'profile' in fix:
         payload['profile'] = fix['profile']  # who wrote the fix (#111)
@@ -1114,7 +1114,7 @@ def render_fix(fix, head, round_no, language=ENGLISH):
         payload['skipped_models'] = fix['skipped_models']  # informative only (#151)
     if fix.get('generated_files'):
         # The generated files of the fix's commit, pointed out (#627): informative only.
-        parts += ['', render_generated(fix['generated_files'])]
+        parts += ['', render_generated(fix['generated_files'], language)]
         payload.update(generated_record(fix['generated_files']))
     if fix.get('conclave') is not None:
         # The conclave decision whose resolution the fix had (#142).
@@ -1267,9 +1267,6 @@ def resume_text(language=ENGLISH):
     return ESCALATION_TEXTS.texts(language)('resume')
 
 
-# The Italian text of before, for the texts of the dispatcher that #628 has not translated yet.
-RESUME = resume_text(ITALIAN)
-
 
 def operator_retry_text(step, language=ENGLISH):
     """How a trusted user runs again the step ``step`` of an escalation to the operator
@@ -1307,16 +1304,68 @@ def render_escalation(reason, detail='', cls='failure', supervised=None, retry=N
     return publishable(body, 'notice', payload)
 
 
-def render_cycle(record):
+# The dependency cycles, the coordinator's authorizations and the operator's merges, in the
+# project's ``language`` (#635); English for a language without translation.
+NOTICE_TEXTS = Catalog(
+    en={
+        'cycle_title': 'Dependency cycle',
+        'cycle_text': ('The "blocked by" dependencies among {issues} form a cycle: none of these '
+                       'issues starts while the cycle stays. The supervisor or the operator '
+                       'removes one of the dependencies; devloop works out by itself which issues '
+                       'may start, with no other action.'),
+        'priority': 'priority `{priority}`',
+        'no_priority': 'no priority given',
+        'authorized_title': 'Work authorized by the coordinator',
+        'authorized_text': ('`{by}` authorized the issue with `{command}` of {at} ({priority}). '
+                            'The authorization holds for the title and the body of this moment '
+                            '(SHA-256 `{hash}`): if they change, it lapses and a new `{command}` '
+                            'is needed. Now `{ready}` of the supervisor starts the issue; if the '
+                            'readiness check declares that it touches the trust policy, only the '
+                            'operator queues it.'),
+        'refused_title': '`{command}` refused',
+        'refused_text': 'The command of `{by}` of {at} does not authorize the issue: {reason}.',
+        'operator_merge_title': 'The merge is the operator\'s',
+        'operator_merge_text': ('Commit `{head}` is ready for the merge, but devloop does not '
+                                'merge it:\n\n{reasons}\n\n'
+                                'devloop added `{label}` and keeps following the PR: it syncs it '
+                                'if it conflicts with the base, checks the CI again and, with a '
+                                'new commit, revokes the readiness and sends it back to review, '
+                                'removing `{label}`.'),
+    },
+    it={
+        'cycle_title': 'Ciclo di dipendenze',
+        'cycle_text': ('Le dipendenze "blocked by" fra {issues} formano un ciclo: nessuna di '
+                       'queste issue parte finché il ciclo resta. Il supervisore o l\'operatore '
+                       'rimuove una delle dipendenze; devloop ricalcola da solo quali issue '
+                       'possono partire, senza altri interventi.'),
+        'priority': 'priorità `{priority}`',
+        'no_priority': 'nessuna priorità indicata',
+        'authorized_title': 'Lavoro autorizzato dal coordinatore',
+        'authorized_text': ('`{by}` ha autorizzato l\'issue con `{command}` del {at} '
+                            '({priority}). L\'autorizzazione vale per il titolo e il corpo di '
+                            'questo momento (SHA-256 `{hash}`): se cambiano, decade e serve un '
+                            'nuovo `{command}`. Ora `{ready}` del supervisore fa partire '
+                            'l\'issue; se il controllo di prontezza la dichiara toccare la policy '
+                            'di fiducia, la mette in coda solo l\'operatore.'),
+        'refused_title': '`{command}` rifiutato',
+        'refused_text': ('Il comando di `{by}` del {at} non autorizza l\'issue: {reason}.'),
+        'operator_merge_title': 'Il merge spetta all\'operatore',
+        'operator_merge_text': ('Il commit `{head}` è pronto per il merge, ma devloop non lo '
+                                'mergia:\n\n{reasons}\n\n'
+                                'devloop ha aggiunto `{label}` e continua a seguire la PR: la '
+                                'sincronizza se va in conflitto con la base, ricontrolla la CI e, '
+                                'con un nuovo commit, revoca la prontezza e la rimanda in review, '
+                                'togliendo `{label}`.'),
+    })
+
+
+def render_cycle(record, language=ENGLISH):
     """The dispatcher's report of a dependency cycle (#277) on an issue of the queue, with a
-    ``cycle`` marker: the same cycle is reported once on each issue."""
-    issues = ', '.join(record['cycle'])
+    ``cycle`` marker: the same cycle is reported once on each issue. In ``language`` (#635)."""
+    t = NOTICE_TEXTS.texts(language)
     return publishable(
-        dispatcher_header() + '\n## Ciclo di dipendenze\n\n'
-        f'Le dipendenze "blocked by" fra {issues} formano un ciclo: nessuna di queste issue parte '
-        'finché il ciclo resta. Il supervisore o l\'operatore rimuove una delle dipendenze; '
-        'devloop ricalcola da solo quali issue possono partire, senza altri interventi.\n',
-        'cycle', record)
+        dispatcher_header() + f'\n## {t("cycle_title")}\n\n'
+        + t('cycle_text', issues=', '.join(record['cycle'])) + '\n', 'cycle', record)
 
 
 def render_recheck(record, language=ENGLISH):
@@ -1332,37 +1381,34 @@ def render_recheck(record, language=ENGLISH):
         'recheck', record)
 
 
-def render_authorize(record, ready_label='agent:ready'):
+def render_authorize(record, ready_label='agent:ready', language=ENGLISH):
     """The dispatcher's record of a ``/devloop authorize`` (#607), with an ``authorize`` marker:
-    each command is recorded once."""
+    each command is recorded once. In ``language`` (#635)."""
+    t = NOTICE_TEXTS.texts(language)
     if record['outcome'] == 'authorized':
-        priority = (f'priorità `{record["priority"]}`' if record['priority']
-                    else 'nessuna priorità indicata')
-        text = (f'## Lavoro autorizzato dal coordinatore\n\n'
-                f'`{record["by"]}` ha autorizzato l\'issue con `{AUTHORIZE_COMMAND}` del '
-                f'{record["at"]} ({priority}). L\'autorizzazione vale per il titolo e il corpo '
-                f'di questo momento (SHA-256 `{record["hash"][:12]}`): se cambiano, decade e '
-                f'serve un nuovo `{AUTHORIZE_COMMAND}`. Ora `{ready_label}` del supervisore fa '
-                'partire l\'issue; se il controllo di prontezza la dichiara toccare la policy di '
-                'fiducia, la mette in coda solo l\'operatore.\n')
+        priority = (t('priority', priority=record['priority']) if record['priority']
+                    else t('no_priority'))
+        text = (f'## {t("authorized_title")}\n\n'
+                + t('authorized_text', by=record['by'], command=AUTHORIZE_COMMAND,
+                    at=record['at'], priority=priority, hash=record['hash'][:12],
+                    ready=ready_label) + '\n')
     else:
-        text = (f'## `{AUTHORIZE_COMMAND}` rifiutato\n\n'
-                f'Il comando di `{record["by"]}` del {record["at"]} non autorizza l\'issue: '
-                f'{record["reason"]}.\n')
+        text = (f'## {t("refused_title", command=AUTHORIZE_COMMAND)}\n\n'
+                + t('refused_text', by=record['by'], at=record['at'], reason=record['reason'])
+                + '\n')
     return publishable(dispatcher_header() + '\n' + text, 'authorize', record)
 
 
-def render_operator_merge(head, labeled, promotion, reasons, label):
+def render_operator_merge(head, labeled, promotion, reasons, label, language=ENGLISH):
     """The dispatcher's comment on a ready PR that devloop does not merge (#248): the merge is
     the operator's, for ``reasons`` (Markdown lines), and ``label`` stays only while the head
     ``head`` is ready. ``labeled``: how many ``labeled`` events of ``label`` came before;
-    ``promotion``: how many promotions the PR's policy records count."""
-    body = (dispatcher_header() + '\n## Il merge spetta all\'operatore\n\n'
-            f'Il commit `{head[:12]}` è pronto per il merge, ma devloop non lo mergia:\n\n'
-            + reasons.strip() + '\n\n'
-            f'devloop ha aggiunto `{label}` e continua a seguire la PR: la sincronizza se va in '
-            'conflitto con la base, ricontrolla la CI e, con un nuovo commit, revoca la prontezza '
-            f'e la rimanda in review, togliendo `{label}`.\n')
+    ``promotion``: how many promotions the PR's policy records count. In ``language``
+    (#635)."""
+    t = NOTICE_TEXTS.texts(language)
+    body = (dispatcher_header() + f'\n## {t("operator_merge_title")}\n\n'
+            + t('operator_merge_text', head=head[:12], reasons=reasons.strip(), label=label)
+            + '\n')
     return publishable(body, 'notice', {'event': 'operator_merge', 'head': head,
                                         'labeled': labeled, 'promotion': promotion})
 

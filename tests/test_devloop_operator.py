@@ -101,9 +101,10 @@ class SetupTests(unittest.TestCase):
 
     def test_setup_renames_the_old_label_and_issues_and_prs_keep_it(self):
         gh = self.make([OLD, 'agent:ready'])
-        note = ensure_labels(gh, CFG.labels, CFG.review_policy)
+        note = ensure_labels(gh, CFG.labels, CFG.review_policy, CFG.language)
         self.assertEqual(gh.renamed_labels, [(OLD, OPERATOR)])
         self.assertEqual(gh.labels, {7: {'agent:ready', OPERATOR}, 100: {REVIEW, OPERATOR}})
+        # The descriptions in the project's language (#635); the names never change.
         self.assertEqual(gh.label_styles[OPERATOR],
                          ('b60205', 'devloop: serve una decisione dell\'operatore'))
         self.assertNotIn(OLD, gh.label_styles)

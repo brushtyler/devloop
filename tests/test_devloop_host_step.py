@@ -758,9 +758,13 @@ class SchemaTests(unittest.TestCase):
 
     def test_a_fix_record_carries_the_step(self):
         fix = {'summary': 's', 'responses': [], 'head_sha': SHA1, 'host_step': f'{STEP}\n'}
-        body = markdown.render_fix(fix, 'header', 1)
+        body = markdown.render_fix(fix, 'header', 1, language='Italian')
         self.assertEqual(markdown.read_marker(body, 'fix')['host_step'], STEP)
         self.assertIn('### Passo sull\'host', body)
+        # In English, and in a language without translation (#635).
+        for language in ('English', 'French'):
+            self.assertIn('### Step on the host',
+                          markdown.render_fix(fix, 'header', 1, language=language))
         cleared = markdown.render_fix(dict(fix, host_step=''), 'header', 1)
         self.assertEqual(markdown.read_marker(cleared, 'fix')['host_step'], '')
         self.assertNotIn('Passo sull\'host', cleared)
@@ -870,7 +874,8 @@ class ProjectTablesTests(unittest.TestCase):
                            {'tests': {'selection': 'python-unittest-modules'}})), [])
 
     def test_the_warning_is_logged_each_time_and_published_once(self):
-        warn = cli.project_tables_warning(ALERT_ISSUE, self.tmp, self.gh, out=self.logs.append)
+        warn = cli.project_tables_warning(ALERT_ISSUE, self.tmp, self.gh, out=self.logs.append,
+                                          language='Italian')
         warn(['prompts', 'tests'])
         warn(['prompts', 'tests'])
         self.assertEqual(len([l for l in self.logs if 'reads [prompts], [tests] from the project '
@@ -911,7 +916,7 @@ class ProjectTablesTests(unittest.TestCase):
     def start(self, *argv):
         dispatcher = SimpleNamespace(tick=mock.Mock(return_value=[]), ws=mock.Mock(),
                                      config_missing=['prompts', 'tests'], gh=self.gh)
-        cfg = SimpleNamespace(run=config.RunPolicy(alert_issue=ALERT_ISSUE))
+        cfg = SimpleNamespace(run=config.RunPolicy(alert_issue=ALERT_ISSUE), language='English')
         with mock.patch.object(cli, 'build', return_value=(cfg, self.tmp, dispatcher)), \
                 mock.patch.object(cli, 'log', self.logs.append), \
                 mock.patch.dict('os.environ'):

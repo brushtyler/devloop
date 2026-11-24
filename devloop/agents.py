@@ -260,13 +260,14 @@ class PermissionDenied(AgentError):
 
     def denied(self):
         """What was denied, for the retry prompt, the log and the escalation (#319): the
-        command when agy reports it, else ``comando non riportato da agy`` with the action it
-        does report; for another permission, its target."""
+        command when agy reports it, else ``command not reported by agy`` with the action it
+        does report; for another permission, its target. In English, as the rest of the error
+        (#635)."""
         if self.command:
             return f'command `{self.command}`'
         if self.permission == 'command':
-            return f'comando non riportato da agy (action: {self.target or "non riportata"})'
-        return f'target {self.target or "non riportato da agy"}'
+            return f'command not reported by agy (action: {self.target or "not reported"})'
+        return f'target {self.target or "not reported by agy"}'
 
 
 class NoOutput(AgentError):

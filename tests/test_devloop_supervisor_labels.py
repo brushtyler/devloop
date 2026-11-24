@@ -209,7 +209,7 @@ class UntrustedChangeTests(unittest.TestCase):
     def check(self, labeled, admitters):
         history = {'title': 't', 'body': 'b', 'author': 'stranger', 'last_edited_at': None,
                    'editor': None, 'renamed': [], 'labeled': labeled}
-        return untrusted_change(history, READY, ['brushtyler'], admitters)
+        return untrusted_change(history, READY, ['brushtyler'], admitters, 'Italian')
 
     def test_the_latest_ready_label_decides(self):
         trusted, supervisor = (READY, 'brushtyler', at(13)), (READY, SUPERVISOR_LOGIN, at(14))

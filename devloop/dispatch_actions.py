@@ -28,6 +28,7 @@ from .context import (_cli_state_refused, _failure_text, _format_conflicts, _for
                       format_previous_rounds, owner_assessments, prompt_values)
 from .generated import generated_record, render_generated
 from .github import GitHubError, GitHubUncertain, LogUnreadable, job_id
+from .i18n import Catalog
 from .hoststep import format_step, render_step
 from .hoststep import latest as latest_host_step
 from .ledger import attempt_branch, attempt_marker, fix_register
@@ -50,6 +51,158 @@ from .review import TEXTS as REVIEW_TEXTS
 from .supervision import SYNC_FAILED, TOOL_FAILURE
 from .workspace import WorkspaceError
 
+
+# The texts of the actions the dispatcher composes itself (implementation, CI rerun, full suite
+# without CI, fix, sync), in the project's ``language`` (#635); English for a language without
+# translation.
+TEXTS = Catalog(
+    en={
+        'same_agent': ('the implementer chosen (`{agent}`, {why}) is the same agent as the '
+                       'readiness check (`{preflight}`)'),
+        'no_implementer': ('The implementer of the issue cannot be determined: {problem}. A '
+                           'decision on who implements it is needed.'),
+        'veto_implement': ('the implementation produced with that resolution is not published: '
+                           'the commit stays in the local worktree.'),
+        'veto_review': 'the review given with that resolution is not published.',
+        'veto_fix': 'the correction produced with that resolution is not published.',
+        'rerun_title': 'CI run again',
+        'rerun_text': ('The CI of `{head}` failed only in test modules not pertinent to the diff '
+                       'of the PR ({modules}): the dispatcher ran the failed jobs again once '
+                       '(run {runs}), without opening a round. If the new run fails too, the '
+                       'failure counts as a round.'),
+        'suite_promotion': ('promotion, fails: the approval, given before the CI was known, does '
+                            'not bring the PR to the merge.'),
+        'suite_review': 'review, fails: the review does not start.',
+        'suite_failed': ('On head `{head}` there is no CI and, with `local_tests = "{mode}"`, the '
+                         'local tests did not run the full suite. The full suite (`{command}`), '
+                         'run locally before the {then}'),
+        'no_review': 'Changes requested but no devloop review to correct.',
+        'no_findings': 'Changes requested but no open finding.',
+        'fix_unconfigured': ('The implementer of the PR (`{agent}`) is no longer configured: a '
+                             'decision on who corrects is needed.'),
+        'requested_unconfigured': ('The implementer of the PR (`{agent}`) is no longer configured: '
+                                   'a decision on who runs `{command}` is needed.'),
+        'granted_more': ' plus {granted} granted',
+        'sync_free': ('The review of the new head **will not count** as a round: it differs from '
+                      'the approved one only by the merge without conflicts of the base (it '
+                      'counts instead if the CI fails or if a new review is asked with '
+                      '`/devloop rereview`).'),
+        'then_over': ('{counted} rounds of {limit} already counted ({what}), none left: the PR '
+                      'will go to the escalation for the limit of the rounds (`round_limit`), as '
+                      'for every round beyond the limit'),
+        'then_last': 'it will be round {number} of {limit} ({what}), the last one left',
+        'then_left': ('it will be round {number} of {limit} ({what}); after it {left} will be '
+                      'left'),
+        'sync_conflicts_approved': ('The review of the new head starts even with no round left '
+                                    'and **will not count** as a round if it approves: it differs '
+                                    'from the approved one only by the merge of the base, with '
+                                    'the conflicts the agent resolved; approved, the PR is ready '
+                                    'for the merge again without an escalation for the limit of '
+                                    'the rounds. If instead it opens blocking findings it **will '
+                                    'count**: {then} (it counts also if the CI fails or if a new '
+                                    'review is asked with `/devloop rereview`).'),
+        'which_fix': 'after the correction',
+        'which_next': 'that follows',
+        'why_fix': 'as every review after a correction',
+        'why_conflicts': 'since the agent resolved conflicts and the content of the PR changed',
+        'why_plain': 'as it would have counted without the synchronisation',
+        'where_over': ('{counted} rounds of {limit} already counted ({what}); no round left: the '
+                       'review {which} will need a decision of the operator'),
+        'where_last': 'round {number} of {limit} ({what}), the last one left',
+        'where_left': 'round {number} of {limit} ({what}); after it {left} will be left',
+        'sync_counts': 'The review {which} **will count** as a round, {why}: {where}.',
+        'sync_unconfigured': ('The PR conflicts with `{branch}` and its implementer (`{agent}`) is '
+                              'no longer configured: a decision on who resolves the conflicts is '
+                              'needed.'),
+        'sync_failed': ('Synchronisation with `{branch}` failed. {reason}\n\n'
+                        'Files in conflict:\n\n{listed}'),
+        'sync_step_failed': 'The step `sync` failed: {failure}{hint}',
+        'sync_blocked': '\n\nFiles in conflict with `{branch}`:\n\n',
+        'sync_merge_moved': ('The merge in progress was concluded or aborted during the '
+                             'resolution of the conflicts, so it is not published.'),
+        'sync_markers': 'Conflict markers are left in {files}.',
+        'sync_review': 'The PR goes back to review on the new head',
+        'sync_fix': 'The waiting correction starts from the new head at the next tick',
+        'sync_title': 'Synchronisation with `{branch}`',
+        'sync_text': ('Merge of `{base}` (`{target}`) into the branch, new head `{head}`. '
+                      '{then}; the synchronisation spends no review round. {note}'),
+        'sync_resolved': 'Files in conflict resolved:',
+        'sync_clean': 'The local merge had no conflicts.',
+    },
+    it={
+        'same_agent': ('l\'implementer scelto (`{agent}`, {why}) è lo stesso agent del controllo '
+                       'di prontezza (`{preflight}`)'),
+        'no_implementer': ('L\'implementer dell\'issue non è determinabile: {problem}. Serve una '
+                           'decisione su chi la implementa.'),
+        'veto_implement': ('l\'implementazione prodotta con quella risoluzione non è pubblicata: '
+                           'il commit resta nel worktree locale.'),
+        'veto_review': 'la review data con quella risoluzione non è pubblicata.',
+        'veto_fix': 'la correzione prodotta con quella risoluzione non è pubblicata.',
+        'rerun_title': 'CI rilanciata',
+        'rerun_text': ('La CI di `{head}` è fallita solo in moduli di test non pertinenti al diff '
+                       'della PR ({modules}): il dispatcher ha rilanciato una volta i job falliti '
+                       '(run {runs}), senza aprire un round. Se anche il rilancio fallisce, il '
+                       'fallimento conta come round.'),
+        'suite_promotion': ('promozione, fallisce: l\'approvazione, data prima che la CI fosse '
+                            'nota, non porta la PR al merge.'),
+        'suite_review': 'review, fallisce: la review non parte.',
+        'suite_failed': ('Sul head `{head}` non risulta alcuna CI e, con `local_tests = '
+                         '"{mode}"`, i test locali non hanno eseguito la suite completa. La suite '
+                         'completa (`{command}`), eseguita in locale prima della {then}'),
+        'no_review': 'Modifiche richieste ma nessuna review devloop da correggere.',
+        'no_findings': 'Modifiche richieste ma nessun finding aperto.',
+        'fix_unconfigured': ('L\'implementer della PR (`{agent}`) non è più configurato: serve una '
+                             'decisione su chi corregge.'),
+        'requested_unconfigured': ('L\'implementer della PR (`{agent}`) non è più configurato: '
+                                   'serve una decisione su chi esegue `{command}`.'),
+        'granted_more': ' più {granted} concessi',
+        'sync_free': ('La review del nuovo head **non conterà** come round: differisce da quello '
+                      'approvato solo per il merge senza conflitti della base (conta invece se la '
+                      'CI fallisce o se viene chiesta una nuova review con `/devloop '
+                      'rereview`).'),
+        'then_over': ('contati già {counted} round di {limit} ({what}), nessuno rimasto: la PR '
+                      'andrà all\'escalation per il limite dei round (`round_limit`), come per '
+                      'ogni round oltre il limite'),
+        'then_last': 'sarà il round {number} di {limit} ({what}), l\'ultimo rimasto',
+        'then_left': ('sarà il round {number} di {limit} ({what}); dopo questo ne resteranno '
+                      '{left}'),
+        'sync_conflicts_approved': ('La review del nuovo head parte anche senza round rimasti e '
+                                    '**non conterà** come round se approva: differisce da quello '
+                                    'approvato solo per il merge della base, con i conflitti '
+                                    'risolti dall\'agent; approvata, la PR torna pronta per il '
+                                    'merge senza un\'escalation per il limite dei round. Se '
+                                    'invece apre finding bloccanti **conterà**: {then} (conta '
+                                    'anche se la CI fallisce o se viene chiesta una nuova review '
+                                    'con `/devloop rereview`).'),
+        'which_fix': 'dopo la correzione',
+        'which_next': 'successiva',
+        'why_fix': 'come ogni review dopo una correzione',
+        'why_conflicts': ('perché l\'agent ha risolto dei conflitti e il contenuto della PR è '
+                          'cambiato'),
+        'why_plain': 'come avrebbe contato senza la sincronizzazione',
+        'where_over': ('contati già {counted} round di {limit} ({what}); nessun round rimasto: '
+                       'la review {which} richiederà una decisione dell\'operatore'),
+        'where_last': 'round {number} di {limit} ({what}), l\'ultimo rimasto',
+        'where_left': 'round {number} di {limit} ({what}); dopo questo ne resteranno {left}',
+        'sync_counts': 'La review {which} **conterà** come round, {why}: {where}.',
+        'sync_unconfigured': ('La PR è in conflitto con `{branch}` e il suo implementer '
+                              '(`{agent}`) non è più configurato: serve una decisione su chi '
+                              'risolve i conflitti.'),
+        'sync_failed': ('Sincronizzazione con `{branch}` non riuscita. {reason}\n\n'
+                        'File in conflitto:\n\n{listed}'),
+        'sync_step_failed': 'Il passo `sync` è fallito: {failure}{hint}',
+        'sync_blocked': '\n\nFile in conflitto con `{branch}`:\n\n',
+        'sync_merge_moved': ('Il merge in corso è stato concluso o annullato durante la '
+                             'risoluzione dei conflitti, quindi non viene pubblicato.'),
+        'sync_markers': 'Restano marcatori di conflitto in {files}.',
+        'sync_review': 'La PR torna in review sul nuovo head',
+        'sync_fix': 'La correzione in attesa parte dal nuovo head al prossimo tick',
+        'sync_title': 'Sincronizzazione con `{branch}`',
+        'sync_text': ('Merge di `{base}` (`{target}`) nel branch, nuovo head `{head}`. {then}; '
+                      'la sincronizzazione non consuma un round di review. {note}'),
+        'sync_resolved': 'File in conflitto risolti:',
+        'sync_clean': 'Il merge locale non aveva conflitti.',
+    })
 
 # The native review of an agent with an app is its review record (#325): a failed submission
 # is tried again, after a pause doubled each time, before the step escalates.
@@ -158,11 +311,11 @@ class ActionsMixin:
                                                issue['admitters'])
         if not problem and cfg.preflight and same_agent(cfg.agent(cfg.preflight),
                                                         cfg.agent(key)):
-            problem = (f'l\'implementer scelto (`{key}`, {why}) è lo stesso agent del controllo '
-                       f'di prontezza (`{cfg.preflight}`)')
+            problem = TEXTS.texts(cfg.language)('same_agent', agent=key, why=why,
+                                                preflight=cfg.preflight)
         if problem:
-            return self._escalate(number, f'L\'implementer dell\'issue non è determinabile: '
-                                          f'{problem}. Serve una decisione su chi la implementa.',
+            return self._escalate(number, TEXTS.texts(cfg.language)('no_implementer',
+                                                                    problem=problem),
                                   remove=[lb.ready], cls='configuration')
         agent = cfg.agent(key)
         if why != 'default':
@@ -241,8 +394,7 @@ class ActionsMixin:
         if veto:
             # Nothing produced with a vetoed resolution is published (#142).
             return self._veto_suspend(number, decision, veto, [lb.working],
-                                      'l\'implementazione prodotta con quella risoluzione non è '
-                                      'pubblicata: il commit resta nel worktree locale.')
+                                      TEXTS.texts(self.cfg.language)('veto_implement'))
         self.ws.push(path, branch, replace=True, auth=auth)
         self._pushed(path)
         # The marker keeps the map the reviewer checks until a fix replaces it (#134). Its
@@ -274,10 +426,12 @@ class ActionsMixin:
         if generated:
             # Pointed out, not left out (#627): a tracked file may be wanted. Informative only.
             meta.update(generated_record(generated))
+        language = cfg.language
         body = publishable(self.runner.header(used) + '\n' + result['pr_body'].strip()
-                           + (('\n\n' + render_step(step)) if step else '')
-                           + (('\n\n' + render_generated(generated)) if generated else '')
-                           + '\n\n' + render_map(result['acceptance_map'])
+                           + (('\n\n' + render_step(step, language)) if step else '')
+                           + (('\n\n' + render_generated(generated, language))
+                              if generated else '')
+                           + '\n\n' + render_map(result['acceptance_map'], language)
                            + f'\n\nCloses #{number}', 'pr', meta)
         pr_number, url = self._as(agent.key, IMPLEMENT).create_pr(
             base=cfg.base_branch, head=branch, title=result['pr_title'], body=body)
@@ -425,13 +579,11 @@ class ActionsMixin:
             return False
         record = {'head': pr.head_sha, 'runs': runs, 'modules': modules,
                   'checks': sorted(c['link'] for c in failed)}
+        t = TEXTS.texts(self.cfg.language)
         self.gh.comment(pr.number, publishable(
-            dispatcher_header() + '\n## CI rilanciata\n\n'
-            f'La CI di `{pr.head_sha[:12]}` è fallita solo in moduli di test non pertinenti al '
-            f'diff della PR ({", ".join(f"`{m}`" for m in modules)}): il dispatcher ha '
-            'rilanciato una volta i job falliti (run '
-            + ', '.join(str(r) for r in runs) + '), senza aprire un round. Se anche il '
-            'rilancio fallisce, il fallimento conta come round.', 'rerun', record))
+            dispatcher_header() + f'\n## {t("rerun_title")}\n\n'
+            + t('rerun_text', head=pr.head_sha[:12], modules=', '.join(f'`{m}`' for m in modules),
+                runs=', '.join(str(r) for r in runs)), 'rerun', record))
         self._ledger_event(pr.number, 'ci_rerun', head=pr.head_sha, runs=runs, modules=modules)
         self.log(f'  CI rerun of {", ".join(str(r) for r in runs)}: failed modules not '
                  f'pertinent to the PR ({", ".join(modules)})')
@@ -842,7 +994,7 @@ class ActionsMixin:
             return self._veto_suspend(pr.number, decision, veto,
                                       [self.cfg.labels.review, self.cfg.labels.changes,
                                        self.cfg.labels.ready_to_merge],
-                                      'la review data con quella risoluzione non è pubblicata.')
+                                      TEXTS.texts(self.cfg.language)('veto_review'))
         records = list(done)
         for key, (raw, used), _ in (turn for turn in turns if turn[2] is None):
             review = normalized(key, raw)
@@ -982,34 +1134,30 @@ class ActionsMixin:
         if passed:
             return True
         self.ws.remove(name)
-        self._escalate(pr.number, f'Sul head `{pr.head_sha[:12]}` non risulta alcuna CI e, con '
-                                  f'`local_tests = "{self.cfg.local_tests}"`, i test locali non '
-                                  'hanno eseguito la suite completa. La suite completa '
-                                  f'(`{self.cfg.test_cmd}`), eseguita in locale prima della '
-                                  + ('promozione, fallisce: l\'approvazione, data prima che la CI '
-                                     'fosse nota, non porta la PR al merge.' if approved else
-                                     'review, fallisce: la review non parte.'), tail,
-                       remove=[lb.review], cls='tests_failed')
+        t = TEXTS.texts(self.cfg.language)
+        self._escalate(pr.number, t('suite_failed', head=pr.head_sha[:12],
+                                    mode=self.cfg.local_tests, command=self.cfg.test_cmd,
+                                    then=t('suite_promotion' if approved else 'suite_review')),
+                       tail, remove=[lb.review], cls='tests_failed')
         return False
 
     def _do_fix(self, pr):
         cfg, lb = self.cfg, self.cfg.labels
         if pr.fix_requests:
             return self._do_requested_fix(pr)
+        t = TEXTS.texts(cfg.language)
         if not pr.reviews:
-            return self._escalate(pr.number, 'Modifiche richieste ma nessuna review devloop da '
-                                             'correggere.', remove=[lb.changes],
+            return self._escalate(pr.number, t('no_review'), remove=[lb.changes],
                                   cls='inconsistent')
         # One fix answers the whole round, with every finding still open, whoever owns it.
         latest = current_round(pr.reviews)[0]
         findings = open_findings(pr.reviews, pr.closures)
         if not findings:
-            return self._escalate(pr.number, 'Modifiche richieste ma nessun finding aperto.',
-                                  remove=[lb.changes], cls='inconsistent')
+            return self._escalate(pr.number, t('no_findings'), remove=[lb.changes],
+                                  cls='inconsistent')
         if pr.meta['implementer'] not in cfg.agents:
             return self._escalate(
-                pr.number, f'L\'implementer della PR (`{pr.meta["implementer"]}`) non è più '
-                           'configurato: serve una decisione su chi corregge.',
+                pr.number, t('fix_unconfigured', agent=pr.meta['implementer']),
                 remove=[lb.changes], cls='configuration')
         agent = cfg.agent(pr.meta['implementer'])
         issue, _ = self._issue_context(pr.issue)
@@ -1118,8 +1266,7 @@ class ActionsMixin:
         veto = self._veto_after(pr.issue, pr.number, conclave) if conclave is not None else None
         if veto:
             return self._veto_suspend(pr.number, conclave, veto, remove,
-                                      'la correzione prodotta con quella risoluzione non è '
-                                      'pubblicata.')
+                                      TEXTS.texts(self.cfg.language)('veto_fix'))
         changes = self.ws.has_changes(path)
         generated = []
         if changes or merged:
@@ -1171,8 +1318,9 @@ class ActionsMixin:
         remove = [lb.review, lb.changes]
         if pr.meta['implementer'] not in cfg.agents:
             return self._escalate(
-                pr.number, f'L\'implementer della PR (`{pr.meta["implementer"]}`) non è più '
-                           f'configurato: serve una decisione su chi esegue `{FIX_COMMAND}`.',
+                pr.number, TEXTS.texts(cfg.language)('requested_unconfigured',
+                                                     agent=pr.meta['implementer'],
+                                                     command=FIX_COMMAND),
                 remove=remove, cls='configuration')
         agent = cfg.agent(pr.meta['implementer'])
         requests = pr.fix_requests
@@ -1223,8 +1371,9 @@ class ActionsMixin:
         would be.
         ``fix``: a fix waits for the sync, and its review is the next one."""
         # The rounds the supervisor granted (#405) raise the limit of this PR only.
+        t = TEXTS.texts(self.cfg.language)
         limit = self.cfg.max_review_rounds + pr.granted_rounds
-        what = '`max_review_rounds`' + (f' più {pr.granted_rounds} concessi'
+        what = '`max_review_rounds`' + (t('granted_more', granted=pr.granted_rounds)
                                          if pr.granted_rounds else '')
         latest = current_round(pr.reviews)
         approved = (bool(latest) and latest[0]['source'] == 'agent'
@@ -1235,42 +1384,18 @@ class ActionsMixin:
         after_approval = not fix and not pr.rereview and (approved or resynced)
         number = counted_rounds(pr.reviews, **waiver(self.cfg, pr.fixes, pr.closures)) + 1
         if after_approval and not conflicts and reason != RESYNC_CONFLICTS:
-            return ('La review del nuovo head **non conterà** come round: differisce da quello '
-                    'approvato solo per il merge senza conflitti della base (conta invece se la '
-                    'CI fallisce o se viene chiesta una nuova review con `/devloop rereview`).')
+            return t('sync_free')
+        counts = {'counted': number - 1, 'number': number, 'limit': limit, 'what': what,
+                  'left': limit - number}
         if after_approval:
-            if number > limit:
-                then = (f'contati già {number - 1} round di {limit} ({what}), nessuno rimasto: '
-                        'la PR andrà all\'escalation per il limite dei round (`round_limit`), '
-                        'come per ogni round oltre il limite')
-            elif number == limit:
-                then = f'sarà il round {number} di {limit} ({what}), l\'ultimo rimasto'
-            else:
-                then = (f'sarà il round {number} di {limit} ({what}); dopo questo ne '
-                        f'resteranno {limit - number}')
-            return ('La review del nuovo head parte anche senza round rimasti e **non conterà** '
-                    'come round se approva: differisce da quello approvato solo per il merge '
-                    'della base, con i conflitti risolti dall\'agent; approvata, la PR torna '
-                    'pronta per il merge senza un\'escalation per il limite dei round. Se '
-                    'invece apre finding bloccanti **conterà**: '
-                    f'{then} (conta anche se la CI fallisce o se viene chiesta una nuova review '
-                    'con `/devloop rereview`).')
-        which = 'dopo la correzione' if fix else 'successiva'
-        if fix:
-            why = 'come ogni review dopo una correzione'
-        elif conflicts:
-            why = 'perché l\'agent ha risolto dei conflitti e il contenuto della PR è cambiato'
-        else:
-            why = 'come avrebbe contato senza la sincronizzazione'
-        if number > limit:
-            where = (f'contati già {number - 1} round di {limit} ({what}); nessun '
-                     f'round rimasto: la review {which} richiederà una decisione dell\'operatore')
-        elif number == limit:
-            where = f'round {number} di {limit} ({what}), l\'ultimo rimasto'
-        else:
-            where = (f'round {number} di {limit} ({what}); dopo questo ne '
-                     f'resteranno {limit - number}')
-        return f'La review {which} **conterà** come round, {why}: {where}.'
+            then = t('then_over' if number > limit else 'then_last' if number == limit
+                     else 'then_left', **counts)
+            return t('sync_conflicts_approved', then=then)
+        which = t('which_fix' if fix else 'which_next')
+        why = t('why_fix' if fix else 'why_conflicts' if conflicts else 'why_plain')
+        where = t('where_over' if number > limit else 'where_last' if number == limit
+                  else 'where_left', which=which, **counts)
+        return t('sync_counts', which=which, why=why, where=where)
 
     def _do_sync(self, pr, fix_remove=None):
         """Merge the base branch into a conflicting PR. The implementer resolves the conflicts
@@ -1281,13 +1406,13 @@ class ActionsMixin:
         (#250). Escalations remove these labels, and on success the labels stay as they are, so
         that the fix runs on the synced head on a later tick."""
         cfg, lb = self.cfg, self.cfg.labels
+        t = TEXTS.texts(cfg.language)
         remove = [lb.review, lb.ready_to_merge] if fix_remove is None else fix_remove
         base = f'origin/{cfg.base_branch}'
         if pr.meta['implementer'] not in cfg.agents:
             return self._escalate(
-                pr.number, f'La PR è in conflitto con `{cfg.base_branch}` e il suo implementer '
-                           f'(`{pr.meta["implementer"]}`) non è più configurato: serve una '
-                           'decisione su chi risolve i conflitti.', remove=remove,
+                pr.number, t('sync_unconfigured', branch=cfg.base_branch,
+                             agent=pr.meta['implementer']), remove=remove,
                 cls='configuration')
         agent = cfg.agent(pr.meta['implementer'])
         issue, _ = self._issue_context(pr.issue)
@@ -1317,8 +1442,8 @@ class ActionsMixin:
             def fail(reason, detail='', cls=None):
                 cls = cls or ('sync_sensitive' if sensitive else SYNC_FAILED)
                 supervised, why = self._supervised(pr.number, cls, 'sync', pr)
-                self._escalate(pr.number, f'Sincronizzazione con `{cfg.base_branch}` non '
-                                          f'riuscita. {reason}\n\nFile in conflitto:\n\n{listed}',
+                self._escalate(pr.number, t('sync_failed', branch=cfg.base_branch,
+                                            reason=reason, listed=listed),
                                detail, remove=remove, cls=cls, supervised=supervised, why=why,
                                retry=None if supervised else self._retry_payload('sync', pr))
             prompt = _template('sync', **prompt_values(cfg), repo=cfg.repo, pr_number=pr.number,
@@ -1333,13 +1458,13 @@ class ActionsMixin:
             except AgentError as exc:
                 # An agent that could not start, even after its retry (#218), is a failure of
                 # the tool, not a conflict to resolve: ``tool_failure`` prevails.
-                return fail(f'Il passo `sync` è fallito: {_failure_text(exc)}'
-                            f'{self._log_hint(exc)}', exc.tail,
+                return fail(t('sync_step_failed', failure=_failure_text(exc),
+                              hint=self._log_hint(exc)), exc.tail,
                             cls=('configuration' if _cli_state_refused(exc)  # #517
                                  else TOOL_FAILURE if _start_failure(exc) else None))
             if result['status'] == 'blocked':
                 return self._blocked(pr.number, used, result['blocked_reason'].strip()
-                                     + f'\n\nFile in conflitto con `{cfg.base_branch}`:\n\n'
+                                     + t('sync_blocked', branch=cfg.base_branch)
                                      + listed, remove=remove, on_pr=True, step='sync',
                                      head=pr.head_sha)
             if failure:
@@ -1347,12 +1472,10 @@ class ActionsMixin:
             # The dispatcher started the merge and concludes it: an agent that committed, reset
             # or aborted it leaves a result that is not the reviewed branch plus the base.
             if self.ws.head(path) != pr.head_sha or self.ws.merge_head(path) != target:
-                return fail('Il merge in corso è stato concluso o annullato durante la '
-                            'risoluzione dei conflitti, quindi non viene pubblicato.')
+                return fail(t('sync_merge_moved'))
             left = self.ws.conflict_markers(path, files)
             if left:
-                return fail('Restano marcatori di conflitto in '
-                            + ', '.join(f'`{f}`' for f in left) + '.')
+                return fail(t('sync_markers', files=', '.join(f'`{f}`' for f in left)))
             message = self._commit_message(agent, message, pr.issue)
         else:
             message += f'\n\nRefs #{pr.issue}\n'
@@ -1365,14 +1488,13 @@ class ActionsMixin:
             return self._escalate_protected(pr.number, protected, remove=remove)
         self.ws.push(path, pr.head_ref, auth=auth)
         self._pushed(path)
-        then = ('La PR torna in review sul nuovo head' if fix_remove is None else
-                'La correzione in attesa parte dal nuovo head al prossimo tick')
-        text = (f'\n## Sincronizzazione con `{cfg.base_branch}`\n\n'
-                f'Merge di `{base}` (`{target[:12]}`) nel branch, nuovo head `{head[:12]}`. '
-                f'{then}; la sincronizzazione non consuma un round di review. '
-                f'{self._sync_rounds_note(pr, bool(files), fix_remove is not None)}\n\n')
+        then = t('sync_review' if fix_remove is None else 'sync_fix')
+        text = (f'\n## {t("sync_title", branch=cfg.base_branch)}\n\n'
+                + t('sync_text', base=base, target=target[:12], head=head[:12], then=then,
+                    note=self._sync_rounds_note(pr, bool(files), fix_remove is not None))
+                + '\n\n')
         if files:
-            text += f'File in conflitto risolti:\n\n{listed}\n\n{result["summary"].strip()}'
+            text += (t('sync_resolved') + f'\n\n{listed}\n\n{result["summary"].strip()}')
             # Who resolved the conflicts wrote code on the PR: the marker keeps its profile,
             # so a later change of configuration cannot make it a reviewer of its own code.
             # ``from``: the head it synced, which a fix waiting for it recognizes (#250).
@@ -1385,7 +1507,7 @@ class ActionsMixin:
             # A sync without an agent is an event, not a turn (#133).
             self._ledger_event(pr.number, 'sync', base=target, head=head, previous_head=pr.head_sha)
             self.gh.comment(pr.number, publishable(dispatcher_header() + text
-                                                   + 'Il merge locale non aveva conflitti.'))
+                                                   + t('sync_clean')))
         if fix_remove is None:
             # A ready PR whose merge is the operator's (#248) loses the dispatcher's label too.
             self.gh.edit_labels(pr.number, add=[lb.review],

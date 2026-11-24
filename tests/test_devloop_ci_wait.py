@@ -279,9 +279,9 @@ class ReviewDuringCITests(unittest.TestCase):
         reviews = snap.prs[0].reviews
         self.assertEqual(review.round_verdict(review.current_round(reviews)), 'request_changes')
         self.assertEqual(counted_rounds(reviews), 1)
-        self.assertEqual(round_reasons(reviews), [(1, 'prima review, con la CI fallita dello '
-                                                   "stesso head, che ne ha fatto decadere "
-                                                   "l'approvazione", True)])
+        self.assertEqual(round_reasons(reviews, language=CFG.language),
+                         [(1, 'prima review, con la CI fallita dello stesso head, che ne ha '
+                              "fatto decadere l'approvazione", True)])
         self.assertEqual([f['key'] for f in open_findings(reviews)], ['1/ci/R1-1'])
         # The fix follows without a new round: it answers round 1.
         self.assertEqual([a.kind for a in plan(snap, cfg)], ['fix'])
@@ -346,7 +346,7 @@ class ReviewDuringCITests(unittest.TestCase):
         snap = d.snapshot()
         reviews = snap.prs[0].reviews
         self.assertEqual(counted_rounds(reviews), 1)
-        self.assertEqual(round_reasons(reviews),
+        self.assertEqual(round_reasons(reviews, language=CFG.language),
                          [(1, 'prima review, con la CI fallita dello stesso head', True)])
         self.assertEqual(sorted(f['owner'] for f in open_findings(reviews)),
                          ['ci', CFG.reviewer])
@@ -442,7 +442,8 @@ class ReviewDuringCITests(unittest.TestCase):
         # A round of its own, counted, with no review to join (#352).
         self.assertNotIn('entra nel suo round', records[0]['note'])
         snap = d.snapshot()
-        self.assertEqual(round_reasons(snap.prs[0].reviews), [(1, 'CI fallita', True)])
+        self.assertEqual(round_reasons(snap.prs[0].reviews, language=CFG.language),
+                         [(1, 'CI fallita', True)])
         self.assertEqual([a.kind for a in plan(snap, self.cfg)], ['fix'])
 
     def test_no_local_full_suite_while_the_ci_runs_or_within_the_window(self):
@@ -567,7 +568,7 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(counted_rounds(joined.reviews), 3)
         self.assertEqual(review.round_verdict(review.current_round(joined.reviews)),
                          'request_changes')
-        self.assertEqual(round_reasons(joined.reviews)[-1],
+        self.assertEqual(round_reasons(joined.reviews, language=CFG.language)[-1],
                          (3, 'review di un nuovo head, con la CI fallita dello stesso head, '
                              "che ne ha fatto decadere l'approvazione", True))
         self.assertEqual(self.plan_of(joined, four), [Action('fix', 100)])

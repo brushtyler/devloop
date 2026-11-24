@@ -62,7 +62,7 @@ class DeniedCommandTests(unittest.TestCase):
             self.assertEqual((ctx.exception.permission, ctx.exception.command),
                              ('command', command))
         self.assertEqual(ctx.exception.denied(),
-                         f'comando non riportato da agy (action: {DENIED[1:-1]})')
+                         f'command not reported by agy (action: {DENIED[1:-1]})')
 
 
 class Base(unittest.TestCase):
@@ -152,7 +152,7 @@ class DeniedRecordTests(Base):
                          [(ARGON, 'failure'), (ARGON, 'failure'), (HYDROGEN, 'failure'),
                           (HYDROGEN, 'success')])
         day = turns[0][0]['started_at'][:10]
-        out = report.Summary(day)
+        out = report.Summary(day, 'Italian')
         for record, _ in turns:
             report.Records._ledger(out, day, 100, record, None)
         self.assertEqual(out.denied, {ARGON: 2, HYDROGEN: 1})
@@ -183,7 +183,7 @@ class RetryPromptTests(Base):
         cli = SequenceCLI(gemini_4_argon_high=[(0, DENIED_ENVELOPE, JETSKI)])
         self.review(cli)
         note = retry_note(cli.calls[1][1])
-        self.assertIn('denied the `command` permission (comando non riportato da agy (action: '
+        self.assertIn('denied the `command` permission (command not reported by agy (action: '
                       f'{DENIED[1:-1]}))', note)
         self.assertIn('- `python3 -m unittest`\n', note)
 
@@ -275,7 +275,7 @@ class EscalationTests(Base):
         self.assertEqual(cli.models(), [ARGON, ARGON])
         self.assertEqual(markdown.read_marker(body, 'notice')['class'], 'tool_failure')
         self.assertIn(f'permission `command` denied again after one retry; model `{ARGON}`; '
-                      f'comando non riportato da agy (action: {DENIED[1:-1]})', body)
+                      f'command not reported by agy (action: {DENIED[1:-1]})', body)
 
 
 if __name__ == '__main__':

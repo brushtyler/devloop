@@ -149,8 +149,7 @@ MAX_DAILY_GRANTS = 3
 # decision on #553): any further one stays the operator's.
 MAX_COORDINATOR_OPERATOR_ROUNDS = 1
 # What the escalation of a round limit to the operator says of how to grant more rounds (#553),
-# by language (#633): ``operator_rounds_text``. The Italian one for the texts of the dispatcher
-# that #628 has not translated yet.
+# by language (#633): ``operator_rounds_text``.
 _OPERATOR_ROUNDS = {
     ENGLISH: ('A trusted user may grant one more round to this PR only with `/devloop grant-round '
               '<reason>`, on the head of this escalation; by raising `max_review_rounds` the '
@@ -159,7 +158,6 @@ _OPERATOR_ROUNDS = {
               '`/devloop grant-round <motivo>`, sul head di questa escalation; alzando '
               '`max_review_rounds` l\'operatore concede invece altri round a tutte le PR.'),
 }
-OPERATOR_ROUNDS_TEXT = _OPERATOR_ROUNDS[ITALIAN]
 
 
 def operator_rounds_text(language=ENGLISH):

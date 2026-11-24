@@ -12,10 +12,68 @@ from dataclasses import dataclass, field, replace
 
 from .budget import BUDGET
 from .config import IMPLEMENTER_LABEL
+from .i18n import ENGLISH, Catalog
 from .policy import PARALLEL_CANCEL, SEQUENTIAL, receipt_of
 from .review import (CI, UNPROVEN, current_round, findings_only, flow_verdict, open_findings,
                      owner_of, round_verdict)
 from .supervision import BUDGET_GRANTABLE, GRANT_BUDGET, ISSUE_STEPS, MERGE, RETRY
+
+# The texts of the choice of the implementer and of the reasons of the review rounds, in the
+# project's ``language`` (#635); English for a language without translation. ``why_*``: how the
+# implementer was chosen; ``round_*``: why a round counts against the limit, or not.
+TEXTS = Catalog(
+    en={
+        'why_label': 'label `{label}`',
+        'why_area': 'area labels {labels}',
+        'many_labels': 'the issue has more than one label that chooses the implementer: {labels}',
+        'not_configured': ('the label `{label}` chooses the implementer `{agent}`, which is not '
+                           'configured'),
+        'many_areas': 'the area labels of the issue lead to different implementers: {mapped}',
+        'round_requested': ('review after a correction {who} asked with `/devloop fix` on an '
+                            'approved head'),
+        'round_resync': 'review of an approved head, moved only by a sync without conflicts',
+        'round_resync_conflicts': ('approving review of an approved head, moved by a sync with '
+                                   'conflicts the agent resolved'),
+        'round_base': 'new review of an approved head, after the revocation for the base',
+        'round_replaced': 'round interrupted by the base moving and replaced by the next one',
+        'round_ci': 'failed CI',
+        'round_sync': 'review after a sync with conflicts the agent resolved',
+        'round_fix': 'review after a correction',
+        'round_fix_requested': (' asked by {who} with `/devloop fix` on an approved head, beyond '
+                                'the {cap} rounds of this kind that do not count '
+                                '(`max_requested_fix_rounds`)'),
+        'round_first': 'first review',
+        'round_same': 'new review of the same head',
+        'round_new': 'review of a new head',
+        'round_with_ci': ', with the failed CI of the same head',
+        'round_voided': ', which voided its approval',
+    },
+    it={
+        'why_label': 'label `{label}`',
+        'why_area': 'label di area {labels}',
+        'many_labels': 'l\'issue ha più label che scelgono l\'implementer: {labels}',
+        'not_configured': ('la label `{label}` sceglie l\'implementer `{agent}`, che non è '
+                           'configurato'),
+        'many_areas': 'le label di area dell\'issue portano a implementer diversi: {mapped}',
+        'round_requested': ('review dopo una correzione chiesta da {who} con `/devloop fix` su '
+                            'un head approvato'),
+        'round_resync': 'review di un head approvato, spostato solo da una sync senza conflitti',
+        'round_resync_conflicts': ('review approvata di un head approvato, spostato da una sync '
+                                   'con conflitti risolti dall\'agent'),
+        'round_base': 'nuova review di un head approvato, dopo la revoca per la base',
+        'round_replaced': 'round interrotto dall\'avanzare della base e sostituito dal successivo',
+        'round_ci': 'CI fallita',
+        'round_sync': 'review dopo una sync con conflitti risolti dall\'agent',
+        'round_fix': 'review dopo una correzione',
+        'round_fix_requested': (' chiesta da {who} con `/devloop fix` su un head approvato, oltre '
+                                'i {cap} round di questo tipo che non contano '
+                                '(`max_requested_fix_rounds`)'),
+        'round_first': 'prima review',
+        'round_same': 'nuova review dello stesso head',
+        'round_new': 'review di un nuovo head',
+        'round_with_ci': ', con la CI fallita dello stesso head',
+        'round_voided': ', che ne ha fatto decadere l\'approvazione',
+    })
 
 RECHECK_COMMAND = '/devloop recheck'
 # A fix asked by a trusted user or the supervisor (#195): the first line of a comment, after the
@@ -370,28 +428,27 @@ def implementer_choice(cfg, labels, labeled, admitters):
     latest = {}
     for name, who, _ in labeled:
         latest[name] = who
+    t = TEXTS.texts(getattr(cfg, 'language', ENGLISH))
     counted = {name for name in label_names(labels) if latest.get(name) in admitters}
     chosen = sorted(name for name in counted if name.startswith(IMPLEMENTER_LABEL))
     if len(chosen) > 1:
-        return None, '', ('l\'issue ha più label che scelgono l\'implementer: '
-                          + ', '.join(f'`{name}`' for name in chosen))
+        return None, '', t('many_labels', labels=', '.join(f'`{name}`' for name in chosen))
     if chosen:
         key = f'{chosen[0][len(IMPLEMENTER_LABEL):]}-implementer'
         if key not in cfg.agents:
-            return None, '', (f'la label `{chosen[0]}` sceglie l\'implementer `{key}`, che non è '
-                              'configurato')
-        return key, f'label `{chosen[0]}`', ''
+            return None, '', t('not_configured', label=chosen[0], agent=key)
+        return key, t('why_label', label=chosen[0]), ''
     mapped = {}
     for label, key in cfg.implementers:
         if label in counted:
             mapped.setdefault(key, []).append(label)
     if len(mapped) > 1:
-        return None, '', ('le label di area dell\'issue portano a implementer diversi: '
-                          + '; '.join(f'{", ".join(f"`{n}`" for n in names)} → `{key}`'
-                                      for key, names in sorted(mapped.items())))
+        return None, '', t('many_areas', mapped='; '.join(
+            f'{", ".join(f"`{n}`" for n in names)} → `{key}`'
+            for key, names in sorted(mapped.items())))
     if mapped:
         (key, names), = mapped.items()
-        return key, 'label di area ' + ', '.join(f'`{n}`' for n in names), ''
+        return key, t('why_area', labels=', '.join(f'`{n}`' for n in names)), ''
     return cfg.implementer, 'default', ''
 
 
@@ -1379,9 +1436,9 @@ def _logins(requesters):
     return ', '.join(f'`{login}`' for login in requesters)
 
 
-def round_reasons(reviews, fixes=(), syncs=(), trusted=(), cap=0, closures=()):
+def round_reasons(reviews, fixes=(), syncs=(), trusted=(), cap=0, closures=(), language=ENGLISH):
     """Every round of ``reviews``, oldest first, as ``(round, reason, counts)`` with the reason
-    in Italian (#289) and whether it counts against ``max_review_rounds`` (``counted_rounds``).
+    in ``language`` (#289, #635) and whether it counts against ``max_review_rounds`` (``counted_rounds``).
     A counted round is a CI failure, the review of a head an agent's conflict resolution
     produced (``syncs``, the ``sync`` markers), the review after a fix (``fixes``) of the round
     before, the first review, or a new review of the same or of another head. A waived round
@@ -1391,6 +1448,7 @@ def round_reasons(reviews, fixes=(), syncs=(), trusted=(), cap=0, closures=()):
     ``waiver``, the review after a correction a trusted user asked with ``/devloop fix`` on an
     approved head (#536, with the PR's finding ``closures``), naming who asked it; such a
     review beyond the ``cap`` counts, and says so."""
+    t = TEXTS.texts(language)
     requested = requested_rounds(reviews, fixes, trusted, cap, closures)
     waived = waived_rounds(reviews) | set(requested)
     replaced = _replaced_rounds(reviews)
@@ -1400,52 +1458,48 @@ def round_reasons(reviews, fixes=(), syncs=(), trusted=(), cap=0, closures=()):
     for number in sorted({r['round'] for r in reviews}):
         first = _round_records(reviews, number)[0]
         if number in requested:
-            reasons.append((number, 'review dopo una correzione chiesta da '
-                            + _logins(requested[number]) + ' con `/devloop fix` su un head '
-                            'approvato', False))
+            reasons.append((number, t('round_requested', who=_logins(requested[number])),
+                            False))
         elif number in waived:
             resync = first.get('resync')
             reason = resync.get('reason') if isinstance(resync, dict) else None
             if number in replaced:
                 reason = None  # interrupted by the base, whatever it reviewed (#458)
             if reason == RESYNC_AFTER_APPROVAL:
-                why = 'review di un head approvato, spostato solo da una sync senza conflitti'
+                why = t('round_resync')
             elif reason == RESYNC_CONFLICTS:
-                why = ('review approvata di un head approvato, spostato da una sync con '
-                       'conflitti risolti dall\'agent')
+                why = t('round_resync_conflicts')
             elif reason == BASE_CHANGED:
-                why = 'nuova review di un head approvato, dopo la revoca per la base'
+                why = t('round_base')
             else:
-                why = 'round interrotto dall\'avanzare della base e sostituito dal successivo'
+                why = t('round_replaced')
                 reasons.append((number, why, False))
                 continue  # the round replacing it follows what came before it
             reasons.append((number, why, False))
         else:
             if first['source'] != 'agent':
-                why = 'CI fallita'
+                why = t('round_ci')
             elif first.get('head_sha') in synced:
-                why = 'review dopo una sync con conflitti risolti dall\'agent'
+                why = t('round_sync')
             elif (previous['round'] if previous else 0) in fixed:
                 # A fix answers the round before (round 0: a requested fix before any review).
-                why = 'review dopo una correzione'
+                why = t('round_fix')
                 by = (_requesters(reviews, fixes, previous['round'], trusted, closures)
                       if previous and cap > 0 else ())
                 if by:
                     # #536: beyond the cap of the rounds that do not count, it counts.
-                    why += (f' chiesta da {_logins(by)} con `/devloop fix` su un head '
-                            f'approvato, oltre i {cap} round di questo tipo che non contano '
-                            '(`max_requested_fix_rounds`)')
+                    why += t('round_fix_requested', who=_logins(by), cap=cap)
             elif previous is None:
-                why = 'prima review'
+                why = t('round_first')
             elif previous.get('head_sha') == first.get('head_sha'):
-                why = 'nuova review dello stesso head'
+                why = t('round_same')
             else:
-                why = 'review di un nuovo head'
+                why = t('round_new')
             records = _round_records(reviews, number)
             if first['source'] == 'agent' and ci_in_round(records):
-                why += ', con la CI fallita dello stesso head'  # one head, one round (#352)
+                why += t('round_with_ci')  # one head, one round (#352)
                 if voided_approval(records):
-                    why += ', che ne ha fatto decadere l\'approvazione'  # #359
+                    why += t('round_voided')  # #359
             reasons.append((number, why, True))
         previous = first
     return reasons

@@ -128,7 +128,8 @@ under the same condition (the same holds for the resyncs of #235 and #252).
 The same holds when the head did not move at all (#252). Before promoting or merging, the
 dispatcher recomputes the receipt; when `main` advanced touching a file of the PR (or the
 check could not be verified, or the head no longer merges into it cleanly), it revokes the
-approval with an "Approvazione non valida" comment, a `stale` event of the `devloop:policy:v1`
+approval with an "Approval not valid" comment ("Approvazione non valida" in Italian, in the
+project's [language](reference.md#language-of-the-texts), #635), a `stale` event of the `devloop:policy:v1`
 marker that lists the base checks (`bases`), and the PR goes back to review. The new review of
 that **same head** does not count against `max_review_rounds` when:
 
@@ -352,7 +353,7 @@ The hash leaves out devloop's own records and comments whose first line is a `/d
 command. A record is recognised by its provenance and its metadata together: it starts with the
 attribution header, it is written by an identity allowed to write devloop records (an agent's or
 the dispatcher's app, or a trusted user for an actor without an app), and it ends with a valid
-devloop marker. Escalations, agents that stop (`Lavoro bloccato`) and the checks themselves
+devloop marker. Escalations, agents that stop (`Work blocked`, `Lavoro bloccato`) and the checks themselves
 carry one. Any other trusted comment counts, even one that starts with the header: without
 GitHub Apps devloop and the operator share a login, and the header alone would hide a
 requirement the check never saw.
@@ -684,7 +685,7 @@ escalation: the key of a `preflight_default` or `merged_issue` escalation only r
 
 When ready issues are on a cycle of [native dependencies](guide.md#dependencies-between-issues)
 (#277), the `dependency_cycle` action reports it on each issue of the queue on the cycle: a
-dispatcher comment ("Ciclo di dipendenze") ending with a `cycle` marker that lists the issues of
+dispatcher comment ("Dependency cycle", "Ciclo di dipendenze" in Italian) ending with a `cycle` marker that lists the issues of
 the cycle (`#N`, sorted). The action reads the dependencies again first and writes nothing if
 the cycle is gone. A `cycle` record counts only from the dispatcher's identity, and the same
 cycle is reported once on each issue; another cycle on the same issue is reported again. The
@@ -695,7 +696,8 @@ record adds no label and blocks nothing by itself: the open blocks do.
 With `[roles.coordinator]` (#607,
 [Authorization by the coordinator](guide.md#authorization-by-the-coordinator)), the `authorize`
 action records each `/devloop authorize [priority:<p>]` of an issue once: a dispatcher comment
-("Lavoro autorizzato dal coordinatore", or "`/devloop authorize` rifiutato") ending with an
+("Work authorized by the coordinator", or "`/devloop authorize` refused"; in Italian "Lavoro
+autorizzato dal coordinatore", "`/devloop authorize` rifiutato") ending with an
 `authorize` marker, with `comment` (the id of the command), `by` and `at` (its author and time),
 `priority` (`high`, `normal`, `low`, or empty without one) and `outcome`:
 
@@ -722,7 +724,7 @@ action, with no slot and no readiness check, which moves the issue from `agent:w
 
 When every failed test of an implementation or of a fix fails on the base commit of its branch
 too ([Tests red on the base too](guide.md#tests-red-on-the-base-too), #459), the dispatcher writes
-a comment ("Test rossi anche sulla base") on the issue (implement) or on the PR (fix), ending
+a comment ("Tests red on the base too", "Test rossi anche sulla base" in Italian) on the issue (implement) or on the PR (fix), ending
 with a `basebroken` marker: `step` (`implement` or `fix`), `base` (the base commit, the merge
 base of the branch with `origin/main`), `head` (the commit the step started from: the PR's head
 for a fix), `count` (the failed tests) and `cases` (their identities, at most 30). A record
@@ -1030,7 +1032,7 @@ operator makes on the host before the code is pinned, with a reference that name
 `ops/host/migrate.md` or a script of `ops/host/`, never free commands (#531; the reviewer
 verifies that it exists on the head and describes the step). A
 non-empty one is recorded in the PR marker (`host_step`) and shown in the PR description under
-"Passo sull'host"; each fix records its declaration again in its `fix` marker (`host_step`, empty
+"Step on the host" ("Passo sull'host" in Italian); each fix records its declaration again in its `fix` marker (`host_step`, empty
 when there is none), and the latest holds, as for the map. The reviewer receives it and checks
 that it is there when the PR needs it (#473: a file in the `state_dir`, a required key or table of
 the project file or of the overlay, a command run as root or on the service); a missing one is a

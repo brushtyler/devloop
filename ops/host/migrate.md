@@ -722,7 +722,8 @@ Finché l'overlay non imposta `[agent_user] name`, gli agent e i test girano com
 possono leggere le chiavi delle app in `/home/devloop/.ghapps` (anche quella del merger), lo
 `state_dir` e l'overlay, e la protezione della sezione precedente vale per una home che nessuno
 usa. devloop lo segnala a ogni avvio di `tick` e `run` nel log, e una volta su
-`[run].alert_issue` (`Agent senza utente dedicato`), ma non si ferma. `check-host.sh --no-apps`
+`[run].alert_issue` (`Agent senza utente dedicato`, o `Agents without a dedicated user` se la
+`language` del progetto è l'inglese), ma non si ferma. `check-host.sh --no-apps`
 lo segnala come errore (`non imposta [agent_user] name = "devloop-agent"`), insieme alle CLI che
 mancano a `devloop-agent` (`…/.local/bin/codex non trovato`).
 

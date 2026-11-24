@@ -26,17 +26,46 @@ REREVIEW_COMMAND = '/devloop rereview'
 # The decision of the operator on the trust policy of an issue (#483): the first line of a
 # comment of a trusted user, followed by the text of the decision.
 APPROVE_COMMAND = '/devloop approve'
-LABEL_STYLE = {
-    'ready': ('0e8a16', 'devloop: pronta per essere implementata da un agent'),
-    'working': ('fbca04', 'devloop: implementazione in corso'),
-    'review': ('1d76db', 'devloop: in attesa di review automatica'),
-    'changes': ('d93f0b', 'devloop: modifiche richieste dalla review'),
-    'ready_to_merge': ('0e8a16', 'devloop: approvata, in attesa del merge'),
-    'needs_operator': ('b60205', 'devloop: serve una decisione dell\'operatore'),
-    'merge_hold': ('5319e7', 'devloop: merge trattenuto dal supervisore o dall\'operatore'),
-    'needs_supervisor': ('d876e3', 'devloop: escalation non critica, decide il supervisore'),
-    'needs_coordinator': ('c2e0c6', 'devloop: in attesa dell\'autorizzazione del coordinatore'),
+# The colours of devloop's labels, by attribute of ``LabelPolicy``; their descriptions, in the
+# project's ``language`` (#635), in ``LABEL_TEXTS``. The names of the labels never change.
+LABEL_COLORS = {
+    'ready': '0e8a16', 'working': 'fbca04', 'review': '1d76db', 'changes': 'd93f0b',
+    'ready_to_merge': '0e8a16', 'needs_operator': 'b60205', 'merge_hold': '5319e7',
+    'needs_supervisor': 'd876e3', 'needs_coordinator': 'c2e0c6',
 }
+LABEL_TEXTS = Catalog(
+    en={
+        'ready': 'devloop: ready to be implemented by an agent',
+        'working': 'devloop: implementation in progress',
+        'review': 'devloop: waiting for the automatic review',
+        'changes': 'devloop: changes requested by the review',
+        'ready_to_merge': 'devloop: approved, waiting for the merge',
+        'needs_operator': 'devloop: a decision of the operator is needed',
+        'merge_hold': 'devloop: merge held by the supervisor or the operator',
+        'needs_supervisor': 'devloop: non-critical escalation, the supervisor decides',
+        'needs_coordinator': 'devloop: waiting for the authorization of the coordinator',
+    },
+    it={
+        'ready': 'devloop: pronta per essere implementata da un agent',
+        'working': 'devloop: implementazione in corso',
+        'review': 'devloop: in attesa di review automatica',
+        'changes': 'devloop: modifiche richieste dalla review',
+        'ready_to_merge': 'devloop: approvata, in attesa del merge',
+        'needs_operator': 'devloop: serve una decisione dell\'operatore',
+        'merge_hold': 'devloop: merge trattenuto dal supervisore o dall\'operatore',
+        'needs_supervisor': 'devloop: escalation non critica, decide il supervisore',
+        'needs_coordinator': 'devloop: in attesa dell\'autorizzazione del coordinatore',
+    })
+
+
+def label_styles(language=ENGLISH):
+    """``{attribute: (colour, description)}`` of devloop's labels, the descriptions in
+    ``language`` (#635)."""
+    t = LABEL_TEXTS.texts(language)
+    return {attr: (color, t(attr)) for attr, color in LABEL_COLORS.items()}
+
+
+LABEL_STYLE = label_styles()
 
 
 def requested_fixes(fixes):
@@ -497,15 +526,32 @@ def format_previous_rounds(reviews, fixes, closures=()):
     return '\n\n'.join(parts)
 
 
-def _open_findings_reason(findings):
-    """Why an approval is not promoted while other owners' findings are open."""
+# Why an approval is not promoted while other owners' findings are open, in the project's
+# ``language`` (#635).
+OPEN_FINDINGS_TEXTS = Catalog(
+    en={
+        'open': ('The approval does not close the findings others opened: a finding is closed '
+                 'only by the reviewer that opened it, by the green CI (for the `ci` findings) or '
+                 'by the operator. Still open:\n\n{listed}\n\nA trusted user may close them with '
+                 'a comment on the PR that holds a line `{command} <round/reviewer/ID> '
+                 'resolved|withdrawn <reason>`, then put the PR back in `agent:review`: the '
+                 'approval recorded is applied again without a new review.'),
+    },
+    it={
+        'open': ('L\'approvazione non chiude i finding aperti da altri: un finding lo chiude solo '
+                 'il reviewer che l\'ha aperto, la CI verde (per i finding `ci`) o l\'operatore. '
+                 'Restano aperti:\n\n{listed}\n\nUn utente fidato può chiuderli con un commento '
+                 'sulla PR che contiene una riga `{command} <round/reviewer/ID> '
+                 'resolved|withdrawn <motivazione>`, poi riportare la PR in `agent:review`: '
+                 'l\'approvazione registrata viene riapplicata senza una nuova review.'),
+    })
+
+
+def _open_findings_reason(findings, language=ENGLISH):
+    """Why an approval is not promoted while other owners' findings are open, in ``language``
+    (#635)."""
     listed = '\n'.join(f'- `{f["key"]}` ({f["title"]})' for f in findings)
-    return ('L\'approvazione non chiude i finding aperti da altri: un finding lo chiude solo il '
-            'reviewer che l\'ha aperto, la CI verde (per i finding `ci`) o l\'operatore. Restano '
-            f'aperti:\n\n{listed}\n\nUn utente fidato può chiuderli con un commento sulla PR '
-            f'che contiene una riga `{FINDING_COMMAND} <round/reviewer/ID> resolved|withdrawn '
-            '<motivazione>`, poi riportare la PR in `agent:review`: l\'approvazione registrata '
-            'viene riapplicata senza una nuova review.')
+    return OPEN_FINDINGS_TEXTS.texts(language)('open', listed=listed, command=FINDING_COMMAND)
 
 
 def _review_failure(failures):
@@ -647,16 +693,16 @@ def both_labels_warning(labels):
             f'{LEGACY_NEEDS_OPERATOR}')
 
 
-def transition_labels(gh: Tracker, labels):
+def transition_labels(gh: Tracker, labels, language=ENGLISH):
     """The transition of #248, for ``devloop setup`` and the first tick of a process:
     ``agent:needs-operator`` is renamed from its old name when only that exists, so that the
     issues and PRs that have it keep it; with both names, neither label is touched
     (``both_labels_warning``). Returns ``(label_transition, note for the log)``, the note ''
-    when there is nothing to say."""
+    when there is nothing to say. ``language``: the project's, of the description (#635)."""
     transition = label_transition(gh, labels)
     note = ''
     if transition == 'rename':
-        color, description = LABEL_STYLE['needs_operator']
+        color, description = label_styles(language)['needs_operator']
         gh.rename_label(LEGACY_NEEDS_OPERATOR, labels.needs_operator, color, description)
         note = (f'renamed {LEGACY_NEEDS_OPERATOR} to {labels.needs_operator}: the issues and PRs '
                 'that had it keep it')

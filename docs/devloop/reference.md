@@ -458,7 +458,23 @@ Today these texts follow it:
   labels, the alarm of a step on the host, the issue a merge closed and the escalation of an
   issue a merged PR already resolved, and the refusals and the traces of a `/devloop merge` of
   the supervisor or of the coordinator, with their reasons: the problems of the changes under
-  `docs/adr/` and the conditions of the coordinator's merge after a conclave.
+  `docs/adr/` and the conditions of the coordinator's merge after a conclave;
+- the other warnings and summaries (#635): the escalations `devloop/dispatcher.py`,
+  `devloop/dispatch_actions.py` and `devloop/dispatch_base.py` compose (a failed step with the
+  work a timeout kept, the round limit with the reasons of each round, the tests that keep
+  failing, a protected path, a lost marker, findings no one can attribute or close, a missing
+  CI, an attempt that does not hold, an interrupted implementation, the implementer that cannot
+  be chosen, a failed sync, a veto of the conclave), the approval found stale before a promotion
+  or a merge, the tests red on the base or only on the host, the red CI of the base branch, the
+  closed findings, the CI run again, the sync with how it counts against the rounds, the
+  operator's merge with its reasons, a dependency cycle, the coordinator's `/devloop authorize`,
+  an agent blocked; the sections of a pull request and of a fix that devloop adds (the coverage
+  map of the acceptance criteria, the step on the host, the generated files); the alerts on
+  `[run].alert_issue` (an auto-pin not done, the publications dropped, the journal near its
+  limit, the missing tables of the project file, the agents without their own user, a stopped
+  `devloop run`); the [daily summary](guide.md#daily-summary) of `devloop report` and of
+  `[report] issue`, archives and index of the past days included; and the descriptions of
+  devloop's labels, which `devloop setup` writes again.
 
 Only the text devloop composes changes, in the language of the moment it composes it. The
 values of the records stay as written, in every language: the opinions `ok`, `dubbi`,
@@ -466,11 +482,11 @@ values of the records stay as written, in every language: the opinions `ok`, `du
 (the reasons of a conclave vote, the gaps of a readiness check the agent lists) and the texts of
 a record already published, such as the note of an earlier review, the reason of an earlier
 recheck or of a conclave already recorded, are shown as recorded. The content of a receipt, its
-digest and its `receipt` record do not depend on the language. The other texts of the
-dispatcher (the reasons of the escalations composed elsewhere, such as a failed step or the
-round limit, the approval found stale before a promotion or a merge, and the acceptance map and
-the step on the host that the comment of a fix repeats from the pull request) are still in
-Italian, until the parts of #628 that translate them.
+digest and its `receipt` record do not depend on the language. Only these texts stay as they
+are: the messages of the errors and of the local log, in English (the permission agy denied
+names the command or reads `command not reported by agy`), `devloop status`, whose budget is in
+Italian, and the placeholders of the [redaction](#host-details-in-the-published-texts) (`<chiave
+dell'app implementer>`), which the scripts of the host write too.
 
 What devloop reads never changes with the language: the `devloop:<kind>:v1` markers and their
 fields, the `/devloop …` commands and the labels. A text that devloop recognises by its title or
@@ -478,10 +494,11 @@ a phrase is recognised in every language it has, so that a change of `language` 
 texts already published recognised: [`devloop watch`](guide.md#waking-the-supervising-agent) leaves out a
 ledger record whose title is `## devloop ledger` or `## Registro devloop`, and the advisory
 review of a head (#369) rewrites the receipt of its promotion found under the title `## Receipt
-of PR #N` or `## Ricevuta della PR #N` (#634), in the language of the moment. The texts of the
-review, the fix, the readiness check, the advisory review, the conclave, the promotions, the
-merges and the receipts are otherwise read only through their markers, never by title or phrase:
-those published before a change of `language` keep counting as before.
+of PR #N` or `## Ricevuta della PR #N` (#634), in the language of the moment, and the
+publication of the daily summary finds the index of the past days in the body of `[report]
+issue` under `## Previous days` or `## Giorni precedenti` (#635), then writes the body again in
+the language of the moment. The other texts are read only through their markers, never by title
+or phrase: those published before a change of `language` keep counting as before.
 
 ### No background work in a turn
 
@@ -632,8 +649,8 @@ since a tracked file may be wanted; it points them out:
   fix, those that look generated (under a `__pycache__/` directory, or ending in `.pyc` or
   `.pyo`), those git sees as binary (added or changed, not deleted: also a binary that the
   agent's own tests regenerated during its turn, which the local test of the dispatcher no
-  longer changes) and those its passing local test changed go to a section `File generati nel
-  commit` of the PR body or of the fix comment, and to `generated_files` of the `pr` or `fix`
+  longer changes) and those its passing local test changed go to a section `Generated files in
+  the commit` (`File generati nel commit` in Italian) of the PR body or of the fix comment, and to `generated_files` of the `pr` or `fix`
   marker (`{path, reasons}`, `reasons` among `generated`, `binary` and `tests`). Information
   only: no receipt nor approval depends on it, and the commit is pushed as it is. A sync is not
   checked: its commit is the merge of the base.
@@ -1121,13 +1138,13 @@ each agy turn its minimal permissions, and treats a stop without output as a fai
   required the "read_file" permission …`) and the turn exited 0, the failure is the tool's,
   not the change's (#180): the same model runs the same turn once more, in the same directory
   and tick, with `-retry` in its log name. devloop's log reports the permission and the last
-  action agy's JSON lists in `denied_actions`, or `target non riportato da agy` when there is
+  action agy's JSON lists in `denied_actions`, or `target not reported by agy` when there is
   none, preceded by ``command `<command line>`;`` when agy's JSON reports the command line of
   that action (#479). The same command line, cleaned as below, is in the turn's
   [ledger record](protocol.md#evidence-and-telemetry) (`denied_command`). The retry's prompt (#319) adds, before the `## Shell commands` block, a
   `## Denied in the previous attempt` block: what was denied (the command line of the last
   denied action, when agy's JSON reports it, cleaned as the [failure comment](protocol.md#failed-agent-turns)
-  cleans commands; for a `command` permission without it, `comando non riportato da agy` with
+  cleans commands; for a `command` permission without it, `command not reported by agy` with
   the action agy reports; for another permission, its target), not to run it again, and the
   command prefixes the turn may run, from the same list as `--settings`. agy 1.5 reports no
   command line (`{"action":"command","display_name":"Bash"}`).
@@ -1140,7 +1157,7 @@ each agy turn its minimal permissions, and treats a stop without output as a fai
   ``permission `<name>` denied twice (<what>)``. On the last model, or on an agent without
   fallback models, the second denial escalates as before (`tool_failure`), and the comment
   says ``permission `<name>` denied again after one retry; model `<model>`; <what>``, `<what>`
-  being the command or `comando non riportato da agy` as in the retry: whoever decides knows
+  being the command or `command not reported by agy` as in the retry: whoever decides knows
   whether to run the review again or replace the reviewer. That last model is not remembered.
   Any other failure (an unavailable
   model, a non-zero exit, a stop that names no permission, invalid output, a timeout) is not
