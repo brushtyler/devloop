@@ -7,7 +7,8 @@ change of ``language``."""
 import dataclasses
 import unittest
 
-from devloop import conclave, dispatch_advisory, i18n, ledger, markdown, review, watch
+from devloop import (acceptance, conclave, dispatch_advisory, i18n, ledger, markdown, review,
+                     supervision, watch)
 from devloop.context import _template, prompt_values
 from devloop.dispatcher import Dispatcher
 from devloop.i18n import ENGLISH, ITALIAN, Catalog, language_code
@@ -16,6 +17,9 @@ from helpers.devloop_fakes import SHA1, FakeGH
 from test_devloop import CFG, FakeRunner, FakeWS, pr
 from test_devloop_ledger import LedgerGH
 from test_devloop_preflight import PCFG, IssueGH
+from test_devloop_preflight import gap as recheck_gap
+from test_devloop_preflight_recheck import CFG as RECHECK_CFG
+from test_devloop_preflight_recheck import Case as RecheckCase
 
 TURN = {'type': 'turn', 'state': 'open', 'kind': 'review', 'agent': 'codex', 'identity': None,
         'mode': 'read', 'model': 'm', 'effort': 'high', 'fallback_for': None,
@@ -361,6 +365,102 @@ class DispatcherLanguageTests(unittest.TestCase):
         self.assertEqual(markdown.read_marker(found['Italian'], 'review'),
                          markdown.read_marker(found['English'], 'review'))
 
+    def test_the_notes_of_a_new_review_in_the_projects_language(self):
+        # A blocking finding without evidence (#481): devloop demotes it and corrects the
+        # verdict, and its notes are composed in the project's language when the record is made.
+        raw = {'verdict': 'request_changes', 'summary': 'ok',
+               'blocking_findings': [dict(FINDING, security=False, evidence='')],
+               'non_blocking_findings': [], 'previous_findings': [], 'human_reason': '',
+               'operator_reason': 'none', 'checks_performed': []}
+        expected = {
+            'Italian': ('devloop ha registrato come non bloccanti 1 finding',
+                        'Verdetto corretto da request_changes a unproven'),
+            'English': ('devloop recorded as non-blocking 1 findings',
+                        'Verdict corrected from request_changes to unproven'),
+            'French': ('devloop recorded as non-blocking 1 findings',
+                       'Verdict corrected from request_changes to unproven'),
+        }
+        for language, says in expected.items():
+            with self.subTest(language=language):
+                gh = FakeGH()
+                d = Dispatcher(dataclasses.replace(CFG, language=language), gh, FakeWS(),
+                               FakeRunner(raw), log=lambda m: None)
+                gh.labels[100] = {'agent:review'}
+                d._do_review(pr())
+                (body,) = [b for _, b in gh.comments if markdown.read_marker(b, 'review')]
+                record = markdown.read_marker(body, 'review')
+                self.assertEqual(record['verdict'], review.UNPROVEN)
+                for text in says:
+                    self.assertIn(text, body)
+                    self.assertIn(text, record['note'])
+                if language != 'Italian':
+                    for word in ('registrato', 'Verdetto', 'bloccant', 'evidenza'):
+                        self.assertNotIn(word, body)
+
+    def test_the_texts_devloop_writes_in_a_review_record(self):
+        def made(language, **raw):
+            fields = dict({'verdict': 'request_changes', 'summary': 'ok',
+                           'blocking_findings': [], 'non_blocking_findings': [],
+                           'previous_findings': [], 'human_reason': '',
+                           'operator_reason': 'none', 'checks_performed': []}, **raw)
+            return review.normalize_review(
+                fields, previous_open=[{'id': 'R1-1', 'key': '1/claude/R1-1', 'owner': 'claude'}],
+                round_no=2, max_rounds=3, head_sha=SHA1, ci='pass', reviewer='codex',
+                criteria=['a'], acceptance_map=None, language=language)
+
+        for language, says in (
+                ('Italian', ('Non valutato dal reviewer.', 'mappa di copertura',
+                             'Mappa di copertura dei criteri di accettazione assente',
+                             'non ha valutato tutti')),
+                ('English', ('Not assessed by the reviewer.', 'coverage map',
+                             'Coverage map of the acceptance criteria missing',
+                             'did not assess every')),
+                ('French', ('Not assessed by the reviewer.', 'coverage map',
+                            'Coverage map of the acceptance criteria missing',
+                            'did not assess every'))):
+            with self.subTest(language=language):
+                record = made(language)
+                self.assertEqual(record['previous_findings'][0]['note'], says[0])
+                self.assertIn(says[1], record['note'])
+                self.assertEqual(record['blocking_findings'][0]['title'], says[2])
+                self.assertIn(says[3], record['note'])
+                # The default of a decision the reviewer did not name.
+                decision = made(language, verdict='needs_operator', operator_reason='decision')
+                self.assertEqual(decision['human_reason'],
+                                 review.TEXTS.texts(language)('no_decision'))
+        ci = {language: review.ci_failure_review(
+            failed_checks=['tests'], log_tail='', round_no=2, max_rounds=3, head_sha=SHA1,
+            previous_open=[{'id': 'R1-1', 'key': '1/claude/R1-1'}], language=language)
+            for language in ('Italian', 'English', 'French')}
+        self.assertEqual(ci['Italian']['blocking_findings'][0]['title'], 'CI fallita: tests')
+        self.assertIn('La CI non è verde (tests)', ci['Italian']['summary'])
+        self.assertEqual(ci['Italian']['previous_findings'][0]['note'],
+                         'Non valutato: CI fallita.')
+        for language in ('English', 'French'):
+            self.assertEqual(ci[language]['blocking_findings'][0]['title'], 'CI failed: tests')
+            self.assertIn('The CI is not green (tests)', ci[language]['summary'])
+            self.assertEqual(ci[language]['previous_findings'][0]['note'],
+                             'Not assessed: CI failed.')
+        # Only the texts change: the record is otherwise the same.
+        strip = ('summary', 'blocking_findings', 'previous_findings')
+        self.assertEqual({k: v for k, v in ci['Italian'].items() if k not in strip},
+                         {k: v for k, v in ci['English'].items() if k not in strip})
+
+    def test_review_texts_catalogues_are_complete(self):
+        for catalog in (review.TEXTS, acceptance.TEXTS):
+            self.assertEqual(set(catalog.tables[ITALIAN]), set(catalog.tables[ENGLISH]))
+        # Every class has its English description (#632), and Italian stays the default.
+        for cls in (*supervision.CRITICAL, *supervision.NON_CRITICAL):
+            with self.subTest(cls=cls):
+                self.assertNotEqual(supervision.describe(cls, language='English'),
+                                    'class not recognised, hence critical')
+                self.assertEqual(supervision.describe(cls, language='Italian'),
+                                 supervision.describe(cls))
+        self.assertEqual(supervision.describe('tests_failed', language='French'),
+                         'failing tests, or no change')
+        self.assertEqual(supervision.describe(None, language='English'),
+                         'class not recognised, hence critical')
+
     def test_a_readiness_check_in_the_projects_language(self):
         output = {'ready': False, 'gaps': [dict(GAP, repository_dependent=False)], 'split': '',
                   'trust_policy': 'none', 'trust_policy_reason': ''}
@@ -379,6 +479,65 @@ class DispatcherLanguageTests(unittest.TestCase):
                 self.assertIn(says[1], gh.thread[-1]['body'])
                 self.assertEqual(markdown.read_marker(gh.thread[-1]['body'],
                                                       'preflight')['ready'], False)
+
+
+class RecheckLanguageTests(RecheckCase):
+    """The answer to a request that runs no check, with its reason, composed in the project's
+    ``language`` (#632) on the real paths of the refusal."""
+
+    LANGUAGES = {
+        'Italian': ('## Controllo di prontezza non ripetuto',
+                    'dopo il controllo di prontezza c\'è un\'escalation di classe '
+                    '`tests_failed` (test che falliscono, o nessuna modifica)',
+                    'attende il supervisore, per un\'escalation di classe `tool_failure` '
+                    '(l\'agent o il modello non ha prodotto un risultato)'),
+        'English': ('## Readiness check not run again',
+                    'after the readiness check there is an escalation of class `tests_failed` '
+                    '(failing tests, or no change)',
+                    'waits for the supervisor, for an escalation of class `tool_failure` (the '
+                    'agent or the model produced no result)'),
+    }
+    LANGUAGES['French'] = LANGUAGES['English']
+
+    def answer(self, cfg, d):
+        self.gh.say(7, 'brushtyler', '/devloop recheck')
+        self.assertEqual(self.planned(d, cfg), [('recheck_refused', 7)])
+        self.assertEqual([a.kind for a in d.tick()], ['recheck_refused'])
+        body = self.gh.threads[7][-1]['body']
+        self.assertEqual(markdown.read_marker(body, 'recheck')['request'], 'recheck')
+        return body
+
+    def test_an_escalation_of_another_class(self):
+        for language, (title, reason, _) in self.LANGUAGES.items():
+            with self.subTest(language=language):
+                cfg = dataclasses.replace(RECHECK_CFG, language=language)
+                d = self.make(cfg=cfg)
+                self.blocked(d, recheck_gap())
+                self.gh.comment(7, markdown.render_escalation('I test falliscono.',
+                                                              cls='tests_failed'))
+                body = self.answer(cfg, d)
+                self.assertIn(title, body)
+                self.assertIn(reason, body)
+                self.assertTrue(markdown.read_marker(body, 'recheck')['reason']
+                                .startswith(reason))
+                if language != 'Italian':
+                    for word in ('dopo', 'blocco', 'controllo di prontezza'):
+                        self.assertNotIn(word, body)
+
+    def test_an_issue_waiting_for_the_supervisor(self):
+        for language, (title, _, reason) in self.LANGUAGES.items():
+            with self.subTest(language=language):
+                cfg = dataclasses.replace(RECHECK_CFG, language=language)
+                d = self.make(cfg=cfg)
+                self.blocked(d, recheck_gap())
+                self.gh.labels[7] = {'agent:ready', 'agent:needs-supervisor'}
+                self.gh.comment(7, markdown.render_escalation('Il passo è fallito.',
+                                                              cls='tool_failure'))
+                body = self.answer(cfg, d)
+                self.assertIn(title, body)
+                self.assertIn(reason, body)
+                if language != 'Italian':
+                    self.assertNotIn('attende', body)
 
 
 if __name__ == '__main__':

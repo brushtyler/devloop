@@ -252,6 +252,22 @@ TEXTS = Catalog(
                          'The block stays, and is resolved as its comment says. When the latest '
                          'block of the issue is again the readiness check\'s, a new '
                          '`/devloop recheck` runs it again.'),
+        # Why a request runs no check (``PreflightMixin._preflight_block``,
+        # ``_supervisor_block``), the ``reason`` of the ``recheck`` record.
+        'why_both_names': ('`agent:needs-operator` is there under both its names, and which of '
+                           'the two is the check\'s cannot be told'),
+        'why_not_set': ('the latest readiness check did not set `agent:needs-operator`, which '
+                        'was already there'),
+        'why_escalation': ('after the readiness check there is an escalation of class {cls} '
+                           '({described}): the latest block of the issue is that one, not the '
+                           'readiness check'),
+        'why_no_class': 'not stated',
+        'why_added_again': ('`agent:needs-operator` was added again after the readiness check, '
+                            'and not by the check'),
+        'why_supervisor': 'the issue is in `{label}` and waits for the supervisor',
+        'why_supervisor_class': ('the issue is in `{label}` and waits for the supervisor, for an '
+                                 'escalation of class `{cls}` ({described}): the latest block of '
+                                 'the issue is that one, not the readiness check'),
         # The notes of the readiness check (``PreflightMixin._publish_preflight``).
         'note_block_removed': 'The block set by the readiness check was removed.',
         'note_label_stays': ('{labels} stays: it was not set by the readiness check, so a '
@@ -375,6 +391,20 @@ TEXTS = Catalog(
                          'Il blocco resta, e si risolve come dice il suo commento. Quando '
                          'l\'ultimo blocco dell\'issue torna a essere quello del controllo di '
                          'prontezza, un nuovo `/devloop recheck` lo ripete.'),
+        'why_both_names': ('`agent:needs-operator` è presente con entrambi i suoi nomi, e quale '
+                           'dei due sia del controllo non si può dire'),
+        'why_not_set': ('l\'ultimo controllo di prontezza non ha messo `agent:needs-operator`, '
+                        'che era già presente'),
+        'why_escalation': ('dopo il controllo di prontezza c\'è un\'escalation di classe {cls} '
+                           '({described}): l\'ultimo blocco dell\'issue è quello, non il '
+                           'controllo di prontezza'),
+        'why_no_class': 'non indicata',
+        'why_added_again': ('`agent:needs-operator` è stato aggiunto di nuovo dopo il controllo '
+                            'di prontezza, e non dal controllo'),
+        'why_supervisor': 'l\'issue è in `{label}` e attende il supervisore',
+        'why_supervisor_class': ('l\'issue è in `{label}` e attende il supervisore, per '
+                                 'un\'escalation di classe `{cls}` ({described}): l\'ultimo '
+                                 'blocco dell\'issue è quello, non il controllo di prontezza'),
         'note_block_removed': 'Il blocco messo dal controllo di prontezza è stato rimosso.',
         'note_label_stays': ('{labels} resta: non risulta messo dal controllo di prontezza, '
                              'quindi lo rimuove una persona.'),
@@ -1236,7 +1266,8 @@ def render_cycle(record):
 def render_recheck(record, language=ENGLISH):
     """The dispatcher's answer to a request for a new readiness check that starts none (#468),
     with a ``recheck`` marker: each request is answered once. ``language``: the project's
-    (#632), of the readable text; the ``reason`` of the record is shown as recorded."""
+    (#632), of the readable text; the ``reason`` of the record is shown as recorded, composed in
+    the same language by the dispatcher (``why_*`` of ``TEXTS``)."""
     t = TEXTS.texts(language)
     what = t('recheck_command' if record['request'] == 'recheck' else 'recheck_relabeled')
     return publishable(

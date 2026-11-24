@@ -217,32 +217,28 @@ class PreflightMixin:
         devloop records) and the dispatcher wrote the only ``labeled`` event of the label
         since. Unlike ``_owns_block``, any other text after the check leaves the block to it:
         the person asking has read it. ``log`` is for the log, ``text`` for the answer on the
-        issue."""
+        issue, in the project's language (#632)."""
+        language = self.cfg.language
+        t = TEXTS.texts(language)
         if not self._owned_block(labels):
-            return ('the operator label is there under both its names',
-                    '`agent:needs-operator` è presente con entrambi i suoi nomi, e quale dei '
-                    'due sia del controllo non si può dire')
+            return ('the operator label is there under both its names', t('why_both_names'))
         if (not records or not records[-1][1]['blocked']
                 or records[-1][1].get('class') not in PREFLIGHT_CLASSES):
-            return ('the latest readiness check did not set the block',
-                    'l\'ultimo controllo di prontezza non ha messo `agent:needs-operator`, che '
-                    'era già presente')
+            return ('the latest readiness check did not set the block', t('why_not_set'))
         position, record = records[-1]
         for comment in comments[position + 1:]:
             notice = read_marker(comment.get('body', ''), 'notice')
             if (notice is not None and notice.get('class') != record['class']
                     and self._writes_records((comment.get('author') or {}).get('login'))):
                 cls = notice.get('class')
-                shown = f'`{cls}`' if isinstance(cls, str) else 'non indicata'
+                shown = f'`{cls}`' if isinstance(cls, str) else t('why_no_class')
                 return (f'an escalation of class {cls} came after the readiness check',
-                        f'dopo il controllo di prontezza c\'è un\'escalation di classe {shown} '
-                        f'({describe(cls)}): l\'ultimo blocco dell\'issue è quello, non il '
-                        'controllo di prontezza')
+                        t('why_escalation', cls=shown,
+                          described=describe(cls, language=language)))
         labelers = self._operator_labelers(number)
         if not (len(labelers) == record['labeled'] + 1 and self._wrote(labelers[-1], DISPATCHER)):
             return ('agent:needs-operator was added again after the readiness check, not by it',
-                    '`agent:needs-operator` è stato aggiunto di nuovo dopo il controllo di '
-                    'prontezza, e non dal controllo')
+                    t('why_added_again'))
         return None
 
     def _supervisor_block(self, comments, records):
@@ -258,13 +254,15 @@ class PreflightMixin:
                     (comment.get('author') or {}).get('login')):
                 cls = notice.get('class')
         label = self.cfg.labels.needs_supervisor
+        # The text in the project's language (#632).
+        language = self.cfg.language
+        t = TEXTS.texts(language)
         if not isinstance(cls, str):
             return (f'the issue waits for the supervisor ({label})',
-                    f'l\'issue è in `{label}` e attende il supervisore')
+                    t('why_supervisor', label=label))
         return (f'the issue waits for the supervisor ({label}) on an escalation of class {cls}',
-                f'l\'issue è in `{label}` e attende il supervisore, per un\'escalation di classe '
-                f'`{cls}` ({describe(cls)}): l\'ultimo blocco dell\'issue è quello, non il '
-                'controllo di prontezza')
+                t('why_supervisor_class', label=label, cls=cls,
+                  described=describe(cls, language=language)))
 
     def _answered(self, comments, records, request):
         """Whether the dispatcher already answered ``request``: a ``/devloop recheck`` is spent

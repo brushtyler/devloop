@@ -98,7 +98,7 @@ class NormalizeTests(unittest.TestCase):
                                          reason='trust_policy'))
                 self.assertEqual((record['verdict'], record['operator_reason']),
                                  ('needs_operator', 'trust_policy'))
-                self.assertIn('policy di fiducia', record['note'])
+                self.assertIn('touches the trust policy', record['note'])  # English (#632)
         # The reason is recorded only with needs_operator.
         self.assertNotIn('operator_reason', norm(raw_review(reason='decision')))
 

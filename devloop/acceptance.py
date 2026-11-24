@@ -18,6 +18,7 @@ the same findings before reusing or keeping an approval recorded without seeing 
 import json
 import re
 
+from .i18n import ENGLISH, Catalog
 from .schema import SchemaError, load_schema, validate
 
 TITLES = ('criteri di accettazione', 'acceptance criteria')
@@ -100,37 +101,67 @@ def latest_map(meta, fixes):
     return None
 
 
+# The texts of the findings of the coverage map, in the project's ``language`` (#632) when the
+# review that carries them is made.
+TEXTS = Catalog(
+    en={
+        'missing_title': 'Coverage map of the acceptance criteria missing',
+        'missing_detail': ('The issue has {count} recognisable acceptance criteria, but the PR '
+                           'records no coverage map (`acceptance_map`).'),
+        'missing_fix': ('Provide `acceptance_map` with one entry per criterion, in the order of '
+                        'the issue.'),
+        'mismatch_title': 'The coverage map does not match the acceptance criteria',
+        'mismatch_detail': ('The issue has {count} recognisable acceptance criteria, the map has '
+                            '{entries} entries.'),
+        'mismatch_fix': ('Provide one entry of `acceptance_map` per criterion, in the order of '
+                         'the issue.'),
+        'uncovered_title': 'Acceptance criterion {position} not covered, without a reason',
+        'uncovered_fix': ('Add the tests that verify the criterion, or explain in `reason` why '
+                          'it stays not covered.'),
+    },
+    it={
+        'missing_title': 'Mappa di copertura dei criteri di accettazione assente',
+        'missing_detail': ('L\'issue ha {count} criteri di accettazione riconoscibili, ma la PR '
+                           'non registra una mappa di copertura (`acceptance_map`).'),
+        'missing_fix': ('Fornire `acceptance_map` con una voce per ogni criterio, nell\'ordine '
+                        'dell\'issue.'),
+        'mismatch_title': 'La mappa di copertura non corrisponde ai criteri di accettazione',
+        'mismatch_detail': ('L\'issue ha {count} criteri di accettazione riconoscibili, la '
+                            'mappa ha {entries} voci.'),
+        'mismatch_fix': ('Fornire una voce di `acceptance_map` per ogni criterio, nell\'ordine '
+                         'dell\'issue.'),
+        'uncovered_title': 'Criterio di accettazione {position} non coperto, senza motivo',
+        'uncovered_fix': ('Aggiungere i test che verificano il criterio, oppure spiegare in '
+                          '`reason` perché resta non coperto.'),
+    })
+
+
 def _finding(title, detail, suggested_fix):
     # A finding of the coverage map (#134) is never one of security (#405, the review schema).
     return {'file': '', 'line': 0, 'title': title, 'detail': detail,
             'suggested_fix': suggested_fix, 'security': False}
 
 
-def acceptance_findings(criteria, acceptance_map):
+def acceptance_findings(criteria, acceptance_map, language=ENGLISH):
     """The blocking findings devloop raises on its own for ``acceptance_map`` (None: no map
-    recorded) against the ``criteria`` of the issue."""
+    recorded) against the ``criteria`` of the issue, their texts in ``language`` (#632)."""
+    t = TEXTS.texts(language)
     criteria = list(criteria or ())
     if acceptance_map is None:
         if not criteria:
             return []  # no recognisable criteria: a missing map is the empty map
-        return [_finding('Mappa di copertura dei criteri di accettazione assente',
-                         f'L\'issue ha {len(criteria)} criteri di accettazione riconoscibili, ma '
-                         'la PR non registra una mappa di copertura (`acceptance_map`).',
-                         'Fornire `acceptance_map` con una voce per ogni criterio, nell\'ordine '
-                         'dell\'issue.')]
+        return [_finding(t('missing_title'), t('missing_detail', count=len(criteria)),
+                         t('missing_fix'))]
     found = []
     if criteria and len(acceptance_map) != len(criteria):
-        found.append(_finding('La mappa di copertura non corrisponde ai criteri di accettazione',
-                              f'L\'issue ha {len(criteria)} criteri di accettazione '
-                              f'riconoscibili, la mappa ha {len(acceptance_map)} voci.',
-                              'Fornire una voce di `acceptance_map` per ogni criterio, '
-                              'nell\'ordine dell\'issue.'))
+        found.append(_finding(t('mismatch_title'),
+                              t('mismatch_detail', count=len(criteria),
+                                entries=len(acceptance_map)),
+                              t('mismatch_fix')))
     for position, entry in enumerate(acceptance_map, 1):
         if entry['status'] == 'not_covered' and not entry['reason'].strip():
-            found.append(_finding(f'Criterio di accettazione {position} non coperto, senza '
-                                  'motivo', entry['criterion'].strip(),
-                                  'Aggiungere i test che verificano il criterio, oppure '
-                                  'spiegare in `reason` perché resta non coperto.'))
+            found.append(_finding(t('uncovered_title', position=position),
+                                  entry['criterion'].strip(), t('uncovered_fix')))
     return found
 
 

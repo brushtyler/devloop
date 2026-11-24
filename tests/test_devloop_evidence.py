@@ -65,11 +65,11 @@ class NormalizeTests(unittest.TestCase):
                 self.assertEqual((demoted['id'], demoted['title'], demoted['without_evidence']),
                                  ('R1-1', 'unproven', True))
                 # The record says so, and the request for changes has nothing left to fix.
-                self.assertIn('senza evidenza', record['note'])
+                self.assertIn('without evidence', record['note'])  # English by default (#632)
                 self.assertIn('R1-1', record['note'])
                 # Neutral, never an approval (#481): it does not send the PR to the fix.
                 self.assertEqual(record['verdict'], review.UNPROVEN)
-                self.assertIn('non è un\'approvazione', record['note'])
+                self.assertIn('it is not an approval', record['note'])
                 self.assertEqual(review.open_findings([record]), [])
                 self.assertEqual(review.flow_verdict(record), review.UNPROVEN)
                 self.assertEqual(markdown.native_event(record), 'COMMENT')

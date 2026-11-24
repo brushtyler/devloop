@@ -27,6 +27,7 @@ from . import receipt as pr_receipt
 from .github import GitHubError
 from .hoststep import UNREADABLE as UNREADABLE_STEP
 from .hoststep import latest as latest_host_step
+from .i18n import ITALIAN
 from .journal import COORDINATOR_MERGE, DELEGATED_MERGE, JournalError
 from .ledger import collect as ledger_collect
 from .ledger import timestamp as ledger_timestamp
@@ -618,8 +619,9 @@ class MergeMixin:
         reason = self._untrusted_change(history)
         if reason:
             return [f'testo dell\'issue non verificabile: {reason}']
+        # The titles go into texts of the merge, still in Italian until #628 translates them.
         found = acceptance_findings(acceptance_criteria(history['body']),
-                                    latest_map(pr.meta, pr.fixes))
+                                    latest_map(pr.meta, pr.fixes), language=ITALIAN)
         return [f['title'] for f in found]
 
     def _refuse_zero(self, pr, receipt, why, states=()):

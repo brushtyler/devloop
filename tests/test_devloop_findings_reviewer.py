@@ -310,7 +310,7 @@ class FindingTests(unittest.TestCase):
                                        max_rounds=3, head_sha='a' * 40, ci='pass',
                                        reviewer=KEY, role=FINDINGS_ONLY)
         self.assertEqual(made['role'], FINDINGS_ONLY)
-        self.assertIn('Review di soli finding', made['note'])
+        self.assertIn('Findings-only review', made['note'])  # in English by default (#632)
         self.assertIn('Review di soli finding, round 2/3',
                       markdown.render_review(made, 'h', language='Italian'))
         # In English by default (#632).

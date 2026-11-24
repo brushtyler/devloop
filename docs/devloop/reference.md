@@ -409,18 +409,24 @@ Today these texts follow it:
   (verdict, sections, notes on the base and on the trust policy, the notice of a text cut
   short), the comment of a fix, the comment of a readiness check with its notes, and the
   dispatcher's answers to a refused `/devloop approve` and to a `/devloop recheck` that runs no
-  check;
+  check, with the reason it gives;
+- the texts devloop writes in a new review record (#632), when it makes it: the note on what it
+  corrected (a blocking finding without evidence, a corrected verdict, the findings it added
+  from the acceptance map), the defaults of what the reviewer left out, the findings of the
+  acceptance map, and the review of a CI failure with its notes;
 - the [advisory review](guide.md#advisory-review-for-the-operator) and the dispatcher's summary
   of it (#632), whose titles the advisory prompt names in the same language;
 - the comment of a [conclave](guide.md#conclave-on-a-block) (#632).
 
-Only the text devloop composes changes. The values of the records stay as written, in every
-language: the opinions `ok`, `dubbi`, `contrario` and the votes `APPROVA`, `BLOCCA` of the
-agents' schemas, and the texts a record holds, such as the note of a review, the reasons of a
-conclave or of a refused recheck and the gaps of a readiness check, are shown as recorded. The
-other texts of the dispatcher (escalations, merge and receipts among them, and the acceptance
-map and the step on the host that the comment of a fix repeats from the pull request) are still
-in Italian, until the parts of #628 that translate them.
+Only the text devloop composes changes, in the language of the moment it composes it. The
+values of the records stay as written, in every language: the opinions `ok`, `dubbi`,
+`contrario` and the votes `APPROVA`, `BLOCCA` of the agents' schemas, the texts of the agents
+(the reasons of a conclave vote, the gaps of a readiness check) and the texts of a record
+already published, such as the note of an earlier review or the reason of an earlier recheck,
+are shown as recorded. The other texts of the dispatcher (escalations, with the descriptions of
+their classes, merge and receipts among them, and the acceptance map and the step on the host
+that the comment of a fix repeats from the pull request) are still in Italian, until the parts
+of #628 that translate them.
 
 What devloop reads never changes with the language: the `devloop:<kind>:v1` markers and their
 fields, the `/devloop …` commands and the labels. A text that devloop recognises by its title or

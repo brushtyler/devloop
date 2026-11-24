@@ -128,8 +128,9 @@ class NormalizeReviewTests(unittest.TestCase):
         self.assertEqual(record['verdict'], 'request_changes')
         (derived,) = record['blocking_findings']
         self.assertEqual(derived['key'], f'1/{REV}/R1-1')
-        self.assertIn('Criterio di accettazione 2', derived['title'])
-        self.assertIn('mappa di copertura', record['note'])
+        # In English by default (#632).
+        self.assertIn('Acceptance criterion 2', derived['title'])
+        self.assertIn('coverage map', record['note'])
 
     def test_not_covered_with_reason_is_left_to_the_reviewer(self):
         amap = covered_map()

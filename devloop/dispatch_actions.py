@@ -46,6 +46,7 @@ from .ports import summarize_checks
 from .review import (FINDINGS_ONLY, ci_failure_review, current_round, findings_only,
                      flow_verdict, last_round, normalize_review, open_findings, owner_of,
                      round_verdict)
+from .review import TEXTS as REVIEW_TEXTS
 from .supervision import SYNC_FAILED, TOOL_FAILURE
 from .workspace import WorkspaceError
 
@@ -323,26 +324,19 @@ class ActionsMixin:
                                    max_rounds=self._last_round_allowed(pr.reviews,
                                                                        pr.granted_rounds,
                                                                        pr.fixes, pr.closures),
-                                   head_sha=pr.head_sha)
+                                   head_sha=pr.head_sha, language=self.cfg.language)
+        # The notes in the project's language (#632).
+        t = REVIEW_TEXTS.texts(self.cfg.language)
         notes = []
         if voided:
-            notes.append(f'La review del round {round_no} ha approvato questo stesso commit: '
-                         'il fallimento della CI fa decadere l\'approvazione ed entra nel suo '
-                         'round, non ne apre uno nuovo; il verdetto del round diventa '
-                         '`request_changes` e la correzione risponde ai finding della CI.')
+            notes.append(t('ci_voided', round=round_no))
         elif joined:
-            notes.append(f'La review del round {round_no} ha chiesto modifiche su questo stesso '
-                         'commit: il fallimento della CI entra nel suo round, non ne apre uno '
-                         'nuovo, e una sola correzione risponde a tutti i finding.')
+            notes.append(t('ci_joined', round=round_no))
         rerun = rerun_of(pr.reruns, pr.head_sha)
         if rerun is not None:
-            notes.append(
-                'I job falliti di questo commit erano già stati rilanciati una volta, perché '
-                'nessun modulo fallito era pertinente alla PR (run '
-                + ', '.join(str(r) for r in rerun['runs']) + '; moduli: '
-                + (', '.join(rerun['modules']) or 'nessuno') + '). Anche il rilancio è fallito: '
-                + ('questo fallimento entra nel round.' if joined
-                   else 'questo fallimento conta come round.'))
+            notes.append(t('ci_rerun', runs=', '.join(str(r) for r in rerun['runs']),
+                           modules=', '.join(rerun['modules']) or t('ci_no_modules'),
+                           outcome=t('ci_rerun_joined' if joined else 'ci_rerun_round')))
         review['note'] = ' '.join(notes)
         review['receipt'] = receipt
         if self.ledger is not None:
@@ -774,7 +768,8 @@ class ActionsMixin:
                                     max_rounds=max_rounds, head_sha=pr.head_sha,
                                     ci=ci, reviewer=key, criteria=criteria,
                                     acceptance_map=acceptance_map,
-                                    role=FINDINGS_ONLY if key in findings else None)
+                                    role=FINDINGS_ONLY if key in findings else None,
+                                    language=cfg.language)
 
         def approves(key, raw):
             # Whether the verdict of the first reviewer leaves the round open (#521), as the
