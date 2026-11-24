@@ -28,17 +28,30 @@ VERIFIED_ARCH=aarch64
 OPS_STATE_DIR=.devloop
 
 # I segnaposto @NOME@ che `render` sostituisce nei file dichiarativi (unità, sudoers).
-OPS_TEMPLATE_VARS='REPO DEVLOOP_USER SUPERVISOR_USER AGENT_USER COORDINATOR_USER DEVLOOP_HOME AGENT_HOME DEVLOOP_CLONE STATE_DIR STATE_PATH LAUNCHER_CMD DEVLOOP_PATH AGENT_PATH SERVICE_NAME REPO_LOCK_DIR REPO_LOCK_GROUP COORDINATOR_OPS_DIR'
+OPS_TEMPLATE_VARS='REPO DEVLOOP_USER SUPERVISOR_USER AGENT_USER COORDINATOR_USER DEVLOOP_HOME AGENT_HOME DEVLOOP_CLONE STATE_DIR STATE_PATH LAUNCHER_CMD DEVLOOP_PATH AGENT_PATH SERVICE_NAME REPO_LOCK_DIR REPO_LOCK_GROUP COORDINATOR_OPS_DIR COORDINATION_DIR WATCHDOG_USER WATCHDOG_OPS_DIR'
 
 # I file di ops/ che check-host.sh legge (#530): setup-coordinator.sh li copia, con i parametri
 # (params.env), nella directory di root COORDINATOR_OPS_DIR, da cui il coordinatore esegue come
-# root `check-host.sh --read-only`, mai dal clone di devloop né da un checkout scrivibile.
-OPS_COORDINATOR_FILES='lib.sh host/check-host.sh host/coordinator-wait.sh host/sudoers-supervisor host/sudoers-agent host/sudoers-coordinator host/tmpfiles-devloop-repos.conf host/devloop.service host/devloop@.service host/devloop-project.conf'
+# root `check-host.sh --read-only`, mai dal clone di devloop né da un checkout scrivibile. Con
+# loro il risveglio dei ruoli (role-wait.sh, #602) e il suo involucro coordinator-wait.sh (#543).
+OPS_COORDINATOR_FILES='lib.sh host/check-host.sh host/role-wait.sh host/coordinator-wait.sh host/role-watchdog.sh host/sudoers-supervisor host/sudoers-agent host/sudoers-coordinator host/tmpfiles-devloop-repos.conf host/devloop.service host/devloop@.service host/devloop-project.conf host/devloop-role-watchdog@.service host/devloop-role-watchdog@.timer host/devloop-role-watchdog-failed@.service host/role-watchdog-project.conf'
+# Il risveglio del supervisore (#602): setup-supervisor.sh copia questi file, con i parametri,
+# nella directory di root SUPERVISOR_OPS_DIR, da cui il supervisore lo esegue.
+OPS_SUPERVISOR_FILES='lib.sh host/role-wait.sh'
+# Il watchdog dei ruoli (#602): setup-supervisor.sh e setup-coordinator.sh copiano questi file, con
+# i parametri del progetto, nella directory di root WATCHDOG_OPS_DIR, da cui lo esegue l'istanza
+# devloop-role-watchdog@<progetto>; le unità template (OPS_WATCHDOG_UNITS) vanno in SYSTEMD_DIR,
+# una volta per host, con una drop-in per istanza (host/role-watchdog-project.conf).
+OPS_WATCHDOG_FILES='lib.sh host/role-watchdog.sh'
+OPS_WATCHDOG_UNITS='devloop-role-watchdog@.service devloop-role-watchdog@.timer devloop-role-watchdog-failed@.service'
 
 # La casella fra supervisore e coordinatore (#543): sotto COORDINATION_DIR una directory di
 # messaggi per destinatario, ciascuna con la sua done/ per i messaggi letti. Tutte di root, del
 # gruppo COORDINATION_GROUP (supervisore e coordinatore, nessun altro), 2770.
 COORDINATION_BOXES='to-coordinator to-supervisor'
+# I battiti dei ruoli (#602): COORDINATION_DIR/heartbeat/<ruolo>, che role-wait.sh scrive a ogni
+# avvio e il watchdog dei ruoli legge; la directory è come le caselle, senza done/.
+COORDINATION_HEARTBEAT=heartbeat
 
 # Nella home dell'utente degli agent (#438), come CLI_DIRS, CLI_SEALED e CLIS di
 # devloop/agentuser.py: le directory delle CLI, di root, del gruppo dell'utente degli agent e con
@@ -465,6 +478,11 @@ ops_load_params() {
         # La casella fra supervisore e coordinatore (#543) è del progetto, come la sveglia del
         # coordinatore che la legge.
         : "${COORDINATION_DIR:=/var/lib/devloop-coordination-$PROJECT}"
+        # La copia di root del risveglio del supervisore e il watchdog dei ruoli (#602): del
+        # progetto, con un utente del watchdog per progetto, che entra solo nella sua casella.
+        : "${SUPERVISOR_OPS_DIR:=/usr/local/lib/devloop-supervisor-$PROJECT}"
+        : "${WATCHDOG_OPS_DIR:=/usr/local/lib/devloop-role-watchdog-$PROJECT}"
+        : "${WATCHDOG_USER:=role-watchdog-$PROJECT}"
         # L'avviatore della sorgente a parte, dal tag SOURCE_REF del progetto (#573): una
         # directory per progetto, così due progetti con tag diversi non si sovrascrivono a
         # turno lo stesso file.
@@ -516,7 +534,22 @@ ops_load_params() {
     : "${TMPFILES_FILE:=/etc/tmpfiles.d/devloop-repos.conf}"
     : "${COORDINATION_DIR:=/var/lib/devloop-coordination}"
     : "${COORDINATION_GROUP:=devloop-roles}"
-    : "${COORDINATOR_WAIT_PERIOD:=14400}"
+    : "${SUPERVISOR_OPS_DIR:=/usr/local/lib/devloop-supervisor}"
+    : "${WATCHDOG_OPS_DIR:=/usr/local/lib/devloop-role-watchdog}"
+    : "${WATCHDOG_USER:=role-watchdog}"
+    # Il periodo del risveglio dei ruoli (#602), un'ora; per il coordinatore
+    # COORDINATOR_WAIT_PERIOD, se params.env lo scrive (#543).
+    : "${ROLE_WAIT_PERIOD:=3600}"
+    : "${COORDINATOR_WAIT_PERIOD:=$ROLE_WAIT_PERIOD}"
+    # Il nome del progetto nei nomi per progetto dei ruoli (#602): PROJECT, o _default senza
+    # PROJECT. '_' non è ammesso in PROJECT, così l'installazione senza PROJECT non coincide mai
+    # con un progetto (PROJECT=default compreso): unità, drop-in e stato restano distinti.
+    OPS_INSTANCE=${PROJECT:-_default}
+    # L'istanza del watchdog dei ruoli (#602).
+    WATCHDOG_INSTANCE=$OPS_INSTANCE
+    WATCHDOG_UNIT=devloop-role-watchdog@$WATCHDOG_INSTANCE
+    WATCHDOG_DROPIN=$SYSTEMD_DIR/$WATCHDOG_UNIT.service.d/project.conf
+    WATCHDOG_FAILED_DROPIN=$SYSTEMD_DIR/devloop-role-watchdog-failed@$WATCHDOG_INSTANCE.service.d/project.conf
 
     [[ $REPO =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$ ]] || die "REPO deve essere owner/nome: '$REPO'"
     [[ $APP_PREFIX =~ ^[a-z0-9-]*$ ]] || die "APP_PREFIX ammette solo minuscole, cifre e '-': '$APP_PREFIX'"
@@ -589,6 +622,7 @@ ops_load_params() {
     _require_name SUPERVISOR_USER
     _require_name AGENT_USER
     _require_name COORDINATOR_USER
+    _require_name WATCHDOG_USER
     _require_name REPO_LOCK_GROUP
     [ "$AGENT_USER" != "$DEVLOOP_USER" ] || die "AGENT_USER deve essere diverso da DEVLOOP_USER"
     [ "$AGENT_USER" != "$SUPERVISOR_USER" ] || die "AGENT_USER deve essere diverso da SUPERVISOR_USER"
@@ -597,6 +631,10 @@ ops_load_params() {
     local role
     for role in DEVLOOP_USER SUPERVISOR_USER AGENT_USER; do
         [ "$COORDINATOR_USER" != "${!role}" ] || die "COORDINATOR_USER deve essere diverso da $role"
+    done
+    # Il watchdog dei ruoli (#602) entra solo nella casella del suo progetto: un utente suo.
+    for role in DEVLOOP_USER SUPERVISOR_USER AGENT_USER COORDINATOR_USER; do
+        [ "$WATCHDOG_USER" != "${!role}" ] || die "WATCHDOG_USER deve essere diverso da $role"
     done
     local path
     for path in DEVLOOP_HOME SUPERVISOR_HOME AGENT_HOME COORDINATOR_HOME DEVLOOP_CLONE \
@@ -626,8 +664,22 @@ ops_load_params() {
             || die "COORDINATION_DIR non può stare dentro né contenere $inside"
     done
     _require_name COORDINATION_GROUP
-    [[ $COORDINATOR_WAIT_PERIOD =~ ^[1-9][0-9]{0,6}$ ]] \
-        || die "COORDINATOR_WAIT_PERIOD è un numero di secondi, da 1 a 9999999: '$COORDINATOR_WAIT_PERIOD'"
+    # Le copie di root del risveglio del supervisore e del watchdog dei ruoli (#602), come quella
+    # del coordinatore: fuori dalle home, dallo state_dir e dalla casella.
+    local copy
+    for copy in SUPERVISOR_OPS_DIR WATCHDOG_OPS_DIR; do
+        [[ ${!copy} =~ ^/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+$ ]] && ! [[ ${!copy}/ =~ /\.\.?/ ]] \
+            || die "$copy deve essere un percorso assoluto di almeno due livelli, senza spazi né '.' o '..': '${!copy}'"
+        for inside in "$DEVLOOP_HOME" "$SUPERVISOR_HOME" "$AGENT_HOME" "$COORDINATOR_HOME" \
+            "$STATE_PATH" "$DEVLOOP_CLONE" "$COORDINATION_DIR"; do
+            [[ ${!copy}/ != "$inside"/* ]] && [[ $inside/ != "${!copy}"/* ]] \
+                || die "$copy non può stare dentro né contenere $inside"
+        done
+    done
+    for copy in ROLE_WAIT_PERIOD COORDINATOR_WAIT_PERIOD; do
+        [[ ${!copy} =~ ^[1-9][0-9]{0,6}$ ]] \
+            || die "$copy è un numero di secondi, da 1 a 9999999: '${!copy}'"
+    done
     ops_check_host_users
 }
 
@@ -643,7 +695,16 @@ _ops_host_users() {
     for file in "$SYSTEMD_DIR"/devloop*.service "$SYSTEMD_DIR"/devloop@*.service.d/project.conf; do
         [ -f "$file" ] && [ -r "$file" ] || continue
         [ "$file" = "$UNIT_FILE" ] || [ "$file" = "$DROPIN_FILE" ] && continue
+        # Le unità del watchdog dei ruoli (#602) non sono il servizio di un progetto.
+        case $(basename "$file") in devloop-role-watchdog*) continue ;; esac
         sed -n "s|^User=\([a-z_][a-z0-9_-]*\)\$|\1 devloop $file|p" "$file"
+    done
+    # Il watchdog dei ruoli di un altro progetto (#602): il suo utente entra solo nella casella di
+    # quel progetto.
+    for file in "$SYSTEMD_DIR"/devloop-role-watchdog@*.service.d/project.conf; do
+        [ -f "$file" ] && [ -r "$file" ] || continue
+        [ "$file" = "$WATCHDOG_DROPIN" ] && continue
+        sed -n "s|^User=\([a-z_][a-z0-9_-]*\)\$|\1 watchdog $file|p" "$file"
     done
     for dir in $(printf '%s\n' "$(dirname "$SUDOERS_FILE")" "$(dirname "$AGENT_SUDOERS_FILE")" | sort -u); do
         for file in "$dir"/devloop-*; do
@@ -672,7 +733,7 @@ _ops_host_users() {
 ops_check_host_users() {
     local user role file var
     while read -r user role file; do
-        for var in DEVLOOP_USER AGENT_USER SUPERVISOR_USER COORDINATOR_USER; do
+        for var in DEVLOOP_USER AGENT_USER SUPERVISOR_USER COORDINATOR_USER WATCHDOG_USER; do
             [ "${!var}" = "$user" ] || continue
             [ "$var" = SUPERVISOR_USER ] && [ "$role" = supervisor ] && continue
             die "$var '$user' è già l'utente $role di un'altra installazione di devloop dell'host ($file): ogni progetto ha i suoi utenti"
@@ -792,7 +853,8 @@ ensure_traverse_acl() {
 
 # ensure_coordination USER: la casella fra supervisore e coordinatore (#543). Il gruppo
 # COORDINATION_GROUP con dentro USER, e COORDINATION_DIR con una directory di messaggi per
-# destinatario (COORDINATION_BOXES) e la sua done/, tutte root:COORDINATION_GROUP 2770: i due
+# destinatario (COORDINATION_BOXES) e la sua done/, e quella dei battiti (#602,
+# COORDINATION_HEARTBEAT), tutte root:COORDINATION_GROUP 2770: i due
 # ruoli si scrivono a vicenda, nessun altro utente vi entra. Una voce che è un link o un file al
 # posto di una directory (la casella di prima, con un file per destinatario) ferma lo script.
 ensure_coordination() {
@@ -811,7 +873,7 @@ ensure_coordination() {
     for dir in "$COORDINATION_DIR" \
         $(for box in $COORDINATION_BOXES; do
               printf '%s\n' "$COORDINATION_DIR/$box" "$COORDINATION_DIR/$box/done"
-          done); do
+          done) "$COORDINATION_DIR/$COORDINATION_HEARTBEAT"; do
         if [ -L "$dir" ] || { [ -e "$dir" ] && ! [ -d "$dir" ]; }; then
             die "$dir non è una directory: la casella di prima va spostata (ops/host/migrate.md, \"Casella fra i ruoli e sveglia del coordinatore (#543)\"); niente cambiato da qui"
         fi
@@ -827,6 +889,116 @@ ensure_coordination() {
             run chmod 2770 "$dir"
         fi
     done
+}
+
+# ops_copy_file SRC DEST: DEST uguale a SRC byte per byte, 644 di root; lo riscrive solo se serve.
+# Per le copie di root degli script dei ruoli (COORDINATOR_OPS_DIR, SUPERVISOR_OPS_DIR,
+# WATCHDOG_OPS_DIR).
+ops_copy_file() {
+    local src=$1 dest=$2
+    [ -f "$src" ] || die "manca $src"
+    if [ -f "$dest" ] && ! [ -L "$dest" ] && cmp -s "$src" "$dest" \
+        && [ "$(stat -c '%a %U' "$dest")" = '644 root' ]; then
+        ok "$dest è già aggiornato"
+        return
+    fi
+    run install -m 644 -o root -g root "$src" "$dest" \
+        || die "install non riesce a scrivere $dest: setup interrotto"
+}
+
+# ops_root_copy DIR FILE...: in DIR, di root 755, i FILE di ops/ e i parametri (params.env).
+ops_root_copy() {
+    local dir=$1 name
+    shift
+    ensure_dir "$dir" 755 root
+    ensure_dir "$dir/host" 755 root
+    for name in "$@"; do
+        ops_copy_file "$OPS_DIR/$name" "$dir/$name"
+    done
+    ops_copy_file "$PARAMS_FILE" "$dir/params.env"
+}
+
+# ensure_dir_acl USER DIR PERMS: sulla directory DIR l'ACL u:USER:PERMS (per esempio --x o -wx),
+# se manca; una diversa la riporta a PERMS. Una DIR che non esiste, o che è un link, è un avviso.
+ensure_dir_acl() {
+    local user=$1 dir=$2 perms=$3 entry
+    if ! [ -d "$dir" ] || [ -L "$dir" ]; then
+        warn "$dir non esiste o è un link: crearlo, poi rieseguire questo script"
+        return 0
+    fi
+    entry=$(getfacl -p --omit-header "$dir" 2>/dev/null | grep "^user:$user:" | head -n 1 || true)
+    entry=${entry%%[[:space:]]*}
+    if [ "$entry" = "user:$user:$perms" ]; then
+        ok "ACL presente: $entry su $dir"
+    else
+        [ -z "$entry" ] || warn "ACL attuale $entry su $dir: la riporto a $perms"
+        run setfacl -m "u:$user:$perms" "$dir"
+    fi
+}
+
+# overlay_declares_coordinator FILE: l'overlay FILE dichiara il coordinatore del progetto (#571),
+# con la sua app ([apps.coordinator]) o il suo ruolo ([roles.coordinator]).
+overlay_declares_coordinator() {
+    [ -f "$1" ] && python3 -I -B - "$1" <<'EOF'
+import sys, tomllib
+try:
+    with open(sys.argv[1], 'rb') as fh:
+        data = tomllib.load(fh)
+except (OSError, tomllib.TOMLDecodeError):
+    sys.exit(1)
+declared = any(isinstance(data.get(table), dict) and 'coordinator' in data[table]
+               for table in ('apps', 'roles'))
+sys.exit(0 if declared else 1)
+EOF
+}
+
+# Le ACL del watchdog dei ruoli (#602) sulla casella del suo progetto, una "<directory> <permessi>"
+# per riga: l'attraversamento di COORDINATION_DIR e di heartbeat/ (legge i battiti, 664, senza
+# elencarli) e la scrittura dei messaggi in to-supervisor/ e to-coordinator/ (senza leggerli).
+watchdog_acls() {
+    local box
+    printf '%s --x\n' "$COORDINATION_DIR" "$COORDINATION_DIR/$COORDINATION_HEARTBEAT"
+    for box in $COORDINATION_BOXES; do
+        printf '%s -wx\n' "$COORDINATION_DIR/$box"
+    done
+}
+
+# ensure_role_watchdog BOTH: il watchdog dei ruoli (#602). Le unità template
+# devloop-role-watchdog@.service, @.timer e -failed@.service in SYSTEMD_DIR, una volta per host;
+# con BOTH=1 (supervisore e coordinatore del progetto ci sono) anche l'utente WATCHDOG_USER, fuori
+# dal gruppo dei ruoli, le sue ACL sulla casella del progetto, la copia di root WATCHDOG_OPS_DIR
+# con i parametri, le drop-in dell'istanza e il timer abilitato e avviato. Con BOTH=0 lo dice e
+# lascia l'istanza com'è.
+ensure_role_watchdog() {
+    local both=$1 unit changed=0 dropin line dir perms
+    for unit in $OPS_WATCHDOG_UNITS; do
+        put_file "$SYSTEMD_DIR/$unit" 644 root "$(render "$OPS_DIR/host/$unit")" && changed=1
+    done
+    if [ "$both" != 1 ]; then
+        ok "il progetto non ha ancora sia il supervisore sia il coordinatore: l'istanza $WATCHDOG_UNIT si prepara quando ci sono entrambi (rieseguire setup-supervisor.sh o setup-coordinator.sh)"
+        [ "$changed" = 0 ] || run systemctl daemon-reload
+        return 0
+    fi
+    if user_exists "$WATCHDOG_USER"; then
+        ok "l'utente $WATCHDOG_USER esiste"
+    else
+        run useradd --system --user-group --no-create-home --home-dir / \
+            --shell /usr/sbin/nologin "$WATCHDOG_USER"
+    fi
+    if id -nG "$WATCHDOG_USER" 2>/dev/null | tr ' ' '\n' | grep -qxF "$COORDINATION_GROUP"; then
+        die "$WATCHDOG_USER è nel gruppo $COORDINATION_GROUP: il watchdog entra solo nella casella del suo progetto, con le ACL (gpasswd -d $WATCHDOG_USER $COORDINATION_GROUP)"
+    fi
+    while read -r dir perms; do
+        ensure_dir_acl "$WATCHDOG_USER" "$dir" "$perms"
+    done < <(watchdog_acls)
+    ops_root_copy "$WATCHDOG_OPS_DIR" $OPS_WATCHDOG_FILES
+    line=$(render "$OPS_DIR/host/role-watchdog-project.conf")
+    for dropin in "$WATCHDOG_DROPIN" "$WATCHDOG_FAILED_DROPIN"; do
+        ensure_dir "$(dirname "$dropin")" 755 root
+        put_file "$dropin" 644 root "$line" && changed=1
+    done
+    [ "$changed" = 0 ] || run systemctl daemon-reload
+    run systemctl enable --now "$WATCHDOG_UNIT.timer"
 }
 
 # clone_origin DIR: l'URL dell'origin del clone DIR, letto da .git/config senza eseguire git nel

@@ -19,6 +19,7 @@ import stat
 import subprocess
 import tempfile
 import textwrap
+import time
 import tomllib
 import unittest
 from pathlib import Path
@@ -31,7 +32,8 @@ ROOT = Path(__file__).resolve().parents[1]
 OPS = ROOT / 'ops'
 SCRIPTS = ('host/setup-devloop.sh', 'host/setup-supervisor.sh', 'host/setup-agent-user.sh',
            'host/setup-coordinator.sh', 'host/check-host.sh', 'host/start-role.sh',
-           'host/coordinator-wait.sh', 'github/create-apps.sh')
+           'host/coordinator-wait.sh', 'host/role-wait.sh', 'host/role-watchdog.sh',
+           'github/create-apps.sh')
 BASH = shutil.which('bash')
 ME = getpass.getuser()
 PREFIX = 'brushtyler-devloop-'
@@ -50,6 +52,7 @@ LEVEL = {'read': 1, 'write': 2}
 FAKE_AGENT = 'opsdry-agent'
 FAKE_SUPERVISOR = 'opsdry-supervisor'
 FAKE_COORDINATOR = 'opsdry-coordinator'
+FAKE_WATCHDOG = 'opsdry-watchdog'
 # check-host.sh for a project whose overlay declares no coordinator (#571).
 NO_COORDINATOR = ('  ok: {overlay} non dichiara né [apps.coordinator] né [roles.coordinator]: '
                   'nessun coordinatore per questo progetto (per aggiungerlo, setup-coordinator.sh)'
@@ -211,6 +214,11 @@ exec {shlex.quote(STAT)} "$@"''')
             # the tests is a member of.
             'COORDINATION_DIR': str(self.tmp / 'coordination'),
             'COORDINATION_GROUP': GROUP,
+            # The root copies of the wake-up of the supervisor and of the watchdog of the roles,
+            # and the watchdog's user (#602): none of them the host's.
+            'SUPERVISOR_OPS_DIR': str(self.tmp / 'lib' / 'devloop-supervisor'),
+            'WATCHDOG_OPS_DIR': str(self.tmp / 'lib' / 'devloop-role-watchdog'),
+            'WATCHDOG_USER': FAKE_WATCHDOG,
         }
         values.update(overrides)
         path = self.tmp / 'params.env'
@@ -251,6 +259,10 @@ class LayoutTests(unittest.TestCase):
                      'host/setup-agent-user.sh', 'host/sudoers-agent',
                      'host/setup-coordinator.sh', 'host/sudoers-coordinator',
                      'host/check-host.sh', 'host/migrate.md', 'host/start-role.sh',
+                     'host/role-wait.sh', 'host/role-watchdog.sh',
+                     'host/devloop-role-watchdog@.service', 'host/devloop-role-watchdog@.timer',
+                     'host/devloop-role-watchdog-failed@.service',
+                     'host/role-watchdog-project.conf',
                      'github/create-apps.sh', 'github/ruleset-main.json', 'github/tokens.md',
                      *(f'github/apps/{role}.json' for role in REQUIRED)):
             self.assertTrue((OPS / name).is_file(), name)
@@ -1189,11 +1201,12 @@ class CoordinatorGuideTests(unittest.TestCase):
         self.assertEqual(token, [
             mint + '-- gh issue comment <ISSUE> --body-file <FILE>',
             mint + '--perm actions=read -- gh run view <RUN> --log-failed'])
-        # The wake-up (#543) runs as the coordinator, from the root copy, without sudo.
-        wake = [c for c in commands if 'coordinator-wait.sh' in c]
+        # The wake-up (#543, #602) runs as the role, from the root copy, without sudo.
+        wake = [c for c in commands if 'role-wait.sh' in c]
         self.assertEqual([c.split('#')[0].strip() for c in wake], [
-            'bash /usr/local/lib/devloop-coordinator/host/coordinator-wait.sh',
-            'bash /usr/local/lib/devloop-coordinator/host/coordinator-wait.sh --period 3600'])
+            'bash /usr/local/lib/devloop-coordinator/host/role-wait.sh --role coordinator',
+            'bash /usr/local/lib/devloop-coordinator/host/role-wait.sh --role coordinator '
+            '--period 7200'])
         # Each other example of the coordinator is a command of its sudoers.
         allowed = self.sudoers()
         for command in [c for c in commands[2:] if c not in token and c not in wake]:
@@ -1762,7 +1775,8 @@ class DryRunTests(OpsTestCase):
                 watch = WAIT_WATCH.replace('@LAUNCHER_CMD@', launcher).replace('@STATE_PATH@',
                                                                               state)
                 self.assertIn(f'    |     {watch}, \\\n', out)
-                self.assertIn(f'  bash {copy}/host/coordinator-wait.sh\n', out)
+                self.assertIn('host/role-wait.sh', files)
+                self.assertIn(f'  bash {copy}/host/role-wait.sh --role coordinator\n', out)
                 self.assertNotRegex(out, r'@[A-Z_]+@')
         self.assertEqual(self.mutating_calls(), [])
         self.assertEqual(self.tree(), before)
@@ -1821,6 +1835,74 @@ class DryRunTests(OpsTestCase):
         self.assertIn(f'{box}/to-coordinator non è una directory: la casella di prima va '
                       'spostata (ops/host/migrate.md, "Casella fra i ruoli e sveglia del '
                       'coordinatore (#543)")', done.stderr)
+        self.assertEqual(self.mutating_calls(), [])
+
+    def test_setup_supervisor_installs_its_wake_up_and_the_watchdog_of_the_roles(self):
+        # #602: the root copy of role-wait.sh, the heartbeats in the mailbox, the template units
+        # of the watchdog once per host and, only when the project has the coordinator too, the
+        # instance of the project with its user, its ACLs and its timer enabled.
+        state = self.home / 'devloop/devloop/.devloop'
+        state.mkdir(parents=True)
+        overlay = state / 'config.local.toml'
+        overlay.write_text('')
+        params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=FAKE_SUPERVISOR,
+                             AGENT_USER=FAKE_AGENT)
+        copy = self.tmp / 'lib/devloop-supervisor'
+        systemd = self.tmp / 'systemd'
+        units = ('devloop-role-watchdog@.service', 'devloop-role-watchdog@.timer',
+                 'devloop-role-watchdog-failed@.service')
+        for users in ((FAKE_AGENT, FAKE_SUPERVISOR), (FAKE_AGENT, FAKE_SUPERVISOR,
+                                                      FAKE_COORDINATOR)):
+            with self.subTest(users=users):
+                self.fake_host('classic sudo', users=users)
+                done = self.run_script('host/setup-supervisor.sh', '--dry-run', '--params',
+                                       str(params))
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                out = done.stdout
+                self.assertIn(f'  [dry-run] install -d -m 2770 -o root -g {GROUP} '
+                              f'{self.tmp}/coordination/heartbeat\n', out)
+                for name in ('lib.sh', 'host/role-wait.sh'):
+                    self.assertIn(f'[dry-run] install -m 644 -o root -g root {OPS}/{name} '
+                                  f'{copy}/{name}\n', out)
+                self.assertIn(f'[dry-run] install -m 644 -o root -g root {params} '
+                              f'{copy}/params.env\n', out)
+                for unit in units:
+                    self.assertIn(f'scriverebbe {systemd}/{unit} (mode 644, proprietario root)',
+                                  out)
+                self.assertIn(f'  bash {copy}/host/role-wait.sh --role supervisor\n', out)
+                self.assertNotRegex(out, r'@[A-Z_]+@')
+        # Without the coordinator of the project (the last run had its user, not the overlay's
+        # declaration): no instance.
+        self.assertIn('  ok: il progetto non ha ancora sia il supervisore sia il coordinatore: '
+                      "l'istanza devloop-role-watchdog@_default si prepara quando ci sono entrambi",
+                      out)
+        self.assertNotIn(FAKE_WATCHDOG, out)
+        self.assertNotIn('systemctl enable', out)
+        overlay.write_text('[roles.coordinator]\nname = "codex-coordinator"\nkind = "codex"\n')
+        done = self.run_script('host/setup-supervisor.sh', '--dry-run', '--params', str(params))
+        out = done.stdout
+        self.assertIn('[dry-run] useradd --system --user-group --no-create-home --home-dir / '
+                      f'--shell /usr/sbin/nologin {FAKE_WATCHDOG}\n', out)
+        box = self.tmp / 'coordination'
+        for path, perms in ((box, '--x'), (box / 'heartbeat', '--x'),
+                            (box / 'to-coordinator', '-wx'), (box / 'to-supervisor', '-wx')):
+            # The directories do not exist in the dry run: the script says to run it again.
+            self.assertIn(f'  ATTENZIONE: {path} non esiste o è un link: crearlo, poi rieseguire '
+                          'questo script\n', out)
+        self.assertNotIn(f'usermod -aG {GROUP} {FAKE_WATCHDOG}', out)
+        watchdog = self.tmp / 'lib/devloop-role-watchdog'
+        for name in ('lib.sh', 'host/role-watchdog.sh'):
+            self.assertIn(f'[dry-run] install -m 644 -o root -g root {OPS}/{name} '
+                          f'{watchdog}/{name}\n', out)
+        for unit in ('devloop-role-watchdog@_default', 'devloop-role-watchdog-failed@_default'):
+            self.assertIn(f'scriverebbe {systemd}/{unit}.service.d/project.conf (mode 644', out)
+        for line in (f'User={FAKE_WATCHDOG}', f'ReadWritePaths={box}',
+                     f'ExecStart=/usr/bin/bash {watchdog}/host/role-watchdog.sh --params '
+                     f'{watchdog}/params.env'):
+            self.assertIn(f'    | {line}\n', out)
+        self.assertIn('  [dry-run] systemctl daemon-reload\n'
+                      '  [dry-run] systemctl enable --now devloop-role-watchdog@_default.timer\n',
+                      out)
         self.assertEqual(self.mutating_calls(), [])
 
     def test_setup_coordinator_gives_the_coordinator_the_reading_of_the_overlay(self):
@@ -2894,6 +2976,48 @@ esac''')
         self.assertEqual(self.resolved(params, 'LAUNCHER_DIR'),
                          {'LAUNCHER_DIR': '/usr/local/lib/devloop/widget'})
 
+    def test_the_installation_without_project_is_not_the_project_default(self):
+        # #602: the instance of the watchdog of the roles without PROJECT is _default, a name no
+        # PROJECT can have ('_' is not allowed): the project "default" of the same host has its
+        # own unit, drop-ins and state, and the check of the other installations sees the
+        # drop-in of the installation without PROJECT.
+        names = ('OPS_INSTANCE', 'WATCHDOG_INSTANCE', 'WATCHDOG_UNIT', 'WATCHDOG_DROPIN',
+                 'WATCHDOG_FAILED_DROPIN')
+        plain = self.resolved(self.params(), *names)
+        systemd = self.tmp / 'systemd'
+        self.assertEqual(plain, {
+            'OPS_INSTANCE': '_default', 'WATCHDOG_INSTANCE': '_default',
+            'WATCHDOG_UNIT': 'devloop-role-watchdog@_default',
+            'WATCHDOG_DROPIN': f'{systemd}/devloop-role-watchdog@_default.service.d/project.conf',
+            'WATCHDOG_FAILED_DROPIN': f'{systemd}/devloop-role-watchdog-failed@_default.service.d/'
+                                      'project.conf'})
+        named = self.resolved(self.project_params(PROJECT='default', REPO='acme/default'), *names)
+        self.assertEqual(named['WATCHDOG_UNIT'], 'devloop-role-watchdog@default')
+        for name in names:
+            self.assertNotEqual(plain[name], named[name], name)
+        # The installation without PROJECT has its watchdog: its user is refused to the project
+        # "default", another one is accepted.
+        dropin = Path(plain['WATCHDOG_DROPIN'])
+        dropin.parent.mkdir(parents=True)
+        dropin.write_text(render('host/role-watchdog-project.conf',
+                                 {'REPO': 'acme/plain', 'WATCHDOG_USER': FAKE_WATCHDOG,
+                                  'COORDINATION_DIR': str(self.tmp / 'coordination'),
+                                  'WATCHDOG_OPS_DIR': str(self.tmp / 'lib/devloop-role-watchdog')}))
+
+        def load(**overrides):
+            params = self.project_params(PROJECT='default', REPO='acme/default', **overrides)
+            return subprocess.run(
+                [BASH, '-c', f'. {OPS / "lib.sh"}; PARAMS_FILE=$1; ops_load_params; '
+                             'echo "$WATCHDOG_UNIT"', '_', str(params)],
+                capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=60)
+        done = load()
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn(f"WATCHDOG_USER '{FAKE_WATCHDOG}' è già l'utente watchdog di un'altra "
+                      f"installazione di devloop dell'host ({dropin})", done.stderr)
+        done = load(WATCHDOG_USER=f'{FAKE_WATCHDOG}-default')
+        self.assertEqual((done.returncode, done.stdout),
+                         (0, 'devloop-role-watchdog@default\n'), done.stderr)
+
     def test_two_projects_with_different_tags_have_each_its_launcher(self):
         # #573: with PROJECT the launcher of the separate source is the project's, from its own
         # tag, in a directory of its own: the setup of a second project with another tag never
@@ -3238,7 +3362,9 @@ esac''')
                 done = self.run_script(f'host/{script}', '--dry-run', '--params', str(params))
                 self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
                 outs[script] = out = done.stdout
-                self.assertNotIn('useradd', out)
+                # Only the watchdog of the roles (#602), which the host has not yet.
+                self.assertEqual([line for line in out.splitlines() if 'useradd' in line
+                                  and not line.endswith(f' {FAKE_WATCHDOG}')], [])
                 self.assertNotIn('.ghapps-devloop', out)
                 self.assertNotIn('devloop-devloop', out)
                 for old in ('devloop/ssdlc', 'supervisor/ssdlc', 'coordinator/ssdlc'):
@@ -3433,9 +3559,10 @@ class CheckHostTests(OpsTestCase):
         path.chmod(0o755)
 
     def box_dirs(self):
-        """The directories of the mailbox (#543): the box, each destination and its done/."""
+        """The directories of the mailbox (#543): the box, each destination and its done/, and
+        the heartbeats of the roles (#602)."""
         return [self.box] + [self.box / name / sub for name in ('to-coordinator', 'to-supervisor')
-                             for sub in ('', 'done')]
+                             for sub in ('', 'done')] + [self.box / 'heartbeat']
 
     def acl(self, entry, reads=f'user:{ME}:r--'):
         """getfacl: ``entry`` on the home of devloop, ``reads`` on the overlay and the project
@@ -4058,6 +4185,78 @@ exec "$@"''')
                       f'{FAKE_COORDINATOR} non esiste (setup-coordinator.sh)\n', out)
         self.assertEqual(self.mutating_calls(), [])
 
+    def test_the_wake_up_and_the_watchdog_of_the_roles_are_checked(self):
+        # #602: the supervisor's copy of role-wait.sh (a warning when missing); the watchdog of
+        # the roles only when the project has the coordinator: its units, its instance enabled,
+        # its user and its ACLs on the mailbox of the project.
+        done, errors = self.check()
+        self.assertEqual(errors, [], done.stdout)
+        out = done.stdout
+        copy = self.tmp / 'lib/devloop-supervisor'
+        self.assertIn(f'  ATTENZIONE: {copy} non esiste: il supervisore non ha role-wait.sh né '
+                      'il battito (setup-supervisor.sh)\n', out)
+        self.assertIn('  ok: il progetto non ha il coordinatore: nessun watchdog dei ruoli\n', out)
+        self.declare_coordinator()
+        self.fake_host('classic sudo', users=(FAKE_AGENT, FAKE_SUPERVISOR, FAKE_COORDINATOR))
+        params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=FAKE_SUPERVISOR,
+                             AGENT_USER=FAKE_AGENT)
+        self.service('active')
+
+        def watchdog():
+            done = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params))
+            out = done.stdout
+            return out[out.index('==> Watchdog dei ruoli'):out.index('==> Utente degli agent')]
+        out = watchdog()
+        systemd = self.tmp / 'systemd'
+        units = ('devloop-role-watchdog@.service', 'devloop-role-watchdog@.timer',
+                 'devloop-role-watchdog-failed@.service')
+        dropins = [systemd / f'{unit}@_default.service.d/project.conf'
+                   for unit in ('devloop-role-watchdog', 'devloop-role-watchdog-failed')]
+        for unit in units:
+            self.assertIn(f'  ERRORE: {systemd}/{unit} non esiste (setup-supervisor.sh, '
+                          'setup-coordinator.sh)\n', out)
+        for dropin in dropins:
+            self.assertIn(f'  ERRORE: {dropin} non esiste', out)
+        self.assertIn(f"  ERRORE: l'utente {FAKE_WATCHDOG} non esiste", out)
+        self.assertIn('  ok: devloop-role-watchdog@_default.timer è abilitato\n', out)
+        # Installed as the setup scripts install them, with the ACLs of the watchdog.
+        for unit in units:
+            (systemd / unit).write_text(render(f'host/{unit}', {}))
+        watchdog_copy = self.tmp / 'lib/devloop-role-watchdog'
+        for dropin in dropins:
+            dropin.parent.mkdir()
+            dropin.write_text(render('host/role-watchdog-project.conf', {
+                'REPO': 'brushtyler/devloop', 'WATCHDOG_USER': FAKE_WATCHDOG,
+                'COORDINATION_DIR': str(self.box), 'WATCHDOG_OPS_DIR': str(watchdog_copy)}))
+        self.fake_host('classic sudo', users=(FAKE_AGENT, FAKE_SUPERVISOR, FAKE_COORDINATOR,
+                                              FAKE_WATCHDOG))
+        acls = {self.box: '--x', self.box / 'heartbeat': '--x',
+                self.box / 'to-coordinator': '-wx', self.box / 'to-supervisor': '-wx'}
+        self.shim('getfacl', 'for a in "$@"; do last=$a; done\necho "user::rwx"\n'
+                  + ''.join(f'[ "$last" = "{path}" ] && echo "user:{FAKE_WATCHDOG}:{perms}"\n'
+                            for path, perms in acls.items() if path != self.box / 'to-supervisor')
+                  + 'echo "other::---"')
+        out = watchdog()
+        for unit in units:
+            self.assertIn(f'  ok: {systemd}/{unit} coincide con ops/host/{unit}\n', out)
+        for dropin in dropins:
+            self.assertIn(f'  ok: {dropin} coincide con ops/host/role-watchdog-project.conf\n',
+                          out)
+        self.assertIn(f"  ok: l'utente {FAKE_WATCHDOG} esiste\n", out)
+        for path, perms in acls.items():
+            if path == self.box / 'to-supervisor':
+                self.assertIn(f"  ERRORE: su {path} serve l'ACL u:{FAKE_WATCHDOG}:-wx, non "
+                              "'nessuna'", out)
+            else:
+                self.assertIn(f'  ok: ACL user:{FAKE_WATCHDOG}:{perms} su {path}\n', out)
+        self.assertIn(f'  ERRORE: {watchdog_copy}/host/role-watchdog.sh non esiste', out)
+        # A timer not enabled is an error.
+        self.shim('systemctl', 'case "$1" in is-active) echo active ;; is-enabled) echo disabled'
+                               ' ;; show) echo mixed ;; esac')
+        self.assertIn('  ERRORE: devloop-role-watchdog@_default.timer non è abilitato (disabled)',
+                      watchdog())
+        self.assertEqual(self.mutating_calls(), [])
+
     def test_the_key_dir_of_the_coordinator_is_checked(self):
         # #549: the key_dir of the coordinator's app, 700 and its own, with only its key, 600.
         self.declare_coordinator()
@@ -4320,11 +4519,16 @@ exec "$@"''')
         named = {f'host/{p.name}' for p in (OPS / 'host').iterdir()
                  if p.is_file() and p.suffix not in ('.sh', '.md', '.example', '.json')
                  and (p.name in script or f'UNIT_TEMPLATE={p.name}' in lib)}
-        # And the coordinator's wake-up (#543), which the coordinator runs from the copy, with
-        # its parameters.
-        self.assertEqual(named | {'lib.sh', 'host/check-host.sh', 'host/coordinator-wait.sh'},
-                         files)
+        # The units of the watchdog of the roles (#602), which check-host.sh renders by their
+        # names in OPS_WATCHDOG_UNITS, and the scripts it compares with the copies of the roles.
+        named |= {f'host/{unit}' for unit in re.search(
+            r"^OPS_WATCHDOG_UNITS='(.*)'$", lib, re.M).group(1).split()}
+        # And the wake-up of the roles (#602; coordinator-wait.sh, #543), which the coordinator
+        # runs from the copy, with its parameters, and the watchdog's script.
+        self.assertEqual(named | {'lib.sh', 'host/check-host.sh', 'host/coordinator-wait.sh',
+                                  'host/role-wait.sh', 'host/role-watchdog.sh'}, files)
         self.assertIn('host/devloop@.service', named)
+        self.assertIn('host/role-watchdog-project.conf', named)
 
     def real_sudo(self, sudo, env_stderr='', env_status=0):
         """A ``sudo`` whose ``--version`` is that of ``SUDO_FLAVORS``, and whose ``sudo -n -E``
@@ -4685,13 +4889,14 @@ class FakeHostTests(OpsTestCase):
 FAKE_DEVLOOP = 'opsdry-devloop'
 
 
-@unittest.skipIf(BASH is None, 'bash is not installed')
-class CoordinatorWaitTests(OpsTestCase):
-    """ops/host/coordinator-wait.sh (#543), the coordinator's wake-up, run as the coordinator
-    (the user of the tests) with simulated commands: ``sudo`` runs the fake of ``devloop-pinned
-    watch``, which answers from ``watch/<n>.out`` and ``watch/<n>.status`` at its n-th call and
-    then, without news, exits 3 as ``--timeout`` does; and the ``tail`` of run.log; ``systemctl
-    is-active`` says the state of ``service``."""
+class WakeUpCase(OpsTestCase):
+    """The wake-up of the roles run as the role (the user of the tests) with simulated commands:
+    ``sudo`` runs the fake of ``devloop-pinned watch``, which answers from ``watch/<n>.out`` and
+    ``watch/<n>.status`` at its n-th call and then, without news, exits 3 as ``--timeout`` does;
+    and the ``tail`` of run.log; ``systemctl is-active`` says the state of ``service``."""
+
+    SCRIPT = 'host/coordinator-wait.sh'
+    ROLE_ARGS = ()
 
     def setUp(self):
         super().setUp()
@@ -4740,18 +4945,29 @@ state=$(cat {shlex.quote(str(self.service_state))}); echo "$state"
         if delay is not None:
             (self.watch / f'{n}.delay').write_text(f'{delay}\n')
 
-    def wait(self, *args):
+    def wait_command(self, *args):
+        """The command of the wake-up and its environment."""
         env = dict(os.environ, PATH=f'{self.bin}:{os.environ.get("PATH", "/usr/bin:/bin")}',
                    OPS_TEST_CALLS=str(self.calls), HOME=str(self.coordinator_home),
                    LC_ALL='C.UTF-8')
-        return subprocess.run([BASH, str(OPS / 'host/coordinator-wait.sh'), '--params',
-                               str(self.params_file), *args], capture_output=True, text=True,
-                              env=env, stdin=subprocess.DEVNULL, timeout=120)
+        return [BASH, str(OPS / self.SCRIPT), *self.ROLE_ARGS, '--params',
+                str(self.params_file), *args], env
+
+    def wait(self, *args):
+        command, env = self.wait_command(*args)
+        return subprocess.run(command, capture_output=True, text=True, env=env,
+                              stdin=subprocess.DEVNULL, timeout=120)
 
     def watch_calls(self):
         if not self.sudo_log.exists():
             return []
         return [line for line in self.sudo_log.read_text().splitlines() if ' watch ' in line]
+
+
+@unittest.skipIf(BASH is None, 'bash is not installed')
+class CoordinatorWaitTests(WakeUpCase):
+    """ops/host/coordinator-wait.sh (#543), the coordinator's wake-up, now a wrapper of
+    role-wait.sh --role coordinator (#602): the same behaviour, from the same command."""
 
     def test_it_wakes_on_an_event_of_the_coordinator_and_not_on_the_others(self):
         self.answer(1, ['watch baseline: 3 open PRs, 2 open issues'])
@@ -4877,6 +5093,380 @@ state=$(cat {shlex.quote(str(self.service_state))}); echo "$state"
         done = self.wait()
         self.assertEqual(done.returncode, 1)
         self.assertIn(f'va eseguito come {FAKE_COORDINATOR}', done.stderr)
+
+
+@unittest.skipIf(BASH is None, 'bash is not installed')
+class RoleWaitTests(WakeUpCase):
+    """ops/host/role-wait.sh (#602), the wake-up of supervisor and coordinator: the mailbox of
+    each role, every event for the supervisor, and the heartbeat at each start."""
+
+    SCRIPT = 'host/role-wait.sh'
+
+    def setUp(self):
+        super().setUp()
+        # The heartbeat is the role's file, 664 (#602).
+        (self.bin / 'chmod').unlink()
+        self.heartbeats = self.tmp / 'coordination/heartbeat'
+        self.heartbeats.mkdir()
+        (self.tmp / 'coordination/to-supervisor/done').mkdir(parents=True)
+
+    def as_role(self, role):
+        """role-wait.sh --role ROLE, with the user of the tests as that role."""
+        self.ROLE_ARGS = ('--role', role)
+        users = dict(DEVLOOP_USER=FAKE_DEVLOOP, AGENT_USER=FAKE_AGENT, STATE_DIR=str(self.state))
+        if role == 'supervisor':
+            users.update(SUPERVISOR_USER=ME, COORDINATOR_USER=FAKE_COORDINATOR)
+        else:
+            users.update(SUPERVISOR_USER=FAKE_SUPERVISOR, COORDINATOR_USER=ME)
+        self.params_file = self.params(**users)
+
+    def test_a_message_in_its_mailbox_wakes_each_role_at_once(self):
+        for role, other in (('supervisor', 'coordinator'), ('coordinator', 'supervisor')):
+            with self.subTest(role=role):
+                self.as_role(role)
+                box = self.tmp / f'coordination/to-{role}'
+                # A message for the other role does not wake it.
+                (self.tmp / f'coordination/to-{other}/20261124T090000Z-other.txt').write_text('x\n')
+                message = box / '20261124T101500Z-a1b2c3.txt'
+                message.write_text('il coordinatore chiede perché #12 è ferma\n')
+                (box / '.tmp-x9y8z7').write_text('not published yet\n')
+                done = self.wait()
+                self.assertEqual((done.returncode, done.stdout),
+                                 (0, f'casella: 1 messaggi in {box}: {message.name}\n'),
+                                 done.stderr)
+                self.assertTrue(message.exists())
+                self.assertEqual(self.watch_calls(), [])
+                message.unlink()
+                (self.tmp / f'coordination/to-{other}/20261124T090000Z-other.txt').unlink()
+
+    def test_a_message_during_the_watch_wakes_each_role_at_once(self):
+        # The watch runs in the background and the mailbox is read every second meanwhile: a
+        # message that arrives during a round of the watch wakes the role before the round ends.
+        # The round is not stopped (sudo is root's): the next wake-up waits for it, without
+        # starting another one on the same state file, and reports its events.
+        for role, line in (('supervisor', 'PR #5 CI pass @abc1234'),
+                           ('coordinator', 'PR #12 labels +agent:needs-operator')):
+            with self.subTest(role=role):
+                self.as_role(role)
+                (self.watch / 'count').unlink(missing_ok=True)
+                self.sudo_log.unlink(missing_ok=True)
+                self.answer(1, [line], delay=4)
+                command, env = self.wait_command()
+                started = time.monotonic()
+                with subprocess.Popen(command, env=env, stdin=subprocess.DEVNULL,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                      text=True) as proc:
+                    deadline = time.monotonic() + 10
+                    while not self.watch_calls() and time.monotonic() < deadline:
+                        time.sleep(0.05)
+                    self.assertEqual(len(self.watch_calls()), 1)
+                    message = self.tmp / f'coordination/to-{role}/20261124T101500Z-a1b2c3.txt'
+                    message.write_text('un messaggio arrivato durante il watch\n')
+                    out, err = proc.communicate(timeout=30)
+                elapsed = time.monotonic() - started
+                self.assertEqual((proc.returncode, out),
+                                 (0, f'casella: 1 messaggi in {message.parent}: {message.name}\n'),
+                                 err)
+                # Before the end of the round, which lasts 4 seconds.
+                self.assertLess(elapsed, 3.5)
+                message.unlink()
+                done = self.wait()
+                self.assertEqual((done.returncode, done.stdout),
+                                 (0, f'evento: {self.STAMP}{line}\n'), done.stderr)
+                self.assertEqual(len(self.watch_calls()), 1)
+
+    def test_every_event_wakes_the_supervisor_with_its_state_file(self):
+        self.as_role('supervisor')
+        self.answer(1, ['watch baseline: 3 open PRs, 2 open issues'])
+        self.answer(2, ['PR #5 CI pass @abc1234', 'issue #7 labels +agent:ready'])
+        done = self.wait()
+        self.assertEqual((done.returncode, done.stdout),
+                         (0, f'evento: {self.STAMP}PR #5 CI pass @abc1234\n'
+                             f'evento: {self.STAMP}issue #7 labels +agent:ready\n'), done.stderr)
+        clone = f'{self.home}/devloop/devloop'
+        command = (f'/usr/bin/env -C {clone} /usr/bin/python3 {clone}/scripts/devloop-pinned '
+                   f'--state-dir {self.state} watch --until-change --interval 60 --timeout 300 '
+                   f'--state {self.state}/watch-state.json')
+        self.assertEqual(self.watch_calls(), [f'sudo -n -u {FAKE_DEVLOOP} -- {command}'] * 2)
+        # The log is the coordinator's: the supervisor's sudoers has no tail.
+        self.assertNotIn('/usr/bin/tail', self.sudo_log.read_text())
+        self.assertEqual(self.mutating_calls(), [])
+
+    def test_the_period_and_the_service_wake_the_supervisor(self):
+        self.as_role('supervisor')
+        done = self.wait('--period', '1')
+        self.assertEqual(done.stdout, 'periodo: 1s senza eventi del supervisore: il controllo '
+                                      'periodico\n')
+        self.service_state.write_text('failed\n')
+        self.assertEqual(self.wait('--period', '1').stdout, 'servizio: devloop è failed\n')
+
+    def test_each_start_writes_the_heartbeat_of_the_role(self):
+        for role, period in (('supervisor', None), ('coordinator', '1')):
+            with self.subTest(role=role):
+                self.as_role(role)
+                (self.tmp / f'coordination/to-{role}/m.txt').write_text('wake up\n')
+                before = int(time.time())
+                done = self.wait(*(('--period', period) if period else ()))
+                self.assertEqual(done.returncode, 0, done.stderr)
+                beat = self.heartbeats / role
+                at, written = beat.read_text().split()
+                self.assertLessEqual(before, int(at))
+                self.assertLessEqual(int(at), int(time.time()))
+                # The period of the beat: --period, or ROLE_WAIT_PERIOD, one hour.
+                self.assertEqual(written, period or '3600')
+                self.assertEqual(stat.S_IMODE(beat.stat().st_mode), 0o664)
+                # Written atomically: no temporary file left.
+                self.assertEqual([p.name for p in self.heartbeats.iterdir()
+                                  if p.name.startswith('.')], [])
+                (self.tmp / f'coordination/to-{role}/m.txt').unlink()
+
+    def test_without_the_heartbeat_directory_it_warns_and_still_waits(self):
+        self.as_role('supervisor')
+        self.heartbeats.rmdir()
+        done = self.wait('--period', '1')
+        self.assertTrue(done.stdout.startswith('periodo:'), done.stdout)
+        self.assertIn('role-wait: non scrivo il battito', done.stderr)
+
+    def test_a_wrong_role_is_refused(self):
+        self.ROLE_ARGS = ('--role', 'operator')
+        done = self.wait()
+        self.assertEqual(done.returncode, 2)
+        self.assertIn('--role vuole supervisor o coordinator', done.stderr)
+
+
+@unittest.skipIf(BASH is None, 'bash is not installed')
+class RoleWatchdogTests(OpsTestCase):
+    """ops/host/role-watchdog.sh (#602), run as the watchdog of the project (the user of the
+    tests) on a mailbox under the temporary directory, with STATE_DIRECTORY as systemd sets it."""
+
+    def setUp(self):
+        super().setUp()
+        self.fake_host('classic sudo', users=(FAKE_DEVLOOP, FAKE_SUPERVISOR, FAKE_COORDINATOR,
+                                              FAKE_AGENT))
+        # The messages are the watchdog's files, 640.
+        (self.bin / 'chmod').unlink()
+        self.projects = {}
+
+    def project(self, name):
+        """A project on the host: its mailbox, its state of the watchdog and its parameters."""
+        box = self.tmp / f'coordination-{name}'
+        for sub in ('heartbeat', 'to-coordinator/done', 'to-supervisor/done'):
+            (box / sub).mkdir(parents=True)
+        state = self.tmp / f'watchdog-state/{name}'
+        state.mkdir(parents=True)
+        params = self.params(PROJECT=name, REPO=f'brushtyler/{name}',
+                             DEVLOOP_USER=f'{FAKE_DEVLOOP}-{name}', AGENT_USER=FAKE_AGENT,
+                             SUPERVISOR_USER=FAKE_SUPERVISOR, COORDINATOR_USER=FAKE_COORDINATOR,
+                             WATCHDOG_USER=ME, COORDINATION_DIR=str(box),
+                             SUPERVISOR_KEY_DIR=str(self.tmp / f'keys-{name}'))
+        shutil.move(params, self.tmp / f'params-{name}.env')
+        self.projects[name] = (box, state, self.tmp / f'params-{name}.env')
+        return box
+
+    def beat(self, name, role, age, period=3600):
+        box = self.projects[name][0]
+        (box / 'heartbeat' / role).write_text(f'{int(time.time()) - age} {period}\n')
+
+    def watchdog(self, name, mode=None):
+        box, state, params = self.projects[name]
+        env = dict(os.environ, PATH=f'{self.bin}:{os.environ.get("PATH", "/usr/bin:/bin")}',
+                   OPS_TEST_CALLS=str(self.calls), STATE_DIRECTORY=str(state), LC_ALL='C.UTF-8')
+        env.pop('DEVLOOP_WATCHDOG_MODE', None)
+        if mode:
+            env['DEVLOOP_WATCHDOG_MODE'] = mode
+        return subprocess.run([BASH, str(OPS / 'host/role-watchdog.sh'), '--params', str(params)],
+                              capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL,
+                              timeout=120)
+
+    def messages(self, name, box):
+        """The messages published in a box of the project: their text, in order of name."""
+        directory = self.projects[name][0] / box
+        return [p.read_text() for p in sorted(directory.iterdir())
+                if p.is_file() and not p.name.startswith('.')]
+
+    def test_fresh_heartbeats_give_no_alert(self):
+        self.project('alpha')
+        self.beat('alpha', 'supervisor', 60)
+        self.beat('alpha', 'coordinator', 7000)  # less than two periods
+        done = self.watchdog('alpha')
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn('stato invariato: nessun avviso nuovo', done.stdout)
+        self.assertEqual(self.messages('alpha', 'to-coordinator'), [])
+        self.assertEqual(self.messages('alpha', 'to-supervisor'), [])
+        self.assertNotIn("avviso all'operatore", done.stdout)
+        self.assertEqual(self.mutating_calls(), [])
+
+    def test_an_old_supervisor_is_told_to_the_coordinator_once(self):
+        self.project('alpha')
+        self.beat('alpha', 'supervisor', 7300)  # more than two periods of an hour
+        self.beat('alpha', 'coordinator', 60)
+        done = self.watchdog('alpha')
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        sent = self.messages('alpha', 'to-coordinator')
+        self.assertEqual(len(sent), 1)
+        self.assertIn('progetto alpha (brushtyler/alpha): il supervisore è fermo (ultimo '
+                      'battito ', sent[0])
+        self.assertEqual(self.messages('alpha', 'to-supervisor'), [])
+        self.assertNotIn("avviso all'operatore", done.stdout)
+        name = next(p for p in (self.projects['alpha'][0] / 'to-coordinator').iterdir()
+                    if p.is_file())
+        self.assertRegex(name.name, r'^\d{8}T\d{6}Z-watchdog-[A-Za-z0-9]{6}\.txt$')
+        self.assertEqual(stat.S_IMODE(name.stat().st_mode), 0o640)
+        # The same state: no new message.
+        done = self.watchdog('alpha')
+        self.assertIn('stato invariato', done.stdout)
+        self.assertEqual(len(self.messages('alpha', 'to-coordinator')), 1)
+        # Its own period: a supervisor that waits four hours is not stopped after two.
+        self.beat('alpha', 'supervisor', 7300, period=14400)
+        done = self.watchdog('alpha')
+        self.assertIn('supervisore e coordinatore di nuovo attivi', done.stdout)
+        self.assertEqual(len(self.messages('alpha', 'to-coordinator')), 1)
+
+    def test_a_missing_coordinator_is_told_to_the_supervisor_and_the_operator(self):
+        self.project('alpha')
+        self.beat('alpha', 'supervisor', 60)
+        done = self.watchdog('alpha')
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        sent = self.messages('alpha', 'to-supervisor')
+        self.assertEqual(len(sent), 1)
+        self.assertIn('progetto alpha (brushtyler/alpha): il coordinatore è fermo (nessun '
+                      'battito in ', sent[0])
+        self.assertEqual(self.messages('alpha', 'to-coordinator'), [])
+        alerts = [line for line in done.stdout.splitlines()
+                  if line.startswith("avviso all'operatore:")]
+        self.assertEqual(len(alerts), 1)
+        self.assertIn('progetto alpha (brushtyler/alpha)', alerts[0])
+        self.assertIn('#593', alerts[0])
+        self.assertEqual(len(self.messages('alpha', 'to-supervisor')), 1)
+        self.assertNotIn("avviso all'operatore", self.watchdog('alpha').stdout)
+
+    def test_both_stopped_alert_the_operator_and_both_mailboxes(self):
+        self.project('alpha')
+        self.beat('alpha', 'coordinator', 90000)
+        done = self.watchdog('alpha')
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("avviso all'operatore: watchdog dei ruoli, progetto alpha "
+                      '(brushtyler/alpha): supervisore e coordinatore sono fermi', done.stdout)
+        for box in ('to-coordinator', 'to-supervisor'):
+            self.assertEqual(len(self.messages('alpha', box)), 1, box)
+        # Deduplicated: the same state, nothing new; a change of state, a new alert.
+        self.assertIn('stato invariato', self.watchdog('alpha').stdout)
+        self.beat('alpha', 'supervisor', 0)
+        done = self.watchdog('alpha')
+        self.assertIn("avviso all'operatore: watchdog dei ruoli, progetto alpha "
+                      '(brushtyler/alpha): il coordinatore è fermo', done.stdout)
+        self.assertEqual(len(self.messages('alpha', 'to-supervisor')), 2)
+        self.assertEqual(len(self.messages('alpha', 'to-coordinator')), 1)
+
+    def test_a_failed_check_is_told_once_in_both_mailboxes(self):
+        self.project('alpha')
+        for _ in range(2):
+            done = self.watchdog('alpha', mode='failed')
+            self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        for box in ('to-coordinator', 'to-supervisor'):
+            sent = self.messages('alpha', box)
+            self.assertEqual(len(sent), 1, box)
+            self.assertIn('progetto alpha (brushtyler/alpha): il controllo dei battiti è '
+                          'fallito', sent[0])
+            self.assertIn('journalctl -u devloop-role-watchdog@alpha.service', sent[0])
+        # A check that succeeds clears it: the next failure is told again.
+        self.beat('alpha', 'supervisor', 0)
+        self.beat('alpha', 'coordinator', 0)
+        self.assertEqual(self.watchdog('alpha').returncode, 0)
+        self.watchdog('alpha', mode='failed')
+        self.assertEqual(len(self.messages('alpha', 'to-coordinator')), 2)
+
+    def test_a_mailbox_it_cannot_write_fails_the_check(self):
+        box = self.project('alpha')
+        self.beat('alpha', 'coordinator', 0)
+        shutil.rmtree(box / 'to-coordinator')
+        done = self.watchdog('alpha')
+        self.assertEqual(done.returncode, 1)
+        self.assertIn('errore: non scrivo in', done.stderr)
+        # The state is not saved: the next check tries again.
+        self.assertFalse((self.projects['alpha'][1] / 'last').exists())
+
+    def test_another_user_and_no_state_directory_are_errors(self):
+        self.project('alpha')
+        params = self.projects['alpha'][2]
+        params.write_text(params.read_text() + f'WATCHDOG_USER={FAKE_AGENT}-wd\n')
+        done = self.watchdog('alpha')
+        self.assertEqual(done.returncode, 1)
+        self.assertIn(f'va eseguito come {FAKE_AGENT}-wd', done.stderr)
+        params.write_text(params.read_text() + f'WATCHDOG_USER={ME}\n')
+        shutil.rmtree(self.projects['alpha'][1])
+        done = self.watchdog('alpha')
+        self.assertEqual(done.returncode, 1)
+        self.assertIn('manca STATE_DIRECTORY', done.stderr)
+
+    def test_the_instances_of_two_projects_are_isolated(self):
+        # Two projects on the same host: each instance reads and writes only its own mailbox.
+        alpha, beta = self.project('alpha'), self.project('beta')
+        self.beat('beta', 'supervisor', 90000)
+        self.beat('beta', 'coordinator', 90000)
+        self.beat('alpha', 'supervisor', 0)
+        self.beat('alpha', 'coordinator', 0)
+        done = self.watchdog('alpha')
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertNotIn('beta', done.stdout)
+        for box in ('to-coordinator', 'to-supervisor'):
+            self.assertEqual(self.messages('beta', box), [])
+            self.assertEqual(self.messages('alpha', box), [])
+        done = self.watchdog('beta')
+        self.assertIn('progetto beta (brushtyler/beta): supervisore e coordinatore sono fermi',
+                      done.stdout)
+        self.assertEqual(self.messages('alpha', 'to-coordinator'), [])
+        # The units: one user, one mailbox and one copy per instance, with only its own ACLs.
+        units = {}
+        for name, box in (('alpha', alpha), ('beta', beta)):
+            values = {'REPO': f'brushtyler/{name}', 'WATCHDOG_USER': f'role-watchdog-{name}',
+                      'COORDINATION_DIR': str(box),
+                      'WATCHDOG_OPS_DIR': f'/usr/local/lib/devloop-role-watchdog-{name}'}
+            units[name] = render('host/role-watchdog-project.conf', values)
+        for name, other in (('alpha', 'beta'), ('beta', 'alpha')):
+            self.assertIn(f'User=role-watchdog-{name}\n', units[name])
+            self.assertIn(f'ReadWritePaths={self.tmp}/coordination-{name}\n', units[name])
+            self.assertNotIn(other, units[name])
+        # What setup-coordinator.sh gives each watchdog: a user of its own, outside the group of
+        # the roles, with ACLs on its own mailbox only, and its own drop-ins.
+        copy = self.root_copy()
+        (self.home / 'devloop').mkdir(parents=True)
+        for name, other in (('alpha', 'beta'), ('beta', 'alpha')):
+            with self.subTest(project=name):
+                params = self.projects[name][2]
+                params.write_text(params.read_text() + f'WATCHDOG_USER=role-watchdog-{name}\n'
+                                  f'COORDINATOR_OPS_DIR={copy}\n')
+                done = self.run_script('host/setup-coordinator.sh', '--dry-run', '--params',
+                                       str(params))
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                out = done.stdout
+                self.assertIn('[dry-run] useradd --system --user-group --no-create-home '
+                              f'--home-dir / --shell /usr/sbin/nologin role-watchdog-{name}\n',
+                              out)
+                acls = [line.split()[-2:] for line in out.splitlines()
+                        if 'setfacl' in line and 'role-watchdog' in line]
+                box = self.projects[name][0]
+                self.assertEqual(acls, [[f'u:role-watchdog-{name}:--x', str(box)],
+                                        [f'u:role-watchdog-{name}:--x', f'{box}/heartbeat'],
+                                        [f'u:role-watchdog-{name}:-wx', f'{box}/to-coordinator'],
+                                        [f'u:role-watchdog-{name}:-wx', f'{box}/to-supervisor']])
+                self.assertNotIn(f'usermod -aG {GROUP} role-watchdog', out)
+                self.assertNotIn(f'coordination-{other}', out)
+                self.assertIn(f'scriverebbe {self.tmp}/systemd/devloop-role-watchdog@{name}.'
+                              'service.d/project.conf', out)
+                self.assertIn(f'[dry-run] systemctl enable --now devloop-role-watchdog@{name}.'
+                              'timer\n', out)
+        # The user of the watchdog of another project is refused: it would read its mailbox.
+        dropin = self.tmp / 'systemd/devloop-role-watchdog@beta.service.d/project.conf'
+        dropin.parent.mkdir(parents=True)
+        dropin.write_text(units['beta'])
+        params = self.projects['alpha'][2]
+        params.write_text(params.read_text() + 'WATCHDOG_USER=role-watchdog-beta\n')
+        done = self.run_script('host/setup-coordinator.sh', '--dry-run', '--params', str(params))
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("WATCHDOG_USER 'role-watchdog-beta' è già l'utente watchdog di un'altra "
+                      f'installazione di devloop dell\'host ({dropin})', done.stderr)
+        self.assertEqual(self.mutating_calls(), [])
 
 
 # The runbooks of the roles (#531), which start-role.sh gives as the first message.
@@ -5023,6 +5613,7 @@ echo "$2:x:1000:"''')
         # follows them without instructions from the operator.
         box = self.tmp / 'coordination'
         copy = self.tmp / 'lib/devloop-coordinator'
+        supervisor_copy = self.tmp / 'lib/devloop-supervisor'
         for role, directory, inbox, outbox in (
                 ('supervisor', self.clone, 'to-supervisor', 'to-coordinator'),
                 ('coordinator', self.home / 'coordinator', 'to-coordinator', 'to-supervisor')):
@@ -5036,8 +5627,12 @@ echo "$2:x:1000:"''')
                               f'the mailbox between supervisor and coordinator is {box} '
                               f'(group {GROUP})', f'your messages are in {box}/{inbox}/',
                               f'yours to the other role go in {box}/{outbox}/',
-                              f'the coordinator\'s wake-up is bash {copy}/host/'
-                              'coordinator-wait.sh', 'Start now with the section "At startup".'):
+                              # #602: the wake-up of each role.
+                              f'the wake-up of the supervisor is bash {supervisor_copy}/host/'
+                              'role-wait.sh --role supervisor',
+                              f'the wake-up of the coordinator is bash {copy}/host/'
+                              'role-wait.sh --role coordinator',
+                              'Start now with the section "At startup".'):
                     self.assertIn(value, channel)
                 self.assertNotRegex(channel, r'@[A-Z_]+@|\$')
         done = self.start('host', '--cli', 'claude', '--model', 'm', sudo_user=FAKE_OPERATOR)
@@ -5108,7 +5703,8 @@ echo "$2:x:1000:"''')
             PROJECT='devloop', REPO='brushtyler/devloop', DEVLOOP_USER='devloop',
             AGENT_USER='devloop-agent', SUPERVISOR_USER=FAKE_SUPERVISOR,
             COORDINATOR_USER=FAKE_COORDINATOR, DEVLOOP_HOME=str(devloop),
-            SUPERVISOR_CLONE=str(self.clone), COORDINATOR_OPS_DIR='', COORDINATION_DIR='')
+            SUPERVISOR_CLONE=str(self.clone), COORDINATOR_OPS_DIR='', COORDINATION_DIR='',
+            SUPERVISOR_OPS_DIR='')
         self.assertEqual(self.clone, self.home / 'supervisor' / 'devloop')
         box = '/var/lib/devloop-coordination-devloop'
         for role, directory in (('supervisor', self.clone),
@@ -5121,8 +5717,10 @@ echo "$2:x:1000:"''')
                 channel = self.cli_args(directory)[3][-1].split('\n\n')[1]
                 for value in (f'the state_dir of devloop is {state};',
                               f'the mailbox between supervisor and coordinator is {box} ',
-                              'the coordinator\'s wake-up is bash '
-                              '/usr/local/lib/devloop-coordinator-devloop/host/coordinator-wait.sh'):
+                              'the wake-up of the supervisor is bash /usr/local/lib/'
+                              'devloop-supervisor-devloop/host/role-wait.sh --role supervisor',
+                              'the wake-up of the coordinator is bash /usr/local/lib/'
+                              'devloop-coordinator-devloop/host/role-wait.sh --role coordinator'):
                     self.assertIn(value, channel)
                 self.assertNotIn('ssdlc', channel)
                 # #565: the coordinator's key_dir and clone, the defaults of PROJECT.
@@ -5240,8 +5838,14 @@ class RoleRunbookTests(unittest.TestCase):
         coordinator = ' '.join(ROLE_RUNBOOKS['coordinator'].read_text().split())
         self.assertIn('You do not follow the continuous stream, which is the supervisor\'s: only '
                       'your events and a periodic check', coordinator)
-        self.assertIn('bash /usr/local/lib/devloop-coordinator/host/coordinator-wait.sh',
-                      coordinator)
+        # #602: the wake-up of the roles, for each role, and what to do with a stopped role.
+        self.assertIn('bash /usr/local/lib/devloop-coordinator/host/role-wait.sh --role '
+                      'coordinator', coordinator)
+        self.assertIn('bash /usr/local/lib/devloop-supervisor/host/role-wait.sh --role '
+                      'supervisor', supervisor)
+        for text in (supervisor, coordinator):
+            self.assertIn('## Stopped roles', text)
+            self.assertIn('devloop-role-watchdog@<project>', text)
         host = ' '.join(ROLE_RUNBOOKS['host'].read_text().split())
         self.assertIn('## Channel, watching and startup', host)
         self.assertIn('never read its messages', host)
