@@ -628,7 +628,7 @@ class ReportTests(unittest.TestCase):
                            outcome='merged', reason=f'{SHA1} delega', head=SHA1, daily=1,
                            daily_cap=5, daily_left=4)
         when = report.parse_day(day)
-        s = report.Records(gh, TRUST, when, when, RCFG.agents).summary(when)
+        s = report.Records(gh, TRUST, when, when, RCFG.agents, 'Italian').summary(when)
         self.assertEqual(s.coordinator, [
             ('09:00', 100, 'merge', COORDINATOR, f'{SHA1} La regola di fiducia, approvata.',
              'mergiata', 'giorno: 1 di 10'),

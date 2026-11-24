@@ -46,6 +46,11 @@ repeated after a failure, edits it instead of writing another. An archive writte
 its day was still open says so (``open: true``): every publication generates that day again and
 edits the archive if the records changed, until no turn of the day is open. ``devloop run`` publishes at the
 end of a tick, at most every ``[report] interval`` minutes (``AutoReport``).
+
+The texts are in the project's ``language`` (#635, ``TEXTS``): Italian or English, English for a
+language without translation. The records and their markers are the same in every language, and
+the heading of the index of the past days is recognised in every language (``INDEX_HEADINGS``),
+so that a body published before a change of ``language`` keeps its index.
 """
 
 import datetime
@@ -58,6 +63,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .apps import COORDINATOR, DISPATCHER
+from .i18n import ENGLISH, Catalog
 from .markdown import dispatcher_header, publishable, read_marker
 from .supervision import CAPACITY, FINDING, GRANT_BUDGET, GRANT_ROUND, MERGE, MERGE_BUDGET
 from .watch import failure_class
@@ -68,21 +74,137 @@ STATE_FILE = 'report-state.json'
 LOCK_FILE = 'report.lock'
 # The days a publication archives at most when it catches up after a pause.
 MAX_CATCH_UP_DAYS = 31
-TITLE = 'Riepilogo devloop'
-TODAY_HEADING = f'## {TITLE} di oggi'
-INDEX_HEADING = '## Giorni precedenti'
-NOT_REPORTED = 'non riportato'
-_DESTINATION = {'operator': 'all\'operatore', 'supervisor': 'al supervisore'}
-_STATE = {'open': 'in corso', 'incomplete': 'incompleto'}
-# The commands of the supervisor's delegations the summary lists (#466), and their outcomes.
+# The commands of the supervisor's delegations the summary lists (#466).
 GRANT_COMMANDS = (GRANT_ROUND, GRANT_BUDGET, CAPACITY)
-_GRANT_OUTCOME = {'granted': 'concessa', 'refused': 'rifiutata'}
-# The delegated merges and the extensions of their daily cap (#486), and their outcomes.
+# The delegated merges and the extensions of their daily cap (#486).
 MERGE_COMMANDS = (MERGE, MERGE_BUDGET)
-_MERGE_OUTCOME = {'merged': 'mergiata', 'granted': 'concessa', 'refused': 'rifiutato'}
 REASON_CHARS = 120  # the first line of a reason, at most
-# The status of a finding the coordinator closed (#606).
-_CLOSED = {'resolved': 'risolto', 'withdrawn': 'ritirato'}
+
+# The texts of the summary in the project's ``language`` (#635); English for a language without
+# translation. ``state_*``: a turn without outcome; ``grant_*``, ``merge_*``: the outcome of a
+# command; ``closed_*``: the status of a finding the coordinator closed (#606).
+TEXTS = Catalog(
+    en={
+        'today_heading': '## devloop summary of today',
+        'index_heading': '## Previous days',
+        'day_heading': 'devloop summary of {day} (UTC)',
+        'not_reported': 'not reported',
+        'to_operator': 'to the operator',
+        'to_supervisor': 'to the supervisor',
+        'state_open': 'in progress',
+        'state_incomplete': 'incomplete',
+        'grant_granted': 'granted',
+        'grant_refused': 'refused',
+        'merge_merged': 'merged',
+        'merge_granted': 'granted',
+        'merge_refused': 'refused',
+        'closed_resolved': 'resolved',
+        'closed_withdrawn': 'withdrawn',
+        'event': 'event {event}',
+        'ci_fail': 'block: CI `fail` on commit `{head}`',
+        'ci_rerun': 'rerun of the failed jobs (run {runs})',
+        'count': '{left} of {cap}',
+        'left_rounds': 'PR: {rounds} rounds',
+        'left_story': 'story: 0 of 1 extensions (booked until the turn starts)',
+        'left_setting': '`{setting}` = {value} until {until}',
+        'left_day': 'day: {daily}',
+        'trace_only': ' (trace completed)',
+        'merge_budget': '+{value} on {day}: cap {cap}',
+        'empty': 'No activity recorded by devloop.',
+        'actions': '### Actions',
+        'actions_columns': '| Time (UTC) | Number | Kind | Agent | Outcome | Duration |',
+        'merges': '### Merges',
+        'merge_person': '- {at} #{number}: merged by a person (no record of devloop)',
+        'merge_line': '- {at} #{number}: mode `{mode}`, level {level}',
+        'escalations': '### Escalations',
+        'escalation_line': '- {at} #{number}: class `{cls}`, {to}',
+        'grants': '### Grants of the supervisor',
+        'grants_columns': '| Time (UTC) | Number | Command | Reason | Outcome | Caps left |',
+        'delegated': '### Merges delegated to the supervisor',
+        'coordinator': '### Reserved merges of the coordinator',
+        'merge_columns': '| Time (UTC) | Number | Command | Author | Reason | Outcome | Cap |',
+        'closures': '### Findings closed by the coordinator',
+        'closures_columns': '| Time (UTC) | Number | Finding | Outcome | Author | Reason |',
+        'substitutes': '### Substitute votes of the coordinator in the conclave',
+        'substitutes_note': ('A member of the conclave was unavailable: the diversity of the '
+                             'voters is reduced.'),
+        'substitutes_columns': ('| Time (UTC) | Number | In place of | Coordinator | Model '
+                                '| Vote |'),
+        'pins': '### Failed auto-pin',
+        'pin_line': ('- {at} #{number}: `{ref}` at commit `{sha}` is not pinned, the running '
+                     'copy stays behind. Reason: `{reason}`'),
+        'totals': '### Totals',
+        'opened': '- PRs opened: {listed}',
+        'merged': '- PRs merged: {listed}',
+        'rounds': '- Review rounds opened: {count}',
+        'fallbacks': '- Turns with a fallback model: {count}',
+        'denied': '- Permissions denied per model: {count}',
+        'today_intro': ('Generated from the records of devloop, updated at {stamp} UTC. Each '
+                        'closed day stays in a comment, linked below.'),
+        'no_days': 'None.',
+    },
+    it={
+        'today_heading': '## Riepilogo devloop di oggi',
+        'index_heading': '## Giorni precedenti',
+        'day_heading': 'Riepilogo devloop del {day} (UTC)',
+        'not_reported': 'non riportato',
+        'to_operator': 'all\'operatore',
+        'to_supervisor': 'al supervisore',
+        'state_open': 'in corso',
+        'state_incomplete': 'incompleto',
+        'grant_granted': 'concessa',
+        'grant_refused': 'rifiutata',
+        'merge_merged': 'mergiata',
+        'merge_granted': 'concessa',
+        'merge_refused': 'rifiutato',
+        'closed_resolved': 'risolto',
+        'closed_withdrawn': 'ritirato',
+        'event': 'evento {event}',
+        'ci_fail': 'blocco: CI `fail` sul commit `{head}`',
+        'ci_rerun': 'rilancio dei job falliti (run {runs})',
+        'count': '{left} di {cap}',
+        'left_rounds': 'PR: {rounds} round',
+        'left_story': 'storia: 0 di 1 estensioni (prenotata fino all\'avvio del turno)',
+        'left_setting': '`{setting}` = {value} fino a {until}',
+        'left_day': 'giorno: {daily}',
+        'trace_only': ' (traccia completata)',
+        'merge_budget': '+{value} il {day}: tetto {cap}',
+        'empty': 'Nessuna attività registrata da devloop.',
+        'actions': '### Azioni',
+        'actions_columns': '| Ora (UTC) | Numero | Tipo | Agent | Esito | Durata |',
+        'merges': '### Merge',
+        'merge_person': '- {at} #{number}: merge di una persona (nessun record di devloop)',
+        'merge_line': '- {at} #{number}: modalità `{mode}`, livello {level}',
+        'escalations': '### Escalation',
+        'escalation_line': '- {at} #{number}: classe `{cls}`, {to}',
+        'grants': '### Concessioni del supervisore',
+        'grants_columns': '| Ora (UTC) | Numero | Comando | Motivo | Esito | Tetti residui |',
+        'delegated': '### Merge delegati al supervisore',
+        'coordinator': '### Merge riservati del coordinatore',
+        'merge_columns': '| Ora (UTC) | Numero | Comando | Autore | Motivo | Esito | Tetto |',
+        'closures': '### Finding chiusi dal coordinatore',
+        'closures_columns': '| Ora (UTC) | Numero | Finding | Esito | Autore | Motivo |',
+        'substitutes': '### Voti sostitutivi del coordinatore nel conclave',
+        'substitutes_note': ('Un membro del conclave era indisponibile: la diversità dei votanti '
+                             'è ridotta.'),
+        'substitutes_columns': ('| Ora (UTC) | Numero | Al posto di | Coordinatore | Modello '
+                                '| Voto |'),
+        'pins': '### Pin automatico non riuscito',
+        'pin_line': ('- {at} #{number}: `{ref}` al commit `{sha}` non è fissato, la copia in '
+                     'esecuzione resta indietro. Motivo: `{reason}`'),
+        'totals': '### Totali',
+        'opened': '- PR aperte: {listed}',
+        'merged': '- PR mergiate: {listed}',
+        'rounds': '- Round di review aperti: {count}',
+        'fallbacks': '- Turni con un modello di fallback: {count}',
+        'denied': '- Permessi negati per modello: {count}',
+        'today_intro': ('Generato dai record di devloop, aggiornato alle {stamp} UTC. Ogni giorno '
+                        'chiuso resta in un commento, linkato qui sotto.'),
+        'no_days': 'Nessuno.',
+    })
+# The heading of the index of the past days in every language: a body published before a change
+# of ``language`` keeps its index (#635).
+INDEX_HEADINGS = TEXTS.variants('index_heading')
 
 
 class ReportError(Exception):
@@ -109,10 +231,10 @@ def _hour(stamp):
     return stamp[11:16] if isinstance(stamp, str) and len(stamp) >= 16 else '--:--'
 
 
-def duration(ms):
-    """``ms`` milliseconds in a readable form, or ``non riportato``."""
+def duration(ms, language=ENGLISH):
+    """``ms`` milliseconds in a readable form, or ``not reported`` in ``language``."""
     if not isinstance(ms, int) or isinstance(ms, bool) or ms < 0:
-        return NOT_REPORTED
+        return TEXTS.texts(language)('not_reported')
     seconds = ms // 1000
     hours, rest = divmod(seconds, 3600)
     minutes, seconds = divmod(rest, 60)
@@ -125,8 +247,9 @@ def duration(ms):
 
 @dataclass
 class Summary:
-    """What devloop recorded on ``day``."""
+    """What devloop recorded on ``day``, its texts in ``language`` (#635)."""
     day: str
+    language: str = ENGLISH
     actions: list = field(default_factory=list)      # (time, number, kind, agent, outcome, ms)
     merges: list = field(default_factory=list)       # (time, number, mode, level)
     escalations: list = field(default_factory=list)  # (time, number, class, destination)
@@ -166,12 +289,14 @@ class Records:
     ``gh`` (``github.GitHub``). ``trust`` is a ``watch.Trust``: who may write each record;
     ``agents`` the keys of the only reviewers whose reviews count (``Config.review_keys``: the
     configured agents that do not sign with a role app, and the keys before the migration of
-    #407 that one of them stands for)."""
+    #407 that one of them stands for); ``language`` the project's, of the texts of the summaries
+    (#635)."""
 
-    def __init__(self, gh, trust, first, last, agents=()):
+    def __init__(self, gh, trust, first, last, agents=(), language=ENGLISH):
         self.gh = gh
         self.trust = trust
         self.agents = frozenset(agents)
+        self.language = language
         since = f'{first.isoformat()}T00:00:00Z'
         self.comments = gh.dated_comments(since=since)
         # The search reads dates in its own time zone: one more day on each side, then the UTC
@@ -242,7 +367,8 @@ class Records:
     def summary(self, day):
         """The ``Summary`` of ``day`` (``datetime.date``)."""
         day = day.isoformat()
-        out = Summary(day)
+        out = Summary(day, self.language)
+        t = TEXTS.texts(self.language)
         rounds = set()
         for comment in self.comments:
             body, created = comment.get('body') or '', comment.get('created_at')
@@ -284,18 +410,18 @@ class Records:
                 continue
             conclave = read_marker(body, 'conclave')
             if conclave is not None:
-                row = _substitute_row(number, conclave)
+                row = _substitute_row(t, number, conclave)
                 if row is not None and _day_of(row[0]) == day:
                     out.substitutes.append((_hour(row[0]), *row[1:]))
                 continue
             supervision = read_marker(body, 'supervision')
             if supervision is not None:
                 if supervision['command'] in GRANT_COMMANDS and _day_of(created) == day:
-                    out.grants.append(_grant_row(_hour(created), number, supervision))
+                    out.grants.append(_grant_row(t, _hour(created), number, supervision))
                 elif supervision['command'] in MERGE_COMMANDS and _day_of(created) == day:
                     rows = (out.coordinator if supervision.get('role') == COORDINATOR
                             else out.delegated)
-                    rows.append(_delegated_row(_hour(created), number, supervision))
+                    rows.append(_delegated_row(t, _hour(created), number, supervision))
                 elif (supervision['command'] == FINDING and supervision['outcome'] == 'closed'
                       and _day_of(created) == day):
                     # The coordinator's closures (#606): the record in the same comment.
@@ -324,17 +450,20 @@ class Records:
 
     @staticmethod
     def _ledger(out, day, number, record, created):
+        t = TEXTS.texts(out.language)
         if record['type'] == 'turn':
             if _day_of(record['started_at']) != day:
                 return
-            outcome = record.get('outcome') or _STATE.get(record['state'], NOT_REPORTED)
+            outcome = record.get('outcome') or t(
+                f'state_{record["state"]}' if record['state'] in ('open', 'incomplete')
+                else 'not_reported')
             kind = record['kind'] + (' (fallback)' if record.get('fallback_for') else '')
             out.actions.append((_hour(record['started_at']), number, kind, record['agent'],
                                 outcome, record.get('duration_ms')))
             if record.get('fallback_for'):
                 out.fallbacks += 1
             if record.get('denied_permission'):
-                model = str(record.get('model') or NOT_REPORTED)
+                model = str(record.get('model') or t('not_reported'))
                 out.denied[model] = out.denied.get(model, 0) + 1
             if record['state'] == 'open':
                 out.open += 1
@@ -347,13 +476,13 @@ class Records:
         event = record['event']
         if event == 'ci_round':
             if record.get('state') == 'fail':
-                head = str(record.get('head') or '')[:12] or NOT_REPORTED
-                out.ci.append((_hour(at), number, f'blocco: CI `fail` sul commit `{head}`'))
+                head = str(record.get('head') or '')[:12] or t('not_reported')
+                out.ci.append((_hour(at), number, t('ci_fail', head=head)))
         elif event == 'ci_rerun':
-            runs = ', '.join(str(r) for r in record.get('runs') or []) or NOT_REPORTED
-            out.ci.append((_hour(at), number, f'rilancio dei job falliti (run {runs})'))
+            runs = ', '.join(str(r) for r in record.get('runs') or []) or t('not_reported')
+            out.ci.append((_hour(at), number, t('ci_rerun', runs=runs)))
         else:
-            out.actions.append((_hour(at), number, f'evento {event}', None, None, None))
+            out.actions.append((_hour(at), number, t('event', event=event), None, None, None))
 
 
 def first_line(text):
@@ -364,66 +493,76 @@ def first_line(text):
     return line or '—'
 
 
-def _count(record, left, cap):
+def _count(t, record, left, cap):
     """``left`` of ``cap`` as ``record`` gives them, or None when it does not give both as
     integers."""
     values = [record.get(left), record.get(cap)]
     if all(isinstance(v, int) and not isinstance(v, bool) for v in values):
-        return f'{max(values[0], 0)} di {values[1]}'
+        return t('count', left=max(values[0], 0), cap=values[1])
     return None
 
 
-def remaining(record):
+def _outcome(t, prefix, outcome):
+    """The text of ``outcome`` among those of ``prefix`` (``grant``, ``merge``, ``closed``), or
+    ``outcome`` itself when it has none."""
+    key = f'{prefix}_{outcome}'
+    return t(key) if key in TEXTS.tables[ENGLISH] else outcome
+
+
+def remaining(record, language=ENGLISH):
     """The caps a command of the supervisor's delegations (its ``supervision`` record) leaves,
-    in Italian (#466): per PR the review rounds (``grant-round``), per story the one extension
-    of its budget envelope (``grant-budget``), the limit in force for a ``capacity``, and per
-    day the grants of every delegation together. A refused command records none: ``—``."""
+    in ``language`` (#466, #635): per PR the review rounds (``grant-round``), per story the one
+    extension of its budget envelope (``grant-budget``), the limit in force for a ``capacity``,
+    and per day the grants of every delegation together. A refused command records none:
+    ``—``."""
+    t = TEXTS.texts(language)
     parts = []
     if record.get('outcome') == 'granted':
-        if record['command'] == GRANT_ROUND and (rounds := _count(record, 'left', 'cap')):
-            parts.append(f'PR: {rounds} round')
+        if record['command'] == GRANT_ROUND and (rounds := _count(t, record, 'left', 'cap')):
+            parts.append(t('left_rounds', rounds=rounds))
         elif record['command'] == GRANT_BUDGET:
-            parts.append('storia: 0 di 1 estensioni (prenotata fino all\'avvio del turno)')
+            parts.append(t('left_story'))
         elif record['command'] == CAPACITY and isinstance(record.get('setting'), str):
-            parts.append(f'`{record["setting"]}` = {record.get("value")} fino a '
-                         f'{record.get("until") or NOT_REPORTED}')
-    if daily := _count(record, 'daily_left', 'daily_cap'):
-        parts.append(f'giorno: {daily}')
+            parts.append(t('left_setting', setting=record['setting'], value=record.get('value'),
+                           until=record.get('until') or t('not_reported')))
+    if daily := _count(t, record, 'daily_left', 'daily_cap'):
+        parts.append(t('left_day', daily=daily))
     return '; '.join(parts) or '—'
 
 
-def _grant_row(at, number, record):
+def _grant_row(t, at, number, record):
     """A row of the grants of the supervisor (#466) from its ``supervision`` record."""
-    outcome = _GRANT_OUTCOME.get(record['outcome'], record['outcome'])
+    outcome = _outcome(t, 'grant', record['outcome'])
     if record.get('trace_only'):
-        outcome += ' (traccia completata)'
+        outcome += t('trace_only')
     return (at, number, record['command'], first_line(record.get('reason')), outcome,
-            remaining(record))
+            remaining(record, t.code))
 
 
-def _delegated_row(at, number, record):
+def _delegated_row(t, at, number, record):
     """A row of the delegated merges and of the extensions of their cap (#486), from the
     dispatcher's ``supervision`` record: the cap of the day as it stood, or the extension."""
-    outcome = _MERGE_OUTCOME.get(record['outcome'], record['outcome'])
+    outcome = _outcome(t, 'merge', record['outcome'])
     if record['command'] == MERGE_BUDGET and record['outcome'] == 'granted':
-        cap = (f'+{record.get("value")} il {record.get("day") or NOT_REPORTED}: tetto '
-               f'{record.get("cap")}')
+        cap = t('merge_budget', value=record.get('value'),
+                day=record.get('day') or t('not_reported'), cap=record.get('cap'))
     else:
-        cap = _count(record, 'daily', 'daily_cap')
-        cap = f'giorno: {cap}' if cap else '—'
-    return (at, number, record['command'], record.get('by') or NOT_REPORTED,
+        cap = _count(t, record, 'daily', 'daily_cap')
+        cap = t('left_day', daily=cap) if cap else '—'
+    return (at, number, record['command'], record.get('by') or t('not_reported'),
             first_line(record.get('reason')), outcome, cap)
 
 
-def _substitute_row(number, record):
+def _substitute_row(t, number, record):
     """``(at, number, member, by, model, verdict)`` of the coordinator's substitute vote in the
     ``conclave`` record ``record`` (#605), ``at`` the time it was recorded; None without one."""
     substitute = record.get('substitute')
     if not substitute or substitute['state'] != 'voted' or not substitute['at']:
         return None
     profile = record['votes'][substitute['index']].get('profile') or {}
-    model = f'{profile.get("kind") or NOT_REPORTED} {profile.get("model") or NOT_REPORTED}'
-    return (substitute['at'], number, substitute['member'], substitute['by'] or NOT_REPORTED,
+    unknown = t('not_reported')
+    model = f'{profile.get("kind") or unknown} {profile.get("model") or unknown}'
+    return (substitute['at'], number, substitute['member'], substitute['by'] or unknown,
             model, substitute['verdict'])
 
 
@@ -437,103 +576,108 @@ def _code(value):
 
 
 def render(summary):
-    """The summary in Markdown, without heading."""
+    """The summary in Markdown, without heading, in its ``language`` (#635)."""
+    t = TEXTS.texts(summary.language)
     if summary.empty():
-        return 'Nessuna attività registrata da devloop.'
+        return t('empty')
     parts = []
     if summary.actions:
-        parts += ['### Azioni', '', '| Ora (UTC) | Numero | Tipo | Agent | Esito | Durata |',
-                  '|---|---|---|---|---|---|']
+        parts += [t('actions'), '', t('actions_columns'), '|---|---|---|---|---|---|']
         for at, number, kind, agent, outcome, ms in summary.actions:
             parts.append(f'| {at} | #{number} | {_cell(kind)} | {_cell(agent or "—")} '
                          f'| {_cell(outcome or "—")} | '
-                         f'{duration(ms) if agent else "—"} |')
+                         f'{duration(ms, t.code) if agent else "—"} |')
         parts.append('')
     if summary.merges:
-        parts += ['### Merge', '']
+        parts += [t('merges'), '']
         for at, number, mode, level in summary.merges:
             if mode is None:
-                parts.append(f'- {at} #{number}: merge di una persona (nessun record di devloop)')
+                parts.append(t('merge_person', at=at, number=number))
             else:
-                parts.append(f'- {at} #{number}: modalità `{mode}`, livello {level}')
+                parts.append(t('merge_line', at=at, number=number, mode=mode, level=level))
         parts.append('')
     if summary.escalations:
-        parts += ['### Escalation', '']
+        parts += [t('escalations'), '']
         for at, number, cls, to in summary.escalations:
-            parts.append(f'- {at} #{number}: classe `{cls}`, {_DESTINATION.get(to, to)}')
+            to = t(f'to_{to}') if to in ('operator', 'supervisor') else to
+            parts.append(t('escalation_line', at=at, number=number, cls=cls, to=to))
         parts.append('')
     if summary.ci:
         parts += ['### CI', '']
         parts += [f'- {at} #{number}: {text}' for at, number, text in summary.ci]
         parts.append('')
     if summary.grants:
-        parts += ['### Concessioni del supervisore', '',
-                  '| Ora (UTC) | Numero | Comando | Motivo | Esito | Tetti residui |',
-                  '|---|---|---|---|---|---|']
+        parts += [t('grants'), '', t('grants_columns'), '|---|---|---|---|---|---|']
         for at, number, command, reason, outcome, left in summary.grants:
             parts.append(f'| {at} | #{number} | `{command}` | {_cell(reason)} '
                          f'| {_cell(outcome)} | {_cell(left)} |')
         parts.append('')
-    for title, rows in (('Merge delegati al supervisore', summary.delegated),
-                        ('Merge riservati del coordinatore', summary.coordinator)):
+    for title, rows in ((t('delegated'), summary.delegated),
+                        (t('coordinator'), summary.coordinator)):
         if not rows:
             continue
-        parts += [f'### {title}', '',
-                  '| Ora (UTC) | Numero | Comando | Autore | Motivo | Esito | Tetto |',
-                  '|---|---|---|---|---|---|---|']
+        parts += [title, '', t('merge_columns'), '|---|---|---|---|---|---|---|']
         for at, number, command, by, reason, outcome, cap in rows:
             parts.append(f'| {at} | #{number} | `{command}` | `{_code(by)}` | {_cell(reason)} '
                          f'| {_cell(outcome)} | {_cell(cap)} |')
         parts.append('')
     if summary.closures:
-        parts += ['### Finding chiusi dal coordinatore', '',
-                  '| Ora (UTC) | Numero | Finding | Esito | Autore | Motivo |',
-                  '|---|---|---|---|---|---|']
+        parts += [t('closures'), '', t('closures_columns'), '|---|---|---|---|---|---|']
         for at, number, key, status, by, reason in summary.closures:
-            outcome = _CLOSED.get(status, status)
+            outcome = _outcome(t, 'closed', status)
             parts.append(f'| {at} | #{number} | `{_code(key)}` | {_cell(outcome)} '
                          f'| `{_code(by)}` | {_cell(reason)} |')
         parts.append('')
     if summary.substitutes:
-        parts += ['### Voti sostitutivi del coordinatore nel conclave', '',
-                  'Un membro del conclave era indisponibile: la diversità dei votanti è ridotta.',
-                  '', '| Ora (UTC) | Numero | Al posto di | Coordinatore | Modello | Voto |',
+        parts += [t('substitutes'), '', t('substitutes_note'), '', t('substitutes_columns'),
                   '|---|---|---|---|---|---|']
         for at, number, member, by, model, verdict in summary.substitutes:
             parts.append(f'| {at} | #{number} | `{_code(member)}` | `{_code(by)}` '
                          f'| `{_code(model)}` | `{_code(verdict)}` |')
         parts.append('')
     if summary.pins:
-        parts += ['### Pin automatico non riuscito', '']
+        parts += [t('pins'), '']
         for at, number, ref, sha, reason in summary.pins:
-            parts.append(f'- {at} #{number}: `{_code(ref)}` al commit `{sha[:12]}` non è '
-                         'fissato, la copia in esecuzione resta indietro. Motivo: '
-                         f'`{_code(reason)}`')
+            parts.append(t('pin_line', at=at, number=number, ref=_code(ref), sha=sha[:12],
+                           reason=_code(reason)))
         parts.append('')
 
     def listed(numbers):
         return f'{len(numbers)}' + (f' ({", ".join(f"#{n}" for n in numbers)})' if numbers else '')
     denied = ', '.join(f'`{_code(model)}`: {count}'
                        for model, count in sorted(summary.denied.items()))
-    parts += ['### Totali', '',
-              f'- PR aperte: {listed(summary.opened)}',
-              f'- PR mergiate: {listed(summary.merged)}',
-              f'- Round di review aperti: {summary.rounds}',
-              f'- Turni con un modello di fallback: {summary.fallbacks}',
-              f'- Permessi negati per modello: {sum(summary.denied.values())}'
+    parts += [t('totals'), '',
+              t('opened', listed=listed(summary.opened)),
+              t('merged', listed=listed(summary.merged)),
+              t('rounds', count=summary.rounds),
+              t('fallbacks', count=summary.fallbacks),
+              t('denied', count=sum(summary.denied.values()))
               + (f' ({denied})' if denied else '')]
     return '\n'.join(parts)
 
 
 def render_text(summary):
     """What ``devloop report`` prints."""
-    return f'# {TITLE} del {summary.day} (UTC)\n\n{render(summary)}\n'
+    heading = TEXTS.texts(summary.language)('day_heading', day=summary.day)
+    return f'# {heading}\n\n{render(summary)}\n'
 
 
 def archive_body(summary):
-    return publishable(dispatcher_header() + f'\n## {TITLE} del {summary.day} (UTC)\n\n'
+    heading = TEXTS.texts(summary.language)('day_heading', day=summary.day)
+    return publishable(dispatcher_header() + f'\n## {heading}\n\n'
                        + render(summary), 'report',
                        {'event': 'archive', 'day': summary.day, 'open': summary.open > 0})
+
+
+def split_index(body):
+    """``(head, index)`` of a body of ``[report] issue``: the index of the past days starts at
+    its heading in any language (``INDEX_HEADINGS``, #635), the first found; ``index`` is ''
+    without one."""
+    found = [i for i in (body.find('\n' + h) for h in INDEX_HEADINGS) if i >= 0]
+    if not found:
+        return body, ''
+    at = min(found)
+    return body[:at], body[at + 1:]
 
 
 @contextmanager
@@ -548,11 +692,13 @@ def locked(path):
 
 class Publisher:
     """Publishes the summaries on issue ``issue`` of ``repo`` with ``gh``, the dispatcher's
-    client; ``trust`` is a ``watch.Trust``. ``clock`` gives the current time (epoch seconds)."""
+    client; ``trust`` is a ``watch.Trust``. ``clock`` gives the current time (epoch seconds).
+    ``language``: the project's, of the texts (#635)."""
 
     def __init__(self, gh, trust, repo, issue, *, agents=(), log=print, clock=time.time,
-                 lock=None):
+                 lock=None, language=ENGLISH):
         self.agents = tuple(agents)
+        self.language = language
         self.gh = gh
         self.trust = trust
         self.repo = repo
@@ -597,17 +743,21 @@ class Publisher:
             existing['body'] = body
             self.log(f'report: archive of {summary.day} updated')
 
+    def _records(self, first, last):
+        return Records(self.gh, self.trust, first, last, self.agents, self.language)
+
     def _index(self, archives):
-        lines = [INDEX_HEADING, '']
+        t = TEXTS.texts(self.language)
+        lines = [t('index_heading'), '']
         days = sorted((d for d in archives if archives[d].get('id') is not None), reverse=True)
-        lines += [f'- [{d}]({self._url(archives[d]["id"])})' for d in days] or ['Nessuno.']
+        lines += [f'- [{d}]({self._url(archives[d]["id"])})' for d in days] or [t('no_days')]
         return '\n'.join(lines)
 
     def _today_section(self, summary):
+        t = TEXTS.texts(self.language)
         stamp = time.strftime('%H:%M', time.gmtime(self._clock()))
-        return (dispatcher_header() + f'\n{TODAY_HEADING}: {summary.day} (UTC)\n\n'
-                f'Generato dai record di devloop, aggiornato alle {stamp} UTC. Ogni giorno chiuso '
-                'resta in un commento, linkato qui sotto.\n\n' + render(summary))
+        return (dispatcher_header() + f'\n{t("today_heading")}: {summary.day} (UTC)\n\n'
+                + t('today_intro', stamp=stamp) + '\n\n' + render(summary))
 
     def publish(self, day=None):
         """Publish the summary of ``day`` (default: today). Today's goes to the body, after the
@@ -626,8 +776,10 @@ class Publisher:
         body, shown = self._body()
         archives = self._archives()
         if day < today:
-            head = body.split('\n' + INDEX_HEADING, 1)[0].rstrip() if shown else None
-            records = Records(self.gh, self.trust, day, day if shown else today, self.agents)
+            # The heading of the index in any language: a body written before a change of
+            # ``language`` keeps its head, and the index is written again in the new one (#635).
+            head = split_index(body)[0].rstrip() if shown else None
+            records = self._records(day, day if shown else today)
             self._archive(records.summary(day), archives)
             if head is None:
                 head = self._today_section(records.summary(today))
@@ -636,7 +788,7 @@ class Publisher:
             return
         days = sorted(set(self._closed_days(today, shown, archives))
                       | set(self._open_archives(today, archives)))
-        records = Records(self.gh, self.trust, days[0] if days else today, today, self.agents)
+        records = self._records(days[0] if days else today, today)
         for closed in days:
             summary = records.summary(closed)
             # The day shown, and a day already archived (one with a turn still open, say), are
@@ -730,5 +882,5 @@ def build(cfg, gh, trust, state_dir, *, log):
     if not cfg.report.issue:
         return None
     return Publisher(gh, trust, cfg.repo, cfg.report.issue, agents=cfg.review_keys(), log=log,
-                     lock=Path(state_dir) / LOCK_FILE)
+                     lock=Path(state_dir) / LOCK_FILE, language=cfg.language)
 

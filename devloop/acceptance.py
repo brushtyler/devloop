@@ -118,6 +118,12 @@ TEXTS = Catalog(
         'uncovered_title': 'Acceptance criterion {position} not covered, without a reason',
         'uncovered_fix': ('Add the tests that verify the criterion, or explain in `reason` why '
                           'it stays not covered.'),
+        # The section of the map in the PR and in a fix record (#635).
+        'map_title': '### Coverage of the acceptance criteria',
+        'map_empty': 'Empty map: no recognisable acceptance criterion in the issue.',
+        'map_columns': '| # | Criterion | Status | Tests | Reason |',
+        'status_covered': 'covered',
+        'status_not_covered': 'not covered',
     },
     it={
         'missing_title': 'Mappa di copertura dei criteri di accettazione assente',
@@ -133,6 +139,11 @@ TEXTS = Catalog(
         'uncovered_title': 'Criterio di accettazione {position} non coperto, senza motivo',
         'uncovered_fix': ('Aggiungere i test che verificano il criterio, oppure spiegare in '
                           '`reason` perché resta non coperto.'),
+        'map_title': '### Copertura dei criteri di accettazione',
+        'map_empty': 'Mappa vuota: nessun criterio di accettazione riconoscibile nell\'issue.',
+        'map_columns': '| # | Criterio | Stato | Test | Motivo |',
+        'status_covered': 'coperto',
+        'status_not_covered': 'non coperto',
     })
 
 
@@ -186,18 +197,16 @@ def _cell(text):
     return ' '.join(str(text).split()).replace('|', '\\|')
 
 
-_STATUS_TEXT = {'covered': 'coperto', 'not_covered': 'non coperto'}
-
-
-def render_map(acceptance_map):
-    """The map as Markdown for GitHub, under its own heading."""
-    parts = ['### Copertura dei criteri di accettazione', '']
+def render_map(acceptance_map, language=ENGLISH):
+    """The map as Markdown for GitHub, under its own heading, in ``language`` (#635)."""
+    text = TEXTS.texts(language)
+    parts = [text('map_title'), '']
     if not acceptance_map:
-        parts.append('Mappa vuota: nessun criterio di accettazione riconoscibile nell\'issue.')
+        parts.append(text('map_empty'))
         return '\n'.join(parts)
-    parts += ['| # | Criterio | Stato | Test | Motivo |', '|---|---|---|---|---|']
+    parts += [text('map_columns'), '|---|---|---|---|---|']
     for i, entry in enumerate(acceptance_map, 1):
         tests = ', '.join(f'`{_cell(t["file"])}`: {_cell(t["name"])}' for t in entry['tests'])
-        parts.append(f'| {i} | {_cell(entry["criterion"])} | {_STATUS_TEXT[entry["status"]]} '
+        parts.append(f'| {i} | {_cell(entry["criterion"])} | {text("status_" + entry["status"])} '
                      f'| {tests or "—"} | {_cell(entry["reason"]) or "—"} |')
     return '\n'.join(parts)

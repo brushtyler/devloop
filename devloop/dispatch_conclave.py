@@ -95,6 +95,22 @@ MERGE_TEXTS = Catalog(
         'no_round': ('nessun round di review completo dopo la ripartenza del lavoro (decisione '
                      'del conclave {decision}) ha approvato l\'head con il quorum del livello'),
     })
+# The escalation of a veto (``_veto_suspend``), in the project's ``language`` (#635).
+VETO_TEXTS = Catalog(
+    en={
+        'vetoed': ('`{login}` annulled with `{command}` (comment {ident}) the conclave decision '
+                   'recorded in comment {comment}: {what} The commits already published stay: '
+                   'devloop does not revert them.'),
+        'veto_reason': '\n\nReason of the veto: {reason}',
+        'suspended': 'the next steps of the PR are suspended.',
+    },
+    it={
+        'vetoed': ('`{login}` ha annullato con `{command}` (commento {ident}) la decisione del '
+                   'conclave registrata nel commento {comment}: {what} I commit già pubblicati '
+                   'restano: devloop non li annulla.'),
+        'veto_reason': '\n\nMotivo del veto: {reason}',
+        'suspended': 'i passi successivi della PR sono sospesi.',
+    })
 
 
 def _short(exc, limit=300):
@@ -741,11 +757,11 @@ class ConclaveMixin:
         escalation of class ``conclave_veto`` to the operator, which records both and spends the
         veto. ``what``: what the veto stopped."""
         ident, login, reason = veto
-        text = (f'`{login}` ha annullato con `{VETO_COMMAND}` (commento {ident}) la decisione del '
-                f'conclave registrata nel commento {comment}: {what} I commit già pubblicati '
-                'restano: devloop non li annulla.')
+        t = VETO_TEXTS.texts(self.cfg.language)
+        text = t('vetoed', login=login, command=VETO_COMMAND, ident=ident, comment=comment,
+                 what=what)
         if reason:
-            text += f'\n\nMotivo del veto: {reason}'
+            text += t('veto_reason', reason=reason)
         self._escalate(number, text, remove=remove, cls='conclave_veto',
                        extra={'veto_of': comment, 'veto': ident})
         self.log(f'  vetoed by {login}: suspended')
@@ -973,7 +989,7 @@ class ConclaveMixin:
             return
         self._veto_suspend(pr.number, decision['comment'], decision['veto'],
                            [lb.review, lb.changes, lb.ready_to_merge],
-                           'i passi successivi della PR sono sospesi.')
+                           VETO_TEXTS.texts(self.cfg.language)('suspended'))
 
 
 def _diff_section(diff):

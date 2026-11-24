@@ -52,6 +52,8 @@ most ``MAIN_HISTORY`` back on its first-parent chain (``Workspace.first_parents`
 per commit: the commit alerted is kept in ``state_dir`` (``MainAlerts``), and with the outbox an
 alert whose outcome is uncertain is only reconciled. Pending, missing or unreadable checks give
 no alert. It is only a report: the merges go on as before.
+
+The texts are in the project's ``language`` (#635, ``TEXTS``); the records are not.
 """
 
 import json
@@ -61,6 +63,7 @@ import time
 from pathlib import Path
 
 from .github import GitHubError
+from .i18n import Catalog
 from .localtests import UNITTEST_MODULES, case_commands, case_modules, module_command
 from .markdown import dispatcher_header, publishable
 from .outbox import SENT as PUBLISHED
@@ -82,6 +85,64 @@ CHECK_CLASSES = ('operator_decision', PREFLIGHT_DEFAULT)
 # The classes of the escalations with which the dispatcher hands an item in
 # ``agent:needs-supervisor`` to the operator (``SupervisionMixin._to_operator``).
 HANDOFFS = ('supervisor_escalated', 'supervisor_refused', 'retry_limit')
+
+# The texts of the tests red on the base or on the host and of the red CI of the base branch, in
+# the project's ``language`` (#635); English for a language without translation.
+TEXTS = Catalog(
+    en={
+        'more': '\n- … and {more} more',
+        'of_issue': 'of the issue',
+        'of_pr': 'of the PR',
+        'host_waited': ', and it became so while the step waited for `{base}` to move',
+        'host_reason': ('After the step `{step}` the local tests fail, and every failed test '
+                        'fails on the base commit of the branch too, `{commit}`; but in the CI of '
+                        'the same commit they pass ({ci}){when}. The defect is of the environment '
+                        'where the local tests run (user, permissions, programs of the host), not '
+                        'of `{base}` nor of the change {what}: the step does not wait for `{base}` '
+                        'to move, since a new commit would not change the host.\n\n'
+                        'Failed tests ({count}):\n{listed}'),
+        'base_title': 'Tests red on the base too',
+        'base_text': ('After the step `{step}` the local tests fail, but every failed test fails '
+                      'on the base commit of the branch too, `{commit}`: the defect is of '
+                      '`{base}`, not of the change {what}. No other attempt of correction and no '
+                      'escalation: the step starts again by itself when `{base}` moves past that '
+                      'commit.\n\nFailed tests ({count}):\n{listed}'),
+        'main_since': 'Commits of `{base}` since the latest green commit, `{green}`:',
+        'main_none': ('No green commit among the latest {count} of `{base}` read; the commits '
+                      'read:'),
+        'main_title': 'Red CI on `{base}`',
+        'main_text': ('On commit `{head}` of `{base}` these checks concluded with a failure:\n'
+                      '{checks}\n\n{since}\n{listed}\n\n'
+                      'It is only a report: the merges go on as before. A new alert starts only '
+                      'for a new red commit of `{base}`.'),
+    },
+    it={
+        'more': '\n- … e altri {more}',
+        'of_issue': 'dell\'issue',
+        'of_pr': 'della PR',
+        'host_waited': ', e lo è diventata mentre il passo attendeva che `{base}` avanzasse',
+        'host_reason': ('Dopo il passo `{step}` i test locali falliscono, e tutti i test falliti '
+                        'falliscono anche sul commit base del branch, `{commit}`; ma nella CI '
+                        'dello stesso commit passano ({ci}){when}. Il difetto è dell\'ambiente in '
+                        'cui girano i test locali (utente, permessi, programmi dell\'host), non di '
+                        '`{base}` né della modifica {what}: il passo non attende che `{base}` '
+                        'avanzi, perché un nuovo commit non cambierebbe l\'host.\n\n'
+                        'Test falliti ({count}):\n{listed}'),
+        'base_title': 'Test rossi anche sulla base',
+        'base_text': ('Dopo il passo `{step}` i test locali falliscono, ma tutti i test falliti '
+                      'falliscono anche sul commit base del branch, `{commit}`: il difetto è di '
+                      '`{base}`, non della modifica {what}. Nessun altro tentativo di correzione '
+                      'e nessuna escalation: il passo riparte da solo quando `{base}` avanza '
+                      'oltre quel commit.\n\nTest falliti ({count}):\n{listed}'),
+        'main_since': 'Commit di `{base}` dall\'ultimo commit verde, `{green}`:',
+        'main_none': ('Nessun commit verde fra gli ultimi {count} di `{base}` letti; i commit '
+                      'letti:'),
+        'main_title': 'CI rossa su `{base}`',
+        'main_text': ('Sul commit `{head}` di `{base}` questi check sono conclusi con un '
+                      'fallimento:\n{checks}\n\n{since}\n{listed}\n\n'
+                      'È solo una segnalazione: i merge proseguono come prima. Un nuovo allarme '
+                      'parte solo per un nuovo commit rosso di `{base}`.'),
+    })
 
 
 class BaseBroken:
@@ -162,10 +223,10 @@ def _of_check(notice, earlier):
     return bool(handed) and _check_escalation(handed[-1])
 
 
-def _listed(cases, count=None):
+def _listed(t, cases, count=None):
     shown = ''.join(f'\n- `{c.replace("`", "")}`' for c in cases[:MAX_CASES_LISTED])
     more = (len(cases) if count is None else count) - min(len(cases), MAX_CASES_LISTED)
-    return shown + (f'\n- … e altri {more}' if more > 0 else '')
+    return shown + (t('more', more=more) if more > 0 else '')
 
 
 class BaseMixin:
@@ -272,17 +333,11 @@ class BaseMixin:
         (``broken``, a ``HostTests``). A critical class: never to the supervisor, and no wait for
         the base branch, whose next commit would not change the host. ``waited``: the step was
         waiting for the base branch, and that CI turned green during the wait."""
-        base = self.cfg.base_branch
-        what = 'dell\'issue' if step == 'implement' else 'della PR'
-        when = (f', e lo è diventata mentre il passo attendeva che `{base}` avanzasse'
-                if waited else '')
-        reason = (f'Dopo il passo `{step}` i test locali falliscono, e tutti i test falliti '
-                  f'falliscono anche sul commit base del branch, `{broken.base[:12]}`; ma nella '
-                  f'CI dello stesso commit passano ({broken.ci}){when}. Il difetto è '
-                  f'dell\'ambiente in cui girano i test locali (utente, permessi, programmi '
-                  f'dell\'host), non di `{base}` né della modifica {what}: il passo non attende '
-                  f'che `{base}` avanzi, perché un nuovo commit non cambierebbe l\'host.\n\n'
-                  f'Test falliti ({broken.count}):\n{_listed(broken.cases, broken.count)}')
+        base, t = self.cfg.base_branch, TEXTS.texts(self.cfg.language)
+        reason = t('host_reason', step=step, commit=broken.base[:12], ci=broken.ci, base=base,
+                   when=t('host_waited', base=base) if waited else '',
+                   what=t('of_issue' if step == 'implement' else 'of_pr'), count=broken.count,
+                   listed=_listed(t, broken.cases, broken.count))
         self._escalate(number, reason, broken.tail, remove=remove, cls=HOST_TESTS,
                        extra={'host_tests': {'step': step, 'base': broken.base, 'ci': broken.ci,
                                              'count': broken.count,
@@ -319,15 +374,11 @@ class BaseMixin:
         base branch to move past ``broken.base`` (#459): a comment of the dispatcher with a
         ``basebroken`` record. No label changes: an issue keeps ``agent:working``, a PR its
         label."""
-        base = self.cfg.base_branch
-        what = 'dell\'issue' if step == 'implement' else 'della PR'
-        text = (dispatcher_header()
-                + '\n## Test rossi anche sulla base\n\n'
-                f'Dopo il passo `{step}` i test locali falliscono, ma tutti i test falliti '
-                f'falliscono anche sul commit base del branch, `{broken.base[:12]}`: il difetto è '
-                f'di `{base}`, non della modifica {what}. Nessun altro tentativo di correzione e '
-                f'nessuna escalation: il passo riparte da solo quando `{base}` avanza oltre quel '
-                f'commit.\n\nTest falliti ({len(broken.cases)}):\n{_listed(broken.cases)}\n')
+        base, t = self.cfg.base_branch, TEXTS.texts(self.cfg.language)
+        text = (dispatcher_header() + f'\n## {t("base_title")}\n\n'
+                + t('base_text', step=step, commit=broken.base[:12], base=base,
+                    what=t('of_issue' if step == 'implement' else 'of_pr'),
+                    count=len(broken.cases), listed=_listed(t, broken.cases)) + '\n')
         if broken.tail:
             text += ('\n```text\n' + broken.tail.strip()[-6000:].replace('```', "'''")
                      + '\n```\n')
@@ -452,17 +503,13 @@ class BaseMixin:
         return None, commits
 
     def _main_body(self, head, names, green, commits):
-        base = self.cfg.base_branch
+        base, t = self.cfg.base_branch, TEXTS.texts(self.cfg.language)
         checks = ''.join(f'\n- `{n.replace("`", "")}`' for n in names)
         listed = ''.join(f'\n- `{sha[:12]}` {subject.replace("`", "")}'
                          for sha, subject in commits)
-        since = (f'Commit di `{base}` dall\'ultimo commit verde, `{green[:12]}`:' if green else
-                 f'Nessun commit verde fra gli ultimi {MAIN_HISTORY} di `{base}` letti; i commit '
-                 'letti:')
+        since = (t('main_since', base=base, green=green[:12]) if green else
+                 t('main_none', count=MAIN_HISTORY, base=base))
         return publishable(
-            dispatcher_header()
-            + f'\n## CI rossa su `{base}`\n\n'
-            + f'Sul commit `{head[:12]}` di `{base}` questi check sono conclusi con un '
-              f'fallimento:\n{checks}\n\n{since}\n{listed}\n\n'
-            + 'È solo una segnalazione: i merge proseguono come prima. Un nuovo allarme parte '
-              f'solo per un nuovo commit rosso di `{base}`.')
+            dispatcher_header() + f'\n## {t("main_title", base=base)}\n\n'
+            + t('main_text', head=head[:12], base=base, checks=checks, since=since,
+                listed=listed))

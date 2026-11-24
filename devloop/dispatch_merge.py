@@ -26,7 +26,7 @@ from .context import _describe_bases, _open_findings_reason, comment_link
 from .dispatch_supervision import RELEASE_COMMAND, merge_command
 from . import receipt as pr_receipt
 from .github import GitHubError
-from .hoststep import UNREADABLE as UNREADABLE_STEP
+from .hoststep import TEXTS as HOST_STEP_TEXTS
 from .hoststep import latest as latest_host_step
 from .i18n import Catalog
 from .journal import COORDINATOR_MERGE, DELEGATED_MERGE, JournalError
@@ -1268,7 +1268,7 @@ class MergeMixin:
             return skip(f'CI is {ci}')
         left = open_findings(pr.reviews, pr.closures)
         if left:
-            return self._escalate(pr.number, _open_findings_reason(left),
+            return self._escalate(pr.number, _open_findings_reason(left, self.cfg.language),
                                   remove=[lb.review, lb.changes, lb.ready_to_merge],
                                   cls='open_findings')
         if pr.zero_head is None and self._acceptance_problems(pr):
@@ -1362,7 +1362,7 @@ class MergeMixin:
 
         # A step on the host declared by the PR (#462) holds the auto-pin before the merge, so
         # that no tick pins the merged base first: a hold that cannot be recorded stops it.
-        step = latest_host_step(pr.meta, pr.fixes)
+        step = latest_host_step(pr.meta, pr.fixes, cfg.language)
         holding = bool(step) and self.pinner is not None and cfg.pin.auto
         attempt = None  # the merge attempt the hold names (``pin.hold``)
         if holding:
@@ -1513,7 +1513,7 @@ class MergeMixin:
                 continue
             head = held.get('head') if isinstance(held.get('head'), str) else ''
             step = held.get('step') if isinstance(held.get('step'), str) and held['step'] \
-                else UNREADABLE_STEP
+                else HOST_STEP_TEXTS.texts(self.cfg.language)('unreadable')
             pr = SimpleNamespace(number=number, meta={'issue': held.get('issue')})
             if held.get('outside'):
                 self.log(f'auto-pin: #{number}, merged outside devloop, declares a step on the '
@@ -1542,7 +1542,7 @@ class MergeMixin:
                 if pr is None or not pr.meta:
                     continue
                 fixes = self._markers(pr, self._pr_thread(number), 'fix')
-                step = latest_host_step(pr.meta, fixes)
+                step = latest_host_step(pr.meta, fixes, self.cfg.language)
                 if step:
                     merge = (raw.get('mergeCommit') or {}).get('oid')
                     found.append({'pr': number, 'head': pr.head_sha, 'step': step,

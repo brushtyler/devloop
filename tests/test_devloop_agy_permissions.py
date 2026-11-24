@@ -426,7 +426,7 @@ class PermissionRetryTests(unittest.TestCase):
         base = first[:first.index('\n\n## Shell commands\n')]
         self.assertTrue(again.startswith(base + '\n\n## Denied in the previous attempt\n'))
         self.assertTrue(again.endswith(first[len(base):]))
-        self.assertIn('denied the `read_file` permission (target non riportato da agy)', again)
+        self.assertIn('denied the `read_file` permission (target not reported by agy)', again)
         self.assertNotIn('Denied in the previous attempt', first)
         self.assertNotIn('Previous attempt on another model', cli.calls[1][1])
         self.assertEqual(self.gh.labels[100], {'agent:ready-to-merge'})
@@ -434,7 +434,7 @@ class PermissionRetryTests(unittest.TestCase):
         self.assertEqual(markdown.read_marker(body, 'review')['verdict'], 'approve')
         self.assertIn('> **Model:** Gemini 4 Argon\n', body)
         self.assertIn(f'agy: model {ARGON} denied the "read_file" permission '
-                      '(target non riportato da agy); retrying once', log)
+                      '(target not reported by agy); retrying once', log)
         # Each attempt keeps its own log.
         self.assertEqual(len(self.log_files), 2)
         self.assertEqual(sum('-retry-' in name for name in self.log_files), 1)

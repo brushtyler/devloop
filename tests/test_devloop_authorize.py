@@ -139,9 +139,10 @@ class CommandTests(unittest.TestCase):
     def test_the_record_is_valid_only_well_formed(self):
         good = {'comment': 3, 'by': COORDINATOR, 'at': 't', 'priority': 'high',
                 'outcome': 'authorized', 'hash': authorization.text_hash('T', 'B')}
-        body = markdown.render_authorize(good)
+        body = markdown.render_authorize(good, language='Italian')
         self.assertEqual(markdown.read_marker(body, 'authorize'), good)
         self.assertIn('Lavoro autorizzato dal coordinatore', body)
+        self.assertIn('Work authorized by the coordinator', markdown.render_authorize(good))
         for bad in (dict(good, hash='x'), dict(good, priority='urgent'),
                     dict(good, outcome='maybe'), {k: v for k, v in good.items() if k != 'hash'},
                     dict(good, outcome='refused', reason='r')):
@@ -334,7 +335,7 @@ class AuthorizeTests(Case):
         d = self.make()
         record = self.authorize(d, 'priority:urgent')
         self.assertEqual((record['outcome'], record['reason']),
-                         ('refused', authorization.MALFORMED))
+                         ('refused', authorization.malformed(CFG.language)))
 
     def test_a_strangers_issue_is_not_authorized(self):
         d = self.make()

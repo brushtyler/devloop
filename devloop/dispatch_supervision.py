@@ -2903,7 +2903,7 @@ class SupervisionMixin:
         pr.syncs = self._markers(pr, comments, 'sync')
         pr.reruns = self._markers(pr, comments, 'rerun')
         pr.closures = self._closures(pr, comments)
-        state = finding_state(pr.reviews, pr.closures)
+        state = finding_state(pr.reviews, pr.closures, self.cfg.language)
         pr.finding_problems = problems + state.problems
         pr.commands = self._finding_commands(pr, comments, state)
         policy = self._marker_entries(pr, comments, 'policy')

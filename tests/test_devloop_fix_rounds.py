@@ -446,7 +446,9 @@ def _pending(number, head):
 
 
 def _cap(cfg):
-    return {'trusted': cfg.trusted_users, 'cap': cfg.max_requested_fix_rounds}
+    # The reasons in the language of ``cfg`` (#635), as the dispatcher writes them.
+    return {'trusted': cfg.trusted_users, 'cap': cfg.max_requested_fix_rounds,
+            'language': cfg.language}
 
 
 def _snapshot(snap_pr):

@@ -270,7 +270,7 @@ class SummaryTests(unittest.TestCase):
             {'command': 'finding', 'by': COORDINATOR, 'reason': 'x', 'comment': 2,
              'outcome': 'refused'}, 't'), '2026-11-24T11:00:00Z')
         day = report.parse_day('2026-11-24')
-        s = report.Records(gh, TRUST, day, day, CFG.agents).summary(day)
+        s = report.Records(gh, TRUST, day, day, CFG.agents, 'Italian').summary(day)
         self.assertEqual(s.closures, [('10:00', 12, KEY, 'withdrawn', COORDINATOR, REASON)])
         text = report.render(s)
         self.assertIn('### Finding chiusi dal coordinatore', text)

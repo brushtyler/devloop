@@ -31,6 +31,7 @@ import signal
 import time
 from pathlib import Path
 
+from .i18n import ENGLISH, Catalog
 from .markdown import dispatcher_header, publishable
 from .pin import Repinned
 from .watch import NOTHING_NEW, failure_class
@@ -61,18 +62,37 @@ class Woken(Stopped):
     slot."""
 
 
-def alert_body(classes):
+# The alert of a stopped loop in the project's ``language`` (#635); English for a language
+# without translation.
+TEXTS = Catalog(
+    en={
+        'title': '`devloop run` has stopped',
+        'text': ('{count} consecutive ticks failed with an error: the loop has stopped and starts '
+                 'no other tick.\n\n'
+                 'Classes of the errors, from the first to the last: {listed}. The detail is in '
+                 'the local log of the loop.\n\n'
+                 'Once the cause is removed, the operator restarts the loop (`devloop run` or its '
+                 'service).'),
+    },
+    it={
+        'title': '`devloop run` si è fermato',
+        'text': ('{count} tick consecutivi sono falliti con un errore: il ciclo si è fermato e '
+                 'non avvia altri tick.\n\n'
+                 'Classi degli errori, dal primo all\'ultimo: {listed}. Il dettaglio è nel log '
+                 'locale del ciclo.\n\n'
+                 'Rimossa la causa, l\'operatore riavvia il ciclo (`devloop run` o il suo '
+                 'servizio).'),
+    })
+
+
+def alert_body(classes, language=ENGLISH):
     """The alert of a loop stopped after ``classes``, the failure classes of its last ticks
-    (``watch.failure_class``): no message, path or token of the errors."""
+    (``watch.failure_class``), in ``language`` (#635): no message, path or token of the
+    errors."""
+    t = TEXTS.texts(language)
     listed = ', '.join(f'`{name}`' for name in classes)
-    return publishable(
-        dispatcher_header()
-        + '\n## `devloop run` si è fermato\n\n'
-        + f'{len(classes)} tick consecutivi sono falliti con un errore: il ciclo si è fermato e '
-          'non avvia altri tick.\n\n'
-        + f'Classi degli errori, dal primo all\'ultimo: {listed}. Il dettaglio è nel log locale '
-          'del ciclo.\n\n'
-        + 'Rimossa la causa, l\'operatore riavvia il ciclo (`devloop run` o il suo servizio).')
+    return publishable(dispatcher_header() + f'\n## {t("title")}\n\n'
+                       + t('text', count=len(classes), listed=listed))
 
 
 class Loop:
@@ -80,13 +100,14 @@ class Loop:
     for news on GitHub for at most ``timeout`` seconds, sleeping with ``sleep`` and calling
     ``check`` (``Stopped`` on a stop) before each read, and returns 0 on news or
     ``watch.NOTHING_NEW`` at the timeout. ``alert(body)`` publishes the alert, None
-    without ``[run].alert_issue``. ``clock`` is monotonic. ``workers``, in continuous mode
-    (#227), holds the actions the ticks started and that may still run."""
+    without ``[run].alert_issue``, in ``language`` (#635). ``clock`` is monotonic. ``workers``,
+    in continuous mode (#227), holds the actions the ticks started and that may still run."""
 
     def __init__(self, tick, watch, stop_file, *, log, alert=None, alert_issue=0,
                  idle_timeout=IDLE_TIMEOUT, clock=time.monotonic, sleep=time.sleep,
-                 workers=None):
+                 workers=None, language=ENGLISH):
         self.tick = tick
+        self.language = language
         self.watch = watch
         self.workers = workers
         self.stop_file = Path(stop_file)
@@ -264,7 +285,7 @@ class Loop:
             self.log(f'{summary}; no [run].alert_issue is configured')
             return FAILED
         try:
-            self.alert(alert_body(failures))
+            self.alert(alert_body(failures, self.language))
         except Exception as exc:  # one attempt only: its class, never its output
             self.log(f'{summary}; the alert on issue #{self.alert_issue} could not be published '
                      f'({failure_class(exc)})')

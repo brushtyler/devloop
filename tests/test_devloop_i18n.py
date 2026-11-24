@@ -1169,5 +1169,216 @@ class MergeLanguageTests(unittest.TestCase):
                               case.text())
 
 
+class RemainingTextsLanguageTests(unittest.TestCase):
+    """#635: the other warnings and summaries of the dispatcher in the project's language,
+    English for a language without translation; the index of the past days of the daily
+    summary is found in every language."""
+
+    LANGUAGES = ('Italian', 'English', 'French')
+
+    def test_the_catalogues_have_every_text_in_italian(self):
+        import devloop.__main__ as cli
+        from devloop import (acceptance, authorization, context, dispatch_actions, dispatch_base,
+                             dispatch_conclave, dispatcher, generated, hoststep, planning, report,
+                             runloop)
+        for catalog in (report.TEXTS, runloop.TEXTS, dispatch_base.TEXTS, dispatcher.TEXTS,
+                        dispatch_actions.TEXTS, planning.TEXTS, generated.TEXTS, hoststep.TEXTS,
+                        markdown.NOTICE_TEXTS, context.LABEL_TEXTS, context.OPEN_FINDINGS_TEXTS,
+                        authorization.TEXTS, dispatch_conclave.VETO_TEXTS, cli.WARNING_TEXTS,
+                        acceptance.TEXTS, review.TEXTS):
+            self.assertEqual(set(catalog.tables[ITALIAN]), set(catalog.tables[ENGLISH]))
+
+    def test_the_daily_summary(self):
+        from devloop import report
+        from test_devloop_report import CFG as RCFG
+        from test_devloop_report import TRUST as RTRUST
+        from test_devloop_report import ReportGH, simulated_day
+        expected = {
+            'Italian': ('# Riepilogo devloop del 2026-11-16 (UTC)', '### Azioni',
+                        '| 23:50 | #13 | review | codex | in corso | non riportato |',
+                        '- 14:00 #5: classe `tests_failed`, all\'operatore',
+                        '- PR mergiate: 2 (#12, #15)'),
+            'English': ('# devloop summary of 2026-11-16 (UTC)', '### Actions',
+                        '| 23:50 | #13 | review | codex | in progress | not reported |',
+                        '- 14:00 #5: class `tests_failed`, to the operator',
+                        '- PRs merged: 2 (#12, #15)'),
+        }
+        found = {}
+        for language in self.LANGUAGES:
+            gh = ReportGH()
+            day = simulated_day(gh)
+            summary = report.Records(gh, RTRUST, day, day, RCFG.agents, language).summary(day)
+            found[language] = summary
+            text = report.render_text(summary)
+            with self.subTest(language=language):
+                for phrase in expected.get(language, expected['English']):
+                    self.assertIn(phrase, text)
+        # The records read are the same: only the words change.
+        self.assertEqual([row[:2] for row in found['Italian'].actions],
+                         [row[:2] for row in found['English'].actions])
+        self.assertEqual(report.render(found['French']), report.render(found['English']))
+
+    def test_the_index_of_the_past_days_after_a_change_of_language(self):
+        import shutil
+        import tempfile
+        from pathlib import Path
+        from devloop import report
+        from test_devloop_report import CFG as RCFG
+        from test_devloop_report import ISSUE
+        from test_devloop_report import TRUST as RTRUST
+        from test_devloop_report import Clock, ReportGH, simulated_day
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        clock = Clock('2026-11-17T08:00:00Z')
+        gh = ReportGH(clock)
+        simulated_day(gh)
+
+        def publisher(language):
+            return report.Publisher(gh, RTRUST, RCFG.repo, ISSUE, agents=RCFG.agents,
+                                    log=lambda line: None, clock=clock,
+                                    lock=tmp / report.LOCK_FILE, language=language)
+        publisher('Italian').publish()
+        self.assertIn('## Giorni precedenti', gh.body)
+        head = gh.body.split('\n## Giorni precedenti', 1)[0]
+        # The language changes: a past day is archived, today's summary is kept as it was and
+        # the index, found under its Italian heading, is written again in English, once.
+        clock.set('2026-11-17T09:00:00Z')
+        publisher('English').publish(report.parse_day('2026-11-16'))
+        self.assertTrue(gh.body.startswith(head))
+        self.assertNotIn('## Giorni precedenti', gh.body)
+        self.assertEqual(gh.body.count('## Previous days'), 1)
+        self.assertIn('[2026-11-16]', gh.body)
+        (archive,) = [c for c in gh.comments if c['number'] == ISSUE]
+        self.assertIn('## devloop summary of 2026-11-16 (UTC)', archive['body'])
+        # And back: the English heading is found too.
+        clock.set('2026-11-17T10:00:00Z')
+        publisher('Italian').publish(report.parse_day('2026-11-16'))
+        self.assertNotIn('## Previous days', gh.body)
+        self.assertEqual(gh.body.count('## Giorni precedenti'), 1)
+        self.assertEqual(report.split_index('no index')[1], '')
+
+    def test_the_alert_of_a_stopped_loop(self):
+        from devloop import runloop
+        expected = {'Italian': '## `devloop run` si è fermato',
+                    'English': '## `devloop run` has stopped'}
+        for language in self.LANGUAGES:
+            body = runloop.alert_body(['network', 'network'], language)
+            self.assertIn(expected.get(language, expected['English']), body)
+            self.assertIn('`network`, `network`', body)
+        self.assertEqual(runloop.alert_body(['x']), runloop.alert_body(['x'], 'English'))
+
+    def test_the_warnings_of_the_start(self):
+        import shutil
+        import tempfile
+        from pathlib import Path
+        import devloop.__main__ as cli
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        expected = {'Italian': ('## Tabelle del file di progetto assenti',
+                                '## Agent senza utente dedicato'),
+                    'English': ('## Tables of the project file missing',
+                                '## Agents without a dedicated user')}
+        for language in self.LANGUAGES:
+            comments = []
+            gh = type('GH', (), {'comment': lambda self, n, body: comments.append(body)})()
+            state = tmp / language
+            state.mkdir()
+            cli.project_tables_warning(7, state, gh, out=lambda line: None,
+                                       language=language)(['tests'])
+            cli.agent_user_warning(True, 7, state, gh, out=lambda line: None, language=language)
+            tables, agents = expected.get(language, expected['English'])
+            self.assertIn(tables, comments[0])
+            self.assertIn(agents, comments[1])
+
+    def test_the_labels_keep_their_names_and_describe_themselves_in_the_language(self):
+        from devloop.dispatcher import ensure_labels
+        styles = {}
+        for language in self.LANGUAGES:
+            created = {}
+            gh = type('GH', (), {
+                'repo_labels': lambda self: [],
+                'ensure_label': lambda self, name, color, text: created.update({name: text})})()
+            ensure_labels(gh, CFG.labels, CFG.review_policy, language)
+            styles[language] = created
+        self.assertEqual(set(styles['Italian']), set(styles['English']))
+        self.assertEqual(styles['Italian'][CFG.labels.needs_operator],
+                         'devloop: serve una decisione dell\'operatore')
+        self.assertEqual(styles['English'][CFG.labels.needs_operator],
+                         'devloop: a decision of the operator is needed')
+        self.assertEqual(styles['French'], styles['English'])
+        self.assertEqual(styles['English']['priority:high'],
+                         'devloop: high priority, starts before the other ready issues')
+
+    def test_the_escalations_of_the_dispatcher(self):
+        expected = {
+            'Italian': ('La descrizione della PR non termina più con il marker devloop della '
+                        'issue #7', 'Implementazione interrotta'),
+            'English': ('The description of the PR no longer ends with the devloop marker of '
+                        'issue #7', 'Implementation interrupted'),
+        }
+        for language in self.LANGUAGES:
+            gh = FakeGH()
+            d = Dispatcher(dataclasses.replace(CFG, language=language), gh, FakeWS(),
+                           FakeRunner({}), log=lambda m: None)
+            d._do_lost_meta(pr())
+            d._do_stale(7)
+            lost, stale = expected.get(language, expected['English'])
+            bodies = [b for _, b in gh.comments]
+            with self.subTest(language=language):
+                self.assertTrue(any(lost in b for b in bodies), bodies)
+                self.assertTrue(any(stale in b for b in bodies), bodies)
+                self.assertEqual(
+                    [markdown.read_marker(b, 'notice')['class'] for b in bodies],
+                    ['lost_meta', 'interrupted'])
+
+    def test_the_reasons_of_the_round_limit(self):
+        from devloop.dispatcher import round_limit_reason
+        from devloop.planning import round_reasons
+        reviews = [dict(TURN, round=1, source='agent', head_sha='a', reviewer='codex'),
+                   dict(TURN, round=2, source='ci', head_sha='a', reviewer=None)]
+        italian = round_reasons(reviews, language='Italian')
+        english = round_reasons(reviews, language='English')
+        self.assertEqual([r[1] for r in italian], ['prima review', 'CI fallita'])
+        self.assertEqual([r[1] for r in english], ['first review', 'failed CI'])
+        self.assertEqual(round_reasons(reviews, language='French'), english)
+        self.assertEqual([r[2] for r in italian], [r[2] for r in english])
+        text = round_limit_reason('Limit.', reviews, (), (), 2, language='English')
+        self.assertIn('Rounds counted against the limit (2 of 2, `max_review_rounds`):', text)
+        self.assertIn('A trusted user may grant one more round', text)
+        text = round_limit_reason('Limite.', reviews, (), (), 2, language='Italian')
+        self.assertIn('Round contati sul limite (2 di 2, `max_review_rounds`):', text)
+
+    def test_the_sections_of_a_pull_request_and_of_a_fix(self):
+        from devloop import acceptance, hoststep
+        from devloop.generated import generated_files, render_generated
+        entry = [{'criterion': 'A', 'tests': [], 'status': 'not_covered', 'reason': 'r'}]
+        files = generated_files(['a/__pycache__/b.pyc'])
+        self.assertIn('| 1 | A | non coperto | — | r |', acceptance.render_map(entry, 'Italian'))
+        self.assertIn('| 1 | A | not covered | — | r |', acceptance.render_map(entry, 'French'))
+        self.assertIn('### Passo sull\'host', hoststep.render_step('x', 'Italian'))
+        self.assertIn('### Step on the host', hoststep.render_step('x'))
+        self.assertIn('(cache o bytecode)', render_generated(files, 'Italian'))
+        self.assertIn('(cache or bytecode)', render_generated(files, 'French'))
+        self.assertEqual(hoststep.latest({'host_step': 3}, [], 'Italian'),
+                         '(dichiarazione non leggibile: vedere la PR)')
+        self.assertEqual(hoststep.latest({'host_step': 3}, []), hoststep.UNREADABLE)
+
+    def test_the_notices_of_markdown_keep_their_records(self):
+        record = {'comment': 3, 'by': 'c', 'at': 't', 'priority': '', 'outcome': 'refused',
+                  'reason': 'why'}
+        for language, title in (('Italian', '## `/devloop authorize` rifiutato'),
+                                ('English', '## `/devloop authorize` refused'),
+                                ('French', '## `/devloop authorize` refused')):
+            body = markdown.render_authorize(record, language=language)
+            self.assertIn(title, body)
+            self.assertEqual(markdown.read_marker(body, 'authorize'), record)
+            cycle = markdown.render_cycle({'cycle': ['#1', '#2']}, language)
+            self.assertEqual(markdown.read_marker(cycle, 'cycle'), {'cycle': ['#1', '#2']})
+        self.assertIn('## Ciclo di dipendenze',
+                      markdown.render_cycle({'cycle': ['#1', '#2']}, 'Italian'))
+        self.assertIn('## The merge is the operator\'s',
+                      markdown.render_operator_merge(SHA1, 0, 1, '- r', 'agent:needs-operator'))
+
+
 if __name__ == '__main__':
     unittest.main()

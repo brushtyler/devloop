@@ -383,7 +383,8 @@ the mailbox.
   - No automatic agent of the host: giving root to an agent without a person is a matter of
     direction.
 - The **reserved merge** (#529): on a ready PR whose merge is the operator's (`agent:ready-to-merge`
-  with the dispatcher's `agent:needs-operator` and its comment "Il merge spetta all'operatore"),
+  with the dispatcher's `agent:needs-operator` and its comment "The merge is the operator's",
+  "Il merge spetta all'operatore" in Italian),
   `/devloop merge <sha> <reason>`, only when every condition of
   [The reserved merge of the coordinator](../guide.md#the-reserved-merge-of-the-coordinator)
   holds, the `/devloop approve` of the operator included when it is needed, and within the daily

@@ -15,6 +15,7 @@ The functions here are pure: the dispatcher reads GitHub and writes the records
 import hashlib
 import json
 
+from .i18n import ENGLISH, Catalog
 from .supervision import command_line
 
 AUTHORIZE = 'authorize'
@@ -22,16 +23,29 @@ AUTHORIZE_COMMAND = f'/devloop {AUTHORIZE}'
 # The priorities a command may carry, as the names of ``priority:<p>``.
 PRIORITIES = ('high', 'normal', 'low')
 OUTCOMES = ('authorized', 'refused')
-MALFORMED = (f'argomenti non validi: il comando si scrive `{AUTHORIZE_COMMAND}` o '
-             f'`{AUTHORIZE_COMMAND} priority:<p>`, con `<p>` fra ' + ', '.join(
-                 f'`{p}`' for p in PRIORITIES))
+# Why the arguments of a command are malformed, in the project's ``language`` (#635).
+TEXTS = Catalog(
+    en={'malformed': ('arguments not valid: the command is written `{command}` or '
+                      '`{command} priority:<p>`, with `<p>` among {priorities}')},
+    it={'malformed': ('argomenti non validi: il comando si scrive `{command}` o '
+                      '`{command} priority:<p>`, con `<p>` fra {priorities}')})
 
 
-def authorize_arguments(body):
+def malformed(language=ENGLISH):
+    """Why the arguments of a ``/devloop authorize`` are malformed, in ``language``."""
+    return TEXTS.texts(language)('malformed', command=AUTHORIZE_COMMAND,
+                                 priorities=', '.join(f'`{p}`' for p in PRIORITIES))
+
+
+MALFORMED = malformed()
+
+
+def authorize_arguments(body, language=ENGLISH):
     """``(priority, problem)`` of the ``/devloop authorize`` of a comment (#607), or None when
     the first line after the attribution header (``command_line``) is no such command.
     ``priority``: one of ``PRIORITIES``, or '' without one. ``problem``: '' or why the
-    arguments are malformed. The rest of the comment is free text, such as the reason."""
+    arguments are malformed, in ``language`` (#635). The rest of the comment is free text, such
+    as the reason."""
     tokens = command_line(body).split()
     if tokens[:2] != ['/devloop', AUTHORIZE]:
         return None
@@ -41,7 +55,7 @@ def authorize_arguments(body):
     name, _, value = arguments[0].partition(':')
     if len(arguments) == 1 and name == 'priority' and value in PRIORITIES:
         return value, ''
-    return '', MALFORMED
+    return '', malformed(language)
 
 
 def text_hash(title, body):

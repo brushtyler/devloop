@@ -25,6 +25,8 @@ from test_devloop import (CFG, FakeRunner, FakeWS, finding, fixed, implemented, 
 from test_devloop_ledger import LedgerGH, TreeWS
 
 PYC = 'pkg/__pycache__/m.cpython-314.pyc'
+# The language of the texts these tests read, the one of ``CFG`` (#635).
+IT = CFG.language
 ENV = {'GIT_AUTHOR_NAME': 'T', 'GIT_AUTHOR_EMAIL': 't@x', 'GIT_COMMITTER_NAME': 'T',
        'GIT_COMMITTER_EMAIL': 't@x'}
 
@@ -51,17 +53,24 @@ class GeneratedFilesTests(unittest.TestCase):
 
     def test_the_section_lists_them_and_says_they_stay(self):
         self.assertEqual(render_generated([]), '')
-        text = render_generated(generated_files([PYC, 'data.bin'], by_tests=['data.bin']))
+        listed = generated_files([PYC, 'data.bin'], by_tests=['data.bin'])
+        text = render_generated(listed, IT)
         self.assertTrue(text.startswith('### File generati nel commit'))
         self.assertIn('devloop non li esclude', text)
         self.assertIn('- `data.bin` (modificato dai test locali)', text)
         self.assertIn(f'- `{PYC}` (cache o bytecode)', text)
         self.assertIn('- `img.png` (binario)', render_generated(
-            generated_files(['img.png'], binary=['img.png'])))
+            generated_files(['img.png'], binary=['img.png']), IT))
         many = generated_files([f'a/{i:02}.pyc' for i in range(MAX_LISTED + 2)])
-        text = render_generated(many)
+        text = render_generated(many, IT)
         self.assertEqual(text.count('\n- `'), MAX_LISTED)
         self.assertIn('- … e altri 2', text)
+        # In English, the default, and in a language without translation (#635).
+        for language in ('English', 'French'):
+            text = render_generated(listed, language)
+            self.assertTrue(text.startswith('### Generated files in the commit'))
+            self.assertIn('- `data.bin` (changed by the local tests)', text)
+        self.assertIn('- … and 2 more', render_generated(many))
 
 
 # Many caches with long paths, as a test suite can create (#627, R1-2).
@@ -99,7 +108,7 @@ class LimitTests(unittest.TestCase):
         record = generated_record(files)
         self.assertEqual(record['generated_files'], files[:MAX_LISTED])
         self.assertEqual(record['generated_omitted'], len(MANY) - MAX_LISTED)
-        text = render_generated(files)
+        text = render_generated(files, IT)
         self.assertEqual(text.count('\n- `'), MAX_LISTED)
         self.assertIn(f'- … e altri {len(MANY) - MAX_LISTED}', text)
 
@@ -123,7 +132,7 @@ class LimitTests(unittest.TestCase):
     def test_the_fix_record_fits_github(self):
         fix = {'summary': 's', 'responses': [], 'head_sha': 'a' * 40,
                'generated_files': generated_files(MANY)}
-        body = markdown.render_fix(fix, 'h', 1)
+        body = markdown.render_fix(fix, 'h', 1, language=IT)
         self.assertLess(len(body), 20000)
         record = markdown.read_marker(body, 'fix')
         self.assertEqual(len(record['generated_files']), MAX_LISTED)
@@ -302,7 +311,7 @@ class PointedOutTests(unittest.TestCase):
                     {'path': 'other.pyc', 'reasons': ['generated']},
                     {'path': PYC, 'reasons': ['generated', 'tests']}]
         self.assertEqual(markdown.read_marker(created['body'], 'pr')['generated_files'], expected)
-        self.assertIn(render_generated(expected), created['body'])
+        self.assertIn(render_generated(expected, IT), created['body'])
         self.assertEqual(ws.pushes, [('agent/issue-7', True)])  # published all the same
         self.assertIn('  3 generated files or files changed by the tests in the commit, '
                       'pointed out', self.logs)
@@ -321,7 +330,7 @@ class PointedOutTests(unittest.TestCase):
         (body,) = [b for _, b in self.gh.comments if markdown.read_marker(b, 'fix')]
         expected = [{'path': PYC, 'reasons': ['generated']}]
         self.assertEqual(markdown.read_marker(body, 'fix')['generated_files'], expected)
-        self.assertIn(render_generated(expected), body)
+        self.assertIn(render_generated(expected, IT), body)
         self.assertEqual(self.ws.pushes, [('agent/issue-7', False)])
 
 

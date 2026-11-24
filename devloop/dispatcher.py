@@ -204,7 +204,7 @@ from .budget import of_issue as budget_of_issue
 from .budget import reserve as budget_reserve
 from .budget import status_lines as budget_status_lines
 from .config import INSTALL_ROOT, LEGACY_NEEDS_OPERATOR, ConfigError, key_role
-from .context import (LABEL_STYLE, _cli_state_refused, _describe_bases, _failure_text,
+from .context import (_cli_state_refused, _describe_bases, _failure_text, label_styles,
                       _open_findings_reason,
                       _render_issue_comments, both_labels_warning, issue_decisions,
                       label_transition, refused_approvals, transition_labels)
@@ -218,14 +218,15 @@ from .dispatch_supervision import TEXTS as SUPERVISION_TEXTS
 from .dispatch_supervision import SupervisionMixin, UntrustedChange, budget_fields
 from .generated import changed_by_tests, generated_files
 from .github import GitHubError, GitHubUncertain, author_login
-from .i18n import ITALIAN
+from .i18n import ENGLISH, Catalog
 from .journal import TEXTS as JOURNAL_TEXTS
 from .journal import (CLOSED, MERGED, RECONCILE_COMMAND, JournalError, TurnBlocked, blocked_text,
                       reconcile_command)
 from .ledger import attempt_branch, comment_ref, fix_register, open_turns, parse_branch
 from .localtests import module_command, select_modules
-from .markdown import (RESUME, carries_record, dispatcher_header, publishable, read_marker,
-                       render_authorize, render_cycle, render_escalation, render_operator_merge)
+from .markdown import (carries_record, dispatcher_header, publishable, read_marker,
+                       render_authorize, render_cycle, render_escalation, render_operator_merge,
+                       resume_text)
 from .activity import iso, restart_line
 from .outbox import SENT as PUBLISHED, describe as outbox_describe
 from .pin import (PREFIX, CheckFailed, PinError, PinHeld, Repinned, ScanFailed, SmokeError,
@@ -242,27 +243,371 @@ from .ports import Backend, Tracker, summarize_checks
 from .review import (CI, OPERATOR, UNPROVEN, current_round, finding_commands, finding_key,
                      flow_verdict, open_findings, owner_of, round_verdict, trust_policy_parts)
 from .supervision import (ACCEPT_DEFAULTS, BUDGET_GRANTABLE, COORDINATOR_DELEGATED, DECIDE,
-                          OPERATOR_ROUNDS_TEXT, RETRY, ROUND_GRANTABLE, TOOL_FAILURE,
-                          UNCERTAIN_TURN, supervisor_command)
+                          RETRY, ROUND_GRANTABLE, TOOL_FAILURE, UNCERTAIN_TURN,
+                          operator_rounds_text, supervisor_command)
 from .workspace import WorkspaceError
 
-LEVEL_LABEL_STYLE = ('5319e7', 'devloop: la PR richiede una review di livello 2')
+# The colours of the labels of the review level, of level 0 and of the priorities; their
+# descriptions, in the project's ``language`` (#635), are ``label_*`` of ``TEXTS``.
+LEVEL_LABEL_COLOR = '5319e7'
 # How many prerequisites outside the queue a snapshot reads at most to follow the dependencies
 # of the ready issues (#277): beyond them, cycles are not looked for.
 MAX_DEPENDENCY_READS = 50
 # The dropped publications one alert lists at most (#397): the others are in the local log.
 MAX_DROPS_LISTED = 30
-PRIORITY_LABEL_STYLE = {
-    'priority:high': ('b60205', 'devloop: priorità alta, parte prima delle altre issue pronte'),
-    'priority:normal': ('c2e0c6', 'devloop: priorità normale (implicita)'),
-    'priority:low': ('c5def5', 'devloop: priorità bassa, parte dopo le altre issue pronte'),
-}
-ZERO_LABEL_STYLE = ('c5def5', 'devloop: livello 0, nessuna review se il diff è nell\'allowlist')
-_RECEIPT_FIELDS = {'pr': 'PR', 'base': 'commit di base', 'head': 'head',
-                   'policy': 'versione della policy', 'level': 'livello',
-                   'reviewers': 'reviewer richiesti',
-                   'profiles': 'identità, modello, effort o argomenti dei reviewer'}
-_CLOSED_TEXT = {'resolved': 'risolto', 'withdrawn': 'ritirato'}
+PRIORITY_LABEL_COLORS = {'priority:high': 'b60205', 'priority:normal': 'c2e0c6',
+                         'priority:low': 'c5def5'}
+ZERO_LABEL_COLOR = 'c5def5'
+# The texts the dispatcher composes itself, in the project's ``language`` (#635): the warnings
+# on ``[run].alert_issue``, the escalations and records of this module, the descriptions of the
+# labels. English for a language without translation; markers, commands and labels are the same
+# in every language. ``field_*``: the fields of a policy receipt whose differences void an
+# approval.
+TEXTS = Catalog(
+    en={
+        'label_level': 'devloop: the PR requires a review of level 2',
+        'label_zero': 'devloop: level 0, no review if the diff is in the allowlist',
+        'label_priority_high': 'devloop: high priority, starts before the other ready issues',
+        'label_priority_normal': 'devloop: normal priority (implicit)',
+        'label_priority_low': 'devloop: low priority, starts after the other ready issues',
+        'field_pr': 'PR',
+        'field_base': 'base commit',
+        'field_head': 'head',
+        'field_policy': 'policy version',
+        'field_level': 'level',
+        'field_reviewers': 'required reviewers',
+        'field_profiles': 'identity, model, effort or arguments of the reviewers',
+        'kept_binary': 'binary',
+        'kept_more': '- … and {more} more files',
+        'kept_text': ('\n\nThe timed-out turn left uncommitted changes: {files} files, +{added} '
+                      '−{removed} lines. devloop did not commit them: it saved them as evidence '
+                      'in `{file}` in `{logs}`. A retry of the same step reapplies them to the '
+                      'new worktree before starting the agent; if they do not apply, it passes '
+                      'them to the agent in the prompt.\n\n'),
+        'rounds_more': ' plus {granted} granted',
+        'rounds_counted': 'Rounds counted against the limit ({count} of {limit}, '
+                          '`max_review_rounds`{more}):',
+        'rounds_none': '- none',
+        'rounds_free': 'Not counted:',
+        'rounds_delegation': ('The conditions of the delegation of the rounds are verified: the '
+                              'supervisor may grant another round to this PR with `/devloop '
+                              'grant-round <reason>`, where the reason reports or cites the '
+                              'analysis of the causes.'),
+        'untrusted_no_label': 'no label `{label}` added by a trusted user',
+        'untrusted_text': 'the text was changed by `{who}` after the label `{label}`',
+        'untrusted_title': 'the title was changed by `{who}` after the label `{label}`',
+        'review_no_reviewer': 'the review of round {round} does not record the reviewer',
+        'review_other_owners': ('the review of round {round} of `{owner}` attributes findings to '
+                                'others: {keys}'),
+        'authorize_not_coordinator': ('only the identity of the coordinator '
+                                      '(`[roles.coordinator]`) authorizes the work'),
+        'authorize_untrusted': ('the issue was opened neither by a trusted user nor by an app of '
+                                'devloop: only a trusted user queues it'),
+        'authorize_changed': ('the title or the body of the issue changed after the command (or '
+                              'in the same second): the text read is the one authorized, a new '
+                              '`{command}` is needed'),
+        'pin_check_title': 'Failed auto-pin',
+        'pin_check_text': ('The copy of `{ref}` at commit `{sha}` did not pass the check before '
+                           'the smoke test. `current` stays on the previous copy, the pin '
+                           'request is cancelled and the loop goes on with the running copy.\n\n'
+                           'Reason: `{reason}`\n\n'
+                           'The pin starts again with a new commit of `{ref}` that touches the '
+                           'installation, or by hand (`devloop pin`) after fixing the cause. '
+                           '`devloop status` shows the reason until a pin succeeds.'),
+        'pin_smoke_title': 'Auto-pin refused by the smoke test',
+        'pin_smoke_text': ('The copy of `{ref}` at commit `{sha}` did not pass the smoke test at '
+                           'step `{step}`. `current` stays on the previous copy, the pin request '
+                           'is cancelled and the loop goes on.\n\n'
+                           'The detail is in the local log; the refused copy stays in '
+                           '`rejected-{sha}` in the state directory, for the analysis.'),
+        'unexpected_error': 'unexpected error of the dispatcher ({error})',
+        'log_hint': ' Local log: `{name}` in `{logs}`.',
+        'tail_hint': (' The last lines of the output (at most {lines}, without secrets or '
+                      'absolute paths) are at the bottom of the comment.'),
+        'step_failed': 'The step `{step}` failed: {failure}{hint}',
+        'advisory_held': ('\n\nThe advisory review of head `{head}` stays suspended until the '
+                          'story covers the turn. A new head does not stay suspended in silence: '
+                          'its advisory review is tried again and, if refused, reported with '
+                          'another escalation.'),
+        'cli_state': ('\n\nThe directories of the CLIs of the agent user hold an entry devloop '
+                      'does not admit (#517). With the loop stopped, the operator removes it as '
+                      'the agent user and looks for the turn or the tests that wrote it, or adds '
+                      'it to the list with a PR, as in `ops/host/migrate.md`, section "Directory '
+                      'delle CLI con lo sticky bit (#517)".'),
+        'drop_line': '\n- `{pub}`: {what}, by `{actor}`: {reason}',
+        'drops_more': '\n- … and {more} more, listed in the local log',
+        'drops_title': 'Dropped publications',
+        'drops_text': ('The outbox of the publications dropped these writes: they were not '
+                       'published on GitHub and will not be.{listed}\n\n'
+                       'The body of each stays in the journal of the turns (`turn-journal.jsonl` '
+                       'in the state directory), with its id: it must be published by hand, if '
+                       'still needed.'),
+        'journal_title': 'Journal of the turns near its limit',
+        'journal_text': ('The journal of the turns (`turn-journal.jsonl` in the state directory) '
+                         'is {size} bytes, {percent}% of the limit of {limit} bytes '
+                         '(`journal_max_mib`). Beyond the limit the journal does not load and '
+                         'accepts no event: no turn starts until the operator raises the limit. '
+                         'devloop removes nothing from it and does not compact it. This warning '
+                         'is published once per threshold.'),
+        'attempt_unreadable': 'the journal of the turns is not readable: {error}',
+        'attempt_bound': 'ties it to the attempt `{attempt}`',
+        'attempt_unbound': ('has the active attempt `{attempt}` of issue #{issue} without a '
+                            'recorded PR, which may be this one'),
+        'attempt_no_mark': ('the marker of the PR has no attempt, but the journal of the turns '
+                            '{which}: the field `attempt` was removed, or its absence cannot be '
+                            'told from a removal'),
+        'attempt_unconfirmed': ('the attempt `{attempt}` of the marker of the PR is not '
+                                'confirmed by the journal of the turns, which is its authority'),
+        'attempt_other_pr': ('the attempt `{attempt}` of the marker is the one of PR #{pr}, not '
+                             'of this one'),
+        'attempt_concluded': ('the attempt `{attempt}` of this PR is already concluded '
+                              '(`{outcome}`): a PR reopened after the conclusion of its attempt '
+                              'does not resume the work'),
+        'attempt_escalation': ('The attempt recorded in the marker of this PR does not hold: '
+                               '{problem}. devloop does not go on with the work on this PR: the '
+                               'operator decides.'),
+        'tests_failed': 'The local tests fail even after the attempts of correction.',
+        'blocked_title': 'Work blocked',
+        'protected': ('The change touches protected paths (`protected_paths`), which devloop '
+                      'does not publish: a workflow or a local action on a branch of this '
+                      'repository would be run by the CI before any review. The commit stays in '
+                      'the local worktree; the change must be applied by hand.'),
+        'stale_no_receipt': 'the approval has no policy receipt',
+        'stale_changed': 'changed: {fields}',
+        'stale_missing': 'the approval of {keys} is missing',
+        'stale_bases': ('\n\nCommits of `{branch}` between the base of the approval and the '
+                        'current one:\n\n'),
+        'stale_round_free': ('The new review of the same commit opens a new round, which does '
+                             'not count against the limit of the rounds; the open findings stay '
+                             'unchanged.'),
+        'stale_round': 'The new review opens a new round; the open findings stay unchanged.',
+        'stale_title_promotion': 'Approval not valid for the promotion',
+        'stale_title_merge': 'Approval not valid for the merge',
+        'stale_text_promotion': ('The policy receipt computed again before the promotion does not '
+                                 'match the one of the approval ({what}). The PR stays in review: '
+                                 'a new review is needed, of the same commit too. '),
+        'stale_text_merge': ('The policy receipt computed again before the merge does not match '
+                             'the one of the approval ({what}). The PR stays in review: a new '
+                             'review is needed, of the same commit too. '),
+        'reviewer_decision': ('A reviewer asks for a decision of the operator: the reason is in '
+                              'its review.'),
+        'round_limit_open': ('Reached the limit of {limit} review rounds with blocking findings '
+                             'still open.'),
+        'merge_off': '- `[merge] mode = "off"`: devloop does not merge the PRs.',
+        'reserved_more': ' and {more} more',
+        'reserved_paths': ('- the PR touches paths reserved to the operator '
+                           '(`[merge] operator_only_paths`): {shown}{more}.'),
+        'level_off': '- `[merge.levels]` sets `off` for the review level {level} of this PR.',
+        'conclave_unblocked': ('- the work of this PR started again after the decision of the '
+                               'conclave recorded in comment {comment}: after each unblock '
+                               'devloop does not merge it alone. The operator merges it, or the '
+                               'coordinator with its reserved merge if the decision was unanimous '
+                               'and still holds and a complete review round after the restart '
+                               'approved the head.'),
+        'interrupted': ('Implementation interrupted: the issue was being worked on but there is '
+                        'no open devloop PR.'),
+        'ci_green': 'CI green on commit {head}',
+        'closed_resolved': 'resolved',
+        'closed_withdrawn': 'withdrawn',
+        'closed_by_ci': 'the CI',
+        'closed_by_operator': 'the operator `{author}`',
+        'closed_line': '- `{finding}`: {status} by {who}: {reason}',
+        'findings_title': 'Findings closed',
+        'findings_text': 'From now on these findings are closed: no later review reopens them.',
+        'unattributable': ('The owner of some findings cannot be rebuilt from the markers of this '
+                           'PR, so devloop does not know who may close them and does not go on: '
+                           'the review and the decision on the merge are a person\'s.\n\n'),
+        'lost_meta': ('The description of the PR no longer ends with the devloop marker of issue '
+                      '#{issue}, so implementer and reviewers are not known. Restore the line of '
+                      'the marker (it is in the history of the edits of the description) as the '
+                      'last line.'),
+        'ci_missing': ('On head `{head}` there is no CI {minutes} minutes after the push, but '
+                       '`{branch}` requires the checks {names}: the review does not start '
+                       'without the CI. Check that the CI started on the head, or run it '
+                       'again.'),
+        'round_limit_both': 'of the supervisor or of the operator',
+        'round_limit_operator': 'of the operator',
+        'round_limit': ('Reached the limit of {limit} review rounds: a new round (review or '
+                        'failed CI) does not start without a decision {who}. A failed CI on the '
+                        'head of a review round that approved or requested changes enters that '
+                        'round and does not open a new one.'),
+        'trust_intro': ('- the PR touches the trust policy: the review and the merge of the '
+                        'operator are needed. Parts touched declared by the reviewers:'),
+        'trust_no_parts': 'the reviewer did not name them.',
+    },
+    it={
+        'label_level': 'devloop: la PR richiede una review di livello 2',
+        'label_zero': 'devloop: livello 0, nessuna review se il diff è nell\'allowlist',
+        'label_priority_high': 'devloop: priorità alta, parte prima delle altre issue pronte',
+        'label_priority_normal': 'devloop: priorità normale (implicita)',
+        'label_priority_low': 'devloop: priorità bassa, parte dopo le altre issue pronte',
+        'field_pr': 'PR',
+        'field_base': 'commit di base',
+        'field_head': 'head',
+        'field_policy': 'versione della policy',
+        'field_level': 'livello',
+        'field_reviewers': 'reviewer richiesti',
+        'field_profiles': 'identità, modello, effort o argomenti dei reviewer',
+        'kept_binary': 'binario',
+        'kept_more': '- … e altri {more} file',
+        'kept_text': ('\n\nIl turno in timeout ha lasciato modifiche non committate: {files} file, '
+                      '+{added} −{removed} righe. devloop non le ha committate: le ha salvate come '
+                      'evidenza in `{file}` in `{logs}`. Un retry dello stesso passo le riapplica '
+                      'al worktree nuovo prima di avviare l\'agent; se non si applicano, le passa '
+                      'all\'agent nel prompt.\n\n'),
+        'rounds_more': ' più {granted} concessi',
+        'rounds_counted': 'Round contati sul limite ({count} di {limit}, '
+                          '`max_review_rounds`{more}):',
+        'rounds_none': '- nessuno',
+        'rounds_free': 'Non contano:',
+        'rounds_delegation': ('Le condizioni della delega dei round sono verificate: il '
+                              'supervisore può concedere un altro round a questa PR con '
+                              '`/devloop grant-round <motivo>`, dove il motivo riporta o cita '
+                              'l\'analisi delle cause.'),
+        'untrusted_no_label': 'nessuna label `{label}` messa da un utente fidato',
+        'untrusted_text': 'il testo è stato modificato da `{who}` dopo la label `{label}`',
+        'untrusted_title': 'il titolo è stato modificato da `{who}` dopo la label `{label}`',
+        'review_no_reviewer': 'la review del round {round} non registra il reviewer',
+        'review_other_owners': ('la review del round {round} di `{owner}` attribuisce finding ad '
+                                'altri: {keys}'),
+        'authorize_not_coordinator': ('solo l\'identità del coordinatore '
+                                      '(`[roles.coordinator]`) autorizza il lavoro'),
+        'authorize_untrusted': ('l\'issue non è stata aperta da un utente fidato né da un\'app di '
+                                'devloop: la mette in coda solo un utente fidato'),
+        'authorize_changed': ('il titolo o il corpo dell\'issue sono cambiati dopo il comando (o '
+                              'nello stesso secondo): si autorizza il testo che si è letto, serve '
+                              'un nuovo `{command}`'),
+        'pin_check_title': 'Pin automatico non riuscito',
+        'pin_check_text': ('La copia di `{ref}` al commit `{sha}` non ha superato il controllo '
+                           'prima dello smoke test. `current` resta sulla copia precedente, la '
+                           'richiesta di pin è annullata e il ciclo continua con la copia in '
+                           'esecuzione.\n\n'
+                           'Motivo: `{reason}`\n\n'
+                           'Il pin riparte con un nuovo commit di `{ref}` che tocca '
+                           'l\'installazione, oppure a mano (`devloop pin`) dopo aver corretto la '
+                           'causa. `devloop status` mostra il motivo finché un pin non riesce.'),
+        'pin_smoke_title': 'Pin automatico rifiutato dallo smoke test',
+        'pin_smoke_text': ('La copia di `{ref}` al commit `{sha}` non ha superato lo smoke test '
+                           'al passo `{step}`. `current` resta sulla copia precedente, la '
+                           'richiesta di pin è annullata e il ciclo continua.\n\n'
+                           'Il dettaglio è nel log locale; la copia rifiutata resta in '
+                           '`rejected-{sha}` nella directory di stato, per l\'analisi.'),
+        'unexpected_error': 'errore inatteso del dispatcher ({error})',
+        'log_hint': ' Log locale: `{name}` in `{logs}`.',
+        'tail_hint': (' Le ultime righe dell\'output (al massimo {lines}, senza segreti né '
+                      'percorsi assoluti) sono in fondo al commento.'),
+        'step_failed': 'Il passo `{step}` è fallito: {failure}{hint}',
+        'advisory_held': ('\n\nLa review consultiva della head `{head}` resta sospesa finché la '
+                          'storia non copre il turno. Una nuova head non resta sospesa in '
+                          'silenzio: la sua review consultiva viene ritentata e, se rifiutata, '
+                          'segnalata con un\'altra escalation.'),
+        'cli_state': ('\n\nLe directory delle CLI dell\'utente degli agent contengono una voce '
+                      'che devloop non ammette (#517). A loop fermo, l\'operatore la rimuove come '
+                      'utente degli agent e cerca il turno o i test che l\'hanno scritta, oppure '
+                      'la aggiunge alla lista con una PR, come in `ops/host/migrate.md`, sezione '
+                      '"Directory delle CLI con lo sticky bit (#517)".'),
+        'drop_line': '\n- `{pub}`: {what}, di `{actor}`: {reason}',
+        'drops_more': '\n- … e altre {more}, elencate nel log locale',
+        'drops_title': 'Pubblicazioni abbandonate',
+        'drops_text': ('L\'outbox delle pubblicazioni ha abbandonato queste scritture: non sono '
+                       'state pubblicate su GitHub e non lo saranno.{listed}\n\n'
+                       'Il corpo di ognuna resta nel journal dei turni (`turn-journal.jsonl` '
+                       'nella directory di stato), con il suo id: va pubblicato a mano, se serve '
+                       'ancora.'),
+        'journal_title': 'Journal dei turni vicino al limite',
+        'journal_text': ('Il journal dei turni (`turn-journal.jsonl` nella directory di stato) è '
+                         'di {size} byte, il {percent}% del limite di {limit} byte '
+                         '(`journal_max_mib`). Oltre il limite il journal non si carica e non '
+                         'accetta eventi: nessun turno parte finché l\'operatore non alza il '
+                         'limite. devloop non ne rimuove nulla e non lo compatta. Questo avviso '
+                         'si pubblica una volta per soglia.'),
+        'attempt_unreadable': 'il journal dei turni non è leggibile: {error}',
+        'attempt_bound': 'le associa il tentativo `{attempt}`',
+        'attempt_unbound': ('ha il tentativo attivo `{attempt}` dell\'issue #{issue} senza PR '
+                            'registrata, che potrebbe essere questa'),
+        'attempt_no_mark': ('il marker della PR non ha il tentativo, ma il journal dei turni '
+                            '{which}: il campo `attempt` è stato rimosso, o la sua assenza non si '
+                            'distingue da una rimozione'),
+        'attempt_unconfirmed': ('il tentativo `{attempt}` del marker della PR non è confermato '
+                                'dal journal dei turni, che ne è l\'autorità'),
+        'attempt_other_pr': ('il tentativo `{attempt}` del marker è quello della PR #{pr}, non di '
+                             'questa'),
+        'attempt_concluded': ('il tentativo `{attempt}` di questa PR è già concluso '
+                              '(`{outcome}`): una PR riaperta dopo la conclusione del suo '
+                              'tentativo non riprende il lavoro'),
+        'attempt_escalation': ('Il tentativo registrato nel marker di questa PR non vale: '
+                               '{problem}. devloop non prosegue il lavoro su questa PR: decide '
+                               'l\'operatore.'),
+        'tests_failed': 'I test locali falliscono anche dopo i tentativi di correzione.',
+        'blocked_title': 'Lavoro bloccato',
+        'protected': ('La modifica tocca percorsi protetti (`protected_paths`), che devloop non '
+                      'pubblica: un workflow o una action locale su un branch di questo '
+                      'repository verrebbe eseguito dalla CI prima di qualsiasi review. Il '
+                      'commit resta nel worktree locale; la modifica va applicata a mano.'),
+        'stale_no_receipt': 'l\'approvazione non ha una ricevuta di policy',
+        'stale_changed': 'cambiati: {fields}',
+        'stale_missing': 'manca l\'approvazione di {keys}',
+        'stale_bases': ('\n\nCommit di `{branch}` fra la base dell\'approvazione e quella '
+                        'corrente:\n\n'),
+        'stale_round_free': ('La nuova review dello stesso commit apre un nuovo round, che non '
+                             'conta per il limite dei round; i finding aperti restano '
+                             'invariati.'),
+        'stale_round': 'La nuova review apre un nuovo round; i finding aperti restano invariati.',
+        'stale_title_promotion': 'Approvazione non valida per la promozione',
+        'stale_title_merge': 'Approvazione non valida per il merge',
+        'stale_text_promotion': ('La ricevuta di policy ricalcolata prima della promozione non '
+                                 'coincide con quella dell\'approvazione ({what}). La PR resta in '
+                                 'review: serve una nuova review, anche dello stesso commit. '),
+        'stale_text_merge': ('La ricevuta di policy ricalcolata prima del merge non coincide con '
+                             'quella dell\'approvazione ({what}). La PR resta in review: serve '
+                             'una nuova review, anche dello stesso commit. '),
+        'reviewer_decision': ('Un reviewer chiede una decisione dell\'operatore: il motivo è '
+                              'nella sua review.'),
+        'round_limit_open': ('Raggiunto il limite di {limit} round di review con finding '
+                             'bloccanti ancora aperti.'),
+        'merge_off': '- `[merge] mode = "off"`: devloop non mergia le PR.',
+        'reserved_more': ' e altri {more}',
+        'reserved_paths': ('- la PR tocca percorsi riservati all\'operatore '
+                           '(`[merge] operator_only_paths`): {shown}{more}.'),
+        'level_off': ('- `[merge.levels]` imposta `off` per il livello di review {level} di '
+                      'questa PR.'),
+        'conclave_unblocked': ('- il lavoro di questa PR è ripartito dopo la decisione del '
+                               'conclave registrata nel commento {comment}: dopo ogni sblocco '
+                               'devloop non la mergia da solo. La mergia l\'operatore, o il '
+                               'coordinatore con il suo merge riservato se la decisione era '
+                               'unanime e resta valida e un round di review completo dopo la '
+                               'ripartenza ha approvato l\'head.'),
+        'interrupted': ('Implementazione interrotta: la issue era in lavorazione ma non esiste '
+                        'una PR devloop aperta.'),
+        'ci_green': 'CI verde sul commit {head}',
+        'closed_resolved': 'risolto',
+        'closed_withdrawn': 'ritirato',
+        'closed_by_ci': 'la CI',
+        'closed_by_operator': 'l\'operatore `{author}`',
+        'closed_line': '- `{finding}`: {status} da {who}: {reason}',
+        'findings_title': 'Finding chiusi',
+        'findings_text': 'Da ora questi finding sono chiusi: nessuna review successiva li riapre.',
+        'unattributable': ('Non è possibile ricostruire il proprietario di alcuni finding dai '
+                           'marker di questa PR, quindi devloop non sa chi può chiuderli e non '
+                           'prosegue: la review e la decisione sul merge spettano a una '
+                           'persona.\n\n'),
+        'lost_meta': ('La descrizione della PR non termina più con il marker devloop della issue '
+                      '#{issue}, quindi implementer e reviewer non sono noti. Ripristinare la riga '
+                      'del marker (si trova nella cronologia delle modifiche della descrizione) '
+                      'come ultima riga.'),
+        'ci_missing': ('Sul head `{head}` non risulta alcuna CI {minutes} minuti dopo il push, ma '
+                       '`{branch}` richiede i check {names}: la review non parte senza la CI. '
+                       'Verificare che la CI sia partita sul head, o rilanciarla.'),
+        'round_limit_both': 'del supervisore o dell\'operatore',
+        'round_limit_operator': 'dell\'operatore',
+        'round_limit': ('Raggiunto il limite di {limit} round di review: un nuovo round (review o '
+                        'CI fallita) non parte senza una decisione {who}. Una CI fallita sul head '
+                        'di un round di review che ha approvato o chiesto modifiche entra in quel '
+                        'round e non ne apre uno nuovo.'),
+        'trust_intro': ('- la PR tocca la policy di fiducia: servono la review e il merge '
+                        'dell\'operatore. Parti toccate dichiarate dai reviewer:'),
+        'trust_no_parts': 'il reviewer non le ha indicate.',
+    })
 # Appended to the prompt of a turn that runs on a fallback model after another model of the
 # same turn was unavailable (#121): its session may have changed the working directory.
 FALLBACK_NOTE = {
@@ -302,24 +647,23 @@ def kept_work_file(label):
     return f'timeout-{label}.diff'
 
 
-def _kept_line(name, added, removed):
-    return f'- `{name}`: ' + ('binario' if added is None else f'+{added} −{removed}')
+def _kept_line(t, name, added, removed):
+    return f'- `{name}`: ' + (t('kept_binary') if added is None else f'+{added} −{removed}')
 
 
-def kept_work_text(kept, state_dir):
-    """The paragraph an escalation gets for the uncommitted work a timed-out turn left (#374):
-    the evidence file, its files and lines, and what a retry does with it."""
+def kept_work_text(kept, state_dir, language=ENGLISH):
+    """The paragraph an escalation gets for the uncommitted work a timed-out turn left (#374),
+    in ``language`` (#635): the evidence file, its files and lines, and what a retry does with
+    it."""
+    t = TEXTS.texts(language)
     stats = kept['stats']
     added = sum(a for _, a, _ in stats if a is not None)
     removed = sum(r for _, _, r in stats if r is not None)
-    listed = [_kept_line(*entry) for entry in stats[:MAX_KEPT_LISTED]]
+    listed = [_kept_line(t, *entry) for entry in stats[:MAX_KEPT_LISTED]]
     if len(stats) > MAX_KEPT_LISTED:
-        listed.append(f'- … e altri {len(stats) - MAX_KEPT_LISTED} file')
-    return (f'\n\nIl turno in timeout ha lasciato modifiche non committate: {len(stats)} file, '
-            f'+{added} −{removed} righe. devloop non le ha committate: le ha salvate come '
-            f'evidenza in `{kept["file"]}` in `{state_dir}/logs`. Un retry dello stesso passo le '
-            'riapplica al worktree nuovo prima di avviare l\'agent; se non si applicano, le passa '
-            'all\'agent nel prompt.\n\n' + '\n'.join(listed))
+        listed.append(t('kept_more', more=len(stats) - MAX_KEPT_LISTED))
+    return (t('kept_text', files=len(stats), added=added, removed=removed, file=kept['file'],
+              logs=f'{state_dir}/logs') + '\n'.join(listed))
 
 
 def kept_work_note(timeout, stats, applied, error, patch):
@@ -544,28 +888,28 @@ def pr_status_line(pr, cfg, reviews=None):
 
 
 def round_limit_reason(lead, reviews, fixes, syncs, limit, granted=0, grantable=False,
-                       trusted=(), cap=0, closures=()):
+                       trusted=(), cap=0, closures=(), language=ENGLISH):
     """The reason of a ``round_limit`` escalation (#289): ``lead``, then the rounds of
     ``reviews`` that count against ``limit`` (``max_review_rounds`` plus the ``granted`` rounds,
     #405), each with its reason, and those that do not, so that the operator sees where the
     limit comes from: with the ``trusted`` users, the ``cap`` and the finding ``closures`` of
     ``waiver``, also the reviews after a ``/devloop fix`` of a trusted user on an approved
     head, with who asked it (#536). ``grantable``: a ``round_grantable`` escalation, whose next
-    round the supervisor may grant."""
-    rounds = round_reasons(reviews, fixes, syncs, trusted, cap, closures)
+    round the supervisor may grant. ``language``: the project's, of the text (#635)."""
+    t = TEXTS.texts(language)
+    rounds = round_reasons(reviews, fixes, syncs, trusted, cap, closures, language)
     counted = [(n, why) for n, why, counts in rounds if counts]
-    more = f' più {granted} concessi' if granted else ''
-    text = (lead.rstrip() + f'\n\nRound contati sul limite ({len(counted)} di {limit}, '
-            f'`max_review_rounds`{more}):\n\n'
-            + ('\n'.join(f'- round {n}: {why}' for n, why in counted) or '- nessuno'))
+    more = t('rounds_more', granted=granted) if granted else ''
+    text = (lead.rstrip() + '\n\n'
+            + t('rounds_counted', count=len(counted), limit=limit, more=more) + '\n\n'
+            + ('\n'.join(f'- round {n}: {why}' for n, why in counted) or t('rounds_none')))
     free = [(n, why) for n, why, counts in rounds if not counts]
     if free:
-        text += ('\n\nNon contano:\n\n' + '\n'.join(f'- round {n}: {why}' for n, why in free))
+        text += ('\n\n' + t('rounds_free') + '\n\n'
+                 + '\n'.join(f'- round {n}: {why}' for n, why in free))
     if grantable:
-        return text + ('\n\nLe condizioni della delega dei round sono verificate: il supervisore '
-                       'può concedere un altro round a questa PR con `/devloop grant-round '
-                       '<motivo>`, dove il motivo riporta o cita l\'analisi delle cause.')
-    return text + '\n\n' + OPERATOR_ROUNDS_TEXT
+        return text + '\n\n' + t('rounds_delegation')
+    return text + '\n\n' + operator_rounds_text(language)
 
 
 def control_command(body):
@@ -616,8 +960,9 @@ def base_revocation(record, head):
             and any(c.get('outcome') != 'disjoint' for c in bases))
 
 
-def untrusted_change(history, ready_label, trusted_users, admitters=None):
-    """Why the issue's title or body can no longer be trusted, or None.
+def untrusted_change(history, ready_label, trusted_users, admitters=None, language=ENGLISH):
+    """Why the issue's title or body can no longer be trusted, in ``language`` (#635), or
+    None.
 
     Trust comes from one of ``admitters`` (``label_admitters``, the trusted users by default)
     adding ``ready_label`` in its latest ``labeled`` event (``ready_approval``); a later change
@@ -625,17 +970,18 @@ def untrusted_change(history, ready_label, trusted_users, admitters=None):
     added again. GitHub timestamps have one-second granularity, so an untrusted change in the
     same second as the label cannot be proven to precede it and voids trust too.
     """
+    t = TEXTS.texts(language)
     admitters = trusted_users if admitters is None else admitters
     approved = ready_approval(history['labeled'], ready_label, admitters)
     if not approved:
-        return f'nessuna label `{ready_label}` messa da un utente fidato'
+        return t('untrusted_no_label', label=ready_label)
     since = approved[1]
     edited = history['last_edited_at']
     if edited and edited >= since and history['editor'] not in trusted_users:
-        return f'il testo è stato modificato da `{history["editor"]}` dopo la label `{ready_label}`'
+        return t('untrusted_text', who=history['editor'], label=ready_label)
     for who, at in history['renamed']:
         if at >= since and who not in trusted_users:
-            return f'il titolo è stato modificato da `{who}` dopo la label `{ready_label}`'
+            return t('untrusted_title', who=who, label=ready_label)
     return None
 
 
@@ -785,8 +1131,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                 actor = DISPATCHER
             elif not isinstance(record.get('reviewer'), str) or not record['reviewer']:
                 if problems is not None and self._writes_records(login):
-                    problems.append(f'la review del round {record["round"]} non registra il '
-                                    'reviewer')
+                    problems.append(TEXTS.texts(self.cfg.language)(
+                        'review_no_reviewer', round=record['round']))
                 continue
             elif (record['reviewer'] in (implementer, CI) or record['reviewer'] not in self.cfg.agents
                   or self.cfg.signs_for_role(record['reviewer'])):
@@ -809,9 +1155,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                          if 'key' in f and f['key'] != finding_key(record['round'], owner, f['id'])]
                 if wrong:
                     if problems is not None:
-                        problems.append(f'la review del round {record["round"]} di `{owner}` '
-                                        'attribuisce finding ad altri: '
-                                        + ', '.join(f'`{k}`' for k in wrong))
+                        problems.append(TEXTS.texts(self.cfg.language)(
+                            'review_other_owners', round=record['round'], owner=owner,
+                            keys=', '.join(f'`{k}`' for k in wrong)))
                     continue
             found.append((position, record))
         return found
@@ -989,17 +1335,13 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         for comment in pending:
             login = (comment.get('author') or {}).get('login') or ''
             at = comment.get('created_at') if isinstance(comment.get('created_at'), str) else ''
-            priority, problem = authorize_arguments(comment.get('body'))
+            priority, problem = authorize_arguments(comment.get('body'), self.cfg.language)
+            t = TEXTS.texts(self.cfg.language)
             reason = (
-                'solo l\'identità del coordinatore (`[roles.coordinator]`) autorizza il lavoro'
-                if not self._coordinator_may(login, AUTHORIZE)
+                t('authorize_not_coordinator') if not self._coordinator_may(login, AUTHORIZE)
                 else problem if problem
-                else 'l\'issue non è stata aperta da un utente fidato né da un\'app di devloop: '
-                     'la mette in coda solo un utente fidato'
-                if not self._devloop_author(history.get('author'))
-                else 'il titolo o il corpo dell\'issue sono cambiati dopo il comando (o nello '
-                     'stesso secondo): si autorizza il testo che si è letto, serve un nuovo '
-                     f'`{AUTHORIZE_COMMAND}`'
+                else t('authorize_untrusted') if not self._devloop_author(history.get('author'))
+                else t('authorize_changed', command=AUTHORIZE_COMMAND)
                 if changed_since(history, at)
                 else '')
             record = {'comment': comment['id'], 'by': login, 'at': at, 'priority': priority}
@@ -1011,7 +1353,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                               hash=text_hash(history['title'], history['body']))
                 self.log(f'  issue #{number}: authorized by {login}'
                          + (f', priority {priority}' if priority else ''))
-            self.gh.comment(number, render_authorize(record, lb.ready))
+            self.gh.comment(number, render_authorize(record, lb.ready, self.cfg.language))
             written.append(record)
         labels = label_names(self.gh.issue(number).get('labels') or [])
         if (lb.needs_coordinator in labels
@@ -1077,7 +1419,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         """``untrusted_change`` of an issue, with the admitters of its author's
         ``agent:ready``."""
         return untrusted_change(history, self.cfg.labels.ready, self.cfg.trusted_users,
-                                self._admitters(history['author'], coordinator=True))
+                                self._admitters(history['author'], coordinator=True),
+                                self.cfg.language)
 
     # Supervision (#182) --------------------------------------------------------
     def _accepted(self, comment):
@@ -1688,7 +2031,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         if self._cycle_reported(number, cycle):
             self.log('  cycle already reported')
             return
-        self.gh.comment(number, render_cycle({'cycle': cycle}))
+        self.gh.comment(number, render_cycle({'cycle': cycle}, self.cfg.language))
         self.log('  dependency cycle reported: ' + ', '.join(cycle))
 
     # Tick ----------------------------------------------------------------
@@ -1870,7 +2213,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                 elif transition == 'both':
                     self.log(f'[dry-run] labels: {both_labels_warning(lb)}')
                 return
-            note = transition_labels(self.gh, lb)[1]
+            note = transition_labels(self.gh, lb, self.cfg.language)[1]
         except GitHubError as exc:
             self.log(f'labels: the rename of {LEGACY_NEEDS_OPERATOR} could not be checked, '
                      f'next tick: {exc}')
@@ -2006,28 +2349,15 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         if self.pinner.alerted(exc.sha):
             self.log(f'  the refusal of {exc.sha[:12]} was already reported on #{issue}')
             return
+        t = TEXTS.texts(self.cfg.language)
         if isinstance(exc, CheckFailed):
             reason = public_reason(exc.reason).replace('`', "'")
-            text = (
-                dispatcher_header()
-                + '\n## Pin automatico non riuscito\n\n'
-                + f'La copia di `{ref}` al commit `{exc.sha[:12]}` non ha superato il controllo '
-                  'prima dello smoke test. `current` resta sulla copia precedente, la richiesta '
-                  'di pin è annullata e il ciclo continua con la copia in esecuzione.\n\n'
-                + f'Motivo: `{reason}`\n\n'
-                + f'Il pin riparte con un nuovo commit di `{ref}` che tocca l\'installazione, '
-                  'oppure a mano (`devloop pin`) dopo aver corretto la causa. `devloop status` '
-                  'mostra il motivo finché un pin non riesce.')
+            text = (dispatcher_header() + f'\n## {t("pin_check_title")}\n\n'
+                    + t('pin_check_text', ref=ref, sha=exc.sha[:12], reason=reason))
         else:
             reason = f'smoke test: {exc.step}'
-            text = (
-                dispatcher_header()
-                + '\n## Pin automatico rifiutato dallo smoke test\n\n'
-                + f'La copia di `{ref}` al commit `{exc.sha[:12]}` non ha superato lo smoke '
-                  f'test al passo `{exc.step}`. `current` resta sulla copia precedente, la '
-                  'richiesta di pin è annullata e il ciclo continua.\n\n'
-                + 'Il dettaglio è nel log locale; la copia rifiutata resta in '
-                  f'`rejected-{exc.sha[:12]}` nella directory di stato, per l\'analisi.')
+            text = (dispatcher_header() + f'\n## {t("pin_smoke_title")}\n\n'
+                    + t('pin_smoke_text', ref=ref, sha=exc.sha[:12], step=exc.step))
         # The record of the daily summary (#453): the commit not pinned, when and why, as above.
         body = publishable(text, 'pin', {'sha': exc.sha, 'ref': ref, 'reason': reason,
                                          'at': iso(self.clock())})
@@ -2086,7 +2416,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                              + self._keep_traceback(action, exc))
                     try:
                         self._escalate_failure(action, prs.get(action.number), RuntimeError(
-                            f'errore inatteso del dispatcher ({type(exc).__name__}: {exc})'))
+                            TEXTS.texts(self.cfg.language)(
+                                'unexpected_error', error=f'{type(exc).__name__}: {exc}')))
                     except Exception as again:
                         self.log(f'  could not escalate: {again}')
                     continue
@@ -2135,11 +2466,12 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                 'supersede_escalation', cls=cls, label=label))
 
     def _log_hint(self, exc):
+        t = TEXTS.texts(self.cfg.language)
         log = getattr(exc, 'log', None)
-        hint = f' Log locale: `{Path(log).name}` in `{self.cfg.state_dir}/logs`.' if log else ''
+        hint = (t('log_hint', name=Path(log).name, logs=f'{self.cfg.state_dir}/logs') if log
+                else '')
         if getattr(exc, 'tail', ''):
-            hint += (f' Le ultime righe dell\'output (al massimo {TAIL_LINES}, senza segreti né '
-                     'percorsi assoluti) sono in fondo al commento.')
+            hint += t('tail_hint', lines=TAIL_LINES)
         return hint
 
     def _escalate_failure(self, action, pr, exc):
@@ -2174,21 +2506,15 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         if action.kind == 'advisory' and not isinstance(exc, TurnBlocked):
             self.log('  advisory review: no escalation, the PR is already the operator\'s')
             return
-        lb = self.cfg.labels
-        reason = f'Il passo `{action.kind}` è fallito: {_failure_text(exc)}{self._log_hint(exc)}'
+        lb, t = self.cfg.labels, TEXTS.texts(self.cfg.language)
+        reason = t('step_failed', step=action.kind, failure=_failure_text(exc),
+                   hint=self._log_hint(exc))
         if getattr(exc, 'kept_work', None):  # what a timed-out writing turn left (#374)
-            reason += kept_work_text(exc.kept_work, self.cfg.state_dir)
+            reason += kept_work_text(exc.kept_work, self.cfg.state_dir, self.cfg.language)
         if action.kind == 'advisory' and isinstance(exc, BudgetRefused) and pr is not None:
-            reason += (f'\n\nLa review consultiva della head `{pr.head_sha[:12]}` resta sospesa '
-                       'finché la storia non copre il turno. Una nuova head non resta sospesa '
-                       'in silenzio: la sua review consultiva viene ritentata e, se rifiutata, '
-                       'segnalata con un\'altra escalation.')
+            reason += t('advisory_held', head=pr.head_sha[:12])
         if _cli_state_refused(exc):
-            reason += ('\n\nLe directory delle CLI dell\'utente degli agent contengono una voce '
-                       'che devloop non ammette (#517). A loop fermo, l\'operatore la rimuove '
-                       'come utente degli agent e cerca il turno o i test che l\'hanno scritta, '
-                       'oppure la aggiunge alla lista con una PR, come in `ops/host/migrate.md`, '
-                       'sezione "Directory delle CLI con lo sticky bit (#517)".')
+            reason += t('cli_state')
         cls = ('configuration' if _cli_state_refused(exc)  # the CLIs' entries (#517)
                else TOOL_FAILURE if isinstance(exc, AgentError)
                else 'untrusted' if isinstance(exc, UntrustedChange)
@@ -2313,18 +2639,14 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                                          'reports it'))
         if not issue or not dropped:
             return
-        listed = ''.join(f'\n- `{e["pub"]}`: {outbox_describe(e)}, di `{e["actor"]}`: '
-                         f'{e.get("reason")}' for e in dropped[:MAX_DROPS_LISTED])
+        t = TEXTS.texts(self.cfg.language)
+        listed = ''.join(t('drop_line', pub=e['pub'], what=outbox_describe(e), actor=e['actor'],
+                           reason=e.get('reason')) for e in dropped[:MAX_DROPS_LISTED])
         more = len(dropped) - MAX_DROPS_LISTED
         if more > 0:
-            listed += f'\n- … e altre {more}, elencate nel log locale'
-        body = publishable(
-            dispatcher_header()
-            + '\n## Pubblicazioni abbandonate\n\n'
-            + 'L\'outbox delle pubblicazioni ha abbandonato queste scritture: non sono state '
-              'pubblicate su GitHub e non lo saranno.' + listed + '\n\n'
-            + 'Il corpo di ognuna resta nel journal dei turni (`turn-journal.jsonl` nella '
-              'directory di stato), con il suo id: va pubblicato a mano, se serve ancora.')
+            listed += t('drops_more', more=more)
+        body = publishable(dispatcher_header() + f'\n## {t("drops_title")}\n\n'
+                           + t('drops_text', listed=listed))
         covers = [e['pub'] for e in dropped]
         try:
             self._alert(issue, body, covers)
@@ -2390,15 +2712,10 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             self.log(f'  the alert of the size of the journal cannot be checked: {exc}')
             self._journal_warned = True
             return
-        body = publishable(
-            dispatcher_header()
-            + '\n## Journal dei turni vicino al limite\n\n'
-            + f'Il journal dei turni (`turn-journal.jsonl` nella directory di stato) è di '
-              f'{size} byte, il {percent}% del limite di {journal.max_bytes} byte '
-              '(`journal_max_mib`). Oltre il limite il journal non si carica e non accetta '
-              'eventi: nessun turno parte finché l\'operatore non alza il limite. devloop non '
-              'ne rimuove nulla e non lo compatta. Questo avviso si pubblica una volta per '
-              'soglia.')
+        t = TEXTS.texts(self.cfg.language)
+        body = publishable(dispatcher_header() + f'\n## {t("journal_title")}\n\n'
+                           + t('journal_text', size=size, percent=percent,
+                               limit=journal.max_bytes))
         try:
             self._alert(issue, body, [key])
         except Exception as exc:  # one attempt per tick: its class, never its output
@@ -2560,7 +2877,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
 
     def _attempt_problem(self, number, issue, mark):
         """Why the attempt ``mark`` of the marker of PR ``number``, of issue ``issue``, does not
-        hold (#384), in Italian; ``''`` when it holds and without ``attempt_identity``. The
+        hold (#384), in the project's language (#635); ``''`` when it holds and without ``attempt_identity``. The
         journal is the authority (ADR 0004, D7): the attempt must be one it holds, of the same
         story, phase, number, key and issue, active, and of this PR or of none yet.
 
@@ -2570,10 +2887,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         marker, or its absence cannot be told from that, and the PR does not hold either."""
         if not self.cfg.attempt_identity or self.ledger is None:
             return ''
+        t = TEXTS.texts(self.cfg.language)
         try:
             attempts = self.ledger.journal.attempts()
         except JournalError as exc:
-            return f'il journal dei turni non è leggibile: {exc}'
+            return t('attempt_unreadable', error=exc)
         if mark is None:
             mine = [a for a in attempts.values() if a['repo'] == self.cfg.repo]
             bound = next((a for a in mine if a['pr'] == number), None)
@@ -2581,25 +2899,18 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                             and a['outcome'] is None), None)
             if bound is None and unbound is None:
                 return ''
-            return ('il marker della PR non ha il tentativo, ma il journal dei turni '
-                    + (f'le associa il tentativo `{bound["attempt"]}`' if bound is not None else
-                       f'ha il tentativo attivo `{unbound["attempt"]}` dell\'issue #{issue} '
-                       'senza PR registrata, che potrebbe essere questa')
-                    + ': il campo `attempt` è stato rimosso, o la sua assenza non si distingue '
-                    'da una rimozione')
+            which = (t('attempt_bound', attempt=bound['attempt']) if bound is not None else
+                     t('attempt_unbound', attempt=unbound['attempt'], issue=issue))
+            return t('attempt_no_mark', which=which)
         current = attempts.get(mark['attempt'])
         if (current is None or current['repo'] != self.cfg.repo or current['issue'] != issue
                 or any(current[k] != mark[k]
                        for k in ('story', 'phase', 'revision', 'n', 'design', 'task'))):
-            return (f'il tentativo `{mark["attempt"]}` del marker della PR non è confermato dal '
-                    'journal dei turni, che ne è l\'autorità')
+            return t('attempt_unconfirmed', attempt=mark['attempt'])
         if current['pr'] is not None and current['pr'] != number:
-            return (f'il tentativo `{mark["attempt"]}` del marker è quello della PR '
-                    f'#{current["pr"]}, non di questa')
+            return t('attempt_other_pr', attempt=mark['attempt'], pr=current['pr'])
         if current['outcome'] is not None:
-            return (f'il tentativo `{mark["attempt"]}` di questa PR è già concluso '
-                    f'(`{current["outcome"]}`): una PR riaperta dopo la conclusione del suo '
-                    'tentativo non riprende il lavoro')
+            return t('attempt_concluded', attempt=mark['attempt'], outcome=current['outcome'])
         return ''
 
     def _conclude_attempt(self, attempt):
@@ -2700,9 +3011,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
     def _do_attempt(self, pr):
         """A PR whose attempt does not hold (#384, ``_attempt_problem``): to the operator."""
         lb = self.cfg.labels
-        self._escalate(pr.number, 'Il tentativo registrato nel marker di questa PR non vale: '
-                       f'{pr.attempt_problem}. devloop non prosegue il lavoro su questa PR: '
-                       'decide l\'operatore.',
+        self._escalate(pr.number, TEXTS.texts(self.cfg.language)(
+                           'attempt_escalation', problem=pr.attempt_problem),
                        remove=[lb.review, lb.changes, lb.ready_to_merge], cls='attempt')
 
     def _work_issue(self, number):
@@ -3055,8 +3365,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         permission and its target, preceded by the command when agy reports it (#479). Returns
         None when ``retry``, the turn being run once more; otherwise the error to escalate,
         which names the permission denied again, the model and what was denied: the command, or
-        ``comando non riportato da agy`` (#319)."""
-        target = exc.target or 'target non riportato da agy'
+        ``command not reported by agy`` (#319)."""
+        target = exc.target or 'target not reported by agy'
         if exc.command:
             target = f'command `{exc.command}`; {target}'
         if retry:
@@ -3360,7 +3670,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                 return result, broken, used, None, local
             failures += ('\n\n## Test failures after your previous attempt\n\nThe test command '
                          f'failed. Fix the cause, then finish again.\n\n```text\n{tail}\n```\n')
-        return (result, ('I test locali falliscono anche dopo i tentativi di correzione.', tail),
+        return (result, (TEXTS.texts(self.cfg.language)('tests_failed'), tail),
                 used, None, local)
 
     def _keep_timed_out(self, exc, path, start, label):
@@ -3423,9 +3733,10 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             payload.update(step=step, head=head)
         if conclave is not None:
             payload['conclave'] = conclave
-        author.comment(number, publishable(self.runner.header(agent) + '\n## Lavoro bloccato\n\n'
-                                           + reason.strip() + '\n\n' + RESUME,
-                                           'notice', payload))
+        language = self.cfg.language
+        author.comment(number, publishable(
+            self.runner.header(agent) + f'\n## {TEXTS.texts(language)("blocked_title")}\n\n'
+            + reason.strip() + '\n\n' + resume_text(language), 'notice', payload))
         self.gh.edit_labels(number, add=[self.cfg.labels.needs_operator], remove=remove)
 
     def _protected_changes(self, path, since=None):
@@ -3435,11 +3746,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
 
     def _escalate_protected(self, number, files, remove):
         listed = '\n'.join(f'- `{f}`' for f in files[:20])
-        self._escalate(number, 'La modifica tocca percorsi protetti (`protected_paths`), che devloop '
-                               'non pubblica: un workflow o una action locale su un branch di questo '
-                               'repository verrebbe eseguito dalla CI prima di qualsiasi review. Il '
-                               'commit resta nel worktree locale; la modifica va applicata a mano.'
-                               '\n\n' + listed, remove=remove, cls='protected_paths')
+        self._escalate(number, TEXTS.texts(self.cfg.language)('protected') + '\n\n' + listed,
+                       remove=remove, cls='protected_paths')
 
     # Review policy -----------------------------------------------------------
     def _profile(self, key, mode, used=None):
@@ -3463,7 +3771,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                         for used in self.cfg.agent(implementer).chain()]
         return authors
 
-    def _approvals_match(self, pr, records, current, paths, step='promozione'):
+    def _approvals_match(self, pr, records, current, paths, step='promotion'):
         """The base checks the approvals ``records`` rely on (``[]`` when none was needed) when
         every reviewer ``current`` requires approved with a receipt that matches it, an earlier
         base admitted only if the base branch left the PR's files alone since (#160).
@@ -3481,30 +3789,24 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         # (#434): the merge that follows is the operator's (``trust_policy_parts``).
         approved = {owner_of(r) for r in records if flow_verdict(r) == 'approve'}
         missing = [key for key in current['reviewers'] if key not in approved]
-        branch = self.cfg.base_branch
+        branch, language = self.cfg.base_branch, self.cfg.language
+        t = TEXTS.texts(language)
         if changed or missing:
-            what = ('l\'approvazione non ha una ricevuta di policy'
-                    if any(receipt_of(r) is None for r in records)
-                    else 'cambiati: ' + ', '.join(_RECEIPT_FIELDS[k] for k in changed) if changed
-                    else 'manca l\'approvazione di ' + ', '.join(f'`{k}`' for k in missing))
-            detail = (f'\n\nCommit di `{branch}` fra la base dell\'approvazione e quella '
-                      'corrente:\n\n'
-                      # Still in Italian, as the text around it, until #628 translates it.
-                      + _describe_bases(bases, branch, ITALIAN)) if bases else ''
+            what = (t('stale_no_receipt') if any(receipt_of(r) is None for r in records)
+                    else t('stale_changed', fields=', '.join(t(f'field_{k}') for k in changed))
+                    if changed
+                    else t('stale_missing', keys=', '.join(f'`{k}`' for k in missing)))
+            detail = (t('stale_bases', branch=branch)
+                      + _describe_bases(bases, branch, language)) if bases else ''
             payload = {'event': 'stale', 'receipt': current, 'bases': bases or []}
             # The new review of this same head does not count against the limit when only
             # the base revoked the approval (#252); any other revocation opens a round as usual.
-            rounds = ('La nuova review dello stesso commit apre un nuovo round, che non conta '
-                      'per il limite dei round; i finding aperti restano invariati.'
-                      if records and base_revocation(payload, records[0]['head_sha'])
-                      else 'La nuova review apre un nuovo round; i finding aperti restano '
-                      'invariati.')
+            rounds = t('stale_round_free'
+                       if records and base_revocation(payload, records[0]['head_sha'])
+                       else 'stale_round')
+            step = 'merge' if step == 'merge' else 'promotion'
             self._policy_comment(
-                pr, f'Approvazione non valida per {"il" if step == "merge" else "la"} {step}',
-                f'La ricevuta di policy ricalcolata prima {"del" if step == "merge" else "della"} '
-                f'{step} non coincide con '
-                f'quella dell\'approvazione ({what}). La PR resta in review: serve una nuova '
-                'review, anche dello stesso commit. ' + rounds
+                pr, t(f'stale_title_{step}'), t(f'stale_text_{step}', what=what) + rounds
                 + detail, current, 'stale', bases)
             self.gh.edit_labels(pr.number, add=[lb.review],
                                 remove=[lb.changes, lb.ready_to_merge, *self._released(pr)])
@@ -3550,8 +3852,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                          f'{records[0]["head_sha"][:12]}')
             elif left:
                 # Owners outside the round (CI, an earlier reviewer): no agent closes them.
-                self._escalate(pr.number, _open_findings_reason(left), remove=transient,
-                               cls='open_findings')
+                self._escalate(pr.number, _open_findings_reason(left, self.cfg.language),
+                               remove=transient, cls='open_findings')
             elif self._approval_current(pr, records[0],
                                         blind=not tested and ci_unknown(records)):
                 self._promote(pr, records, reviews)
@@ -3559,8 +3861,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             if announce:
                 # The reviewer's record asks for the decision; this one classifies it (#182).
                 self.gh.comment(pr.number, render_escalation(
-                    'Un reviewer chiede una decisione dell\'operatore: il motivo è nella sua '
-                    'review.', cls='reviewer_decision', language=self.cfg.language))
+                    TEXTS.texts(self.cfg.language)('reviewer_decision'),
+                    cls='reviewer_decision', language=self.cfg.language))
             self.gh.edit_labels(pr.number, add=[lb.needs_operator], remove=transient)
         elif verdict == UNPROVEN:
             # #481: a reviewer's request for changes had no evidence. Nothing to fix, and no
@@ -3576,10 +3878,10 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             # The next round may be the supervisor's to grant (#405); else the operator's.
             route, why = self._round_grant(pr, reviews) if announce else (None, '')
             reason = round_limit_reason(
-                f'Raggiunto il limite di {limit} round di review con finding bloccanti ancora '
-                'aperti.', reviews, pr.fixes, pr.syncs, limit, pr.granted_rounds,
-                grantable=route is not None, trusted=self.cfg.trusted_users,
-                cap=self.cfg.max_requested_fix_rounds, closures=pr.closures)
+                TEXTS.texts(self.cfg.language)('round_limit_open', limit=limit), reviews,
+                pr.fixes, pr.syncs, limit, pr.granted_rounds, grantable=route is not None,
+                trusted=self.cfg.trusted_users, cap=self.cfg.max_requested_fix_rounds,
+                closures=pr.closures, language=self.cfg.language)
             if route is not None:
                 self._escalate(pr.number, reason, remove=transient, cls=ROUND_GRANTABLE,
                                supervised=route)
@@ -3623,7 +3925,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             return
         labeled = len(self._operator_labelers(pr.number))
         body = render_operator_merge(pr.head_sha, labeled, pr.promotions, reasons,
-                                     lb.needs_operator)
+                                     lb.needs_operator, self.cfg.language)
         if pr.operator_notice is None:
             self.gh.comment(pr.number, body)
         else:
@@ -3637,10 +3939,10 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         off, a level ``off`` in ``[merge.levels]``, the operator-only paths its diff touches,
         the trust policy its reviewers say it touches (#434), with the parts they name.
         ``''`` (logged) when the head moved or devloop may merge it."""
-        merge = self.cfg.merge
-        trust = _trust_policy_lines(trust_policy_parts(pr.reviews))
+        merge, t = self.cfg.merge, TEXTS.texts(self.cfg.language)
+        trust = _trust_policy_lines(t, trust_policy_parts(pr.reviews))
         if not merge.enabled():
-            return '\n'.join([*trust, '- `[merge] mode = "off"`: devloop non mergia le PR.'])
+            return '\n'.join([*trust, t('merge_off')])
         receipt, paths = self._current_receipt(pr)
         if receipt is None:
             return ''
@@ -3648,30 +3950,23 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         reserved = sorted(p for p in paths if merge.operator_only(p))
         if reserved:
             shown = ', '.join(f'`{p}`' for p in reserved[:MAX_LISTED_PATHS])
-            more = (f' e altri {len(reserved) - MAX_LISTED_PATHS}'
+            more = (t('reserved_more', more=len(reserved) - MAX_LISTED_PATHS)
                     if len(reserved) > MAX_LISTED_PATHS else '')
-            lines.append('- la PR tocca percorsi riservati all\'operatore '
-                         f'(`[merge] operator_only_paths`): {shown}{more}.')
+            lines.append(t('reserved_paths', shown=shown, more=more))
         level = receipt['level']
         if any(lvl == level and mode == 'off' for lvl, mode in merge.levels):
-            lines.append(f'- `[merge.levels]` imposta `off` per il livello di review {level} di '
-                         'questa PR.')
+            lines.append(t('level_off', level=level))
         unblocked = self._human_merge(pr)
         if unblocked is not None:
-            lines.append('- il lavoro di questa PR è ripartito dopo la decisione del conclave '
-                         f'registrata nel commento {unblocked}: dopo ogni sblocco devloop non la '
-                         'mergia da solo. La mergia l\'operatore, o il coordinatore con il suo '
-                         'merge riservato se la decisione era unanime e resta valida e un round '
-                         'di review completo dopo la ripartenza ha approvato l\'head.')
+            lines.append(t('conclave_unblocked', comment=unblocked))
         if not lines:
             self.log(f'  merge mode {merge.mode_for(level, paths)}: devloop may merge this PR')
         return '\n'.join(lines)
 
     def _do_stale(self, number):
         lb = self.cfg.labels
-        self._escalate(number, 'Implementazione interrotta: la issue era in lavorazione ma non '
-                               'esiste una PR devloop aperta.', remove=[lb.working],
-                       cls='interrupted')
+        self._escalate(number, TEXTS.texts(self.cfg.language)('interrupted'),
+                       remove=[lb.working], cls='interrupted')
 
     def _do_settle(self, number):
         self.gh.edit_labels(number, remove=[self.cfg.labels.working])
@@ -3683,6 +3978,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
     def _do_findings(self, pr):
         """Record the closures of open findings: those trusted users asked for, and the CI
         findings once CI passes on the PR's current head."""
+        t = TEXTS.texts(self.cfg.language)
         closed = list(pr.commands)
         ci = [f for f in open_findings(pr.reviews, pr.closures) if f['owner'] == CI]
         if ci and pr.checks == 'pass':
@@ -3691,37 +3987,31 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             else:
                 closed += [{'key': f['key'], 'status': 'resolved', 'by': CI,
                             'author': self._app_login(DISPATCHER) or 'devloop dispatcher',
-                            'reason': f'CI verde sul commit {pr.head_sha[:12]}',
+                            'reason': t('ci_green', head=pr.head_sha[:12]),
                             'head_sha': pr.head_sha} for f in ci]
         if not closed:
             return
         lines = []
         for c in closed:
-            who = 'la CI' if c['by'] == CI else f'l\'operatore `{c["author"]}`'
-            lines.append(f'- `{c["key"]}`: {_CLOSED_TEXT[c["status"]]} da {who}: '
-                         + ' '.join(c['reason'].split()))
+            who = (t('closed_by_ci') if c['by'] == CI
+                   else t('closed_by_operator', author=c['author']))
+            lines.append(t('closed_line', finding=c['key'], status=t(f'closed_{c["status"]}'),
+                           who=who, reason=' '.join(c['reason'].split())))
         self.gh.comment(pr.number, publishable(
-            dispatcher_header() + '\n## Finding chiusi\n\n' + '\n'.join(lines)
-            + '\n\nDa ora questi finding sono chiusi: nessuna review successiva li riapre.',
-            'finding', {'closed': closed}))
+            dispatcher_header() + f'\n## {t("findings_title")}\n\n' + '\n'.join(lines)
+            + '\n\n' + t('findings_text'), 'finding', {'closed': closed}))
         pr.closures = pr.closures + closed
         pr.commands = []
 
     def _do_unattributable(self, pr):
         lb = self.cfg.labels
-        self._escalate(pr.number, 'Non è possibile ricostruire il proprietario di alcuni finding '
-                                  'dai marker di questa PR, quindi devloop non sa chi può '
-                                  'chiuderli e non prosegue: la review e la decisione sul merge '
-                                  'spettano a una persona.\n\n'
+        self._escalate(pr.number, TEXTS.texts(self.cfg.language)('unattributable')
                        + '\n'.join(f'- {p}' for p in pr.finding_problems),
                        remove=[lb.review, lb.changes, lb.ready_to_merge], cls='unattributable')
 
     def _do_lost_meta(self, pr):
         lb = self.cfg.labels
-        self._escalate(pr.number, 'La descrizione della PR non termina più con il marker devloop '
-                                  f'della issue #{pr.issue}, quindi implementer e reviewer non sono '
-                                  'noti. Ripristinare la riga del marker (si trova nella cronologia '
-                                  'delle modifiche della descrizione) come ultima riga.',
+        self._escalate(pr.number, TEXTS.texts(self.cfg.language)('lost_meta', issue=pr.issue),
                        remove=[lb.review, lb.changes, lb.ready_to_merge], cls='lost_meta')
 
     def _do_ci_missing(self, pr):
@@ -3735,11 +4025,10 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             self.log(f'  CI appeared on {pr.head_sha[:12]}; retrying next tick')
             return
         names = ', '.join(f'`{name}`' for name in pr.ci_missing)
-        self._escalate(pr.number, f'Sul head `{pr.head_sha[:12]}` non risulta alcuna CI '
-                                  f'{self.cfg.ci.required_timeout_minutes} minuti dopo il push, '
-                                  f'ma `{self.cfg.base_branch}` richiede i check {names}: la '
-                                  'review non parte senza la CI. Verificare che la CI sia '
-                                  'partita sul head, o rilanciarla.',
+        self._escalate(pr.number, TEXTS.texts(self.cfg.language)(
+                           'ci_missing', head=pr.head_sha[:12],
+                           minutes=self.cfg.ci.required_timeout_minutes,
+                           branch=self.cfg.base_branch, names=names),
                        remove=[lb.review], cls='ci_missing')
 
     def _do_round_limit(self, pr):
@@ -3750,15 +4039,13 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         lb = self.cfg.labels
         limit = self.cfg.max_review_rounds + pr.granted_rounds
         route, why = self._round_grant(pr, pr.reviews)
-        who = 'del supervisore o dell\'operatore' if route else 'dell\'operatore'
+        t = TEXTS.texts(self.cfg.language)
+        who = t('round_limit_both' if route else 'round_limit_operator')
         self._escalate(pr.number, round_limit_reason(
-            f'Raggiunto il limite di {limit} round di review: un nuovo round (review o CI '
-            f'fallita) non parte senza una decisione {who}. Una CI fallita sul head di '
-            'un round di review che ha approvato o chiesto modifiche entra in quel round e non '
-            'ne apre uno nuovo.', pr.reviews, pr.fixes,
+            t('round_limit', limit=limit, who=who), pr.reviews, pr.fixes,
             pr.syncs, limit, pr.granted_rounds, grantable=route is not None,
             trusted=self.cfg.trusted_users, cap=self.cfg.max_requested_fix_rounds,
-            closures=pr.closures),
+            closures=pr.closures, language=self.cfg.language),
             remove=[lb.review, lb.changes, lb.ready_to_merge],
             cls=ROUND_GRANTABLE if route else 'round_limit', supervised=route, why=why,
             # The head and the label to resume, for a trusted user's grant-round (#553).
@@ -3787,15 +4074,14 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
 MAX_TRUST_REASON = 2000
 
 
-def _trust_policy_lines(parts):
-    """The reason of an operator merge for the trust policy (#434), as Markdown lines, from
-    ``trust_policy_parts``: empty without parts."""
+def _trust_policy_lines(t, parts):
+    """The reason of an operator merge for the trust policy (#434), as Markdown lines in the
+    language of ``t`` (#635), from ``trust_policy_parts``: empty without parts."""
     if not parts:
         return []
-    lines = ['- la PR tocca la policy di fiducia: servono la review e il merge dell\'operatore. '
-             'Parti toccate dichiarate dai reviewer:']
+    lines = [t('trust_intro')]
     for reviewer, round_no, reason in parts:
-        text = reason or 'il reviewer non le ha indicate.'
+        text = reason or t('trust_no_parts')
         if len(text) > MAX_TRUST_REASON:
             # The whole text is in the reviewer's review; the notice stays within GitHub's limit.
             text = text[:MAX_TRUST_REASON].rstrip() + ' […]'
@@ -3804,18 +4090,20 @@ def _trust_policy_lines(parts):
     return lines
 
 
-def ensure_labels(gh: Tracker, labels, review_policy=None):
-    """Create or update devloop's labels, and return what the transition of #248 did, for the
-    log ('' when nothing): see ``transition_labels``."""
-    transition, note = transition_labels(gh, labels)
-    for attr, (color, description) in LABEL_STYLE.items():
+def ensure_labels(gh: Tracker, labels, review_policy=None, language=ENGLISH):
+    """Create or update devloop's labels, their descriptions in ``language`` (#635), and return
+    what the transition of #248 did, for the log ('' when nothing): see
+    ``transition_labels``."""
+    t = TEXTS.texts(language)
+    transition, note = transition_labels(gh, labels, language)
+    for attr, (color, description) in label_styles(language).items():
         if attr == 'needs_operator' and transition == 'both':
             continue
         gh.ensure_label(getattr(labels, attr), color, description)
     if review_policy is not None:
-        gh.ensure_label(review_policy.label, *LEVEL_LABEL_STYLE)
+        gh.ensure_label(review_policy.label, LEVEL_LABEL_COLOR, t('label_level'))
         if review_policy.zero_enabled():
-            gh.ensure_label(review_policy.zero_label, *ZERO_LABEL_STYLE)
-    for name, (color, description) in PRIORITY_LABEL_STYLE.items():
-        gh.ensure_label(name, color, description)
+            gh.ensure_label(review_policy.zero_label, ZERO_LABEL_COLOR, t('label_zero'))
+    for name, color in PRIORITY_LABEL_COLORS.items():
+        gh.ensure_label(name, color, t('label_' + name.replace(':', '_')))
     return note

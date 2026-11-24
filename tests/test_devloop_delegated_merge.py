@@ -565,7 +565,7 @@ class ReportTests(unittest.TestCase):
         supervision(101, f'{day}T10:00:00Z', command='merge', by=SUPERVISOR_LOGIN,
                     outcome='refused', reason=f'{SHA2} altro')
         when = report.parse_day(day)
-        s = report.Records(gh, TRUST, when, when, RCFG.agents).summary(when)
+        s = report.Records(gh, TRUST, when, when, RCFG.agents, 'Italian').summary(when)
         self.assertEqual(s.delegated, [
             ('08:00', REPORT, 'merge-budget', 'brushtyler', 'Molte precisazioni.', 'concessa',
              f'+2 il {day}: tetto 7'),

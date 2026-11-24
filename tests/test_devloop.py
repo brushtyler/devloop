@@ -944,7 +944,8 @@ class IssueTrustTests(unittest.TestCase):
         return dict(base, **changes)
 
     def check(self, **changes):
-        return untrusted_change(self.history(**changes), 'agent:ready', ['brushtyler'])
+        return untrusted_change(self.history(**changes), 'agent:ready', ['brushtyler'],
+                                language='Italian')
 
     def test_edits_after_the_trusted_label(self):
         self.assertIsNone(self.check())

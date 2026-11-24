@@ -96,6 +96,9 @@ TEXTS = Catalog(
         'ci_no_modules': 'none',
         'ci_rerun_joined': 'this failure joins the round.',
         'ci_rerun_round': 'this failure counts as a round.',
+        'state_no_reviewer': 'round {round} does not record the reviewer',
+        'state_no_origin': ('round {round} leaves open the finding `{id}`, whose round of origin '
+                            'is not known'),
     },
     it={
         'derived': ('devloop ha aggiunto {count} finding bloccanti dalla mappa di copertura dei '
@@ -142,6 +145,9 @@ TEXTS = Catalog(
         'ci_no_modules': 'nessuno',
         'ci_rerun_joined': 'questo fallimento entra nel round.',
         'ci_rerun_round': 'questo fallimento conta come round.',
+        'state_no_reviewer': 'il round {round} non registra il reviewer',
+        'state_no_origin': ('il round {round} lascia aperto il finding `{id}`, di cui non risulta '
+                            'il round di origine'),
     })
 
 # The verdicts a reviewer gives: those of the schema.
@@ -312,9 +318,9 @@ def _quorum_closures(records, open_):
     return closed
 
 
-def finding_state(reviews, closures=()):
+def finding_state(reviews, closures=(), language=ENGLISH):
     """The findings left open by ``reviews`` (sorted by round) and ``closures`` (the entries of
-    the dispatcher's ``finding`` records).
+    the dispatcher's ``finding`` records); its ``problems`` in ``language`` (#635).
 
     A keyed review closes only the findings it owns, then opens its own. An older record without
     keys is read as before (migration): the open set becomes the earlier findings it marks
@@ -328,6 +334,7 @@ def finding_state(reviews, closures=()):
     single other one: only by the quorum of a later round, once that round's records are all
     read (``_quorum_closures``).
     """
+    t = TEXTS.texts(language)
     open_, seen, known, problems = {}, {}, set(), []
     keyed_seen = False
     quorum_closed, round_records = {}, []
@@ -343,7 +350,7 @@ def finding_state(reviews, closures=()):
         round_records.append(review)
         owner, round_no = owner_of(review), review['round']
         if not isinstance(owner, str) or not owner:
-            problems.append(f'il round {round_no} non registra il reviewer')
+            problems.append(t('state_no_reviewer', round=round_no))
             continue
         with_key, total = _keys(review)
         if with_key == total:
@@ -365,8 +372,7 @@ def finding_state(reviews, closures=()):
                     continue
                 earlier = seen.get(p.get('id'))
                 if earlier is None:
-                    problems.append(f'il round {round_no} lascia aperto il finding '
-                                    f'`{p.get("id")}`, di cui non risulta il round di origine')
+                    problems.append(t('state_no_origin', round=round_no, id=p.get('id')))
                     continue
                 carried[earlier['key']] = earlier
             open_ = carried

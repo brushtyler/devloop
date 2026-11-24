@@ -206,7 +206,7 @@ class OldFormTests(unittest.TestCase):
         gh.add(14, DISPATCHER, ledger.render({'type': 'fix', 'round': 1, 'records': [
             dict(turn, section=1), dict(sync, section=2)]}), f'{day}T11:00:01Z')
         when = report.parse_day(day)
-        s = report.Records(gh, TRUST, when, when, CFG.agents).summary(when)
+        s = report.Records(gh, TRUST, when, when, CFG.agents, CFG.language).summary(when)
         self.assertEqual(s.actions, [('11:00', 12, 'fix', 'claude', 'success', 60000),
                                      ('11:00', 14, 'fix', 'claude', 'success', 60000),
                                      ('11:02', 12, 'evento sync', None, None, None),

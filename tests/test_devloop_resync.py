@@ -19,6 +19,8 @@ from test_devloop_quorum import CORE, FIRST, SECOND, Quorum
 
 LEVEL1 = [{'path': 'x.py', 'links': []}]  # a diff reviewed at level 1
 ONE_ROUND = dataclasses.replace(CFG, max_review_rounds=1)
+# The language of the reasons these tests read, the one of ``CFG`` (#635).
+IT = CFG.language
 SYNCED = {'status': 'completed', 'summary': 'Kept both sides.', 'blocked_reason': ''}
 
 
@@ -154,7 +156,7 @@ class ResyncTests(Quorum):
         self.assertEqual((waived_rounds(reviews), counted_rounds(reviews)), ({2}, 1))
         self.assertEqual(self.gh.labels[100], {'agent:ready-to-merge'})
         self.assertFalse(any('**Classe:**' in body for _, body in self.gh.comments))
-        self.assertEqual(round_reasons(reviews, syncs=self.records('sync'))[-1], (
+        self.assertEqual(round_reasons(reviews, syncs=self.records('sync'), language=IT)[-1], (
             2, 'review approvata di un head approvato, spostato da una sync con conflitti '
                'risolti dall\'agent', False))
 
@@ -213,7 +215,8 @@ class ResyncTests(Quorum):
                 escalated = [body for _, body in self.gh.comments if '**Classe:**' in body]
                 if counted == 1:
                     self.assertEqual(escalated, [])
-                    self.assertEqual(round_reasons(reviews, syncs=self.records('sync'))[1:], [
+                    self.assertEqual(round_reasons(reviews, syncs=self.records('sync'),
+                                                   language=IT)[1:], [
                         (2, 'round interrotto dall\'avanzare della base e sostituito dal '
                             'successivo', False),
                         (3, 'review approvata di un head approvato, spostato da una sync con '
@@ -455,7 +458,7 @@ class CountingTests(unittest.TestCase):
         ]
         fixes = [{'round': 1, 'head_sha': SHA2}, {'round': 2, 'head_sha': third}]
         syncs = [{'head_sha': fifth, 'from': fourth}]
-        self.assertEqual(round_reasons(reviews, fixes, syncs), [
+        self.assertEqual(round_reasons(reviews, fixes, syncs, language=IT), [
             (1, 'prima review', True),
             (2, 'CI fallita', True),
             (3, 'review dopo una correzione', True),
@@ -467,10 +470,10 @@ class CountingTests(unittest.TestCase):
                                                               reviewers=[FIRST, SECOND])),
                      dict(self.record(2, FIRST), restarts={'round': 1, 'bases': []}),
                      self.record(3, FIRST)]
-        self.assertEqual(round_reasons(restarted), [
+        self.assertEqual(round_reasons(restarted, language=IT), [
             (1, 'round interrotto dall\'avanzare della base e sostituito dal successivo', False),
             (2, 'prima review', True), (3, 'nuova review dello stesso head', True)])
-        text = round_limit_reason('Limite.', reviews, fixes, syncs, 6)
+        text = round_limit_reason('Limite.', reviews, fixes, syncs, 6, language=IT)
         self.assertTrue(text.startswith('Limite.\n\nRound contati sul limite (6 di 6, '))
         self.assertIn('- round 2: CI fallita\n', text)
         self.assertIn('Non contano:\n\n- round 4: ', text)

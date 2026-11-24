@@ -836,7 +836,8 @@ decision](#after-a-unanimous-decision)), and a trusted user can annul it with `/
 escalation of the issue or PR and nothing moved the item on after it (a review, fix or sync
 record, a command applied, a passed readiness check, a policy record of no escalation):
 
-- the implementer or a fixer that stopped as `blocked` (`Lavoro bloccato`): its notice, written
+- the implementer or a fixer that stopped as `blocked` (`Work blocked`, `Lavoro bloccato` in
+  Italian): its notice, written
   with the agent's identity, records the agent, the step, the commit it started from and the
   reason. A sync that stops is not a block of the conclave;
 - a review round whose verdict is `needs_operator` for a decision; one for the
@@ -1051,7 +1052,8 @@ implementer devloop reads the identities of the failed tests from the whole outp
 modules, one at a time, on the base commit of the branch, in a disposable worktree:
 
 - **every failed test fails on the base too**: the step is `base_broken`. No other attempt of
-  the agent and no escalation: the dispatcher writes a comment "Test rossi anche sulla base" with
+  the agent and no escalation: the dispatcher writes a comment "Tests red on the base too"
+  ("Test rossi anche sulla base" in Italian) with
   a `basebroken` record (the base commit and the failed tests) on the issue or on the PR, and
   nothing is pushed. The issue keeps `agent:working`, the PR its label. When `main` moves past
   that commit the step starts again by itself: the issue as a new implementation, in a free slot
@@ -1107,8 +1109,8 @@ markers of the records, whose identifiers stay as they are
 ### Red CI on `main`
 
 With `[run].alert_issue`, at each tick (not in a dry run) devloop reads the checks of the current
-commit of `origin/main`. When one ended with a failure, it publishes **one** alert "CI rossa su
-`main`" on that issue, with the commit, the failed checks and the commits of `main` since the
+commit of `origin/main`. When one ended with a failure, it publishes **one** alert "Red CI on
+`main`" ("CI rossa su `main`" in Italian) on that issue, with the commit, the failed checks and the commits of `main` since the
 latest green one, at most 10 back on its first-parent chain. A new alert comes only for a new red
 commit; the commit alerted is kept in `state_dir` (`main-ci-alert.json`), so a restart does not
 repeat it. Pending, missing or unreadable checks give no alert, and without `[run].alert_issue`
@@ -1174,8 +1176,8 @@ routed as above.
 
 In `"auto"` or `"strict"`, `agent:ready-to-merge` usually means that devloop merges the PR. When
 it does not (#248), because the [merge mode](#merge-modes) of the PR is `"off"`, the dispatcher also adds
-`agent:needs-operator` once the PR is ready, with a comment ("Il merge spetta all'operatore")
-that says why: the reserved paths the diff touches, the mode or the level, the restart of its
+`agent:needs-operator` once the PR is ready, with a comment ("The merge is the operator's", "Il
+merge spetta all'operatore" in Italian) that says why: the reserved paths the diff touches, the mode or the level, the restart of its
 work after a [conclave](#after-a-unanimous-decision) (#142), or a reviewer who said that it
 touches the [trust policy](#changes-to-the-trust-policy) (#434) and whose `trust_policy` a
 later approval did not clear (#461), with the parts each such reviewer named; this last reason is stated with `[merge] mode = "off"` too. The comment
@@ -1735,7 +1737,7 @@ reviewer devloop does not start.
 
 With `merge = true`, in merge mode `"auto"`, the supervisor's identity writes, as the first line
 of a comment on such a PR, in `agent:ready-to-merge` with the dispatcher's own
-`agent:needs-operator` and its comment "Il merge spetta all'operatore":
+`agent:needs-operator` and its comment "The merge is the operator's":
 
 ```text
 /devloop merge <sha> <reason>
@@ -2053,7 +2055,7 @@ condition below, and the operator stops one with [`/devloop hold`](#holding-a-me
 case needs a decision of the operator, it is the one given on the issue before the
 implementation (the `/devloop approve` below). With `[roles.coordinator]`, its identity writes, as
 the first line after the attribution header of a comment on a PR in `agent:ready-to-merge` with
-the dispatcher's own `agent:needs-operator` and its comment "Il merge spetta all'operatore"
+the dispatcher's own `agent:needs-operator` and its comment "The merge is the operator's"
 ([an operator merge](#ready-prs-whose-merge-is-the-operators)):
 
 ```text
@@ -2169,8 +2171,8 @@ anyone else is ignored there, and a trusted user's stays the
 The closures are a `finding` record of the dispatcher with `by: coordinator`, the author, the
 reason and the head, in the same comment as the `supervision` record of the command (outcome
 `closed`): the [PR receipt](protocol.md#pr-receipt) and the prompts of later turns show them, and
-the [daily summary](#daily-summary) lists each one with its reason under "Finding chiusi dal
-coordinatore". When no finding is left open, the PR goes back to `agent:review`, where the
+the [daily summary](#daily-summary) lists each one with its reason under "Findings closed by
+the coordinator". When no finding is left open, the PR goes back to `agent:review`, where the
 recorded approval is applied again without a new review: promotion and merge follow their rules.
 With findings still open it stays in `agent:needs-operator`, and the escalation still takes the
 coordinator's next command.
@@ -2744,12 +2746,13 @@ and writes nothing without `--publish`. The summary lists:
   dispatcher answered that day, merged or refused, and, once merged, how many of the
   coordinator's daily cap it took;
 - the findings the coordinator closed (#606,
-  [Closing findings as the coordinator](#closing-findings-as-the-coordinator)), under "Finding
-  chiusi dal coordinatore": one row per finding of each `/devloop finding` applied that day, with
-  the UTC time, the PR, the key, `risolto` or `ritirato`, the author and the first line of the
-  reason;
+  [Closing findings as the coordinator](#closing-findings-as-the-coordinator)), under "Findings
+  closed by the coordinator" ("Finding chiusi dal coordinatore" in Italian): one row per finding
+  of each `/devloop finding` applied that day, with the UTC time, the PR, the key, `resolved` or
+  `withdrawn` (`risolto`, `ritirato`), the author and the first line of the reason;
 - the substitute votes of the coordinator in a conclave (#605, [Conclave on a
-  block](#conclave-on-a-block)), under "Voti sostitutivi del coordinatore nel conclave": from
+  block](#conclave-on-a-block)), under "Substitute votes of the coordinator in the conclave"
+  ("Voti sostitutivi del coordinatore nel conclave"): from
   the dispatcher's `conclave` records, each vote recorded that day, with its UTC time, the issue
   or PR, the member it replaced, the coordinator's identity, its agent and model, and the vote,
   so that the operator sees when the diversity of the voters was reduced;
@@ -2763,8 +2766,12 @@ and writes nothing without `--publish`. The summary lists:
   of the agents with an app are not among the comments the summary reads), turns run with a
   fallback model, and the permissions headless agy denied, per model (#479): each turn stopped
   on a denied permission, whether agy reported the command or not, counted under the model it
-  ran with, as in ``Permessi negati per modello: 3 (`<model>`: 2, …)``. Those turns are also
+  ran with, as in ``Permissions denied per model: 3 (`<model>`: 2, …)``. Those turns are also
   among the actions, as failures.
+
+The summary is in the project's [language](reference.md#language-of-the-texts) (#635), the
+titles of the archives and the index included; the records it reads are the same in every
+language.
 
 A turn belongs to the day it started, with its whole duration; a merge of devloop to the day
 GitHub reports for it, since its record goes in the comment of the promotion (#338); any other
@@ -2778,7 +2785,9 @@ dispatcher's, and devloop rewrites it: on top the summary of today, below the in
 days, newest first, each a link to its archive. When the day changes, the next publication
 generates the summary of the closed day again from the records and archives it in a comment of
 its own, one per day; the days in between with activity are archived too (at most the last 31),
-the empty ones are not. An archive already written is edited if the records changed, never
+the empty ones are not. The index is found under its heading in any language devloop has
+(`## Previous days`, `## Giorni precedenti`), so a body written before a change of `language`
+keeps its summary and its index, written again in the new language. An archive already written is edited if the records changed, never
 written again: more runs on the same day, or a run repeated after a failure, leave one comment
 per day. A day archived while one of its turns was still open (a turn started just before
 midnight, say) is generated again at every publication, and its archive edited when the records
@@ -3607,7 +3616,7 @@ says `the auto-pin of <sha12> already failed (<reason>): not tried again …`), 
 
 Both alerts, of the smoke test and of the checks, carry a `pin` record: the commit, the branch,
 the time and the reason the alert shows. The [daily summary](#daily-summary) lists them under
-`Pin automatico non riuscito`, so the summary says on which day the running copy stayed behind
+`Failed auto-pin` (`Pin automatico non riuscito` in Italian), so the summary says on which day the running copy stayed behind
 and why. Without `[run].alert_issue` there is no alert, and the summary does not show it.
 
 A failure after `current` moved to the new copy (the removal of the request, the record of the
@@ -3627,7 +3636,7 @@ A PR whose code needs a step on the host before it is pinned (#462), such as a n
 project file or of the overlay, declares it: implementer and fixer return `host_step` in their
 structured output (a short text with a reference to the document of the step, such as a section
 of `ops/host/migrate.md`; empty when there is none), the PR description shows it under
-"Passo sull'host", and the reviewer checks it (#473): a declaration is needed when, and only
+"Step on the host" ("Passo sull'host" in Italian), and the reviewer checks it (#473): a declaration is needed when, and only
 when, the pinned code cannot run as intended without a file in the `state_dir`, a key or table
 of the project file or of the overlay that is required, or a command run as root or on the
 service; a change only to the documents of `ops/host/`, or an optional key or table with a
