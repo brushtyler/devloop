@@ -4730,9 +4730,17 @@ exec "$@"''')
         self.assertNotIn('non è un ruolo di questo progetto', out)
         # #629: a member of the group that is no role of this project, for example the
         # supervisor of another project, is an error; the project's roles are not.
-        self.shim('getent', f'''[ "$1" = group ] && [ $# -eq 2 ] || exit 2
+        # A user whose primary group is the mailbox's is no member in getent group, and is one
+        # all the same (R1-1).
+        self.shim('getent', f'''if [ "$1" = passwd ] && [ $# -eq 1 ]; then
+    echo "{FAKE_SUPERVISOR}:x:1001:1001::/h/s:/bin/sh"
+    echo "coordinator-gadget:x:1003:34567::/h/c:/bin/sh"
+    echo "unrelated:x:1004:1004::/h/u:/bin/sh"
+    exit 0
+fi
+[ "$1" = group ] && [ $# -eq 2 ] || exit 2
 case "$2" in
-    {FAKE_AGENT}) echo "$2:x:1000:{FAKE_SUPERVISOR},supervisor-gadget,{FAKE_COORDINATOR}" ;;
+    {FAKE_AGENT}) echo "$2:x:34567:{FAKE_SUPERVISOR},supervisor-gadget,{FAKE_COORDINATOR}" ;;
     opsdry-nogroup) exit 2 ;;
     *) echo "$2:x:1000:" ;;
 esac''')
@@ -4740,10 +4748,25 @@ esac''')
         errors = [line for line in done.stdout.splitlines()
                   if 'non è un ruolo di questo progetto' in line]
         self.assertEqual(errors, [
-            f'  ERRORE: supervisor-gadget è nel gruppo {FAKE_AGENT}, ma non è un ruolo di questo '
+            f'  ERRORE: {user} è nel gruppo {FAKE_AGENT}, ma non è un ruolo di questo '
             'progetto: la casella è solo del supervisore e del coordinatore del progetto '
-            f'(gpasswd -d supervisor-gadget {FAKE_AGENT}; ops/host/migrate.md, "Utenti dei ruoli '
-            'per progetto")'])
+            f'(gpasswd -d {user} {FAKE_AGENT}, o un altro gruppo primario; ops/host/migrate.md, '
+            '"Utenti dei ruoli per progetto")'
+            for user in ('supervisor-gadget', 'coordinator-gadget')])
+        # Without --verbose the names of the foreign users stay out of the output (R1-2): they
+        # are no parameters of the project, and the filter would not replace them (#583).
+        done = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params),
+                               redacted=True)
+        for name in ('supervisor-gadget', 'coordinator-gadget'):
+            self.assertNotIn(name, done.stdout + done.stderr)
+        errors = [line for line in done.stdout.splitlines()
+                  if 'non è un ruolo di questo progetto' in line]
+        self.assertEqual(len(errors), 2, done.stdout)
+        for line in errors:
+            self.assertTrue(line.startswith('  ERRORE: un utente che non è un ruolo di questo '
+                                            'progetto è nel gruppo '), line)
+            self.assertIn('(il nome e il comando con --verbose; ops/host/migrate.md, "Utenti '
+                          'dei ruoli per progetto")', line)
         params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=FAKE_SUPERVISOR,
                              AGENT_USER=FAKE_AGENT, COORDINATION_GROUP='opsdry-nogroup')
         done = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params))
@@ -6247,6 +6270,54 @@ exit 1''')
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertIn('==> Sessione tmux devloop-supervisor-widget', done.stdout)
 
+    def test_the_migration_prepares_the_clone_of_the_coordinator_without_source_repo(self):
+        # #629, R1-3: without SOURCE_REPO, setup-coordinator.sh does not clone the managed
+        # repository; the migration clones it in the coordinator's new home, as the new user,
+        # and start-role.sh then starts the coordinator's session there.
+        self.project('widget', FAKE_SUPERVISOR, self.home / 'supervisor-widget')
+        home = self.home / 'coordinator-widget'
+        for cli in ('claude', 'codex', 'agy'):
+            path = home / '.local' / 'bin' / cli
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(FAKE_CLI)
+            path.chmod(0o755)
+        self.params_file.write_text(self.params_file.read_text()
+                                    + f'COORDINATOR_HOME={home}\n')
+        clone = home / 'widget'
+        self.refused('coordinator', says=f'manca il clone del coordinatore {clone}')
+        # The commands of the procedure: leggi of step 1, the clone of step 4.
+        migrate = RootStepsGuideTests().section('## Utenti dei ruoli per progetto (#629)')
+        commands = RootStepsGuideTests.commands(migrate, inline=False)
+        leggi = [c for c in commands if c.startswith('leggi() {')]
+        block = [c for c in commands if 'git clone' in c or c.startswith('repo=$(leggi')
+                 or 'clone pronto' in c]
+        self.assertEqual((len(leggi), len(block)), (1, 3), block)
+        # The fake git records the clone and makes its .git (mkdir is a fake of the tests).
+        self.shim('git', '[ "$1" = clone ] || exit 2\necho "git $* as $OPS_TEST_AS" '
+                         '>> "$OPS_TEST_CALLS"\n'
+                         'python3 -c "import os, sys; os.makedirs(sys.argv[1])" "$3/.git"')
+        script = '\n'.join([f'ops={shlex.quote(str(self.checkout / "ops"))}',
+                            f'params={shlex.quote(str(self.params_file))}', *leggi, *block])
+        env = dict(os.environ, PATH=f'{self.bin}:{os.environ.get("PATH", "/usr/bin:/bin")}',
+                   OPS_TEST_CALLS=str(self.calls), LC_ALL='C.UTF-8')
+        env.pop('OPS_TEST_AS', None)
+        done = subprocess.run([BASH, '-c', script], capture_output=True, text=True, env=env,
+                              stdin=subprocess.DEVNULL, timeout=120)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(done.stdout, 'clone pronto\n')
+        self.assertIn(f'git clone https://github.com/acme/widget.git {clone} as '
+                      f'{FAKE_COORDINATOR}', self.mutating_calls())
+        done = self.start('coordinator')
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn(f'tmux new-session -d -s devloop-coordinator-widget -c {clone} env',
+                      [c.rstrip() for c in self.mutating_calls()])
+        # Run again, the clone is there: nothing is cloned twice.
+        calls = len(self.mutating_calls())
+        done = subprocess.run([BASH, '-c', script], capture_output=True, text=True, env=env,
+                              stdin=subprocess.DEVNULL, timeout=120)
+        self.assertEqual(done.stdout, 'clone pronto\n', done.stderr)
+        self.assertEqual(len(self.mutating_calls()), calls)
+
 
 class RoleRunbookTests(unittest.TestCase):
     """The runbooks of the roles (#531) and the documents that cite them."""
@@ -6705,6 +6776,42 @@ class RoleRunbookTests(unittest.TestCase):
                        '`COORDINATION_GROUP=devloop-roles`', '`devloop-supervisor-devloop`',
                        '**Rollback**'):
             self.assertIn(phrase, flat)
+        # R1-3: without SOURCE_REPO the coordinator's clone, in the new home, after its setup
+        # (StartRoleTests runs it).
+        clone = [i for i, c in enumerate(commands) if 'git clone' in c]
+        setup = commands.index('sudo bash <checkout>/ops/host/setup-coordinator.sh --params '
+                               '"$params"')
+        self.assertEqual(len(clone), 1)
+        self.assertGreater(clone[0], setup)
+        # The old clones are removed only once the rollback is no longer needed (R1-4).
+        removal = [i for i, c in enumerate(commands) if c.startswith('rm -rf')]
+        rollback = migrate.index('**Rollback**')
+        self.assertTrue(removal)
+        self.assertLess(migrate.index('10. **Pulizia'), rollback)
+        # R1-4: the scripts of this version refuse the shared users even with the parameters
+        # of before (DryRunTests, test_the_sudoers_of_the_coordinator_gives_the_role_of_its_
+        # project): the rollback first goes back to the scripts of before, then restores keys,
+        # ACLs and parameters and runs those scripts.
+        back = RootStepsGuideTests.commands(migrate[rollback:], inline=False)
+        steps = ['tmux kill-session -t "=devloop-supervisor-$progetto"',
+                 "versione=$(git -C <checkout> rev-parse 'origin/main^{/^Merge pull request #641 }^1')",
+                 'git -C <checkout> checkout --detach "$versione"',
+                 'mv -n -t "$vecchia"', 'setfacl -x "u:$nsup"',
+                 'cp -p "$copie/params.env" "$params"',
+                 'sudo bash <checkout>/ops/host/setup-supervisor.sh --params "$params"',
+                 'sudo bash <checkout>/ops/host/setup-coordinator.sh --params "$params"',
+                 'chgrp -R "$(prima COORDINATION_GROUP)"']
+        at = -1
+        for step in steps:
+            with self.subTest(rollback=step):
+                found = [i for i, c in enumerate(back) if i > at and step in c]
+                self.assertTrue(found, back)
+                at = found[0]
+        # The values of this version are read before the checkout of the version of before.
+        self.assertLess(max(i for i, c in enumerate(back) if c.startswith(('nsup=', 'nsupkd='))),
+                        min(i for i, c in enumerate(back) if 'checkout --detach' in c))
+        self.assertIn('per **tutti i progetti dell\'host** passati da questa sezione, compreso '
+                      'quello che resta', ' '.join(migrate[rollback:].split()))
 
     def test_the_documents_cite_the_runbooks(self):
         readme = (OPS / 'README.md').read_text()

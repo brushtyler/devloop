@@ -442,14 +442,30 @@ for user in "$DEVLOOP_USER" "$AGENT_USER"; do
     fi
 done
 # Nel gruppo, solo i ruoli di questo progetto (#629): un utente di un altro progetto, o di nessun
-# ruolo, leggerebbe e scriverebbe la casella del progetto.
-members=$({ getent group "$COORDINATION_GROUP" 2>/dev/null || true; } | cut -d: -f4 | tr ',' ' ')
+# ruolo, leggerebbe e scriverebbe la casella del progetto. Contano i membri supplementari (il
+# quarto campo di getent group) e gli utenti che hanno il gruppo come primario (getent passwd).
+group_line=$(getent group "$COORDINATION_GROUP" 2>/dev/null || true)
+group_gid=$(printf '%s\n' "$group_line" | cut -d: -f3)
+members=$(printf '%s\n' "$group_line" | cut -d: -f4 | tr ',' ' ')
+if [ -n "$group_gid" ]; then
+    members="$members $({ getent passwd 2>/dev/null || true; } \
+                        | awk -F: -v gid="$group_gid" '$4 == gid { print $1 }')"
+fi
+box_listed=' '
 for user in $members; do
+    case "$box_listed" in *" $user "*) continue ;; esac
+    box_listed="$box_listed$user "
     # Gli utenti devloop, degli agent e del watchdog hanno già la loro riga.
     case " $SUPERVISOR_USER $COORDINATOR_USER $DEVLOOP_USER $AGENT_USER $WATCHDOG_USER " in
         *" $user "*) continue ;;
     esac
-    fail "$user è nel gruppo $COORDINATION_GROUP, ma non è un ruolo di questo progetto: la casella è solo del supervisore e del coordinatore del progetto (gpasswd -d $user $COORDINATION_GROUP; ops/host/migrate.md, \"Utenti dei ruoli per progetto\")"
+    # Il nome di un utente estraneo non è un parametro del progetto, e il filtro non lo
+    # sostituirebbe (#583): nell'output ordinario una descrizione generica, il nome con --verbose.
+    if [ "$VERBOSE" = 1 ]; then
+        fail "$user è nel gruppo $COORDINATION_GROUP, ma non è un ruolo di questo progetto: la casella è solo del supervisore e del coordinatore del progetto (gpasswd -d $user $COORDINATION_GROUP, o un altro gruppo primario; ops/host/migrate.md, \"Utenti dei ruoli per progetto\")"
+    else
+        fail "un utente che non è un ruolo di questo progetto è nel gruppo $COORDINATION_GROUP: la casella è solo del supervisore e del coordinatore del progetto (il nome e il comando con --verbose; ops/host/migrate.md, \"Utenti dei ruoli per progetto\")"
+    fi
 done
 for dir in "$COORDINATION_DIR" $(for box in $COORDINATION_BOXES; do
                                      printf '%s\n' "$COORDINATION_DIR/$box" "$COORDINATION_DIR/$box/done"

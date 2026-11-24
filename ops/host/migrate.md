@@ -2733,6 +2733,19 @@ Per ogni progetto che si separa, nella stessa shell di root, che resta aperta fi
    `chgrp` porta al gruppo nuovo anche i messaggi e i battiti già nella casella, che restano da
    leggere.
 
+   Senza `SOURCE_REPO`, `setup-coordinator.sh` non clona il repository gestito, e la sessione del
+   coordinatore parte da quel clone, `COORDINATOR_HOME/<nome del repository>` (`start-role.sh`
+   si ferma se manca): lo si clona nella home nuova, come utente nuovo, se il progetto ha il
+   coordinatore. Con `SOURCE_REPO` il clone della sorgente l'ha già preparato lo script:
+
+   ```bash
+   repo=$(leggi "$params" REPO) chome=$(leggi "$params" COORDINATOR_HOME) cutente=$(leggi "$params" COORDINATOR_USER)
+   if [ -z "$(leggi "$params" SOURCE_REPO)" ] && ! [ -d "$chome/${repo#*/}/.git" ]; then sudo -u "$cutente" -H sh -c 'cd && git clone "$1" "$2"' _ "https://github.com/$repo.git" "$chome/${repo#*/}"; fi
+   [ -n "$(leggi "$params" SOURCE_REPO)" ] || [ -d "$chome/${repo#*/}/.git" ] && echo "clone pronto"
+   ```
+
+   L'ultima riga stampa `clone pronto`.
+
 5. **Le chiavi delle app di ruolo**, dalle `key_dir` di prima a quelle nuove, che il passo 4 ha
    creato (700, dell'utente nuovo). Si **spostano** con `mv`, mai copiate lasciando l'originale,
    e passano all'utente nuovo, 600; poi la `key_dir` di prima, vuota, si toglie:
@@ -2770,20 +2783,18 @@ Per ogni progetto che si separa, nella stessa shell di root, che resta aperta fi
    ([github/tokens.md](../github/tokens.md)). Lo stato di `gh` e i login degli utenti di prima non
    si copiano.
 
-8. **Verifica**, poi i clone di prima. `check-host.sh` del progetto non dà nessun `ERRORE` (gli
-   utenti nuovi, le loro `key_dir` con le chiavi, il gruppo della casella con i soli ruoli del
-   progetto, i sudoers); il token dell'app del supervisore si conia dal suo clone nuovo. Solo dopo,
-   i clone del progetto nella home di prima si cancellano:
+8. **Verifica.** `check-host.sh` del progetto non dà nessun `ERRORE` (gli utenti nuovi, le loro
+   `key_dir` con le chiavi, il gruppo della casella con i soli ruoli del progetto, i sudoers); il
+   token dell'app del supervisore si conia dal suo clone nuovo:
 
    ```bash
    sudo bash <checkout>/ops/host/check-host.sh --params "$params" --no-apps
    sudo -u "$(leggi "$params" SUPERVISOR_USER)" -H sh -c 'cd "$1" && DEVLOOP_APP_KEY_DIR="$2" python3 scripts/supervisor-token.py --state-dir "$3" --perm issues=read -- gh api "repos/$4" --jq .full_name' _ "$(leggi "$params" SUPERVISOR_CLONE)" "$(leggi "$params" SUPERVISOR_KEY_DIR)" "$(leggi "$params" STATE_PATH)" "$(leggi "$params" REPO)"
-   rm -rf -- "$(prima SUPERVISOR_CLONE)"
    ```
 
    Lo script dei token stampa il repository del progetto (con `SOURCE_REPO` si lancia dal clone
-   della sorgente, `SUPERVISOR_SOURCE_CLONE`, e quello di prima si cancella allo stesso modo). Il
-   clone di prima si cancella solo se il suo nome finisce con `-<progetto>` (passo 2).
+   della sorgente, `SUPERVISOR_SOURCE_CLONE`). I clone del progetto nella home di prima restano
+   fino al passo 10: il rollback li riusa.
 
 Poi, per il **progetto che resta**, con i suoi parametri:
 
@@ -2801,9 +2812,100 @@ Poi, per il **progetto che resta**, con i suoi parametri:
    l'utente del ruolo ha ancora una sessione con il nome di prima. Il watchdog del progetto che si
    separa l'ha riavviato `setup-coordinator.sh` (passo 4).
 
-**Rollback**, per un progetto che si separa, con le sessioni ferme come al passo 3, nella shell
-del passo 1: le chiavi tornano nella `key_dir` di prima (`install -d -m 700` dell'utente di prima,
-poi `mv` e `chown` come al passo 5, a ruoli invertiti), i parametri alla copia
-(`cp -p "$copie/params.env" "$params"`), poi di nuovo il passo 4, che riscrive i sudoers e le ACL
-con gli utenti di prima, e `chgrp -R devloop-roles` sulla casella. Gli utenti nuovi restano, senza
-sudoers: si tolgono (`userdel -r`) solo su decisione dell'operatore.
+10. **Pulizia, su conferma dell'operatore** che il rollback non serve più (le sessioni nuove
+    girano e i ruoli lavorano): per ogni progetto che si separa, nella shell del passo 1, i clone
+    del progetto nella home di prima e la copia dei parametri:
+
+    ```bash
+    rm -rf -- "$(prima SUPERVISOR_CLONE)"
+    rm -rf -- "$copie"
+    ```
+
+    Con `SOURCE_REPO` si cancellano allo stesso modo `$(prima SUPERVISOR_SOURCE_CLONE)` e
+    `$(prima COORDINATOR_SOURCE_CLONE)`. Un clone di prima si cancella solo se il suo nome finisce
+    con `-<progetto>` (passo 2); il clone del coordinatore senza `SOURCE_REPO`,
+    `<home di prima>/<nome del repository>`, resta finché l'operatore non decide altrimenti.
+
+**Rollback**, prima del passo 10. Gli script di questa versione rifiutano per costruzione un
+utente di ruolo condiviso fra due progetti (`ops_check_host_users` di `ops/lib.sh`), anche con i
+parametri di prima: rieseguirli si ferma prima di riscrivere sudoers e ACL. Il rollback torna
+quindi alla versione di prima degli script di `ops/`, per **tutti i progetti dell'host** passati da
+questa sezione, compreso quello che resta, le cui copie di root hanno già la `lib.sh` nuova.
+
+1. **Le sessioni nuove e i risvegli**, fermi: per ogni progetto che si separa, nella shell del suo
+   passo 1, con i valori di questa versione, letti prima di tornare a quella di prima:
+
+   ```bash
+   nsup=$(leggi "$params" SUPERVISOR_USER) ncoord=$(leggi "$params" COORDINATOR_USER)
+   nsupkd=$(leggi "$params" SUPERVISOR_KEY_DIR) ncoordkd=$(leggi "$params" COORDINATOR_KEY_DIR)
+   systemctl stop "devloop-role-watchdog@$progetto.timer"
+   sudo -u "$nsup" -H tmux kill-session -t "=devloop-supervisor-$progetto"
+   sudo -u "$ncoord" -H tmux kill-session -t "=devloop-coordinator-$progetto"
+   pkill -u "$nsup" -f 'wait\.sh'
+   pkill -u "$ncoord" -f 'wait\.sh'
+   ```
+
+   Per il progetto che resta, le stesse righe di `systemctl`, `tmux` e `pkill`, con il suo
+   `PROJECT` e i suoi utenti. Le righe del coordinatore solo se il progetto lo ha.
+
+2. **La versione di prima** degli script, una volta per host: il commit di `main` prima del merge
+   di questa sezione (#629, pull request #641). `git log` lo mostra, per conferma
+   dell'operatore:
+
+   ```bash
+   versione=$(git -C <checkout> rev-parse 'origin/main^{/^Merge pull request #641 }^1')
+   git -C <checkout> log -1 --format='%h %s' "$versione"
+   git -C <checkout> checkout --detach "$versione"
+   ```
+
+   Da qui `leggi` e `prima` usano la `lib.sh` di prima, in cui i default di `PROJECT` sono gli
+   utenti condivisi.
+
+3. **Le chiavi**, per ogni progetto che si separa: dalle `key_dir` nuove a quelle di prima, con
+   `mv` come al passo 5, a ruoli invertiti; poi le ACL degli utenti nuovi sui file del progetto,
+   tolte come al passo 6:
+
+   ```bash
+   vecchia=$(prima SUPERVISOR_KEY_DIR) utente=$(prima SUPERVISOR_USER)
+   install -d -m 700 -o "$utente" -g "$(id -gn "$utente")" "$vecchia"
+   find "$nsupkd" -mindepth 1 -maxdepth 1 -name '*.private-key.pem' -exec mv -n -t "$vecchia" -- {} +
+   chown "$utente:$(id -gn "$utente")" "$vecchia"/*.private-key.pem && chmod 600 "$vecchia"/*.private-key.pem
+   vecchia=$(prima COORDINATOR_KEY_DIR) utente=$(prima COORDINATOR_USER)
+   install -d -m 700 -o "$utente" -g "$(id -gn "$utente")" "$vecchia"
+   find "$ncoordkd" -mindepth 1 -maxdepth 1 -name '*.private-key.pem' -exec mv -n -t "$vecchia" -- {} +
+   chown "$utente:$(id -gn "$utente")" "$vecchia"/*.private-key.pem && chmod 600 "$vecchia"/*.private-key.pem
+   home=$(prima DEVLOOP_HOME) state=$(prima STATE_PATH)
+   setfacl -x "u:$nsup" "$home" "$state" "$state/config.local.toml" "$state/project.toml"
+   setfacl -x "u:$ncoord" "$home" "$state" "$state/config.local.toml"
+   ls "$nsupkd" "$ncoordkd"
+   ```
+
+   `ls` non elenca nessun file: se una `key_dir` nuova non è vuota, ci si ferma e si chiede
+   all'operatore.
+
+4. **I parametri e gli script di prima**, per ogni progetto che si separa: i parametri tornano
+   alla copia, e gli script della versione di prima riscrivono sudoers, ACL, copie di root
+   (con la `lib.sh` di prima) e watchdog con gli utenti di prima, che hanno ancora i loro clone
+   (il passo 10 non c'è stato); la casella torna al gruppo di prima:
+
+   ```bash
+   cp -p "$copie/params.env" "$params"
+   sudo bash <checkout>/ops/host/setup-supervisor.sh --params "$params" --dry-run
+   sudo bash <checkout>/ops/host/setup-supervisor.sh --params "$params"
+   sudo bash <checkout>/ops/host/setup-coordinator.sh --params "$params" --dry-run
+   sudo bash <checkout>/ops/host/setup-coordinator.sh --params "$params"
+   chgrp -R "$(prima COORDINATION_GROUP)" "$(prima COORDINATION_DIR)"
+   ```
+
+   Poi, per il progetto che resta, gli stessi `setup-supervisor.sh` e `setup-coordinator.sh`
+   con i suoi parametri, che restano come sono: le sue copie di root tornano alla versione di
+   prima. Infine `check-host.sh` della versione di prima, per ogni progetto, senza `ERRORE`.
+
+5. **Le sessioni, dell'operatore**, con `start-role.sh` della versione di prima, con i nomi di
+   prima (`devloop-<ruolo>`): con gli utenti condivisi, una sessione per ruolo sull'host, come
+   prima della sezione.
+
+Gli utenti nuovi e il loro gruppo restano, senza sudoers né ACL: si tolgono (`userdel -r`,
+`groupdel`) solo su decisione dell'operatore. Il checkout resta alla versione di prima finché
+l'operatore non riprende la sezione, dall'inizio, con `git -C <checkout> checkout --detach
+origin/main`.

@@ -691,8 +691,10 @@ Poi, a mano:
   (`/home/devloop/devloop/.devloop`), dal cui overlay legge `repo` e `[apps.supervisor]`
   (ADR 0006, R6); prima passano da `scripts/agent-token.py`, con
   l'attore `claude`, che non espone l'app `supervisor`;
-- **token di sola lettura** per `gh` ([github/tokens.md](github/tokens.md)); per un altro
-  progetto sullo stesso host, esteso al suo repository o affiancato da uno nuovo;
+- **token di sola lettura** per `gh` ([github/tokens.md](github/tokens.md)), con il solo
+  repository del progetto; un altro progetto sullo stesso host ha il suo token, distinto, nella
+  configurazione di `gh` dell'utente del supervisore di quel progetto e limitato al suo
+  repository, mai questo esteso (#629);
 - **Claude Code** come utente `supervisor`, con lo stesso `npm install` del passo 5 e il login;
 - gli strumenti del diario (`~/supervisor`) e la memoria di Claude Code non vengono dal
   repository: su una macchina nuova si copiano da quella vecchia ([host/migrate.md](host/migrate.md)).
