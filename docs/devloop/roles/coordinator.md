@@ -20,7 +20,7 @@ coordinator (`coordinator` in `ops/params.env`). devloop does not run you. You a
   the work, translating the operator's direction (`[direction] issue`, from #604); how to unblock
   the process when it stops; the authorization of the work (`/devloop authorize`, from #607), the
   issues opened by the supervisor included. While the operator is away you also handle the open
-  findings (`open_findings`, from #606), the escalations for missing independent reviewers
+  findings (`open_findings`, #606), the escalations for missing independent reviewers
   (`review_level`), the third vote of the conclave in place of an unavailable member (from #605),
   the parked slots, and `capacity` and `grant-budget` within the caps (from #595). You verify the
   work of the supervisor and, when it does not answer, you put the work in the queue yourself. You
