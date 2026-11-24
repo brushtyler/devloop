@@ -248,7 +248,7 @@ class EnvelopeTests(unittest.TestCase):
             number or issue, issue=issue, repo=REPO, kind=kind, agent=agent,
             model=candidate.model, label='l', attempt=attempt,
             reserve=lambda j: budget.reserve(cfg.budget, j, repo=REPO, issue=issue, kind=kind,
-                                             agent=candidate))
+                                             agent=candidate, language=cfg.language))
 
     def booked(self, turn, journal=None):
         return (journal or self.journal).turns()[turn]['budget']
@@ -412,7 +412,7 @@ class EnvelopeTests(unittest.TestCase):
         # #393: consumed, reserved and available per dimension, from the journal.
         cfg = cfg_with(envelope(wall_seconds=3600))
         # A story with no turn has consumed nothing: 0 is attested there.
-        text = budget.describe(budget.of_issue(cfg.budget, self.journal, REPO, 7))
+        text = budget.describe(budget.of_issue(cfg.budget, self.journal, REPO, 7), cfg.language)
         self.assertIn('turni 0 di 10 (consumati 0, prenotati 0, disponibili 10)', text)
         self.assertIn('`metered_usd` consumati 0.00 USD, prenotati 0.00 USD, disponibili '
                       '1.00 USD di 1.00 USD', text)
@@ -446,7 +446,7 @@ class EnvelopeTests(unittest.TestCase):
         self.assertEqual(found['time'], {
             'started_at': '2027-01-15T08:00:00Z', 'deadline_at': '2027-01-15T09:00:00Z',
             'cap': 3600, 'consumed': 600, 'available': 3000})
-        text = budget.describe(found)
+        text = budget.describe(found, cfg.language)
         self.assertIn('turni 4 di 10 (consumati 3, prenotati 1, disponibili 6)', text)
         self.assertIn('turni `review` 2 di 3 (consumati 1, prenotati 1, disponibili 1)', text)
         self.assertIn('`cli_estimate_usd` consumati almeno 1.50 USD (turni senza valore '
@@ -476,7 +476,7 @@ class EnvelopeTests(unittest.TestCase):
                                  'reserved': 1.5, 'cap': 5, 'available': 3.0},
             'metered_usd': {'consumed': None, 'unattested': 1, 'uncovered': 0,
                             'reserved': 1.0, 'cap': 10, 'available': 9.0}})
-        text = budget.describe(found)
+        text = budget.describe(found, cfg.language)
         self.assertIn('`cli_estimate_usd` consumati 0.50 USD, prenotati 1.50 USD, disponibili '
                       '3.00 USD di 5.00 USD', text)
         self.assertIn('`metered_usd` consumati non attestato (turni senza valore attestato: 1), '
@@ -531,13 +531,15 @@ class EnvelopeTests(unittest.TestCase):
             self.book(cfg, issue=9)
         self.assertEqual(caught.exception.category, 'SCOPE_REQUIRED')
         self.assertEqual(len(self.journal.turns()), 0)
-        self.assertIn(budget.no_story(9), str(caught.exception))
-        self.assertIn('presa in carico prima', budget.no_story(9))
-        self.assertIn('senza migrazione', budget.no_story(9))
-        # ``devloop status`` gives the same reason, for those issues only, with the budget on.
+        self.assertIn(budget.no_story(9, cfg.language), str(caught.exception))
+        self.assertIn('presa in carico prima', budget.no_story(9, 'Italian'))
+        self.assertIn('senza migrazione', budget.no_story(9, 'Italian'))
+        self.assertIn('taken over before', budget.no_story(9))  # English by default (#633)
+        # ``devloop status`` gives the same reason, in Italian, for those issues only, with the
+        # budget on.
         lines = budget.status_lines(cfg.budget, self.journal, REPO, [9, 7, 9])
         self.assertEqual([line for line in lines if line.startswith('budget #')],
-                         [f'budget #9: {budget.no_story(9)}'])
+                         [f'budget #9: {budget.no_story(9, "Italian")}'])
         self.assertEqual(budget.status_lines(BudgetPolicy(), self.journal, REPO, [9]), [])
 
     def test_a_role_configured_after_the_freeze_is_a_dedicated_refusal(self):
@@ -834,8 +836,8 @@ class DispatcherBudgetTests(unittest.TestCase):
         d.ledger.journal.story(REPO, 7, 'h1')
         issues = list(snap.working_issues) + [p.issue for p in snap.prs]
         lines = d.budget_status(issues)
-        self.assertIn(f'budget #9: {budget.no_story(9)}', lines)
-        self.assertIn(f'budget #11: {budget.no_story(11)}', lines)
+        self.assertIn(f'budget #9: {budget.no_story(9, "Italian")}', lines)
+        self.assertIn(f'budget #11: {budget.no_story(11, "Italian")}', lines)
         self.assertFalse([line for line in lines if line.startswith('budget #7:')])
         self.assertEqual(self.make(cfg_with()).budget_status(issues), [])  # budget off
 
@@ -875,7 +877,7 @@ class DispatcherBudgetTests(unittest.TestCase):
         self.assertIn('`metered_usd` consumati non attestato (turni senza valore attestato: 1)',
                       line)
         self.assertIn('tempo trascorso ', line)
-        self.assertEqual(none, f'budget #9: {budget.no_story(9)}')
+        self.assertEqual(none, f'budget #9: {budget.no_story(9, "Italian")}')
 
     def test_the_readiness_check_is_outside_the_envelope(self):
         cfg = cfg_with(envelope(turns=1))

@@ -168,8 +168,11 @@ class JournalChainTests(unittest.TestCase):
         self.assertEqual([t['turn'] for t in TurnJournal(self.dir).blocking(CFG.repo, 7, 7)],
                          [running])
         self.assertEqual(j.blocking(CFG.repo, 8, 8), [])  # not another work
-        self.assertIn('terminato senza che il suo esito sia stato scritto',
+        # In English by default (#633), in the project's language when asked.
+        self.assertIn('ended without its outcome being written',
                       journal_mod.describe_turn(j.turns()[running]))
+        self.assertIn('terminato senza che il suo esito sia stato scritto',
+                      journal_mod.describe_turn(j.turns()[running], 'Italian'))
 
     def test_a_turn_the_recovery_cannot_make_uncertain_blocks_its_work(self):
         left = intent(TurnJournal(self.dir))  # the process that wrote it stopped
@@ -276,16 +279,20 @@ class ReconcileCommandTests(unittest.TestCase):
     def test_one_reconciliation_per_turn_and_never_of_a_turn_not_uncertain(self):
         j = TurnJournal()
         turn = intent(j)
-        with self.assertRaisesRegex(ValueError, 'non è incerto'):
+        # The reasons in English by default (#633), in the project's language when asked.
+        with self.assertRaisesRegex(ValueError, 'is not uncertain'):
             j.reconcile(turn, 'failed', by='brushtyler', comment=1, note='n')
+        with self.assertRaisesRegex(ValueError, 'non è incerto'):
+            j.reconcile(turn, 'failed', by='brushtyler', comment=1, note='n',
+                        language='Italian')
         j.uncertain(7)
-        with self.assertRaisesRegex(ValueError, 'nota'):
+        with self.assertRaisesRegex(ValueError, 'note'):
             j.reconcile(turn, 'failed', by='brushtyler', comment=1, note='  ')
-        with self.assertRaisesRegex(ValueError, 'non ammesso'):
+        with self.assertRaisesRegex(ValueError, 'not admitted'):
             j.reconcile(turn, 'uncertain', by='brushtyler', comment=1, note='n')
         self.assertTrue(j.reconcile(turn, 'failed', by='brushtyler', comment=1, note='n'))
         self.assertFalse(j.reconcile(turn, 'failed', by='brushtyler', comment=2, note='n'))
-        with self.assertRaisesRegex(ValueError, 'esito diverso è rifiutato'):
+        with self.assertRaisesRegex(ValueError, 'a different outcome is refused'):
             j.reconcile(turn, 'returned', by='brushtyler', comment=3, note='n')
         done = j.turns()[turn]['reconciled']
         self.assertEqual((done['outcome'], done['by'], done['comment'], done['note']),
@@ -293,7 +300,7 @@ class ReconcileCommandTests(unittest.TestCase):
         self.assertRegex(done['at'], r'^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$')
         # Still counted: the turn keeps its intent and its uncertain outcome.
         self.assertEqual(j.turns()[turn]['outcome'], 'uncertain')
-        with self.assertRaisesRegex(ValueError, 'non è nel journal'):
+        with self.assertRaisesRegex(ValueError, 'is not in the journal'):
             j.reconcile('turn-99-0a1b2c3d', 'failed', by='brushtyler', comment=4, note='n')
 
 

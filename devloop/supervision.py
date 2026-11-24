@@ -77,7 +77,7 @@ left open the PR goes back to ``agent:review``, where the recorded approval is a
 
 import re
 
-from .i18n import ITALIAN, language_code
+from .i18n import ENGLISH, ITALIAN, language_code
 
 # Non-critical classes: the supervisor decides them in ``auto``.
 TOOL_FAILURE = 'tool_failure'            # the agent or its model produced no result
@@ -148,10 +148,26 @@ MAX_DAILY_GRANTS = 3
 # may grant at most this many of them on one PR, whoever granted the others (the operator's
 # decision on #553): any further one stays the operator's.
 MAX_COORDINATOR_OPERATOR_ROUNDS = 1
-# What the escalation of a round limit to the operator says of how to grant more rounds (#553).
-OPERATOR_ROUNDS_TEXT = ('Un utente fidato può concedere un round in più a questa sola PR con '
-                        '`/devloop grant-round <motivo>`, sul head di questa escalation; alzando '
-                        '`max_review_rounds` l\'operatore concede invece altri round a tutte le PR.')
+# What the escalation of a round limit to the operator says of how to grant more rounds (#553),
+# by language (#633): ``operator_rounds_text``. The Italian one for the texts of the dispatcher
+# that #628 has not translated yet.
+_OPERATOR_ROUNDS = {
+    ENGLISH: ('A trusted user may grant one more round to this PR only with `/devloop grant-round '
+              '<reason>`, on the head of this escalation; by raising `max_review_rounds` the '
+              'operator grants more rounds to every PR instead.'),
+    ITALIAN: ('Un utente fidato può concedere un round in più a questa sola PR con '
+              '`/devloop grant-round <motivo>`, sul head di questa escalation; alzando '
+              '`max_review_rounds` l\'operatore concede invece altri round a tutte le PR.'),
+}
+OPERATOR_ROUNDS_TEXT = _OPERATOR_ROUNDS[ITALIAN]
+
+
+def operator_rounds_text(language=ENGLISH):
+    """How a trusted user grants one more round on a ``round_limit`` escalation (#553), in
+    ``language`` (#633)."""
+    return _OPERATOR_ROUNDS[language_code(language)]
+
+
 # The tolerance of the budget envelope (#411, ADR 0005, D3): the one extension of a story adds
 # this share of each of its turn caps and of its time, rounded down (``floor``), so that it never
 # goes beyond it. A constant of the code, like the caps above.
@@ -253,16 +269,22 @@ OUTCOMES = ('applied', 'accepted', 'decided', 'escalated', 'refused', 'limit', '
             'merged', 'closed')
 
 
-def coordinator_refusal(command):
+def coordinator_refusal(command, language=ENGLISH):
     """``(log, text)`` of why ``command`` of the coordinator's identity does not count (#528),
-    or None for a delegated command (``COORDINATOR_DELEGATED``)."""
+    or None for a delegated command (``COORDINATOR_DELEGATED``). ``text``, the answer, in
+    ``language`` (#633); ``log`` in English."""
     if command in COORDINATOR_DELEGATED:
         return None
+    italian = language_code(language) == ITALIAN
     if command in COORDINATOR_RESERVED:
         return ('reserved to the operator, never the coordinator\'s',
-                f'`/devloop {command}` è riservato all\'operatore di persona, mai al coordinatore')
+                f'`/devloop {command}` è riservato all\'operatore di persona, mai al coordinatore'
+                if italian else
+                f'`/devloop {command}` is reserved to the operator in person, never to the '
+                'coordinator')
     return ('not delegated to the coordinator',
-            f'`/devloop {command}` non è tra i comandi delegati al coordinatore')
+            f'`/devloop {command}` non è tra i comandi delegati al coordinatore' if italian
+            else f'`/devloop {command}` is not among the commands delegated to the coordinator')
 
 
 def recorded_command(command, outcome):
@@ -312,9 +334,8 @@ def retries_done(key, keys):
     return max(sum(1 for other, who in spent if other == rest and name in who) for name in names)
 
 
-# The descriptions of the classes in English (#632), for the texts that already follow the
-# project's ``language``: the answer to a recheck that runs no check names the escalation that
-# holds the block. The escalations themselves still describe their class in Italian.
+# The descriptions of the classes in English (#632), for the texts that follow the project's
+# ``language``: the escalations (#633) and the answer to a recheck that runs no check.
 _ENGLISH = {
     TOOL_FAILURE: 'the agent or the model produced no result',
     PREFLIGHT_DEFAULT: 'gaps of the readiness check with a proposed default',
@@ -353,10 +374,10 @@ _ENGLISH = {
 _ENGLISH_UNKNOWN = 'class not recognised, hence critical'
 
 
-def describe(cls, language=None):
-    """A short description of ``cls``, for comments: in Italian, as the escalations still give
-    it; in English for a ``language`` (#632) other than Italian (``i18n.language_code``)."""
-    if language is not None and language_code(language) != ITALIAN:
+def describe(cls, language=ENGLISH):
+    """A short description of ``cls``, for comments, in ``language`` (#632, #633): Italian, or
+    English for any other language (``i18n.language_code``)."""
+    if language_code(language) != ITALIAN:
         return _ENGLISH.get(cls, _ENGLISH_UNKNOWN) if isinstance(cls, str) else _ENGLISH_UNKNOWN
     if cls == TOOL_FAILURE:
         return 'l\'agent o il modello non ha prodotto un risultato'
