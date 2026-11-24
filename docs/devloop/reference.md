@@ -393,6 +393,23 @@ file gains the
 `[prompts]` table before the pin of R4
 ([ops/host/migrate.md](../../ops/host/migrate.md#dati-di-ssdlc-nei-prompt)).
 
+### Language of the texts
+
+`language` (a fact of the [project file](#project-file), `English` by default) is the language
+the prompts ask the agents to write in, as free text. The texts the dispatcher composes itself
+follow it too (#628), in the languages devloop has a translation for: Italian and English. The
+value is read without case, as a name (`English`, `Italian`, `italiano`) or a tag (`en`, `it`,
+`it-IT`); any other language gets the English texts. The shared catalogue is `devloop/i18n.py`.
+
+Today the [ledger records](protocol.md#evidence-and-telemetry) follow it (#631): titles,
+notes and names of their fields, and `not reported` for a value nobody attested. The other
+texts of the dispatcher are still in Italian, until the parts of #628 that translate them.
+What devloop reads never changes with the language: the `devloop:<kind>:v1` markers and their
+fields, the `/devloop …` commands and the labels. A text that devloop recognises by its title or
+a phrase is recognised in every language it has, so that a change of `language` leaves the
+texts already published recognised: [`devloop watch`](guide.md#waking-the-supervising-agent) leaves out a
+ledger record whose title is `## devloop ledger` or `## Registro devloop`.
+
 ### No background work in a turn
 
 A headless turn ends when the agent gives its final answer, without waiting for anything it

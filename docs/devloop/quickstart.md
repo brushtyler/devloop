@@ -200,7 +200,8 @@ test_cmd = "python3 -m pytest -q"
 # "full" runs test_cmd after each writing turn. "changed" needs a selection in [tests]
 # (docs/devloop/reference.md, "Local tests"); without one it is "full".
 local_tests = "full"
-# The language of the text the agents write for GitHub.
+# The language of the text the agents write for GitHub, and of the dispatcher's texts that
+# devloop translates (Italian or English, English for any other language).
 language = "English"
 # Never pushed by devloop: a workflow pushed to a branch would run before any review.
 protected_paths = [".github/"]
