@@ -2223,8 +2223,10 @@ per gli altri ruoli quelli dei commenti.
    ```bash
    systemctl stop devloop@devloop                                    # devloop
    systemctl is-active devloop@devloop                               # devloop: "inactive"
-   sudo -u supervisor -H tmux kill-session -t =devloop-supervisor    # supervisor
-   sudo -u coordinator -H tmux kill-session -t =devloop-coordinator  # coordinator
+   sudo -u supervisor -H tmux kill-session -t =devloop-supervisor-devloop    # supervisor
+   sudo -u coordinator -H tmux kill-session -t =devloop-coordinator-devloop  # coordinator
+   sudo -u supervisor -H tmux kill-session -t =devloop-supervisor    # supervisor, prima di #629
+   sudo -u coordinator -H tmux kill-session -t =devloop-coordinator  # coordinator, prima di #629
    pkill -u coordinator -f coordinator-wait.sh                       # coordinator: la sveglia
    ```
 
@@ -2627,3 +2629,181 @@ decadono e serve una nuova review. Meglio con la coda vuota.
 dell'overlay e del file di progetto](#acl-delloverlay-e-del-file-di-progetto-543)), oppure si
 tolgono a mano le due voci; poi `systemctl start <SERVICE_NAME>`. La copia di prima e quella di
 #615 accettano il file con le voci e senza: l'ordine fra pin e file non conta.
+
+## Utenti dei ruoli per progetto (#629)
+
+Supervisore e coordinatore sono per progetto, con un utente di sistema per ruolo e per progetto
+([ADR 0002, precisazione del
+2026-11-24](../../docs/adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-24-ruoli-per-progetto-629)).
+Dal #629, con `PROJECT`, i default di `ops/lib.sh` sono `supervisor-<progetto>`,
+`coordinator-<progetto>` e il gruppo della casella `devloop-roles-<progetto>`, e gli script di
+`ops/host/` si fermano se un utente di ruolo del progetto è già il supervisore o il coordinatore di
+un'altra installazione dell'host (`SUPERVISOR_USER '…' è già l'utente supervisor di un'altra
+installazione di devloop dell'host`). Le sessioni dei ruoli si chiamano
+`devloop-<ruolo>-<progetto>` ([ops/README.md](../README.md#i-quattro-ruoli)).
+
+Questa sezione separa i ruoli di un host che li ha condivisi fra più progetti: gli stessi utenti
+`supervisor` e `coordinator`, con una `key_dir` e un clone per progetto nella stessa home, e lo
+stesso gruppo `devloop-roles`. Un progetto, il **progetto che resta**, tiene gli utenti e il
+gruppo di prima, scritti nei suoi parametri; ogni altro progetto, un **progetto che si separa**,
+passa ai suoi utenti. Sull'host di questo repository resta il progetto `devloop`, con
+`SUPERVISOR_USER=supervisor`, `COORDINATOR_USER=coordinator` e `COORDINATION_GROUP=devloop-roles`
+scritti (`ops/params.env.example`); un progetto senza `PROJECT` resta sempre, perché i suoi
+default non cambiano. Un host con un solo progetto non ha nulla da separare: per lui contano solo
+i parametri del progetto che resta (dopo il passo 8) e il nome nuovo delle sessioni (passo 9).
+Con `PROJECT` e senza `COORDINATION_GROUP` scritto, gli script cercherebbero il gruppo
+`devloop-roles-<progetto>`, che l'host non ha ancora.
+
+Il codice di devloop non cambia e il loop dei progetti resta attivo: si fermano solo le sessioni
+dei ruoli e i loro risvegli. Si esegue come root, con l'[agent dell'host](../../docs/devloop/roles/host.md),
+dal checkout dell'operatore aggiornato (`git -C <checkout> fetch origin` e
+`git -C <checkout> checkout --detach origin/main`), **prima i progetti che si separano**, uno
+alla volta, poi il progetto che resta: finché un progetto che si separa ha il sudoers con
+l'utente condiviso, gli script del progetto che resta si fermano. I passi che chiedono una
+persona (login, token, avvio delle sessioni) li fa l'operatore.
+
+### Comandi
+
+Per ogni progetto che si separa, nella stessa shell di root, che resta aperta fino alla fine.
+`<checkout>` è il checkout dell'operatore, `<progetto>` il `PROJECT` del progetto e
+`<parametri>` il suo file di parametri.
+
+1. **I valori e la copia dei parametri.** `leggi FILE NOME` stampa il valore che gli script di
+   `ops/` ricavano da `FILE`, senza la verifica degli altri utenti dell'host; `prima NOME` quello
+   di prima, con gli utenti condivisi come default:
+
+   ```bash
+   progetto=<progetto>
+   ops=<checkout>/ops
+   params=<parametri>
+   copie=/root/roles-629-$progetto
+   leggi() { bash -c '. "$1/lib.sh" && ops_check_host_users() { :; } && PARAMS_FILE=$2 && ops_load_params && printf "%s\n" "${!3}"' _ "$ops" "$1" "$2"; }
+   prima() { SUPERVISOR_USER=supervisor COORDINATOR_USER=coordinator COORDINATION_GROUP=devloop-roles leggi "$copie/params.env" "$1"; }
+   test ! -e "$copie" && install -d -m 700 "$copie" && cp -p "$params" "$copie/params.env" && echo pronto
+   ```
+
+   `test` stampa `pronto`. Una `$copie` che esiste già è di un passo di prima: si cancella solo
+   se il suo rollback non serve più.
+
+2. **I parametri del progetto che si separa**: si tolgono le righe che scrivono gli utenti di
+   ruolo condivisi, le loro home, le loro `key_dir`, i loro clone e il gruppo della casella, così
+   valgono i default del progetto:
+
+   ```bash
+   grep -nE '^(SUPERVISOR|COORDINATOR)_(USER|HOME|KEY_DIR|CLONE|SOURCE_CLONE)=|^COORDINATION_GROUP=' "$params"
+   sed -i -E '/^(SUPERVISOR|COORDINATOR)_(USER|HOME|KEY_DIR|CLONE|SOURCE_CLONE)=|^COORDINATION_GROUP=/d' "$params"
+   for p in SUPERVISOR_USER COORDINATOR_USER COORDINATION_GROUP SUPERVISOR_KEY_DIR COORDINATOR_KEY_DIR SUPERVISOR_CLONE; do
+       printf '%s: %s -> %s\n' "$p" "$(prima "$p")" "$(leggi "$params" "$p")"
+   done
+   ```
+
+   Gli utenti diventano `supervisor-<progetto>` e `coordinator-<progetto>`, il gruppo
+   `devloop-roles-<progetto>`, e `key_dir` e clone passano nelle home nuove. Se un valore di
+   prima non finisce con `-<progetto>` (una `key_dir` o un clone condivisi), ci si ferma e si
+   chiede all'operatore: i passi 5 e 8 spostano e cancellano solo ciò che è del progetto.
+
+3. **Fermare le sessioni dei ruoli e il watchdog del progetto.** Con gli utenti condivisi una
+   sola sessione per ruolo poteva girare: si fermano quella e i risvegli, anche del progetto che
+   resta, che ripartono al passo 9:
+
+   ```bash
+   systemctl stop "devloop-role-watchdog@$progetto.timer"
+   sudo -u "$(prima SUPERVISOR_USER)" -H tmux kill-session -t =devloop-supervisor
+   sudo -u "$(prima COORDINATOR_USER)" -H tmux kill-session -t =devloop-coordinator
+   pkill -u "$(prima SUPERVISOR_USER)" -f 'wait\.sh'
+   pkill -u "$(prima COORDINATOR_USER)" -f 'wait\.sh'
+   ```
+
+   Una sessione che non c'è dà `can't find session`, un risveglio che non c'è nessun output: va
+   bene.
+
+4. **Gli script del progetto**, prima con `--dry-run`: creano gli utenti nuovi, il gruppo della
+   casella del progetto (e vi portano le directory della casella), le ACL sulla home e sullo
+   `state_dir` di devloop, i sudoers del progetto con gli utenti nuovi, le copie di root, i clone,
+   le `key_dir` e il watchdog. `setup-coordinator.sh` solo se il progetto ha il coordinatore:
+
+   ```bash
+   sudo bash <checkout>/ops/host/setup-supervisor.sh --params "$params" --dry-run
+   sudo bash <checkout>/ops/host/setup-supervisor.sh --params "$params"
+   sudo bash <checkout>/ops/host/setup-coordinator.sh --params "$params" --dry-run
+   sudo bash <checkout>/ops/host/setup-coordinator.sh --params "$params"
+   chgrp -R "$(leggi "$params" COORDINATION_GROUP)" "$(leggi "$params" COORDINATION_DIR)"
+   ```
+
+   `chgrp` porta al gruppo nuovo anche i messaggi e i battiti già nella casella, che restano da
+   leggere.
+
+5. **Le chiavi delle app di ruolo**, dalle `key_dir` di prima a quelle nuove, che il passo 4 ha
+   creato (700, dell'utente nuovo). Si **spostano** con `mv`, mai copiate lasciando l'originale,
+   e passano all'utente nuovo, 600; poi la `key_dir` di prima, vuota, si toglie:
+
+   ```bash
+   vecchia=$(prima SUPERVISOR_KEY_DIR) nuova=$(leggi "$params" SUPERVISOR_KEY_DIR) utente=$(leggi "$params" SUPERVISOR_USER)
+   find "$vecchia" -mindepth 1 -maxdepth 1 -name '*.private-key.pem' -exec mv -n -t "$nuova" -- {} +
+   chown "$utente:$(id -gn "$utente")" "$nuova"/*.private-key.pem && chmod 600 "$nuova"/*.private-key.pem
+   rmdir "$vecchia" && echo spostate
+   vecchia=$(prima COORDINATOR_KEY_DIR) nuova=$(leggi "$params" COORDINATOR_KEY_DIR) utente=$(leggi "$params" COORDINATOR_USER)
+   find "$vecchia" -mindepth 1 -maxdepth 1 -name '*.private-key.pem' -exec mv -n -t "$nuova" -- {} +
+   chown "$utente:$(id -gn "$utente")" "$nuova"/*.private-key.pem && chmod 600 "$nuova"/*.private-key.pem
+   rmdir "$vecchia" && echo spostate
+   ```
+
+   Ogni `rmdir` stampa `spostate`; le righe del coordinatore solo se il progetto lo ha. Se
+   `rmdir` fallisce, nella `key_dir` di prima è rimasto qualcosa: ci si ferma, senza copiare né
+   cancellare nulla, e si chiede all'operatore.
+
+6. **Le ACL degli utenti condivisi** sui file del progetto: gli utenti di prima restano i ruoli
+   del progetto che resta, e non leggono più l'overlay né il file di progetto di questo:
+
+   ```bash
+   home=$(leggi "$params" DEVLOOP_HOME) state=$(leggi "$params" STATE_PATH)
+   setfacl -x "u:$(prima SUPERVISOR_USER)" "$home" "$state" "$state/config.local.toml" "$state/project.toml"
+   setfacl -x "u:$(prima COORDINATOR_USER)" "$home" "$state" "$state/config.local.toml"
+   getfacl -p --omit-header "$home" "$state" "$state/config.local.toml" "$state/project.toml" | grep -E "^user:($(prima SUPERVISOR_USER)|$(prima COORDINATOR_USER)):" || echo nessuna
+   ```
+
+   `grep` non trova nulla e si stampa `nessuna`.
+
+7. **Login e token, dell'operatore**, come utenti nuovi: la CLI di `[roles.supervisor]` e quella
+   di `[roles.coordinator]`, ciascuna con il suo login (una quota contata a parte), e il token di
+   sola lettura per `gh` di ciascun ruolo, con il solo repository del progetto
+   ([github/tokens.md](../github/tokens.md)). Lo stato di `gh` e i login degli utenti di prima non
+   si copiano.
+
+8. **Verifica**, poi i clone di prima. `check-host.sh` del progetto non dà nessun `ERRORE` (gli
+   utenti nuovi, le loro `key_dir` con le chiavi, il gruppo della casella con i soli ruoli del
+   progetto, i sudoers); il token dell'app del supervisore si conia dal suo clone nuovo. Solo dopo,
+   i clone del progetto nella home di prima si cancellano:
+
+   ```bash
+   sudo bash <checkout>/ops/host/check-host.sh --params "$params" --no-apps
+   sudo -u "$(leggi "$params" SUPERVISOR_USER)" -H sh -c 'cd "$1" && DEVLOOP_APP_KEY_DIR="$2" python3 scripts/supervisor-token.py --state-dir "$3" --perm issues=read -- gh api "repos/$4" --jq .full_name' _ "$(leggi "$params" SUPERVISOR_CLONE)" "$(leggi "$params" SUPERVISOR_KEY_DIR)" "$(leggi "$params" STATE_PATH)" "$(leggi "$params" REPO)"
+   rm -rf -- "$(prima SUPERVISOR_CLONE)"
+   ```
+
+   Lo script dei token stampa il repository del progetto (con `SOURCE_REPO` si lancia dal clone
+   della sorgente, `SUPERVISOR_SOURCE_CLONE`, e quello di prima si cancella allo stesso modo). Il
+   clone di prima si cancella solo se il suo nome finisce con `-<progetto>` (passo 2).
+
+Poi, per il **progetto che resta**, con i suoi parametri:
+
+- `SUPERVISOR_USER`, `COORDINATOR_USER` e `COORDINATION_GROUP=devloop-roles` scritti, come in
+  `ops/params.env.example` per l'host di questo repository (senza `PROJECT` non servono: sono i
+  default);
+- `setup-supervisor.sh` e, se c'è il coordinatore, `setup-coordinator.sh`, prima con `--dry-run`,
+  poi `check-host.sh`, che non dà nessun `ERRORE`: nel gruppo `devloop-roles` restano solo i suoi
+  due ruoli.
+
+9. **Avvio delle sessioni, dell'operatore**: per ogni progetto, con i suoi parametri,
+   `sudo bash <checkout>/ops/host/start-role.sh --params <parametri> supervisor` e `coordinator`.
+   Le sessioni hanno il nome nuovo, `devloop-<ruolo>-<progetto>` (sull'host di questo repository
+   `devloop-supervisor-devloop` e `devloop-coordinator-devloop`); `start-role.sh` si ferma finché
+   l'utente del ruolo ha ancora una sessione con il nome di prima. Il watchdog del progetto che si
+   separa l'ha riavviato `setup-coordinator.sh` (passo 4).
+
+**Rollback**, per un progetto che si separa, con le sessioni ferme come al passo 3, nella shell
+del passo 1: le chiavi tornano nella `key_dir` di prima (`install -d -m 700` dell'utente di prima,
+poi `mv` e `chown` come al passo 5, a ruoli invertiti), i parametri alla copia
+(`cp -p "$copie/params.env" "$params"`), poi di nuovo il passo 4, che riscrive i sudoers e le ACL
+con gli utenti di prima, e `chgrp -R devloop-roles` sulla casella. Gli utenti nuovi restano, senza
+sudoers: si tolgono (`userdel -r`) solo su decisione dell'operatore.

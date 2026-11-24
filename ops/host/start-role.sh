@@ -14,7 +14,9 @@
 #   l'utente dell'operatore che lancia lo script con sudo, quello che ha sudo sull'host.
 #
 # Supervisore e coordinatore partono dal loro clone: SUPERVISOR_CLONE, e per il coordinatore il
-# clone da cui conia i token (#621); senza, lo script si ferma.
+# clone da cui conia i token (#621); senza, lo script si ferma. Sono del progetto (ADR 0002,
+# precisazione del 2026-11-24; #629): la sessione si chiama devloop-<ruolo>-<progetto> con
+# PROJECT, devloop-<ruolo> senza, e il primo messaggio dice che il ruolo serve solo quel progetto.
 #
 # Non legge segreti: legge i parametri, la configurazione e il runbook, e avvia tmux. Scrive un
 # solo file: il primo messaggio della sessione, nella home dell'utente del ruolo, suo e con modo
@@ -204,7 +206,12 @@ if [ -n "$INBOX" ]; then
 
 "
 fi
-PROMPT="You hold the role \"$ROLE\" of devloop for $REPO. Your instructions are the runbook below ($RUNBOOK of the checkout $ROOT_DIR, started by ops/host/start-role.sh): follow it for the whole session.
+# Supervisore e coordinatore sono del progetto (ADR 0002, precisazione del 2026-11-24; #629): il
+# primo messaggio lo dice, con il repository.
+SCOPE=''
+[ "$ROLE" = host ] \
+    || SCOPE=" You serve only this project: you have no channel with the roles of other projects, on this host or elsewhere."
+PROMPT="You hold the role \"$ROLE\" of devloop for $REPO.$SCOPE Your instructions are the runbook below ($RUNBOOK of the checkout $ROOT_DIR, started by ops/host/start-role.sh): follow it for the whole session.
 
 $CHANNEL$(<"$ROOT_DIR/$RUNBOOK")"
 
@@ -226,13 +233,23 @@ case $CLI in
     agy) COMMAND=(agy --model "$MODEL" -i) ;;
 esac
 
-SESSION=devloop-$ROLE
+# Una sessione per ruolo e per progetto (#629): con PROJECT devloop-<ruolo>-<progetto>, così le
+# sessioni dello stesso ruolo di due progetti dell'host hanno nomi distinti; senza PROJECT
+# devloop-<ruolo>, come prima. L'installazione con PROJECT=devloop prende anch'essa il nome nuovo.
+SESSION=devloop-$ROLE${PROJECT:+-$PROJECT}
 # Come l'utente del ruolo (sudo -u … -H), o direttamente se lo script gira già come lui.
 AS_ROLE=()
 [ "$(id -un)" = "$ROLE_USER" ] || AS_ROLE=(sudo -u "$ROLE_USER" -H --)
 step "Sessione tmux $SESSION"
-if [ "$DRY_RUN" != 1 ] && "${AS_ROLE[@]}" tmux has-session -t "=$SESSION" >/dev/null 2>&1; then
-    die "la sessione $SESSION di $ROLE_USER esiste già: sudo -u $ROLE_USER -H tmux attach -t $SESSION"
+if [ "$DRY_RUN" != 1 ]; then
+    if "${AS_ROLE[@]}" tmux has-session -t "=$SESSION" >/dev/null 2>&1; then
+        die "la sessione $SESSION di $ROLE_USER esiste già: sudo -u $ROLE_USER -H tmux attach -t $SESSION"
+    fi
+    # La sessione con il nome di prima, senza il progetto, avviata prima di #629: è lo stesso
+    # ruolo, e due sessioni del ruolo non girano insieme.
+    if [ -n "$PROJECT" ] && "${AS_ROLE[@]}" tmux has-session -t "=devloop-$ROLE" >/dev/null 2>&1; then
+        die "la sessione devloop-$ROLE di $ROLE_USER, con il nome di prima di #629, esiste già: chiuderla prima (sudo -u $ROLE_USER -H tmux kill-session -t =devloop-$ROLE), o entrarci (sudo -u $ROLE_USER -H tmux attach -t devloop-$ROLE)"
+    fi
 fi
 # Il primo messaggio non passa dalla riga di comando di tmux, che rifiuta un comando oltre circa
 # 16 KB (#621): lo scrive l'utente del ruolo in un file nuovo della sua home, con modo 600

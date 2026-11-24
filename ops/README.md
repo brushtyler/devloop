@@ -24,12 +24,18 @@ divieti:
 | Ruolo | Utente sull'host | Privilegi | Runbook |
 |---|---|---|---|
 | **Operatore** | il suo | tutti: decisioni di persona, credenziali, login delle CLI, GitHub App; lancia l'agent dell'host | — |
-| **Coordinatore** | `coordinator` (`COORDINATOR_USER`, passo 10) | la sua app; sull'host solo lettura (`sudoers-coordinator`) | [coordinator.md](../docs/devloop/roles/coordinator.md) |
-| **Supervisore** | `supervisor` (`SUPERVISOR_USER`, passo 7) | la sua app; sull'host i comandi di `sudoers-supervisor` | [supervisor.md](../docs/devloop/roles/supervisor.md) |
+| **Coordinatore** | `coordinator` (`COORDINATOR_USER`, passo 10; con `PROJECT`, `coordinator-<progetto>`) | la sua app; sull'host solo lettura (`sudoers-coordinator`) | [coordinator.md](../docs/devloop/roles/coordinator.md) |
+| **Supervisore** | `supervisor` (`SUPERVISOR_USER`, passo 7; con `PROJECT`, `supervisor-<progetto>`) | la sua app; sull'host i comandi di `sudoers-supervisor` | [supervisor.md](../docs/devloop/roles/supervisor.md) |
 | **Agent dell'host** | quello dell'operatore che lo lancia | `sudo` sull'host; nessuna scrittura su GitHub; legge solo procedure e script di `main`, mai issue, PR o output degli agent | [host.md](../docs/devloop/roles/host.md) |
 
 devloop (dispatcher, preflight, implementer, reviewer) gira come `devloop` e `devloop-agent` e
 non ha un runbook: le sue istruzioni sono i prompt di `devloop/prompts/`.
+
+**Ruoli per progetto** ([ADR 0002, precisazione del
+2026-11-24](../docs/adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-24-ruoli-per-progetto-629)):
+supervisore e coordinatore servono un solo progetto, anche quando l'host ne ha più di uno, e non
+hanno nessun canale con i ruoli di altri progetti. Con `PROJECT` ciascuno ha il suo utente, la sua
+casella e la sua sessione ([Più progetti sullo stesso host](#più-progetti-sullo-stesso-host)).
 
 **Avvio di una sessione.** `ops/host/start-role.sh` avvia la sessione di un ruolo agent in tmux,
 con l'utente del ruolo e il suo runbook come istruzioni iniziali:
@@ -40,6 +46,8 @@ sudo bash ops/host/start-role.sh supervisor
 sudo bash ops/host/start-role.sh coordinator
 sudo bash ops/host/start-role.sh host --cli claude --model claude-opus-5-5
 sudo -u supervisor -H tmux attach -t devloop-supervisor   # per entrare nella sessione
+sudo -u supervisor -H tmux attach -t devloop-supervisor-devloop   # con PROJECT=devloop (#629)
+sudo -u supervisor-widget -H tmux attach -t devloop-supervisor-widget   # con PROJECT=widget
 ```
 
 - **Supervisore e coordinatore:** CLI e modello sono `kind` e `model` della tabella
@@ -62,8 +70,16 @@ sudo -u supervisor -H tmux attach -t devloop-supervisor   # per entrare nella se
   quello del kernel per un argomento (128 KiB con pagine di 4 KiB), l'unico modo in cui le CLI
   ricevono il primo messaggio di una sessione interattiva: oltre, lo script si ferma prima di
   avviare e lo dice.
-- La sessione si chiama `devloop-<ruolo>`; se esiste già, lo script si ferma e dice come
-  entrarci. Serve `tmux` sull'host (`apt-get install tmux`).
+- La sessione si chiama `devloop-<ruolo>-<progetto>` con `PROJECT`, `devloop-<ruolo>` senza
+  (#629): le sessioni dello stesso ruolo di due progetti dell'host hanno nomi distinti, e
+  ciascuna gira con l'utente del ruolo del suo progetto. Anche l'installazione con
+  `PROJECT=devloop` prende il nome nuovo, `devloop-supervisor-devloop` e
+  `devloop-coordinator-devloop`, senza un parametro per tenere quello di prima. Se la sessione
+  esiste già, lo script si ferma e dice come entrarci; con `PROJECT` si ferma anche se l'utente
+  del ruolo ha ancora la sessione con il nome di prima (`devloop-<ruolo>`), e dice come
+  chiuderla. Serve `tmux` sull'host (`apt-get install tmux`).
+- Per supervisore e coordinatore il primo messaggio nomina il repository e dice che il ruolo
+  serve solo quel progetto, senza canali con i ruoli di altri progetti (#629).
 - Per supervisore e coordinatore, prima del runbook, lo script passa i valori dell'installazione
   per il canale fra i due ruoli (lo `state_dir`, la casella e le sue destinazioni, la sveglia del
   coordinatore) e chiede di cominciare dalla sezione *At startup* del runbook: una sessione
@@ -83,8 +99,9 @@ sorveglia ciascuno e cosa fa all'avvio:
 - **la casella**, per gli avvisi rapidi, sempre disponibile anche senza GitHub:
   `COORDINATION_DIR` (`/var/lib/devloop-coordination`; con `PROJECT`,
   `/var/lib/devloop-coordination-<progetto>`), con `to-coordinator/` e `to-supervisor/`, ciascuna
-  con `done/`, tutte `root:devloop-roles` (`COORDINATION_GROUP`) 2770. Nel gruppo ci sono solo
-  `supervisor` e `coordinator`, non `devloop` né `devloop-agent`. Un file per messaggio, con un
+  con `done/`, tutte `root:devloop-roles` (`COORDINATION_GROUP`; con `PROJECT`,
+  `devloop-roles-<progetto>`) 2770. Nel gruppo ci sono solo il supervisore e il coordinatore del
+  progetto, non `devloop` né `devloop-agent` né i ruoli di altri progetti. Un file per messaggio, con un
   nome univoco (data e ora UTC più un suffisso casuale), pubblicato con una rinomina atomica da
   un file temporaneo che comincia con `.`; il destinatario lo legge, poi lo sposta in `done/` o
   lo rimuove. La casella serve solo per gli avvisi, non per lo stato;
@@ -742,7 +759,7 @@ Il coordinatore è facoltativo **per progetto**, non per host (#571): se l'overl
 dichiara (`[apps.coordinator]` o `[roles.coordinator]`) verifica anche l'utente, la sua `key_dir`,
 il suo sudoers e la copia di root di `check-host.sh` (passo 10), con un errore se l'utente manca;
 altrimenti lo dice in una riga (`nessun coordinatore per questo progetto`), senza errore, anche
-se l'host ha l'utente `coordinator` per un altro progetto.
+se l'host ha il coordinatore di un altro progetto.
 
 Poi, come in [docs/devloop/guide.md](../docs/devloop/guide.md#installation-as-a-dedicated-user):
 
@@ -1082,7 +1099,7 @@ senza, i prompt tolgono le frasi che li citano. I test locali e la lettura della
    `state_dir`, le sue chiavi e il suo servizio.
 4. **GitHub**: app nuove dai manifest (`create-apps.sh`), installate solo sul nuovo repository,
    oppure le app di un insieme condiviso installate anche lì (sotto); un ruleset con i check
-   della sua CI; un token di sola lettura per il suo supervisore.
+   della sua CI; un token di sola lettura per il suo supervisore, che è del progetto (#629).
 5. **Host**: i passi 4-9 sopra, con quei parametri.
 6. **Label**: devloop lavora sulle issue con `agent:ready` e usa le label descritte nella sua
    guida; crearle sul nuovo repository se mancano.
@@ -1169,17 +1186,32 @@ progetto:
 | `DEVLOOP_HOME`, `AGENT_HOME`, `DEVLOOP_CLONE`, `DEVLOOP_KEY_DIR` | nella home dell'utente del progetto |
 | `SERVICE_NAME` | `devloop@widget`, l'unica forma ammessa |
 | `SUDOERS_FILE`, `AGENT_SUDOERS_FILE` | `/etc/sudoers.d/devloop-supervisor-widget`, `/etc/sudoers.d/devloop-agent-widget` |
-| `SUPERVISOR_KEY_DIR` | `/home/supervisor/.ghapps-widget`: le chiavi dell'insieme di app del progetto |
-| `SUPERVISOR_CLONE` | `/home/supervisor/devloop-widget`: il clone del supervisore per il progetto |
+| `SUPERVISOR_USER`, `COORDINATOR_USER` | `supervisor-widget`, `coordinator-widget`: gli utenti dei ruoli del progetto, uno per ruolo e per progetto (#629) |
+| `SUPERVISOR_HOME`, `COORDINATOR_HOME` | `/home/supervisor-widget`, `/home/coordinator-widget` |
+| `COORDINATION_GROUP` | `devloop-roles-widget`: il gruppo della casella del progetto, con i suoi due ruoli (#629) |
+| `SUPERVISOR_KEY_DIR` | `/home/supervisor-widget/.ghapps-widget`: le chiavi dell'insieme di app del progetto |
+| `SUPERVISOR_CLONE` | `/home/supervisor-widget/devloop-widget`: il clone del supervisore per il progetto |
+| `COORDINATOR_KEY_DIR` | `/home/coordinator-widget/.ghapps-widget`: la chiave dell'app del coordinatore del progetto |
 | `COORDINATOR_SUDOERS_FILE`, `COORDINATOR_OPS_DIR` | `/etc/sudoers.d/devloop-coordinator-widget`, `/usr/local/lib/devloop-coordinator-widget` |
 | `SUPERVISOR_OPS_DIR` | `/usr/local/lib/devloop-supervisor-widget`: la copia di root del risveglio del supervisore (#602) |
 | `WATCHDOG_USER`, `WATCHDOG_OPS_DIR` | `role-watchdog-widget`, `/usr/local/lib/devloop-role-watchdog-widget`: il watchdog dei ruoli del progetto, istanza `devloop-role-watchdog@widget`, che entra solo nella casella del progetto (#602) |
-| `SUPERVISOR_SOURCE_CLONE`, `COORDINATOR_SOURCE_CLONE` | con `SOURCE_REPO`, `/home/supervisor/devloop-source-widget` e `/home/coordinator/devloop-source-widget`: i clone della sorgente da cui i due ruoli coniano i token delle loro app (#571) |
+| `SUPERVISOR_SOURCE_CLONE`, `COORDINATOR_SOURCE_CLONE` | con `SOURCE_REPO`, `/home/supervisor-widget/devloop-source-widget` e `/home/coordinator-widget/devloop-source-widget`: i clone della sorgente da cui i due ruoli coniano i token delle loro app (#571) |
 | `LAUNCHER_DIR` | `/usr/local/lib/devloop/widget`: l'avviatore del tag `SOURCE_REF` del progetto, che nessun altro progetto sovrascrive (#573) |
 
-`SUPERVISOR_USER`, `COORDINATOR_USER`, `REPO_LOCK_DIR`, `REPO_LOCK_GROUP` e `TMPFILES_FILE` sono
-gli stessi per tutti i progetti dell'host. Un `params.env` senza `PROJECT` continua a installare
-`devloop.service` come prima.
+`REPO_LOCK_DIR`, `REPO_LOCK_GROUP` e `TMPFILES_FILE` sono gli stessi per tutti i progetti
+dell'host. Un `params.env` senza `PROJECT` continua a installare `devloop.service` come prima.
+
+**Ruoli per progetto** (#629; [ADR 0002, precisazione del
+2026-11-24](../docs/adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-24-ruoli-per-progetto-629)).
+Supervisore e coordinatore sono del progetto: un utente per ruolo e per progetto, con la sua home,
+i suoi login delle CLI (quindi una quota contata a parte), il suo token di sola lettura per `gh`
+([github/tokens.md](github/tokens.md)), la sua `key_dir` e il suo clone, e una casella con un
+gruppo del progetto. Così la sessione di un progetto non legge la casella né la chiave dell'app di
+ruolo di un altro, e non ne conia i token: la separazione è del sistema, non solo del contesto.
+Nessun canale fra i ruoli di progetti diversi, nemmeno sullo stesso host: un progetto usa un altro
+progetto come chiunque, con un'issue sul suo repository, e ne segue i rilasci. I login in più si
+fanno una volta per progetto (passi 7 e 10, con l'utente del progetto). Un host che ha già i ruoli
+condivisi fra progetti li separa con [host/migrate.md](host/migrate.md#utenti-dei-ruoli-per-progetto-629).
 
 **Avviatore.** Con `SOURCE_REPO`, ogni progetto ha il suo avviatore, dal suo `SOURCE_REF`, in
 `/usr/local/lib/devloop/<progetto>` (#573): prima era `/usr/local/lib/devloop` per tutti, e
@@ -1197,17 +1229,21 @@ suo default. Così l'host che sviluppa questo repository è passato all'istanza 
 sue `key_dir` (`~/.ghapps` di `devloop`, `supervisor` e `coordinator`), con
 `SUPERVISOR_CLONE=/home/supervisor/devloop`; il clone di devloop è il default,
 `/home/devloop/devloop`, e sudoers, casella e copia di root del coordinatore hanno i default di
-`PROJECT` (l'esempio è in [params.env.example](params.env.example)).
+`PROJECT` (l'esempio è in [params.env.example](params.env.example)). Dal #629 tiene scritto anche
+il gruppo della casella, `COORDINATION_GROUP=devloop-roles`: gli utenti `supervisor` e
+`coordinator` e il gruppo sono solo suoi, e gli altri progetti dell'host hanno i loro.
 
 **Utenti distinti.** I nomi derivati da `PROJECT` non coincidono mai con l'utente di un altro
 ruolo o di un altro progetto. Ogni script lo verifica anche sull'host: legge gli utenti delle altre
-installazioni di devloop dalle loro unità (`User=`) e dai loro sudoers (`devloop-*`), e si ferma
-se `DEVLOOP_USER` o `AGENT_USER` vi hanno già un ruolo, o se `SUPERVISOR_USER` vi è l'utente
-devloop o degli agent. Solo il supervisore è lo stesso in ogni progetto, e così il coordinatore
-(`COORDINATOR_USER`), che non deve essere l'utente di nessun ruolo di un'altra installazione: i
-sudoers `devloop-coordinator*` non danno ruoli, e la verifica li salta. I sudoers sono di root:
-senza root (`--dry-run`) la verifica legge solo le unità. `setup-supervisor.sh` si ferma anche se
-`SUPERVISOR_CLONE` è già un clone di un altro repository.
+installazioni di devloop dalle loro unità (`User=`) e dai loro sudoers (`devloop-*`, compresi
+quelli del coordinatore, `devloop-coordinator*`), e si ferma se uno degli utenti del progetto
+(`DEVLOOP_USER`, `AGENT_USER`, `SUPERVISOR_USER`, `COORDINATOR_USER`, `WATCHDOG_USER`) vi ha già
+un ruolo. Anche il supervisore e il coordinatore sono del progetto (#629): un utente di ruolo
+condiviso con un altro progetto ferma gli script, che rimandano a
+[host/migrate.md](host/migrate.md#utenti-dei-ruoli-per-progetto-629). I sudoers sono di root:
+senza root (`--dry-run`) la verifica legge solo le unità. `check-host.sh` verifica anche che nel
+gruppo della casella non ci sia nessun utente oltre ai due ruoli del progetto.
+`setup-supervisor.sh` si ferma anche se `SUPERVISOR_CLONE` è già un clone di un altro repository.
 
 **Unità.** Con `PROJECT`, `setup-devloop.sh` installa l'unità template `devloop@.service`, comune
 ai progetti, e i parametri del progetto (utente, clone, avviatore, log) nella drop-in
@@ -1221,6 +1257,7 @@ sudo bash ops/host/setup-agent-user.sh --params ops/params-widget.env
 sudo bash ops/host/setup-supervisor.sh --params ops/params-widget.env
 sudo bash ops/host/check-host.sh --params ops/params-widget.env
 sudo systemctl start devloop@widget
+sudo bash ops/host/start-role.sh --params ops/params-widget.env supervisor   # dopo i login di supervisor-widget
 ```
 
 **Lock per repository.** `setup-devloop.sh` aggiunge l'utente del progetto al gruppo

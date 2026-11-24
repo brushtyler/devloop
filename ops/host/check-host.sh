@@ -441,6 +441,16 @@ for user in "$DEVLOOP_USER" "$AGENT_USER"; do
         fail "$user è nel gruppo $COORDINATION_GROUP: deve restarne fuori"
     fi
 done
+# Nel gruppo, solo i ruoli di questo progetto (#629): un utente di un altro progetto, o di nessun
+# ruolo, leggerebbe e scriverebbe la casella del progetto.
+members=$({ getent group "$COORDINATION_GROUP" 2>/dev/null || true; } | cut -d: -f4 | tr ',' ' ')
+for user in $members; do
+    # Gli utenti devloop, degli agent e del watchdog hanno già la loro riga.
+    case " $SUPERVISOR_USER $COORDINATOR_USER $DEVLOOP_USER $AGENT_USER $WATCHDOG_USER " in
+        *" $user "*) continue ;;
+    esac
+    fail "$user è nel gruppo $COORDINATION_GROUP, ma non è un ruolo di questo progetto: la casella è solo del supervisore e del coordinatore del progetto (gpasswd -d $user $COORDINATION_GROUP; ops/host/migrate.md, \"Utenti dei ruoli per progetto\")"
+done
 for dir in "$COORDINATION_DIR" $(for box in $COORDINATION_BOXES; do
                                      printf '%s\n' "$COORDINATION_DIR/$box" "$COORDINATION_DIR/$box/done"
                                  done) "$COORDINATION_DIR/$COORDINATION_HEARTBEAT"; do

@@ -29,7 +29,7 @@ DERIVED = ('REPO', 'APP_PREFIX', 'PROJECT', 'DEFAULT_BRANCH', 'DEVLOOP_USER', 'A
            'DEVLOOP_HOME', 'DEVLOOP_CLONE', 'STATE_PATH', 'SOURCE_REF', 'SOURCE_CLONE',
            'DEVLOOP_KEY_DIR', 'SUPERVISOR_KEY_DIR', 'LAUNCHER', 'LAUNCHER_CMD', 'SERVICE_NAME',
            'REPO_LOCK_DIR', 'DEVLOOP_KEYS', 'SUPERVISOR_KEYS', 'APPS', 'SUPERVISOR_SOURCE_CLONE',
-           'COORDINATOR_KEY_DIR')
+           'COORDINATOR_KEY_DIR', 'SUPERVISOR_USER')
 
 
 def text():
@@ -256,8 +256,10 @@ class ParameterTests(QuickstartTestCase):
     def test_the_supervisor_mints_its_tokens_from_the_clone_of_the_source(self):
         # #571: acme/widget does not hold scripts/supervisor-token.py: the supervisor runs it
         # from the clone of the source that setup-supervisor.sh makes, with its key_dir and the
-        # project's state_dir; its read-only token of gh must reach the new repository.
+        # project's state_dir; its read-only token of gh must reach the new repository. #629: the
+        # supervisor is a user of the project, with its own token and its own session.
         p = self.derived()
+        self.assertEqual(p['SUPERVISOR_USER'], 'supervisor-widget')
         lines = commands()
         self.assertIn(f'cd {p["SUPERVISOR_SOURCE_CLONE"]}', lines)
         self.assertIn(f'DEVLOOP_APP_KEY_DIR={p["SUPERVISOR_KEY_DIR"]} python3 '
@@ -266,7 +268,9 @@ class ParameterTests(QuickstartTestCase):
         self.assertIn(f'`{p["SUPERVISOR_SOURCE_CLONE"]}` (`SUPERVISOR_SOURCE_CLONE`)', text())
         self.assertTrue((ROOT / 'scripts' / 'supervisor-token.py').is_file())
         page = ' '.join(text().split())
-        self.assertIn("The supervisor's read-only `gh` token must reach `acme/widget` too", page)
+        self.assertIn("The supervisor of the project needs its own read-only `gh` token, for "
+                      f"`acme/widget` only, as `{p['SUPERVISOR_USER']}`", page)
+        self.assertIn('Its session is `devloop-supervisor-widget`', page)
 
     def test_the_coordinator_is_optional_for_the_project(self):
         # #571: check-host.sh checks the coordinator only if the overlay declares it; the page

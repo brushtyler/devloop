@@ -335,10 +335,14 @@ sudo -u devloop-widget -H sh -c 'cd ~/widget && PYTHONPATH=~/devloop-source pyth
 
 ## 7. Supervisor
 
-The supervisor is the same user for every project of the host, with a sudoers, a clone and a
-`key_dir` per project (`/home/supervisor/.ghapps-widget`). That `key_dir` gets the keys of
+The supervisor is the project's, like the coordinator: one system user per role and per project,
+`supervisor-widget`, with its home, its logins of the CLIs, its sudoers, its clone and its
+`key_dir` (`/home/supervisor-widget/.ghapps-widget`), and no channel with the roles of the other
+projects of the host
+([ADR 0002](../adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-24-ruoli-per-progetto-629),
+#629). That `key_dir` gets the keys of
 `SUPERVISOR_KEYS` (by default `supervisor` and, until `[roles.supervisor]` is a table in the
-overlay, `claude-agent`), mode `600`, owned by `supervisor`
+overlay, `claude-agent`), mode `600`, owned by `supervisor-widget`
 ([7. Host del supervisore](../../ops/README.md#7-host-del-supervisore)):
 
 ```bash
@@ -348,13 +352,13 @@ sudo bash ops/host/setup-supervisor.sh --params ops/params-widget.env
 
 `acme/widget` does not contain devloop, so the supervisor's clone of it has no
 `scripts/supervisor-token.py`: the script also clones the source, `brushtyler/devloop`, at the tag
-`SOURCE_REF`, in `/home/supervisor/devloop-source-widget` (`SUPERVISOR_SOURCE_CLONE`), and prints
-the command that mints the tokens of the supervisor's app, as `supervisor`, from that clone, with
-its `key_dir` and the project's `state_dir`:
+`SOURCE_REF`, in `/home/supervisor-widget/devloop-source-widget` (`SUPERVISOR_SOURCE_CLONE`), and
+prints the command that mints the tokens of the supervisor's app, as `supervisor-widget`, from that
+clone, with its `key_dir` and the project's `state_dir`:
 
 ```bash
-cd /home/supervisor/devloop-source-widget
-DEVLOOP_APP_KEY_DIR=/home/supervisor/.ghapps-widget python3 scripts/supervisor-token.py \
+cd /home/supervisor-widget/devloop-source-widget
+DEVLOOP_APP_KEY_DIR=/home/supervisor-widget/.ghapps-widget python3 scripts/supervisor-token.py \
     --state-dir /var/lib/devloop/widget -- gh issue comment <ISSUE> --body-file <FILE>
 ```
 
@@ -362,14 +366,18 @@ The clone's origin is `brushtyler/devloop`, but the command acts on `acme/widget
 passes it `GH_REPO` with the `repo` of the project's overlay, the only repository its token
 reaches, and refuses a `GH_REPO` of the caller that names another one.
 
-The supervisor's read-only `gh` token must reach `acme/widget` too: extend the one it has to this
-repository or, for a repository of another owner, add a new one
+The supervisor of the project needs its own read-only `gh` token, for `acme/widget` only, as
+`supervisor-widget`, and its own login of the CLI of `[roles.supervisor]`
 ([Token di sola lettura del supervisore](../../ops/github/tokens.md#token-di-sola-lettura-del-supervisore)).
+Its session is `devloop-supervisor-widget`:
+`sudo bash ops/host/start-role.sh --params ops/params-widget.env supervisor`
+([I quattro ruoli](../../ops/README.md#i-quattro-ruoli)).
 
 **Coordinator (optional).** A project has a coordinator only if its overlay declares it, with
 `[apps.coordinator]` or `[roles.coordinator]`; otherwise `check-host.sh` says so in one line. To
 add it: the app `coordinator` in `APPS` of the project's set (step 3), its key in
-`/home/coordinator/.ghapps-widget`, `[apps.coordinator]` in the overlay, and
+`/home/coordinator-widget/.ghapps-widget` (the user `coordinator-widget`), `[apps.coordinator]` in
+the overlay, and
 `sudo bash ops/host/setup-coordinator.sh --params ops/params-widget.env`, which also gives it its
 clone of the source for `scripts/coordinator-token.py`
 ([10. Coordinatore (facoltativo)](../../ops/README.md#10-coordinatore-facoltativo)).

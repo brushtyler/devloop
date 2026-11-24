@@ -553,19 +553,24 @@ ops_load_params() {
         : "${SERVICE_NAME:=devloop@$PROJECT}"
         : "${SUDOERS_FILE:=/etc/sudoers.d/devloop-supervisor-$PROJECT}"
         : "${AGENT_SUDOERS_FILE:=/etc/sudoers.d/devloop-agent-$PROJECT}"
-        # Il coordinatore è uno per host, come il supervisore: sudoers e copia di check-host.sh
-        # sono del progetto.
+        # Supervisore e coordinatore sono del progetto (ADR 0002, precisazione del 2026-11-24;
+        # #629): un utente per ruolo e per progetto, con i suoi login delle CLI, e il gruppo della
+        # casella del progetto, così la sessione di un progetto non legge la casella né le chiavi
+        # dei ruoli di un altro. Sudoers e copia di check-host.sh del coordinatore sono del progetto.
+        : "${SUPERVISOR_USER:=supervisor-$PROJECT}"
+        : "${COORDINATOR_USER:=coordinator-$PROJECT}"
+        : "${COORDINATION_GROUP:=devloop-roles-$PROJECT}"
         : "${COORDINATOR_SUDOERS_FILE:=/etc/sudoers.d/devloop-coordinator-$PROJECT}"
         : "${COORDINATOR_OPS_DIR:=/usr/local/lib/devloop-coordinator-$PROJECT}"
-        # Il supervisore è uno per host: la sua key_dir e il suo clone sono del progetto.
-        : "${SUPERVISOR_KEY_DIR:=${SUPERVISOR_HOME:-/home/${SUPERVISOR_USER:-supervisor}}/.ghapps-$PROJECT}"
-        : "${SUPERVISOR_CLONE:=${SUPERVISOR_HOME:-/home/${SUPERVISOR_USER:-supervisor}}/devloop-$PROJECT}"
+        # La key_dir e il clone del supervisore, nella sua home, con il nome del progetto.
+        : "${SUPERVISOR_KEY_DIR:=${SUPERVISOR_HOME:-/home/$SUPERVISOR_USER}/.ghapps-$PROJECT}"
+        : "${SUPERVISOR_CLONE:=${SUPERVISOR_HOME:-/home/$SUPERVISOR_USER}/devloop-$PROJECT}"
         # Anche il coordinatore: la key_dir della sua app (#549) è del progetto.
-        : "${COORDINATOR_KEY_DIR:=${COORDINATOR_HOME:-/home/${COORDINATOR_USER:-coordinator}}/.ghapps-$PROJECT}"
+        : "${COORDINATOR_KEY_DIR:=${COORDINATOR_HOME:-/home/$COORDINATOR_USER}/.ghapps-$PROJECT}"
         # Con SOURCE_REPO, i clone della sorgente da cui supervisore e coordinatore coniano i
         # token delle loro app (#571), al tag SOURCE_REF del progetto.
-        : "${SUPERVISOR_SOURCE_CLONE:=${SUPERVISOR_HOME:-/home/${SUPERVISOR_USER:-supervisor}}/devloop-source-$PROJECT}"
-        : "${COORDINATOR_SOURCE_CLONE:=${COORDINATOR_HOME:-/home/${COORDINATOR_USER:-coordinator}}/devloop-source-$PROJECT}"
+        : "${SUPERVISOR_SOURCE_CLONE:=${SUPERVISOR_HOME:-/home/$SUPERVISOR_USER}/devloop-source-$PROJECT}"
+        : "${COORDINATOR_SOURCE_CLONE:=${COORDINATOR_HOME:-/home/$COORDINATOR_USER}/devloop-source-$PROJECT}"
         # La casella fra supervisore e coordinatore (#543) è del progetto, come la sveglia del
         # coordinatore che la legge.
         : "${COORDINATION_DIR:=/var/lib/devloop-coordination-$PROJECT}"
@@ -775,14 +780,14 @@ ops_load_params() {
 }
 
 # Gli utenti delle altre installazioni di devloop dell'host (ADR 0006, R8), una riga
-# "<utente> <ruolo> <file>" ciascuno, con ruolo devloop, agent o supervisor: dalle loro unità
-# (User=) e dai loro sudoers (devloop-*: "<devloop> ALL=(<agent>) NOPASSWD:SETENV:" di
-# sudoers-agent, "<supervisore> ALL=(<devloop>) NOPASSWD:" di sudoers-supervisor). Salta i file
-# di questa installazione e quelli che non può leggere: i sudoers sono di root, quindi senza
-# root (--dry-run) legge solo le unità. Salta anche i sudoers del coordinatore
-# (devloop-coordinator*, #530), uno per host come il supervisore, che non danno ruoli.
+# "<utente> <ruolo> <file>" ciascuno, con ruolo devloop, agent, supervisor o coordinator: dalle
+# loro unità (User=) e dai loro sudoers (devloop-*: "<devloop> ALL=(<agent>) NOPASSWD:SETENV:" di
+# sudoers-agent, "<supervisore> ALL=(<devloop>) NOPASSWD:" di sudoers-supervisor,
+# "<coordinatore> ALL=(<devloop>) NOPASSWD:" di sudoers-coordinator, #629). Salta i file di questa
+# installazione e quelli che non può leggere: i sudoers sono di root, quindi senza root
+# (--dry-run) legge solo le unità.
 _ops_host_users() {
-    local file dir
+    local file dir role
     for file in "$SYSTEMD_DIR"/devloop*.service "$SYSTEMD_DIR"/devloop@*.service.d/project.conf; do
         [ -f "$file" ] && [ -r "$file" ] || continue
         [ "$file" = "$UNIT_FILE" ] || [ "$file" = "$DROPIN_FILE" ] && continue
@@ -802,15 +807,16 @@ _ops_host_users() {
             [ -f "$file" ] && [ -r "$file" ] || continue
             [ "$file" = "$SUDOERS_FILE" ] || [ "$file" = "$AGENT_SUDOERS_FILE" ] && continue
             [ "$file" = "$COORDINATOR_SUDOERS_FILE" ] && continue
-            case $(basename "$file") in devloop-coordinator*) continue ;; esac
-            awk -v file="$file" '
+            role=supervisor
+            case $(basename "$file") in devloop-coordinator*) role=coordinator ;; esac
+            awk -v file="$file" -v role="$role" '
                 $2 ~ /^ALL=[(][a-z_][a-z0-9_-]*[)]$/ && $1 ~ /^[a-z_][a-z0-9_-]*$/ \
                         && $3 ~ /^NOPASSWD:/ {
                     target = substr($2, 6, length($2) - 6)
                     if ($3 ~ /^NOPASSWD:SETENV:/) {
                         print $1 " devloop " file; print target " agent " file
                     } else if (target != "root") {
-                        print $1 " supervisor " file; print target " devloop " file
+                        print $1 " " role " " file; print target " devloop " file
                     }
                 }' "$file"
         done
@@ -818,16 +824,20 @@ _ops_host_users() {
 }
 
 # Rifiuta un utente di questa installazione che sull'host abbia già un ruolo in un'altra (ADR
-# 0006, R8; D6): ogni progetto ha il suo utente devloop e il suo utente degli agent, che non sono
-# di nessun altro progetto né di un altro ruolo. Solo il supervisore, uno per host, è lo stesso in
-# ogni progetto; il coordinatore (#530), anch'esso uno per host, non ha nessuno di questi ruoli.
+# 0006, R8; D6): ogni progetto ha i suoi utenti, che non sono di nessun altro progetto né di un
+# altro ruolo. Anche supervisore e coordinatore sono del progetto (ADR 0002, precisazione del
+# 2026-11-24; #629): un utente condiviso con un altro progetto si separa con ops/host/migrate.md.
 ops_check_host_users() {
-    local user role file var
+    local user role file var hint
     while read -r user role file; do
         for var in DEVLOOP_USER AGENT_USER SUPERVISOR_USER COORDINATOR_USER WATCHDOG_USER; do
             [ "${!var}" = "$user" ] || continue
-            [ "$var" = SUPERVISOR_USER ] && [ "$role" = supervisor ] && continue
-            die "$var '$user' è già l'utente $role di un'altra installazione di devloop dell'host ($file): ogni progetto ha i suoi utenti"
+            hint=''
+            case $var in
+                SUPERVISOR_USER | COORDINATOR_USER)
+                    hint=' (supervisore e coordinatore sono per progetto, #629: ops/host/migrate.md, "Utenti dei ruoli per progetto")' ;;
+            esac
+            die "$var '$user' è già l'utente $role di un'altra installazione di devloop dell'host ($file): ogni progetto ha i suoi utenti$hint"
         done
     done < <(_ops_host_users)
 }

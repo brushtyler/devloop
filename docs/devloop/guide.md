@@ -2266,7 +2266,11 @@ their inputs, privileges, tasks and prohibitions: the [supervisor](roles/supervi
 session in tmux, as
 the role's user, with the CLI and the model of `[roles.supervisor]` or `[roles.coordinator]`
 (for `host`, those the operator chooses at launch) and the runbook as its first message
-([ops/README.md](../../ops/README.md#i-quattro-ruoli)).
+([ops/README.md](../../ops/README.md#i-quattro-ruoli)). Supervisor and coordinator serve one
+project only, with a system user per role and per project and no channel with the roles of
+other projects; with `PROJECT` their session is `devloop-<role>-<project>`
+([ADR 0002](../adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-24-ruoli-per-progetto-629),
+#629).
 
 ## Usage
 
