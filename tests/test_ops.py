@@ -5476,6 +5476,8 @@ class RoleWatchdogTests(OpsTestCase):
 ROLE_RUNBOOKS = {role: ROOT / 'docs' / 'devloop' / 'roles' / f'{role}.md'
                  for role in ('supervisor', 'coordinator', 'host')}
 FAKE_OPERATOR = 'opsdry-operator'
+# The longest command the fake tmux accepts (#621): tmux 3.6 takes 15,000 bytes, not 16,500.
+TMUX_COMMAND_LIMIT = 15000
 # The fake of a CLI: its name, the user it runs as (the fake sudo says it), its PATH and its
 # arguments, separated by NUL, in cli-args of the directory it runs in.
 FAKE_CLI = '''#!/bin/sh
@@ -5508,10 +5510,17 @@ user=$2; shift 2
 [ "$1" = -H ] && shift
 [ "$1" = -- ] && shift
 OPS_TEST_AS=$user exec "$@"''')
+        # #621: like tmux, it refuses a command over its limit (with tmux 3.6, 15,000 bytes pass
+        # and 16,500 do not); it records the size of the command of new-session and the mode of
+        # the file of the first message, which the session reads and removes.
         self.shim('tmux', '''echo "tmux $1 $2 $3 $4 $5 $6 $7" >> "$OPS_TEST_CALLS"
+size=0
+for arg in "$@"; do size=$((size + ${#arg} + 1)); done
+[ "$size" -le @LIMIT@ ] || { echo 'command too long' >&2; exit 1; }
 case $1 in
     has-session) [ -n "${OPS_TEST_SESSION:-}" ] && exit 0; exit 1 ;;
     new-session)
+        echo "$size" >> "$OPS_TEST_CALLS.tmux-size"
         shift
         while [ $# -gt 0 ]; do
             case $1 in
@@ -5521,9 +5530,10 @@ case $1 in
                 *) break ;;
             esac
         done
+        stat -c '%a %n' "$7" >> "$OPS_TEST_CALLS.first-message"
         cd "$dir" && exec "$@" ;;
 esac
-exit 2''')
+exit 2'''.replace('@LIMIT@', str(TMUX_COMMAND_LIMIT)))
         self.operator = self.home / 'operator'
         self.shim('getent', f'''if [ "$1" = passwd ] && [ "$2" = {FAKE_OPERATOR} ]; then
     echo "{FAKE_OPERATOR}:x:1002:1002::{self.operator}:/bin/bash"; exit 0
@@ -5541,7 +5551,9 @@ echo "$2:x:1000:"''')
         self.overlay.write_text(self.OVERLAY)
         self.clone = self.home / 'supervisor' / 'devloop'
         self.clone.mkdir(parents=True)
-        (self.home / 'coordinator').mkdir()
+        # #621: the coordinator's session starts in its clone, COORDINATOR_HOME/<repository>.
+        self.coordinator_clone = self.home / 'coordinator' / 'devloop'
+        (self.coordinator_clone / '.git').mkdir(parents=True)
         for home in (self.home / 'supervisor', self.home / 'coordinator', self.operator):
             for cli in ('claude', 'codex', 'agy'):
                 path = home / '.local' / 'bin' / cli
@@ -5604,11 +5616,16 @@ echo "$2:x:1000:"''')
     def test_the_coordinator_starts_with_the_cli_and_the_model_of_its_table(self):
         done = self.start('coordinator')
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-        name, user, path, args = self.cli_args(self.home / 'coordinator')
+        # #621: in its clone, as the supervisor, not in its home.
+        name, user, path, args = self.cli_args(self.coordinator_clone)
         self.assertEqual((name, user), ('codex', FAKE_COORDINATOR))
         self.assertTrue(path.startswith(f'{self.home}/coordinator/.local/bin:'), path)
         self.assertEqual(args[:2], ['--model', 'gpt-6.1-sol'])
+        self.assertEqual(len(args), 3)
         self.assert_prompt(args[2], 'coordinator')
+        self.assertIn(f'tmux new-session -d -s devloop-coordinator -c {self.coordinator_clone} '
+                      'env', [c.rstrip() for c in self.mutating_calls()])
+        self.assertFalse((self.home / 'coordinator' / 'cli-args').exists())
 
     def test_the_session_gets_the_channel_and_starts_from_its_startup(self):
         # #543: before the runbook, the values of this installation for the channel between the
@@ -5619,7 +5636,7 @@ echo "$2:x:1000:"''')
         supervisor_copy = self.tmp / 'lib/devloop-supervisor'
         for role, directory, inbox, outbox in (
                 ('supervisor', self.clone, 'to-supervisor', 'to-coordinator'),
-                ('coordinator', self.home / 'coordinator', 'to-coordinator', 'to-supervisor')):
+                ('coordinator', self.coordinator_clone, 'to-coordinator', 'to-supervisor')):
             with self.subTest(role=role):
                 done = self.start(role)
                 self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
@@ -5647,8 +5664,7 @@ echo "$2:x:1000:"''')
         # runs scripts/coordinator-token.py, as the other values of the installation, so that
         # its runbook holds no path of a host. The supervisor's does not.
         key_dir = self.tmp / 'keys-coordinator'
-        clone = self.home / 'coordinator' / 'devloop'
-        (clone / '.git').mkdir(parents=True)
+        clone = self.coordinator_clone
         self.params_file = self.params(SUPERVISOR_USER=FAKE_SUPERVISOR,
                                        SUPERVISOR_CLONE=str(self.clone),
                                        STATE_DIR=str(self.state),
@@ -5656,7 +5672,7 @@ echo "$2:x:1000:"''')
         done = self.start('coordinator')
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertNotIn('manca il clone del coordinatore', done.stdout)
-        channel = self.cli_args(self.home / 'coordinator')[3][-1].split('\n\n')[1]
+        channel = self.cli_args(clone)[3][-1].split('\n\n')[1]
         self.assertIn(f'For the section "GitHub": the key_dir of your app (DEVLOOP_APP_KEY_DIR) '
                       f'is {key_dir}, and your clone, from which you run '
                       f'scripts/coordinator-token.py, is {clone}.', channel)
@@ -5680,17 +5696,32 @@ echo "$2:x:1000:"''')
         done = self.start('coordinator')
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertNotIn('manca il clone del coordinatore', done.stdout)
-        channel = self.cli_args(self.home / 'coordinator')[3][-1].split('\n\n')[1]
+        # #621: the session starts in the clone of the source, from which it mints the tokens.
+        channel = self.cli_args(clone)[3][-1].split('\n\n')[1]
         self.assertIn(f'and your clone, from which you run scripts/coordinator-token.py, is '
                       f'{clone}.', channel)
+        self.assertIn(f'tmux new-session -d -s devloop-coordinator -c {clone} env',
+                      [c.rstrip() for c in self.mutating_calls()])
 
-    def test_a_missing_clone_of_the_coordinator_is_a_warning(self):
-        # The session starts all the same: it reads its mailbox and tells the operator.
-        done = self.start('coordinator')
-        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-        self.assertIn('ATTENZIONE: manca il clone del coordinatore '
-                      f'{self.home}/coordinator/devloop', done.stdout)
-        self.assertEqual(len(self.launches()), 1)
+    def test_without_its_clone_the_coordinator_does_not_start(self):
+        # #621: the clone is the working directory of the session, never the home; without it,
+        # the script stops with the step to make.
+        shutil.rmtree(self.coordinator_clone / '.git')
+        self.refused('coordinator', says='manca il clone del coordinatore '
+                     f'{self.coordinator_clone}, la sua directory di lavoro: prima clonare '
+                     f'brushtyler/devloop in {self.coordinator_clone} come {FAKE_COORDINATOR} '
+                     '(ops/README.md, passo 10)')
+        shutil.rmtree(self.coordinator_clone)
+        self.refused('coordinator', says=f'manca il clone del coordinatore {self.coordinator_clone}')
+        # With the source apart, the clone of the source, which setup-coordinator.sh prepares.
+        self.params_file = self.params(SUPERVISOR_USER=FAKE_SUPERVISOR,
+                                       SUPERVISOR_CLONE=str(self.clone),
+                                       STATE_DIR=str(self.state), REPO='acme/widget',
+                                       SOURCE_REPO='brushtyler/devloop', SOURCE_REF='v1.2.0')
+        self.refused('coordinator', says='manca il clone del coordinatore '
+                     f'{self.home}/coordinator/devloop-source, la sua directory di lavoro: prima '
+                     'setup-coordinator.sh')
+        self.assertFalse(list((self.home / 'coordinator').glob('.devloop-start-role-*')))
 
     def test_the_sessions_of_the_project_devloop_get_the_paths_of_563(self):
         # #563: PROJECT=devloop with the users of before and the supervisor's clone written. The
@@ -5711,7 +5742,7 @@ echo "$2:x:1000:"''')
         self.assertEqual(self.clone, self.home / 'supervisor' / 'devloop')
         box = '/var/lib/devloop-coordination-devloop'
         for role, directory in (('supervisor', self.clone),
-                                ('coordinator', self.home / 'coordinator')):
+                                ('coordinator', self.coordinator_clone)):
             with self.subTest(role=role):
                 done = self.start(role)
                 self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
@@ -5758,21 +5789,115 @@ echo "$2:x:1000:"''')
         self.assertEqual(len(self.launches()), 1)
         self.assertIn(f'-c {self.checkout} env', self.launches()[0])
 
+    def test_a_runbook_of_any_length_reaches_the_cli_through_a_file(self):
+        # #621: tmux refuses a command over about 16 KB. The first message, with a runbook of
+        # 64 KB, goes in a file of the role's home (600), which the session reads and removes:
+        # the CLI gets the same text, as its last argument, and the command of tmux stays short.
+        for role in ROLE_RUNBOOKS:
+            runbook = self.checkout / 'docs/devloop/roles' / f'{role}.md'
+            runbook.write_text(ROLE_RUNBOOKS[role].read_text()
+                               + ''.join(f'\nRiga {i} del runbook, con "virgolette", $HOME, '
+                                         f'`backtick` e \\ barre.' for i in range(1000)) + '\n')
+            self.assertGreater(len(runbook.read_bytes()), 64 * 1024)
+        for role, cli, home, directory, extra in (
+                ('supervisor', 'claude', self.home / 'supervisor', self.clone, ()),
+                ('coordinator', 'codex', self.home / 'coordinator', self.coordinator_clone, ()),
+                ('host', 'agy', self.operator, self.checkout, ('--cli', 'agy', '--model', 'm'))):
+            with self.subTest(role=role):
+                for record in (self.calls, Path(f'{self.calls}.tmux-size')):
+                    record.unlink(missing_ok=True)
+                done = self.start(role, *extra, sudo_user=FAKE_OPERATOR if extra else None)
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                name, _, _, args = self.cli_args(directory)
+                self.assertEqual(name, cli)
+                prompt = args[-1]
+                self.assertEqual(args[:-1], ['--model', args[1]] + (['-i'] if cli == 'agy'
+                                                                    else []))
+                runbook = (self.checkout / 'docs/devloop/roles' / f'{role}.md').read_text()
+                self.assertTrue(prompt.endswith('\n\n' + runbook.rstrip('\n')))
+                self.assertTrue(prompt.startswith(f'You hold the role "{role}" of devloop'))
+                sizes = Path(f'{self.calls}.tmux-size').read_text().split()
+                self.assertEqual(len(sizes), 1)
+                self.assertLess(int(sizes[0]), 2048)
+                mode, path = Path(f'{self.calls}.first-message').read_text().split()[-2:]
+                self.assertEqual(mode, '600')
+                self.assertTrue(path.startswith(f'{home}/.devloop-start-role-{role}.'), path)
+                self.assertFalse(Path(path).exists())
+                self.assertEqual(list(home.glob('.devloop-start-role-*')), [])
+
+    def test_the_first_message_up_to_the_limit_of_the_kernel(self):
+        # #621: the CLIs get the first message of an interactive session only as an argument, and
+        # the kernel refuses an argument over MAX_ARG_STRLEN (32 pages). Just under it, the
+        # session starts with the whole text; over it (a runbook of 256 KiB), the script stops
+        # before writing the file and starting tmux, instead of a session that closes at once.
+        limit = 32 * os.sysconf('SC_PAGE_SIZE')
+        runbook = self.checkout / 'docs/devloop/roles/supervisor.md'
+        line = 'Riga del runbook, abbastanza lunga da riempirlo in fretta.\n'
+        runbook.write_text(line * ((limit - 4096) // len(line)))
+        done = self.start('supervisor')
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        prompt = self.cli_args(self.clone)[3][-1]
+        self.assertGreater(len(prompt.encode()), limit - 8192)
+        self.assertTrue(prompt.endswith('\n\n' + runbook.read_text().rstrip('\n')))
+        self.assertLess(int(Path(f'{self.calls}.tmux-size').read_text().split()[-1]), 2048)
+        (self.clone / 'cli-args').unlink()
+        self.calls.unlink()
+        runbook.write_text(line * (256 * 1024 // len(line) + 1))
+        self.assertGreaterEqual(len(runbook.read_bytes()), 256 * 1024)
+        self.refused('supervisor', says='supera il limite del kernel per un argomento '
+                     f'({limit - 1} byte): la CLI non partirebbe. Accorciare il runbook')
+        self.assertEqual(list((self.home / 'supervisor').glob('.devloop-start-role-*')), [])
+
+    def test_the_first_message_is_the_one_of_before(self):
+        # #621: the text the CLI gets is the one the script built before, when it was the last
+        # argument of tmux: the header, the values of the installation and the runbook, with no
+        # trailing newline.
+        done = self.start('supervisor')
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        prompt = self.cli_args(self.clone)[3][-1]
+        header, channel = prompt.split('\n\n')[:2]
+        self.assertEqual(header, 'You hold the role "supervisor" of devloop for '
+                         'brushtyler/devloop. Your instructions are the runbook below '
+                         f'(docs/devloop/roles/supervisor.md of the checkout {self.checkout}, '
+                         'started by ops/host/start-role.sh): follow it for the whole session.')
+        self.assertEqual(prompt, f'{header}\n\n{channel}\n\n'
+                         + ROLE_RUNBOOKS['supervisor'].read_text().rstrip('\n'))
+
+    def test_the_command_of_tmux_over_its_limit_is_refused_by_the_fake(self):
+        # The fake tmux holds the limit of the real one: the first message of before, as the
+        # last argument of new-session, would not start (#621).
+        env = dict(os.environ, OPS_TEST_CALLS=str(self.calls))
+        done = subprocess.run([str(self.bin / 'tmux'), 'new-session', '-d', '-s', 'x', '-c',
+                               str(self.tmp), 'true', 'x' * TMUX_COMMAND_LIMIT],
+                              capture_output=True, text=True, env=env, timeout=60)
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn('command too long', done.stderr)
+
+    def test_a_session_that_tmux_does_not_start_leaves_no_file(self):
+        self.shim('tmux', '''[ "$1" = new-session ] || exit 1
+exit 1''')
+        self.refused('supervisor', says='tmux non ha avviato la sessione devloop-supervisor')
+        self.assertEqual(list((self.home / 'supervisor').glob('.devloop-start-role-*')), [])
+
     def test_dry_run_starts_nothing(self):
         done = self.start('--dry-run', 'supervisor')
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertIn('[dry-run]', done.stdout)
         self.assertIn('claude --model claude-opus-5-5 <istruzioni: '
                       'docs/devloop/roles/supervisor.md>', done.stdout)
+        self.assertIn(f'sh {self.home}/supervisor/.devloop-start-role-supervisor.XXXXXX claude',
+                      done.stdout)
         self.assertEqual(self.mutating_calls(), [])
         self.assertFalse((self.clone / 'cli-args').exists())
+        self.assertEqual(list((self.home / 'supervisor').glob('.devloop-start-role-*')), [])
 
     def refused(self, *args, says, **kwargs):
         done = self.start(*args, **kwargs)
         self.assertNotEqual(done.returncode, 0, done.stdout)
         self.assertIn(says, done.stdout + done.stderr)
         self.assertEqual(self.launches(), [])
-        for directory in (self.clone, self.home / 'coordinator', self.checkout):
+        for directory in (self.clone, self.home / 'coordinator', self.coordinator_clone,
+                          self.checkout):
             self.assertFalse((directory / 'cli-args').exists(), directory)
 
     def test_without_the_table_nothing_starts(self):

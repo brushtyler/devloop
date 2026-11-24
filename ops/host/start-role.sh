@@ -13,8 +13,15 @@
 # - host: CLI e modello li sceglie l'operatore al lancio (--cli, --model); la sessione gira con
 #   l'utente dell'operatore che lancia lo script con sudo, quello che ha sudo sull'host.
 #
-# Non scrive file e non legge segreti: legge i parametri, la configurazione e il runbook, e avvia
-# tmux. Va lanciato dall'operatore, da un suo checkout aggiornato del branch principale.
+# Supervisore e coordinatore partono dal loro clone: SUPERVISOR_CLONE, e per il coordinatore il
+# clone da cui conia i token (#621); senza, lo script si ferma.
+#
+# Non legge segreti: legge i parametri, la configurazione e il runbook, e avvia tmux. Scrive un
+# solo file: il primo messaggio della sessione, nella home dell'utente del ruolo, suo e con modo
+# 600 (mktemp), che la sessione legge e rimuove prima di avviare la CLI (#621). Il primo messaggio
+# non passa dalla riga di comando di tmux, che rifiuta un comando oltre circa 16 KB; resta il
+# limite del kernel per un argomento (128 KiB), che lo script controlla prima di avviare. Va lanciato
+# dall'operatore, da un suo checkout aggiornato del branch principale.
 
 OPS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 ROOT_DIR=$(cd "$OPS_DIR/.." && pwd)
@@ -120,7 +127,6 @@ case $ROLE in
         else
             ROLE_USER=$COORDINATOR_USER
             ROLE_HOME=$COORDINATOR_HOME
-            ROLE_DIR=$COORDINATOR_HOME
             # Il clone del coordinatore, da cui lancia scripts/coordinator-token.py (#565): nella
             # sua home, con il nome del repository, come i clone di devloop e del supervisore
             # senza PROJECT (/home/coordinator/devloop su questo host, ADR 0007).
@@ -128,6 +134,9 @@ case $ROLE in
             # (#571): il repository gestito non contiene lo script.
             TOKEN_CLONE=$COORDINATOR_HOME/${REPO#*/}
             [ -z "$SOURCE_REPO" ] || TOKEN_CLONE=$COORDINATOR_SOURCE_CLONE
+            # La sessione parte dal clone, come quella del supervisore: è la directory fidata
+            # della CLI, la home non lo è (#621, decisione dell'operatore del 2026-11-24).
+            ROLE_DIR=$TOKEN_CLONE
         fi
         ;;
     host)
@@ -165,11 +174,14 @@ if [ -z "$ROLE_HOME" ]; then
     ROLE_HOME=$(getent passwd "$ROLE_USER" | cut -d: -f6) || true
     [[ $ROLE_HOME =~ ^/[A-Za-z0-9._/-]*$ ]] || die "non trovo la home di $ROLE_USER: '$ROLE_HOME'"
 fi
+if [ "$ROLE" = coordinator ] && [ ! -d "$TOKEN_CLONE/.git" ]; then
+    if [ -n "$SOURCE_REPO" ]; then
+        die "manca il clone del coordinatore $TOKEN_CLONE, la sua directory di lavoro: prima setup-coordinator.sh, che lo clona (ops/README.md, passo 10)"
+    fi
+    die "manca il clone del coordinatore $TOKEN_CLONE, la sua directory di lavoro: prima clonare $REPO in $TOKEN_CLONE come $ROLE_USER (ops/README.md, passo 10)"
+fi
 [ -d "$ROLE_DIR" ] || die "manca la directory di lavoro $ROLE_DIR"
 ok "$ROLE_USER, directory di lavoro $ROLE_DIR"
-if [ "$ROLE" = coordinator ] && [ ! -d "$TOKEN_CLONE/.git" ]; then
-    warn "manca il clone del coordinatore $TOKEN_CLONE: senza, non conia i token della sua app (ops/README.md, passo 10)"
-fi
 command -v tmux >/dev/null 2>&1 || die 'manca tmux: installarlo (apt-get install tmux)'
 
 # Il runbook, intero, è il primo messaggio della sessione: le istruzioni del ruolo, valide per
@@ -196,11 +208,22 @@ PROMPT="You hold the role \"$ROLE\" of devloop for $REPO. Your instructions are 
 
 $CHANNEL$(<"$ROOT_DIR/$RUNBOOK")"
 
-# La riga di comando della CLI, interattiva, con il modello e il primo messaggio.
+# Il primo messaggio arriva alla CLI come un solo argomento, l'unico modo in cui le tre CLI
+# ricevono il primo messaggio di una sessione interattiva: il kernel non accetta un argomento oltre
+# MAX_ARG_STRLEN (32 pagine, 128 KiB con pagine di 4 KiB), terminatore compreso. Oltre, la CLI non
+# partirebbe e la sessione si chiuderebbe subito: lo script si ferma prima, e lo dice.
+PAGE_SIZE=$(getconf PAGESIZE 2>/dev/null) || PAGE_SIZE=4096
+[[ $PAGE_SIZE =~ ^[0-9]+$ ]] || PAGE_SIZE=4096
+PROMPT_BYTES=$(printf '%s' "$PROMPT" | wc -c)
+[ "$PROMPT_BYTES" -lt $((32 * PAGE_SIZE)) ] \
+    || die "il primo messaggio della sessione ($PROMPT_BYTES byte, con $RUNBOOK) supera il limite del kernel per un argomento ($((32 * PAGE_SIZE - 1)) byte): la CLI non partirebbe. Accorciare il runbook"
+
+# La riga di comando della CLI, interattiva, con il modello: il primo messaggio la segue, come
+# ultimo argomento, e lo aggiunge la sessione leggendolo dal suo file.
 case $CLI in
-    claude) COMMAND=(claude --model "$MODEL" "$PROMPT") ;;
-    codex) COMMAND=(codex --model "$MODEL" "$PROMPT") ;;
-    agy) COMMAND=(agy --model "$MODEL" -i "$PROMPT") ;;
+    claude) COMMAND=(claude --model "$MODEL") ;;
+    codex) COMMAND=(codex --model "$MODEL") ;;
+    agy) COMMAND=(agy --model "$MODEL" -i) ;;
 esac
 
 SESSION=devloop-$ROLE
@@ -211,13 +234,32 @@ step "Sessione tmux $SESSION"
 if [ "$DRY_RUN" != 1 ] && "${AS_ROLE[@]}" tmux has-session -t "=$SESSION" >/dev/null 2>&1; then
     die "la sessione $SESSION di $ROLE_USER esiste già: sudo -u $ROLE_USER -H tmux attach -t $SESSION"
 fi
+# Il primo messaggio non passa dalla riga di comando di tmux, che rifiuta un comando oltre circa
+# 16 KB (#621): lo scrive l'utente del ruolo in un file nuovo della sua home, con modo 600
+# (mktemp), e la sessione lo legge, lo rimuove e lo passa alla CLI come ultimo argomento. Il
+# testo è lo stesso di prima: $(cat) toglie i ritorni a capo finali, che il messaggio non ha.
+FIRST=$ROLE_HOME/.devloop-start-role-$ROLE.XXXXXX
+if [ "$DRY_RUN" != 1 ]; then
+    # shellcheck disable=SC2016  # lo script di sh -c si espande nella sua shell
+    FIRST=$(printf '%s' "$PROMPT" | "${AS_ROLE[@]}" sh -c \
+        'f=$(mktemp "$1") || exit 1; cat > "$f" || { rm -f "$f"; exit 1; }; printf "%s\n" "$f"' \
+        sh "$FIRST") || die "non scrivo il primo messaggio della sessione in $ROLE_HOME"
+    [[ $FIRST == "$ROLE_HOME/.devloop-start-role-$ROLE."* ]] \
+        || die "file del primo messaggio inatteso: '$FIRST'"
+fi
+# shellcheck disable=SC2016  # lo script si espande nella shell della sessione
+READ_FIRST='first=$(cat "$1") && rm -f "$1" && shift && exec "$@" "$first"'
 # La CLI dalla home dell'utente del ruolo (~/.local/bin), poi dal sistema.
 LAUNCH=("${AS_ROLE[@]}" tmux new-session -d -s "$SESSION" -c "$ROLE_DIR"
-        env "PATH=$ROLE_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" "${COMMAND[@]}")
-# Il comando si stampa senza il primo messaggio, che è l'ultimo argomento: il runbook intero.
+        env "PATH=$ROLE_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
+        sh -c "$READ_FIRST" sh "$FIRST" "${COMMAND[@]}")
+# Il comando, con il nome del runbook al posto del primo messaggio, che aggiunge la sessione.
 if [ "$DRY_RUN" = 1 ]; then printf '  [dry-run]'; else printf '  +'; fi
-printf ' %q' "${LAUNCH[@]:0:${#LAUNCH[@]}-1}"
+printf ' %q' "${LAUNCH[@]}"
 printf ' <istruzioni: %s>\n' "$RUNBOOK"
 [ "$DRY_RUN" = 1 ] && exit 0
-"${LAUNCH[@]}" || die "tmux non ha avviato la sessione $SESSION"
+if ! "${LAUNCH[@]}"; then
+    "${AS_ROLE[@]}" rm -f "$FIRST" || true
+    die "tmux non ha avviato la sessione $SESSION"
+fi
 say "Sessione avviata. Per entrarci: sudo -u $ROLE_USER -H tmux attach -t $SESSION"

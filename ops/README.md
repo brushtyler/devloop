@@ -46,7 +46,8 @@ sudo -u supervisor -H tmux attach -t devloop-supervisor   # per entrare nella se
   `[roles.supervisor]` o `[roles.coordinator]`, letta da `devloop/config.toml` del checkout con
   sopra l'overlay (`<state_dir>/config.local.toml`), come li compone devloop. Senza la tabella,
   o con `roles.supervisor` come chiave di un agent, lo script si ferma. La sessione gira con
-  `SUPERVISOR_USER` nel suo clone (`SUPERVISOR_CLONE`) o con `COORDINATOR_USER` nella sua home.
+  `SUPERVISOR_USER` nel suo clone (`SUPERVISOR_CLONE`) o con `COORDINATOR_USER` nel suo clone,
+  quello da cui conia i token (sotto): la directory fidata della CLI, mai la home (#621).
 - **Agent dell'host:** CLI e modello li sceglie l'operatore al lancio (`--cli`, `--model`). La
   sessione gira con l'utente dell'operatore che lancia lo script con `sudo` (`SUDO_USER`, quello
   che ha `sudo`), mai come root né come l'utente di un altro ruolo, nel checkout da cui parte lo
@@ -54,7 +55,13 @@ sudo -u supervisor -H tmux attach -t devloop-supervisor   # per entrare nella se
 - La CLI si cerca in `~/.local/bin` dell'utente del ruolo, poi in `/usr/local/bin`, `/usr/bin` e
   `/bin`, e parte interattiva con il modello e il runbook intero come primo messaggio:
   `claude --model <modello> <runbook>`, `codex --model <modello> <runbook>`,
-  `agy --model <modello> -i <runbook>`.
+  `agy --model <modello> -i <runbook>`. Il primo messaggio non passa dalla riga di comando di
+  tmux, che rifiuta un comando oltre circa 16 KB (#621): lo script lo scrive in un file nuovo
+  nella home dell'utente del ruolo (`~/.devloop-start-role-<ruolo>.XXXXXX`, suo, con modo 600) e
+  la sessione lo legge, lo rimuove e lo passa alla CLI. Il limite di tmux non conta più; resta
+  quello del kernel per un argomento (128 KiB con pagine di 4 KiB), l'unico modo in cui le CLI
+  ricevono il primo messaggio di una sessione interattiva: oltre, lo script si ferma prima di
+  avviare e lo dice.
 - La sessione si chiama `devloop-<ruolo>`; se esiste già, lo script si ferma e dice come
   entrarci. Serve `tmux` sull'host (`apt-get install tmux`).
 - Per supervisore e coordinatore, prima del runbook, lo script passa i valori dell'installazione
@@ -63,8 +70,9 @@ sudo -u supervisor -H tmux attach -t devloop-supervisor   # per entrare nella se
   nuova, anche di un'altra CLI, li segue senza istruzioni dell'operatore. Al coordinatore passa
   anche i valori dei token della sua app (#565): la sua `key_dir` (`COORDINATOR_KEY_DIR`, per
   `DEVLOOP_APP_KEY_DIR`) e il clone da cui lancia `scripts/coordinator-token.py`, cioè
-  `COORDINATOR_HOME/<nome del repository>` (`/home/coordinator/devloop` su questo host). Se il
-  clone manca, lo script lo segnala con un `ATTENZIONE` e avvia comunque la sessione.
+  `COORDINATOR_HOME/<nome del repository>` (`/home/coordinator/devloop` su questo host) o, con
+  la sorgente a parte, `COORDINATOR_SOURCE_CLONE`. È anche la directory di lavoro della sessione:
+  se il clone manca, lo script si ferma e dice il passo da fare (#621).
 
 **Canale fra supervisore e coordinatore** (#543). I runbook descrivono come si parlano, come
 sorveglia ciascuno e cosa fa all'avvio:
