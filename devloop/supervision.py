@@ -77,7 +77,7 @@ left open the PR goes back to ``agent:review``, where the recorded approval is a
 
 import re
 
-from .i18n import ENGLISH, ITALIAN, language_code
+from .i18n import ENGLISH, ITALIAN, Catalog, language_code
 
 # Non-critical classes: the supervisor decides them in ``auto``.
 TOOL_FAILURE = 'tool_failure'            # the agent or its model produced no result
@@ -562,28 +562,44 @@ def comment_links(text, repo, aliases=()):
     return [(int(n), int(c)) for n, c in re.findall(pattern, text or '')]
 
 
-def adr_problems(files, repo, aliases=()):
+# The problems of the changes of ``docs/adr/`` (``adr_problems``), in the project's
+# ``language`` (#634); English for a language without translation.
+ADR_TEXTS = Catalog(
+    en={
+        'not_added': ('`{path}` does not have only added lines (lines removed or changed, a '
+                      'file removed or binary, or a change of mode)'),
+        'no_link': ('a block added in `{path}` does not have the link to a comment of this '
+                    'repository («{first}»)'),
+    },
+    it={
+        'not_added': ('`{path}` non ha solo righe aggiunte (righe tolte o modificate, file '
+                      'rimosso o binario, o cambio di modo)'),
+        'no_link': ('un blocco aggiunto in `{path}` non ha il link a un commento di questo '
+                    'repository («{first}»)'),
+    })
+
+
+def adr_problems(files, repo, aliases=(), language=ENGLISH):
     """Why the changes of ``docs/adr/`` in ``files`` (``Workspace.diff_blocks``) do not only
-    record decisions of the operator already written on GitHub (#486), as Italian phrases, and
-    the links each block needs verified: ``(problems, blocks)``, ``blocks`` a list of ``(path,
-    links)``. A file that is not plain text, or that loses or changes a line (a deleted line,
-    a removed file, a new mode) has a problem; so has each block of added lines without a link
-    to a comment of ``repo`` (or of one of its ``aliases``, ``comment_links``). Whether each
-    comment linked is in ``repo`` and by a trusted user is the dispatcher's check, with the
-    API."""
+    record decisions of the operator already written on GitHub (#486), as phrases in
+    ``language`` (``ADR_TEXTS``, #634), and the links each block needs verified: ``(problems,
+    blocks)``, ``blocks`` a list of ``(path, links)``. A file that is not plain text, or that
+    loses or changes a line (a deleted line, a removed file, a new mode) has a problem; so has
+    each block of added lines without a link to a comment of ``repo`` (or of one of its
+    ``aliases``, ``comment_links``). Whether each comment linked is in ``repo`` and by a
+    trusted user is the dispatcher's check, with the API."""
+    t = ADR_TEXTS.texts(language)
     problems, blocks = [], []
     for entry in files:
         path = entry['path']
         if entry.get('binary') or entry.get('removed') or entry.get('other'):
-            problems.append(f'`{path}` non ha solo righe aggiunte (righe tolte o modificate, '
-                            'file rimosso o binario, o cambio di modo)')
+            problems.append(t('not_added', path=path))
             continue
         for block in entry.get('blocks') or []:
             links = comment_links(block, repo, aliases)
             if not links:
                 first = next((ln.strip() for ln in block.splitlines() if ln.strip()), '')
-                problems.append(f'un blocco aggiunto in `{path}` non ha il link a un commento '
-                                f'di questo repository («{first[:80]}»)')
+                problems.append(t('no_link', path=path, first=first[:80]))
             else:
                 blocks.append((path, links))
     return problems, blocks

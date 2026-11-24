@@ -85,7 +85,7 @@ class LinkTests(unittest.TestCase):
         self.assertEqual((problems, blocks), ([], [('docs/adr/a.md', [(1, 2)])]))
         problems, blocks = supervision.adr_problems([adr_entry('docs/adr/a.md', block)], NEW)
         self.assertEqual(blocks, [])
-        self.assertIn('non ha il link a un commento di questo repository', problems[0])
+        self.assertIn('does not have the link to a comment of this repository', problems[0])
 
 
 class DelegatedMergeTests(Case):

@@ -2053,7 +2053,8 @@ class MergeMixin:
             return t('adr_not_text', adr=ADR_DIR)
         # A link under a former name of the repository (``repo_aliases``, #540) is checked as
         # any other: its comment read by id among those of its issue in ``repo``.
-        problems, blocks = adr_problems(files, self.cfg.repo, self.cfg.repo_aliases)
+        problems, blocks = adr_problems(files, self.cfg.repo, self.cfg.repo_aliases,
+                                        self.cfg.language)
         if problems:
             return t('adr_problems', adr=ADR_DIR,
                      problems='; '.join(problems[:MAX_LISTED_PATHS]))

@@ -457,7 +457,8 @@ Today these texts follow it:
   and those of the delegated merge and of the coordinator's reserved merge), a merge held by the
   labels, the alarm of a step on the host, the issue a merge closed and the escalation of an
   issue a merged PR already resolved, and the refusals and the traces of a `/devloop merge` of
-  the supervisor or of the coordinator.
+  the supervisor or of the coordinator, with their reasons: the problems of the changes under
+  `docs/adr/` and the conditions of the coordinator's merge after a conclave.
 
 Only the text devloop composes changes, in the language of the moment it composes it. The
 values of the records stay as written, in every language: the opinions `ok`, `dubbi`,

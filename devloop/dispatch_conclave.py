@@ -43,6 +43,7 @@ from .context import _template, prompt_values
 from .dispatch_actions import Models
 from .dispatch_supervision import UntrustedChange, _epoch
 from .github import GitHubError
+from .i18n import Catalog
 from .ledger import comment_ref
 from .markdown import carries_record, read_marker
 from .planning import (Action, PullRequest, label_names, operator_blocked, operator_held,
@@ -56,6 +57,44 @@ BLOCKED_STEPS = ('implement', 'fix')
 # What moves an item on after its escalation, as ``_operator_anchor`` reads it (#321): the
 # escalation is no longer the latest word on it.
 _MOVING = ('review', 'fix', 'sync')
+# Why the coordinator's reserved merge after a conclave may not go ahead
+# (``_conclave_merge_problem``), in the project's ``language`` (#634); English for a language
+# without translation.
+MERGE_TEXTS = Catalog(
+    en={
+        'untrusted': 'the text of issue #{issue} is no longer trusted ({error})',
+        'unreadable': 'the conclave decisions of issue #{issue} are not readable ({error})',
+        'gone': 'the conclave decision that restarted the work can no longer be read',
+        'invalid': ('the conclave decision {decision}, which restarted the work, is not a valid '
+                    '`UNANIMOUS` decision of this issue'),
+        'lapsed': ('the conclave decision {decision} lapsed: the request of issue #{issue} '
+                   'changed after the decision'),
+        'not_latest': ('the conclave decision {decision}, which restarted the work, is no '
+                       'longer the latest unanimous decision on the issue and on the PR'),
+        'vetoed': ('`{login}` vetoed with `{command}` (comment {comment}) a conclave decision '
+                   'that restarted the work'),
+        'no_time': ('the time of a conclave decision of issue #{issue}, which restarted the '
+                    'work, is not readable'),
+        'no_round': ('no complete review round after the work restarted (conclave decision '
+                     '{decision}) approved the head with the quorum of the level'),
+    },
+    it={
+        'untrusted': 'il testo della issue #{issue} non è più fidato ({error})',
+        'unreadable': 'le decisioni del conclave della issue #{issue} non sono leggibili ({error})',
+        'gone': 'la decisione del conclave che ha fatto ripartire il lavoro non si legge più',
+        'invalid': ('la decisione del conclave {decision}, che ha fatto ripartire il lavoro, non '
+                    'è una decisione `UNANIMOUS` valida di questa issue'),
+        'lapsed': ('la decisione del conclave {decision} è decaduta: la richiesta della issue '
+                   '#{issue} è cambiata dopo la decisione'),
+        'not_latest': ('la decisione del conclave {decision}, che ha fatto ripartire il lavoro, '
+                       'non è più l\'ultima decisione unanime sulla issue e sulla PR'),
+        'vetoed': ('`{login}` ha annullato con `{command}` (commento {comment}) una decisione '
+                   'del conclave che ha fatto ripartire il lavoro'),
+        'no_time': ('l\'ora di una decisione del conclave della issue #{issue}, che ha fatto '
+                    'ripartire il lavoro, non è leggibile'),
+        'no_round': ('nessun round di review completo dopo la ripartenza del lavoro (decisione '
+                     'del conclave {decision}) ha approvato l\'head con il quorum del livello'),
+    })
 
 
 def _short(exc, limit=300):
@@ -813,7 +852,7 @@ class ConclaveMixin:
     def _conclave_merge_problem(self, pr, thread, latest, quorum):
         """Why the coordinator's reserved merge of ``pr``, whose work restarted after a conclave
         (``_human_merge``), may not go ahead (#624, ADR 0002, precision of 2026-11-24), in
-        Italian, or ''. ``thread``: the PR's conversation read now (``_pr_thread``);
+        the project's ``language`` (``MERGE_TEXTS``, #634), or ''. ``thread``: the PR's conversation read now (``_pr_thread``);
         ``latest``: the latest review round, complete and approving the head to merge;
         ``quorum``: the latest review of that head of each reviewer of the quorum. Every
         condition is read now, and what cannot be read refuses it:
@@ -835,40 +874,36 @@ class ConclaveMixin:
         The check of the direction, that the resolution stays within the authorized request of
         the issue, is the coordinator's, written in the reason of its command."""
         issue_number = pr.issue
+        t = MERGE_TEXTS.texts(self.cfg.language)
         try:
             issue, _ = self._issue_context(issue_number)
             pr_comments = self.gh.pr_comments(pr.number)
         except UntrustedChange as exc:
-            return f'il testo della issue #{issue_number} non è più fidato ({_short(exc)})'
+            return t('untrusted', issue=issue_number, error=_short(exc))
         except GitHubError as exc:
-            return (f'le decisioni del conclave della issue #{issue_number} non sono leggibili '
-                    f'({_short(exc)})')
+            return t('unreadable', issue=issue_number, error=_short(exc))
         resumed = [(cid, record) for comments in (issue['thread'], pr_comments)
                    for cid, record in self._conclave_records(comments)
                    if record.get('resumed') is not None
                    and isinstance(cid, int) and not isinstance(cid, bool)]
         if not resumed:
-            return 'la decisione del conclave che ha fatto ripartire il lavoro non si legge più'
+            return t('gone')
         last = max(cid for cid, _ in resumed)
         for cid, record in resumed:
             if not (record['outcome'] == UNANIMOUS and consistent(record)[0]
                     and record['issue'] == issue_number):
-                return (f'la decisione del conclave {cid}, che ha fatto ripartire il lavoro, non '
-                        'è una decisione `UNANIMOUS` valida di questa issue')
+                return t('invalid', decision=cid)
             if record['issue_hash'] != issue['request']:
-                return (f'la decisione del conclave {cid} è decaduta: la richiesta della issue '
-                        f'#{issue_number} è cambiata dopo la decisione')
+                return t('lapsed', decision=cid, issue=issue_number)
         decision = self._conclave_decision(issue_number, issue['thread'], pr_comments)
         if decision is None or decision['comment'] != last:
-            return (f'la decisione del conclave {last}, che ha fatto ripartire il lavoro, non è '
-                    'più l\'ultima decisione unanime sulla issue e sulla PR')
+            return t('not_latest', decision=last)
         first = min(cid for cid, _ in resumed)
         vetoes = sorted(v for comments in (issue['thread'], pr_comments)
                         for v in self._veto_commands(comments, issue_number) if v[0] > first)
         if vetoes:
             ident, login, _ = vetoes[0]
-            return (f'`{login}` ha annullato con `{VETO_COMMAND}` (commento {ident}) una '
-                    'decisione del conclave che ha fatto ripartire il lavoro')
+            return t('vetoed', login=login, command=VETO_COMMAND, comment=ident)
         cids = {cid for cid, _ in resumed}
         positions = [p for p, c in enumerate(thread) if comment_ref(c) in cids]
         # A decision on the issue is not in the PR's conversation: its restart is the latest
@@ -878,8 +913,7 @@ class ConclaveMixin:
                   if c.get(key) is not None]
                  for c in issue['thread'] if comment_ref(c) in cids]
         if any(not stamps or None in stamps for stamps in times):
-            return (f'l\'ora di una decisione del conclave della issue #{issue_number}, che ha '
-                    'fatto ripartire il lavoro, non è leggibile')
+            return t('no_time', issue=issue_number)
         since = max((max(stamps) for stamps in times), default=None)
 
         def earlier(position):
@@ -893,8 +927,7 @@ class ConclaveMixin:
                       if earlier(p)], default=0)
         if (not latest or latest[0]['round'] <= before
                 or any(r['round'] <= before for r in quorum.values())):
-            return (f'nessun round di review completo dopo la ripartenza del lavoro (decisione '
-                    f'del conclave {last}) ha approvato l\'head con il quorum del livello')
+            return t('no_round', decision=last)
         return ''
 
     def _conclave_pr_state(self, pr, comments):

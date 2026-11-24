@@ -953,9 +953,10 @@ class MergeLanguageTests(unittest.TestCase):
     before a change of ``language`` is still recognised by its title."""
 
     def test_the_catalogues_have_every_text_in_italian(self):
-        from devloop import context, dispatch_merge, policy, receipt
+        from devloop import context, dispatch_conclave, dispatch_merge, policy, receipt
         for catalog in (dispatch_merge.TEXTS, policy.TEXTS, receipt.TEXTS,
-                        context.BASES_TEXTS):
+                        context.BASES_TEXTS, supervision.ADR_TEXTS,
+                        dispatch_conclave.MERGE_TEXTS):
             self.assertEqual(set(catalog.tables[ITALIAN]), set(catalog.tables[ENGLISH]))
 
     def test_the_description_of_a_policy_receipt(self):
@@ -1118,6 +1119,54 @@ class MergeLanguageTests(unittest.TestCase):
                 self.assertTrue(revoked and phrases[3] in revoked[-1], language)
         self.assertEqual({k: dict(v, comment=None) for k, v in holds.items()}['Italian'],
                          dict(holds['English'], comment=None))
+
+    def test_the_refusal_of_a_delegated_merge_for_the_changes_of_an_adr(self):
+        from test_devloop_delegated_merge import ADR, ON, Case, adr_entry
+        expected = {
+            'Italian': ('rifiutato: sotto `docs/adr/` sono ammesse solo righe aggiunte',
+                        f'`{ADR}` non ha solo righe aggiunte (righe tolte o modificate',
+                        f'un blocco aggiunto in `{ADR}` non ha il link a un commento di questo '
+                        'repository («nessun link»)'),
+            'English': ('refused: under `docs/adr/` only added lines',
+                        f'`{ADR}` does not have only added lines (lines removed or changed',
+                        f'a block added in `{ADR}` does not have the link to a comment of this '
+                        'repository («nessun link»)'),
+        }
+        for language in ('Italian', 'English', 'French'):
+            phrases = expected.get(language, expected['English'])
+            for adr, phrase in (([adr_entry(ADR, removed=True)], phrases[1]),
+                                ([adr_entry(ADR, 'nessun link\n')], phrases[2])):
+                with self.subTest(language=language, phrase=phrase):
+                    case = Case()
+                    d = case.make(dataclasses.replace(ON, language=language), adr=adr)
+                    case.merge()
+                    case.apply(d)
+                    self.assertEqual(case.gh.merged, [])
+                    self.assertEqual(case.decisions()[-1]['outcome'], 'refused')
+                    self.assertIn(phrases[0], case.text())
+                    self.assertIn(phrase, case.text())
+
+    def test_the_refusal_of_the_coordinators_merge_after_a_conclave(self):
+        from test_devloop_coordinator_merge import COORD, ConclaveTests
+        expected = {
+            'Italian': 'rifiutato: nessun round di review completo dopo la ripartenza del '
+                       'lavoro (decisione del conclave {cid}) ha approvato l\'head con il quorum '
+                       'del livello.',
+            'English': 'refused: no complete review round after the work restarted (conclave '
+                       'decision {cid}) approved the head with the quorum of the level.',
+        }
+        for language in ('Italian', 'English', 'French'):
+            with self.subTest(language=language):
+                case = ConclaveTests()
+                d = case.reviewed(cfg=dataclasses.replace(COORD, language=language))
+                (cid,) = [c['id'] for c in case.gh.thread
+                          if markdown.read_marker(c['body'], 'conclave')]
+                case.merge()
+                case.apply(d)
+                self.assertEqual(case.gh.merged, [])
+                self.assertEqual(case.decisions()[-1]['outcome'], 'refused')
+                self.assertIn(expected.get(language, expected['English']).format(cid=cid),
+                              case.text())
 
 
 if __name__ == '__main__':
