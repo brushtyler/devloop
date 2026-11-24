@@ -24,6 +24,7 @@ import devloop.__main__ as cli
 import test_devloop_fix_command as fix_tests
 import test_devloop_merge as merge_tests
 import test_devloop_preflight_recheck as recheck_tests
+import test_devloop_supervisor_app as supervisor_tests
 from devloop import apps, config, markdown, supervision, token
 from devloop.config import AppConfig, ConfigError, CoordinatorActor, DelegationPolicy
 from devloop.dispatcher import Dispatcher
@@ -170,6 +171,42 @@ class IdentityTests(unittest.TestCase):
         self.assertNotIn(COORDINATOR, d.cfg.trusted_users)
         self.assertIn(COORDINATOR, d._devloop_logins())
         self.assertNotIn(COORDINATOR, self.make(declared(CFG))._devloop_logins())
+
+    def test_the_watch_admits_with_the_dispatchers_admitters(self):
+        # #623: the watch follows an issue of an untrusted author when the dispatcher admits it,
+        # with the same admitters; the coordinator's app stays outside its trusted authors.
+        checked_cfg = recheck_tests.CFG  # a supervisor with its agent's app, a readiness check
+        role = dataclasses.replace(supervisor_tests.ROLE, preflight=checked_cfg.preflight)
+        self.assertIsNotNone(checked_cfg.preflight)
+        for name, cfg in (('off', checked_cfg), ('coordinated', coordinated(checked_cfg)),
+                          ('no preflight', coordinated(dataclasses.replace(checked_cfg,
+                                                                           preflight=None))),
+                          ('no supervisor', coordinated(dataclasses.replace(checked_cfg,
+                                                                            supervisor=None))),
+                          ('supervisor role app', coordinated(role))):
+            with self.subTest(name):
+                keyless = apps.Identities(cfg.repo, {
+                    actor: apps.AppAuth(app.app_id, app.slug, None, cfg.repo)
+                    for actor, app in cfg.apps.items() if apps.used(cfg, actor)})
+                d = Dispatcher(cfg, SnapshotGH([]), fix_tests.FakeWS(), FakeRunner(),
+                               log=lambda m: None, identities=keyless)
+                trust = Trust.from_config(cfg)
+                self.assertEqual(trust.supervisor, d._supervisor_login())
+                self.assertEqual(trust.coordinator, d._coordinator_login())
+                self.assertEqual(trust.devloop, d._devloop_logins())
+                self.assertNotIn(COORDINATOR, trust.apps)
+                self.assertFalse(trust.trusted(COORDINATOR))
+                for author in ('brushtyler', 'stranger', None, COORDINATOR,
+                               d._supervisor_login(), *sorted(d._devloop_logins())):
+                    self.assertEqual(trust.ready_admitters(author),
+                                     d._admitters(author, coordinator=True), author)
+                for login in ('brushtyler', COORDINATOR, d._supervisor_login(), 'stranger'):
+                    self.assertEqual(trust.needs_authorization(login),
+                                     d._needs_authorization(login), login)
+                if name in ('coordinated', 'supervisor role app'):
+                    # The case of #620: the supervisor queues a coordinator's issue, authorized.
+                    self.assertIn(trust.supervisor, trust.ready_admitters(COORDINATOR))
+                    self.assertTrue(trust.needs_authorization(trust.supervisor))
 
 
 class OffByDefaultTests(Case):

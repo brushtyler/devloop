@@ -2410,12 +2410,22 @@ too frequent. Trust follows [AGENTS.md](../../AGENTS.md): an issue or PR counts 
 dispatcher; not the [merger app](reference.md#the-merger-app), which only merges: its comments and the
 `review` records naming it are ignored). Anyone else's issue or PR
 produces only `new issue #N by an untrusted author (ignored)` (or `new PR`), with no title nor
-content, and nothing after it. The exception is an issue whose latest `agent:ready` was added by
-a user in `trusted_users`, whether the label is still there or the dispatcher already replaced it
-with `agent:working`: while so it is reported (`issue #N admitted with agent:ready by <login>`),
-its labels, closure and trusted comments, never its title. A later `agent:ready` added by anyone
-else ends the admission. The labeled events of an external issue are read when it is first seen
-and whenever its labels change. Labels, heads, CI and closures of a trusted issue or PR are
+content, and nothing after it. The exception is an issue that the dispatcher admits (#623): its
+latest `agent:ready`, whether the label is still there or the dispatcher already replaced it with
+`agent:working`, was added by one of the logins whose `agent:ready` the dispatcher accepts on an
+issue of that author. A user in `trusted_users` always; on an issue of one of devloop's apps,
+the [coordinator's](reference.md#the-coordinator-app)
+included, the supervisor's identity and the coordinator's too, on the coordinator's own only with
+a [readiness check](#readiness-check-before-implementation). With `[roles.coordinator]` the supervisor's
+label counts only while an authorization of the coordinator (`/devloop authorize`, #607)
+recorded by the dispatcher holds for the current title and body. While so it is reported
+(`issue #N admitted with agent:ready by <login>`), its labels, closure and trusted comments, never
+its title. A later `agent:ready` added by anyone else ends the admission. The labeled events of an
+external issue are read when it is first seen and whenever its labels change, with its author,
+text and authorization records when the label is the supervisor's or the coordinator's: an
+authorization given or voided while the labels stay the same is seen at their next change. The
+coordinator's app is not one of the trusted authors: its issues are external issues, and its
+comments are not reported. Labels, heads, CI and closures of a trusted issue or PR are
 reported whoever changed them; comments and reviews only when their author is trusted or a
 devloop app. A trusted comment on an issue or PR outside the open listings (closed before the
 baseline, say) is reported too: the watcher reads its author once and remembers it. On such an
