@@ -635,7 +635,8 @@ set with `/devloop capacity` (#412,
 the dispatcher plans with; the same figures go in a ledger `event` `delegation_grant` with the
 `delegation` `capacity`, after a `grant` event in the turn journal. With the delegation off the
 command gets a `refused` record all the same, which spends it. The records of the coordinator's
-identity (#595) carry `role: coordinator`: its limits are in force only with
+identity (#595) carry `role: coordinator` and, as `cap`, the cap of the code (`MAX_CAPACITY`,
+#611), never the lower one of `[delegations]`: its limits are in force only with
 `[roles.coordinator]` on, the others only with `[delegations] capacity` on; the latest grant of a
 key replaces the earlier ones whatever its switch, so one switched off restores none of them. A
 [delegated merge](guide.md#delegated-merge) (#486, `/devloop merge <sha> <reason>`) has its
