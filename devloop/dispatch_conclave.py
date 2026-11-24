@@ -31,7 +31,7 @@ from itertools import combinations
 from .activity import iso
 from .agents import AgentError
 from .conclave import (DONE, MAX_DIFF, MAX_OPTION, MAX_OPTIONS, MAX_RESOLUTION, MAX_TEXT,
-                       PENDING, UNANIMOUS, VETO_COMMAND, VOTE_COMMAND, apply_proposal,
+                       PENDING, STARTED, UNANIMOUS, VETO_COMMAND, VOTE_COMMAND, apply_proposal,
                        apply_substitute, apply_vote, await_substitute, calls_left, consistent,
                        describe_block, expire_substitute, make_stale, missing, new_record,
                        next_call, outcome, refuse_substitute, render, resolution_section,
@@ -259,9 +259,12 @@ class ConclaveMixin:
                     return None
                 return self._resume_view(number, comments, pr, block, details, comment, record)
             if (waiting_substitute(record) is not None and next_call(record) is None
+                    and all(item['state'] != STARTED
+                            for item in [record['proposal'], *record['votes']])
                     and not self._substitute_due(record, comments)):
                 # Waiting for the coordinator's substitute vote (#605): nothing to do until a
-                # command of the coordinator, or the deadline.
+                # command of the coordinator, or the deadline. A call started without a result
+                # is still settled (``settle_started``): a second member missing ends the wait.
                 return None
             members = [record['proposal']['agent'], *(v['agent'] for v in record['votes'])]
         else:
@@ -539,8 +542,8 @@ class ConclaveMixin:
         """The coordinator's substitute vote in the conclave of ``record`` (#605), from the
         thread ``comments``, while it waits for one. The commands of the coordinator's identity
         not spent yet, oldest first: the first that names this conclave and the hash of its
-        proposal, written before the deadline, is the vote; each one before it is refused, and
-        recorded as such. A command of anyone else is ignored and logged. Past the deadline
+        proposal, written and last changed before the deadline, is the vote; each one before it
+        is refused, and recorded as such. A command of anyone else is ignored and logged. Past the deadline
         without a vote, the vote is missing and the conclave closes as before."""
         substitute = waiting_substitute(record)
         if substitute is None:
@@ -552,11 +555,17 @@ class ConclaveMixin:
                          'coordinator\'s identity votes in place of a member')
                 continue
             why = substitute_problem(record, command)
-            written, deadline = _epoch(comment.get('created_at')), _epoch(substitute['deadline'])
-            if not why and (written is None or deadline is None):
-                why = 'l\'ora del comando o la scadenza non sono leggibili'
-            elif not why and written > deadline:
-                why = f'scritto dopo la scadenza del voto sostitutivo ({substitute["deadline"]})'
+            # The comment is read as it is now: its latest change (``updated_at``), not only
+            # its creation, must come before the deadline, or a comment written in time and
+            # turned into a vote later would count.
+            times = [_epoch(comment.get(key)) for key in ('created_at', 'updated_at')]
+            deadline = _epoch(substitute['deadline'])
+            if not why and (None in times or deadline is None):
+                why = ('l\'ora del comando, della sua ultima modifica o la scadenza non sono '
+                       'leggibili')
+            elif not why and max(times) > deadline:
+                why = (f'scritto o modificato dopo la scadenza del voto sostitutivo '
+                       f'({substitute["deadline"]})')
             if why:
                 refuse_substitute(record, ident, why)
                 self.log(f'  #{number}: refused `{VOTE_COMMAND}` of comment {ident}: {why}')

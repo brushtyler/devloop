@@ -852,15 +852,17 @@ written after the wait started, that names this conclave and this hash, before t
 it records it as a **substitute** vote (`APPROVE` and `BLOCK` are `APPROVA` and `BLOCCA`;
 `RESERVED` flags the reserved perimeter, and the conclave ends `RESERVED`) and closes the
 conclave with the rules above. A malformed command, one for another conclave or another hash,
-or one written after the deadline is refused, and listed in the comment; the coordinator may
+or one written or last edited after the deadline (a comment written in time and turned into a
+vote later included) is refused, and listed in the comment; the coordinator may
 write a new one while the wait lasts. A `/devloop vote` of anyone else, trusted users included,
 is ignored and only logged. Past the deadline without a vote the vote is missing, and the
 conclave closes as without a coordinator.
 
 - **The proposer is never substituted**: when the agent that stopped fails, the conclave ends
   `BLOCKED` as before.
-- **One substitute vote per conclave**: when the second voter fails too, before or after the
-  coordinator's vote, the conclave is `BLOCKED`, to the operator.
+- **One substitute vote per conclave**: when the second voter is missing too, before or after
+  the coordinator's vote, the conclave is `BLOCKED`, to the operator, at once: a failed call, an
+  output over the limits, or a call started without a result alike.
 - **It is visible**: the vote is shown as the coordinator's in place of the member, with the
   coordinator's identity and the agent and model of `[roles.coordinator]`; the three distinct
   profiles rule does not apply to it, and the [daily summary](#daily-summary) lists it, so that

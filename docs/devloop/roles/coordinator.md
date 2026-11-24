@@ -279,8 +279,9 @@ the mailbox.
     credentials and permissions, trust rules, merge), vote `RESERVED`: the conclave ends
     `RESERVED`, to the operator.
   - Copy the id and the hash from the comment: a command with another hash, for another
-    conclave, malformed or written after the deadline is refused, and the comment lists it. You
-    may write a corrected one while the wait lasts. One substitute vote per conclave: when a
+    conclave, malformed or written after the deadline is refused, and the comment lists it; so is
+    a comment edited after the deadline, since its latest change counts. You may write a new,
+    corrected one while the wait lasts, rather than editing an old one. One substitute vote per conclave: when a
     second member is missing, the conclave goes to the operator. The proposer is never
     substituted.
   - Your vote is recorded as substitute, with your identity and the model of

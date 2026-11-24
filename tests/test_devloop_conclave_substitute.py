@@ -63,7 +63,8 @@ class SubstituteBase(Base):
         body = (HEADER + f'/devloop vote {conclave_id or self.conclave_id()} '
                 f'{digest or conclave.text_hash(RESOLUTION)} {verdict} {reason}\n')
         ident = self.gh.say(100, body, login)
-        self.gh.thread[100][-1]['created_at'] = iso(self.now if written is None else written)
+        at = iso(self.now if written is None else written)
+        self.gh.thread[100][-1].update(created_at=at, updated_at=at)
         return ident
 
     def due(self):
@@ -193,6 +194,34 @@ class VoteTests(SubstituteBase):
         self.assertEqual(refused['comment'], ident)
         self.assertIn('dopo la scadenza', refused['why'])
 
+    def test_a_comment_turned_into_a_vote_after_the_deadline_is_refused(self):
+        self.start(proposal(), UNAVAILABLE, vote())
+        ident = self.gh.say(100, HEADER + 'Leggo la risoluzione.\n', COORDINATOR)
+        self.gh.thread[100][-1].update(created_at=iso(NOW + 10), updated_at=iso(NOW + 10))
+        self.now = NOW + TIMEOUT + 60
+        for c in self.gh.thread[100]:
+            if c['id'] == ident:
+                c['body'] = (HEADER + f'/devloop vote {self.conclave_id()} '
+                             f'{conclave.text_hash(RESOLUTION)} APPROVE In perimetro.\n')
+                c['updated_at'] = iso(self.now)
+        self.run_conclave(times=1)
+        record = self.record()
+        self.assertEqual(record['outcome'], conclave.BLOCKED)
+        self.assertEqual(record['substitute']['state'], 'expired')
+        (refused,) = record['substitute']['refused']
+        self.assertEqual(refused['comment'], ident)
+        self.assertIn('modificato dopo la scadenza', refused['why'])
+
+    def test_a_command_without_the_time_of_its_latest_change_is_refused(self):
+        self.start(proposal(), UNAVAILABLE, vote())
+        ident = self.vote_cmd()
+        del self.gh.thread[100][-1]['updated_at']
+        self.run_conclave(times=1)
+        record = self.record()
+        self.assertEqual(record['outcome'], '')
+        self.assertEqual(record['substitute']['refused'][0]['comment'], ident)
+        self.assertIn('non sono leggibili', record['substitute']['refused'][0]['why'])
+
     def test_a_changed_hash_of_the_resolution_is_refused(self):
         self.start(proposal(), UNAVAILABLE, vote())
         ident = self.vote_cmd(digest=conclave.text_hash('un\'altra risoluzione'))
@@ -254,6 +283,36 @@ class TwoMissingTests(SubstituteBase):
         self.assertEqual([v['state'] for v in record['votes']], ['missing', 'missing'])
         self.assertEqual(record['substitute']['state'], 'void')
         self.assertIn('un solo voto sostitutivo', record['votes'][0]['missing'])
+
+    def test_a_second_vote_over_the_limits_goes_to_the_operator(self):
+        record = self.start(proposal(), UNAVAILABLE, vote(reason='x' * 1001))
+        self.assertEqual(record['outcome'], conclave.BLOCKED)
+        self.assertEqual([v['state'] for v in record['votes']], ['missing', 'missing'])
+        self.assertEqual(record['substitute']['state'], 'void')
+        self.assertIn('un solo voto sostitutivo', record['votes'][0]['missing'])
+        self.assertEqual(conclave.consistent(record), (True, ''))
+        self.assertFalse(self.due())
+
+    def test_a_second_call_started_without_a_result_goes_to_the_operator(self):
+        self.make(proposal(), UNAVAILABLE, RuntimeError('dispatcher crash'))
+        self.now = NOW
+        self.d.clock = lambda: self.now
+        self.block_pr()
+        self.run_conclave(times=2)
+        with self.assertRaises(RuntimeError):
+            self.run_conclave(times=1)
+        record = self.record()
+        self.assertEqual([v['state'] for v in record['votes']], ['waiting', 'started'])
+        # The restart settles the started call, before the deadline and without a command.
+        self.assertTrue(self.due())
+        self.run_conclave(times=1)
+        record = self.record()
+        self.assertEqual(record['outcome'], conclave.BLOCKED)
+        self.assertEqual([v['state'] for v in record['votes']], ['missing', 'missing'])
+        self.assertEqual(record['votes'][1]['missing'], conclave.STARTED_WITHOUT_RESULT)
+        self.assertEqual(record['substitute']['state'], 'void')
+        self.assertEqual(len(self.runner.calls), 3)
+        self.assertFalse(self.due())
 
     def test_a_second_missing_member_after_the_substitute_vote_goes_to_the_operator(self):
         self.make(proposal(), UNAVAILABLE, agents.AgentError('agy: quota exhausted'))

@@ -160,13 +160,19 @@ def apply_vote(record, index, raw, proposal_hash, profile=None):
 
 def missing(record, which, reason):
     """``record`` with contribution ``which`` (``'proposal'`` or a voter's index) missing for
-    ``reason``. A missing proposal leaves nothing to vote on: the votes are missing too."""
+    ``reason``. A missing proposal leaves nothing to vote on: the votes are missing too. A
+    contribution missing while a vote waits for the coordinator's substitute vote ends the wait
+    (#605): one substitute vote per conclave, so two members missing leave it to the operator,
+    however the second one went missing (a failed call, an output over the limits, a call
+    started without a result)."""
     item = record['proposal'] if which == 'proposal' else record['votes'][which]
     item.update(state=MISSING, missing=reason)
     if which == 'proposal':
         for vote in record['votes']:
             if vote['state'] in (PENDING, STARTED):
                 vote.update(state=MISSING, missing='nessuna proposta da votare')
+    if waiting_substitute(record) is not None:
+        _void(record, 'un secondo membro non ha votato: un solo voto sostitutivo per conclave')
     return record
 
 
@@ -192,11 +198,7 @@ def await_substitute(record, index, reason, deadline, conclave, after):
     so that only a command written later counts. One substitute vote per conclave: when a
     member is already substituted, or waits, this vote is missing, and so is the waiting one."""
     if record.get('substitute'):
-        missing(record, index, reason)
-        if waiting_substitute(record) is not None:
-            _void(record, 'un secondo membro non ha votato: un solo voto sostitutivo per '
-                          'conclave')
-        return record
+        return missing(record, index, reason)
     record['votes'][index].update(state=WAITING, missing=reason)
     record['substitute'] = {'index': index, 'member': record['votes'][index]['agent'],
                             'why': reason, 'deadline': deadline, 'conclave': conclave,
