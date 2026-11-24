@@ -420,6 +420,24 @@ devloop works on the issues of `acme/widget` that a user of `trusted_users` labe
   ([Installation source](guide.md#installation-source), [Rollback](guide.md#rollback)). With the
   new tag in `SOURCE_REF`, `setup-supervisor.sh` (and `setup-coordinator.sh`, if the project has
   the coordinator) moves the clone of the source of its role to that tag.
+- **The direction of the project** (#604), when the operator wants the coordinator to order the
+  work by it: open an issue of `acme/widget` dedicated to it, say `Direzione del progetto`, and
+  write the first direction there as a comment of a user of `trusted_users` that starts with the
+  line `## Direzione`:
+
+  ```markdown
+  ## Direzione
+  1. <theme> — <goal, what "done" means>; issue: #N, #M
+  2. <theme> — …
+  In pausa: <themes or issues not to touch for now>
+  Vincoli: <e.g. budget, what not to change>
+  ```
+
+  Then set its number in the overlay, `[direction]` with `issue = <N>`, and check it with the
+  launcher (`direction` instead of `apps` in the commands of step 8): it prints the comment, its
+  author, its date and its link. A new direction is a new comment, complete: it replaces the one
+  before ([Project direction](guide.md#project-direction)). Without it, the priorities are those
+  of the operator's labels.
 - **A change of the project file or of the overlay** is read again before each tick; most keys
   need a restart ([Changes while the loop runs](guide.md#changes-while-the-loop-runs)).
 - **Updating a CLI** is done by hand with the loop stopped ([Agent CLIs](guide.md#agent-clis)).

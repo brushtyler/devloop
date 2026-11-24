@@ -625,7 +625,7 @@ app non firma. Dopo ogni sostituzione si riesegue `setup-supervisor.sh` (e
 Il **sudoers** (`ops/host/sudoers-supervisor`) permette:
 
 - come `devloop`, solo `scripts/devloop-pinned` con `status`, `status *`, `watch *`, `report *`,
-  `tick --dry-run` e `pin *` (con `Defaults>devloop always_set_home, secure_path=…`); con uno
+  `direction` (la direzione dell'operatore, in sola lettura, #604), `tick --dry-run` e `pin *` (con `Defaults>devloop always_set_home, secure_path=…`); con uno
   `STATE_DIR` diverso dal default o con `SOURCE_REPO`, lo stesso comando dell'unità
   (`/usr/bin/env -C <clone> /usr/bin/python3 <avviatore> --state-dir <state_dir>`);
 - come root, solo `systemctl start|stop|restart devloop` e `systemctl status devloop *`.
@@ -778,8 +778,9 @@ si riesegue: `check-host.sh` avvisa se la copia è diversa dal checkout.
 
 Il **sudoers** permette, ciascun comando con i suoi argomenti esatti, senza caratteri jolly:
 
-- come `devloop`: `scripts/devloop-pinned status` (lo stesso comando dell'unità, come per il
-  supervisore), `/usr/bin/tail -n 200` o `-n 1000` di `<state_dir>/run.log` e, per la sveglia
+- come `devloop`: `scripts/devloop-pinned status` e `scripts/devloop-pinned direction` (la
+  direzione dell'operatore, #604; lo stesso comando dell'unità, come per il supervisore),
+  `/usr/bin/tail -n 200` o `-n 1000` di `<state_dir>/run.log` e, per la sveglia
   (#543), `scripts/devloop-pinned watch --until-change --interval 60 --timeout 300 --state
   <state_dir>/coordinator-watch-state.json`: il watch gira come `devloop`, con la sua
   configurazione, e il coordinatore non vede le chiavi del dispatcher; il file di stato è suo,
