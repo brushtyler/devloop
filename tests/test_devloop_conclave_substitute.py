@@ -293,6 +293,34 @@ class TwoMissingTests(SubstituteBase):
         self.assertEqual(conclave.consistent(record), (True, ''))
         self.assertFalse(self.due())
 
+    def test_a_first_vote_over_the_limits_then_a_failed_one_goes_to_the_operator(self):
+        record = self.start(proposal(), vote(reason='x' * 1001), UNAVAILABLE)
+        self.assertEqual(record['outcome'], conclave.BLOCKED)
+        self.assertEqual([v['state'] for v in record['votes']], ['missing', 'missing'])
+        self.assertIsNone(record.get('substitute'))
+        self.assertIn('oltre i limiti', record['votes'][0]['missing'])
+        self.assertIn('usage limit', record['votes'][1]['missing'])
+        self.assertIn('un solo voto sostitutivo', record['votes'][1]['missing'])
+        self.assertEqual(conclave.consistent(record), (True, ''))
+        self.assertFalse(self.due())
+
+    def test_a_first_call_started_without_a_result_then_a_failed_one_goes_to_the_operator(self):
+        self.make(proposal(), RuntimeError('dispatcher crash'), UNAVAILABLE)
+        self.now = NOW
+        self.d.clock = lambda: self.now
+        self.block_pr()
+        self.run_conclave(times=1)
+        with self.assertRaises(RuntimeError):
+            self.run_conclave(times=1)
+        self.assertEqual([v['state'] for v in self.record()['votes']], ['started', 'pending'])
+        self.run_conclave(times=2)
+        record = self.record()
+        self.assertEqual(record['outcome'], conclave.BLOCKED)
+        self.assertEqual([v['state'] for v in record['votes']], ['missing', 'missing'])
+        self.assertEqual(record['votes'][0]['missing'], conclave.STARTED_WITHOUT_RESULT)
+        self.assertIsNone(record.get('substitute'))
+        self.assertFalse(self.due())
+
     def test_a_second_call_started_without_a_result_goes_to_the_operator(self):
         self.make(proposal(), UNAVAILABLE, RuntimeError('dispatcher crash'))
         self.now = NOW

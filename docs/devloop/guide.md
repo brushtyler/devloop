@@ -862,7 +862,8 @@ conclave closes as without a coordinator.
   `BLOCKED` as before.
 - **One substitute vote per conclave**: when the second voter is missing too, before or after
   the coordinator's vote, the conclave is `BLOCKED`, to the operator, at once: a failed call, an
-  output over the limits, or a call started without a result alike.
+  output over the limits, or a call started without a result alike, and in either order (a
+  voter that fails after the other is already missing opens no wait).
 - **It is visible**: the vote is shown as the coordinator's in place of the member, with the
   coordinator's identity and the agent and model of `[roles.coordinator]`; the three distinct
   profiles rule does not apply to it, and the [daily summary](#daily-summary) lists it, so that

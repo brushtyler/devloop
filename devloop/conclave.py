@@ -196,9 +196,15 @@ def await_substitute(record, index, reason, deadline, conclave, after):
     waits for the coordinator's substitute vote until ``deadline`` (ISO 8601, UTC), on the
     conclave of comment ``conclave``; ``after`` is the latest comment id read before the wait,
     so that only a command written later counts. One substitute vote per conclave: when a
-    member is already substituted, or waits, this vote is missing, and so is the waiting one."""
+    member is already substituted, or waits, this vote is missing, and so is the waiting one;
+    when another vote is already missing (an output over the limits, a call started without a
+    result), this one is missing too, and no wait opens: two members missing leave the
+    conclave to the operator at once."""
     if record.get('substitute'):
         return missing(record, index, reason)
+    if any(vote['state'] == MISSING for i, vote in enumerate(record['votes']) if i != index):
+        return missing(record, index, f'{reason}; un altro membro non ha votato: un solo voto '
+                                      'sostitutivo per conclave')
     record['votes'][index].update(state=WAITING, missing=reason)
     record['substitute'] = {'index': index, 'member': record['votes'][index]['agent'],
                             'why': reason, 'deadline': deadline, 'conclave': conclave,
