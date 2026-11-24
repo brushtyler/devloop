@@ -130,7 +130,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(set(supervision.COORDINATOR_DELEGATED),
                          {'retry', 'rereview', 'recheck', 'fix', 'hold', 'release',
                           'grant-round', 'grant-budget', 'capacity', 'accept-defaults',
-                          'decide', 'merge', 'finding'})
+                          'decide', 'merge', 'finding', 'vote'})
         self.assertEqual(set(supervision.COORDINATOR_RESERVED),
                          {'approve', 'merge-budget', 'reconcile'})
         self.assertFalse(set(supervision.COORDINATOR_DELEGATED)

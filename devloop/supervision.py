@@ -230,9 +230,11 @@ LONG_TEXT = (DECIDE, GRANT_ROUND, GRANT_BUDGET, CAPACITY, MERGE, MERGE_BUDGET, R
 # ``budget`` escalation to the operator (``_operator_grant_budget``). ``finding`` since #606 (ADR
 # 0002, second precision of 2026-11-23, point 3): the closure of findings on an ``open_findings``
 # escalation, never of one the trust policy holds, nor while a reviewer asks for changes on the
-# head (``_coordinator_findings``).
+# head (``_coordinator_findings``). ``vote`` is the substitute vote in a conclave waiting for it
+# (#605, ADR 0002, second precision of 2026-11-23, point 3), read only there
+# (``ConclaveMixin._conclave_substitute``), never on an escalation.
 COORDINATOR_DELEGATED = (RETRY, REREVIEW, 'recheck', 'fix', 'hold', 'release', GRANT_ROUND,
-                         GRANT_BUDGET, CAPACITY, ACCEPT_DEFAULTS, DECIDE, MERGE, FINDING)
+                         GRANT_BUDGET, CAPACITY, ACCEPT_DEFAULTS, DECIDE, MERGE, FINDING, 'vote')
 COORDINATOR_RESERVED = ('approve', MERGE_BUDGET, 'reconcile')
 # The name of a command of the coordinator's identity outside ``COMMANDS`` (#528), such as
 # ``reconcile`` or ``veto``: refused on an escalation, with its name in the record of the
