@@ -721,17 +721,26 @@ class DocsTests(unittest.TestCase):
         prompt = ' '.join((PROMPT_DIR / 'advisory.md').read_text(encoding='utf-8').split())
         self.assertNotIn('never reads it to decide', prompt)
         self.assertIn('`[delegations] merge`', prompt)
-        summary = ' '.join(render_advisory_summary(advisory_record(SHA1, 'claude', 'contrario'))
-                           .split())
         advisory = {'summary': 's', 'residual_risks': [], 'operator_checks': [],
                     'overlooked': [], 'unfounded': [], 'opinion': 'contrario',
                     'opinion_reason': ''}
-        review = ' '.join(render_advisory_review(advisory, 'claude', SHA1, 'h')['body'].split())
-        for text in (summary, review):
-            self.assertNotIn('non la legge per decidere', text)
-            self.assertIn('Il parere conta solo per il merge delegato al supervisore', text)
-            self.assertIn('con `contrario`, o senza review consultiva, devloop rifiuta il '
-                          '`/devloop merge` di questo head', text)
+        record = advisory_record(SHA1, 'claude', 'contrario')
+        # In the project's language (#632): Italian, and English by default.
+        for language, says in (
+                ('Italian', ('Il parere conta solo per il merge delegato al supervisore',
+                             'con `contrario`, o senza review consultiva, devloop rifiuta il '
+                             '`/devloop merge` di questo head')),
+                (None, ('The opinion counts only for the merge delegated to the supervisor',
+                        'with `contrario`, or without an advisory review, devloop refuses the '
+                        '`/devloop merge` of this head'))):
+            extra = {'language': language} if language else {}
+            summary = ' '.join(render_advisory_summary(record, **extra).split())
+            review = ' '.join(render_advisory_review(advisory, 'claude', SHA1, 'h',
+                                                     **extra)['body'].split())
+            for text in (summary, review):
+                self.assertNotIn('non la legge per decidere', text)
+                for phrase in says:
+                    self.assertIn(phrase, text)
 
 
 if __name__ == '__main__':

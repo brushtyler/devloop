@@ -490,8 +490,10 @@ class CountingTests(unittest.TestCase):
         record = dict(self.record(2, FIRST, head=SHA2, resync=self.resync()), max_rounds=2,
                       ci='pass', summary='ok', human_reason='', blocking_findings=[],
                       non_blocking_findings=[], previous_findings=[], checks_performed=[])
-        body = markdown.render_review(record, '')
+        body = markdown.render_review(record, '', language='Italian')
         self.assertIn(f'Il round 1 aveva approvato `{SHA1[:12]}`', body)
+        # In English by default (#632).
+        self.assertIn(f'Round 1 had approved `{SHA1[:12]}`', markdown.render_review(record, ''))
 
 
 class CleanResyncTests(unittest.TestCase):

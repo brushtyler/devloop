@@ -1066,8 +1066,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
 
     def _refused_approvals(self, comments):
         """``refused_approvals`` of an issue (#483), with the apps of devloop and the
-        supervisor's identity."""
-        return refused_approvals(comments, self.cfg.trusted_users, self._devloop_logins())
+        supervisor's identity, its reasons in the project's language (#632)."""
+        return refused_approvals(comments, self.cfg.trusted_users, self._devloop_logins(),
+                                 language=self.cfg.language)
 
     def _untrusted_change(self, history):
         """``untrusted_change`` of an issue, with the admitters of its author's

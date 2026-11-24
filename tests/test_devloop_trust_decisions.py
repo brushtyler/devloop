@@ -22,7 +22,7 @@ from devloop.context import (APPROVE_COMMAND, PROMPT_DIR, approve_command,
                              format_operator_decisions, issue_decisions, refused_approvals,
                              text_changed_at, trust_policy_rule)
 from devloop.github import GitHub
-from devloop.dispatch_preflight import TRUST_QUESTION, normalize_preflight
+from devloop.dispatch_preflight import GAP_TEXTS, normalize_preflight
 from devloop.dispatcher import Dispatcher, preflight_hash
 from devloop.planning import plan
 from devloop.supervision import NON_CRITICAL, preflight_class
@@ -35,6 +35,8 @@ from test_devloop_trust_loop import OPERATOR as OPERATOR_LABEL, TrustGH, trust
 from test_devloop_zero import changes
 
 OPERATOR = 'brushtyler'
+# The question devloop writes, in the language of the tests' project (Italian, #632).
+TRUST_QUESTION = GAP_TEXTS.texts(CFG.language)('trust_question')
 SUPERVISOR_LOGIN = 'brushtyler-devloop-supervisor[bot]'
 WORKING = CFG.labels.working
 CREATED = '2026-11-19T09:00:00Z'
@@ -289,7 +291,8 @@ class PreflightTrustTests(unittest.TestCase):
 
     def test_the_question_comes_first_among_the_gaps(self):
         outcome = normalize_preflight(checked(False, [gap('default_available', 'JSON')],
-                                              trust='uncovered', reason=''))
+                                              trust='uncovered', reason=''),
+                                      language=CFG.language)
         self.assertFalse(outcome['ready'])
         self.assertEqual([g['kind'] for g in outcome['gaps']],
                          ['operator_decision', 'default_available'])
@@ -463,7 +466,8 @@ class ApproveCommandTests(unittest.TestCase):
                 with self.subTest(login=login, body=body):
                     command = comment(login=login, body=body)
                     self.assertEqual(decided([command], trusted=trusted, apps=apps), [])
-                    (refused, reason), = refused_approvals([command], trusted, set(apps))
+                    (refused, reason), = refused_approvals([command], trusted, set(apps),
+                                                            language='Italian')
                     self.assertIs(refused, command)
                     self.assertIn('l\'autore è il supervisore o un\'app', reason)
         # Any app, trusted or not.
@@ -476,7 +480,8 @@ class ApproveCommandTests(unittest.TestCase):
         for body, reason in cases:
             with self.subTest(body=body):
                 command = comment(body=body)
-                (refused, why), = refused_approvals([command], {OPERATOR}, set())
+                (refused, why), = refused_approvals([command], {OPERATOR}, set(),
+                                                    language='Italian')
                 self.assertIs(refused, command)
                 self.assertTrue(why.startswith(reason), why)
         # A command that counts, an approval without it and an untrusted author: no answer.

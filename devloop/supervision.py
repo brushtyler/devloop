@@ -77,6 +77,8 @@ left open the PR goes back to ``agent:review``, where the recorded approval is a
 
 import re
 
+from .i18n import ITALIAN, language_code
+
 # Non-critical classes: the supervisor decides them in ``auto``.
 TOOL_FAILURE = 'tool_failure'            # the agent or its model produced no result
 PREFLIGHT_DEFAULT = 'preflight_default'  # readiness gaps all ``default_available``
@@ -310,8 +312,52 @@ def retries_done(key, keys):
     return max(sum(1 for other, who in spent if other == rest and name in who) for name in names)
 
 
-def describe(cls):
-    """A short Italian description of ``cls``, for comments."""
+# The descriptions of the classes in English (#632), for the texts that already follow the
+# project's ``language``: the answer to a recheck that runs no check names the escalation that
+# holds the block. The escalations themselves still describe their class in Italian.
+_ENGLISH = {
+    TOOL_FAILURE: 'the agent or the model produced no result',
+    PREFLIGHT_DEFAULT: 'gaps of the readiness check with a proposed default',
+    SYNC_FAILED: 'sync with the base failed',
+    MERGED_ISSUE: 'issue still open, but resolved by a devloop PR already merged',
+    ROUND_GRANTABLE: 'limit of the review rounds, with one more round the supervisor may grant',
+    BUDGET_GRANTABLE: ('budget envelope of the story used up, with the one extension the '
+                       'supervisor may grant'),
+    'round_limit': 'limit of the review rounds',
+    'operator_decision': 'decision of the operator asked by the readiness check',
+    'untrusted': 'untrusted author or text changed after `agent:ready`',
+    'reviewer_decision': 'a reviewer asks for a decision of the operator',
+    'open_findings': 'open findings that no agent can close any more',
+    'review_level': 'not enough independent reviewers for the review level',
+    'level_zero': 'promotion at level 0 not possible',
+    'protected_paths': 'change to `protected_paths`',
+    'sync_sensitive': 'sync conflicts on sensitive paths',
+    'tests_failed': 'failing tests, or no change',
+    'blocked': 'the agent declared itself blocked',
+    'interrupted': 'implementation interrupted',
+    'unattributable': 'finding without an owner that can be rebuilt',
+    'lost_meta': 'marker of the PR lost',
+    'inconsistent': 'inconsistent state of the PR',
+    'receipt_conflict': 'receipt of the PR in contradiction with the markers',
+    'configuration': 'configuration to decide',
+    'failure': 'error of `gh`, of git or of the dispatcher',
+    'retry_limit': 'attempts of the supervisor used up',
+    'supervisor_escalated': 'passed to the operator by the supervisor',
+    'supervisor_refused': 'command of the supervisor not admitted for this escalation',
+    'conclave_veto': 'decision of the conclave voided by a trusted user with `/devloop veto`',
+    'uncertain_turn': 'turns without an outcome to reconcile with `/devloop reconcile`',
+    'attempt': 'attempt of the PR not confirmed by the journal, or already concluded',
+    'budget': 'turn not covered by the budget envelope of the story',
+    'host_tests': 'tests red locally on the base too, green in its CI',
+}
+_ENGLISH_UNKNOWN = 'class not recognised, hence critical'
+
+
+def describe(cls, language=None):
+    """A short description of ``cls``, for comments: in Italian, as the escalations still give
+    it; in English for a ``language`` (#632) other than Italian (``i18n.language_code``)."""
+    if language is not None and language_code(language) != ITALIAN:
+        return _ENGLISH.get(cls, _ENGLISH_UNKNOWN) if isinstance(cls, str) else _ENGLISH_UNKNOWN
     if cls == TOOL_FAILURE:
         return 'l\'agent o il modello non ha prodotto un risultato'
     if cls == PREFLIGHT_DEFAULT:

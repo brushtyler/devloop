@@ -17,8 +17,8 @@ from devloop import markdown, review
 from devloop.config import PromptFacts
 from devloop.context import (_format_findings, _template, format_previous_rounds,
                              owner_assessments, prompt_values)
-from devloop.dispatch_advisory import (UNFOUNDED_TITLE, normalize_advisory,
-                                       render_advisory_review)
+from devloop.dispatch_advisory import (TEXTS, UNFOUNDED_TITLE, advisory_titles,
+                                       normalize_advisory, render_advisory_review)
 from devloop.dispatcher import Dispatcher
 from devloop.schema import load_schema
 from helpers import ssdlc_project
@@ -31,6 +31,7 @@ from test_devloop_trust_loop import PARTS, resolving, trust
 
 ROOT = Path(__file__).resolve().parent.parent
 CONFIGS = (ssdlc_project.load(), SimpleNamespace(prompts=PromptFacts()))
+ITALIAN_UNFOUNDED = TEXTS.texts('Italian')('unfounded')
 
 
 def flat(text):
@@ -64,15 +65,15 @@ class NormalizeTests(unittest.TestCase):
                 self.assertEqual((demoted['id'], demoted['title'], demoted['without_evidence']),
                                  ('R1-1', 'unproven', True))
                 # The record says so, and the request for changes has nothing left to fix.
-                self.assertIn('senza evidenza', record['note'])
+                self.assertIn('without evidence', record['note'])  # English by default (#632)
                 self.assertIn('R1-1', record['note'])
                 # Neutral, never an approval (#481): it does not send the PR to the fix.
                 self.assertEqual(record['verdict'], review.UNPROVEN)
-                self.assertIn('non è un\'approvazione', record['note'])
+                self.assertIn('it is not an approval', record['note'])
                 self.assertEqual(review.open_findings([record]), [])
                 self.assertEqual(review.flow_verdict(record), review.UNPROVEN)
                 self.assertEqual(markdown.native_event(record), 'COMMENT')
-                body = markdown.render_review(record, 'h')
+                body = markdown.render_review(record, 'h', language='Italian')
                 self.assertIn('**Verdetto:** Nessun finding bloccante con evidenza: non '
                               'approvata', body)
                 self.assertIn('### Non bloccanti', body)
@@ -104,8 +105,10 @@ class NormalizeTests(unittest.TestCase):
                           for f in record['non_blocking_findings']],
                          [('R1-2', 'a', True), ('R1-3', 'c', False)])
         self.assertEqual(record['verdict'], 'request_changes')
-        body = markdown.render_review(record, 'h')
+        body = markdown.render_review(record, 'h', language='Italian')
         self.assertIn('*Evidenza:* `python3 x.py` fails', body)
+        # In English by default (#632).
+        self.assertIn('*Evidence:* `python3 x.py` fails', markdown.render_review(record, 'h'))
 
     def test_an_unresolved_earlier_finding_still_asks_for_changes(self):
         first = normalized(raw_review('request_changes', [finding()]))
@@ -317,22 +320,28 @@ class AdvisoryTests(unittest.TestCase):
     def test_the_advisory_prompt_asks_for_the_findings_without_evidence(self):
         self.assertIn('unfounded', load_schema('advisory')['required'])
         for cfg in CONFIGS:
-            text = flat(_template('advisory', **prompt_values(cfg), pr_number=7, repo='o/r',
-                                  language='italiano'))
-            self.assertIn('`unfounded`: the findings of the reviews below whose evidence does '
-                          'not hold, and the fixes the implementer made that were not needed',
-                          text)
-            self.assertIn(f'"{UNFOUNDED_TITLE}"', text)
+            # The section is named as the review names it, in the project's language (#632).
+            for language, title in (('italiano', ITALIAN_UNFOUNDED), ('English', UNFOUNDED_TITLE)):
+                text = flat(_template('advisory', **prompt_values(cfg), pr_number=7, repo='o/r',
+                                      **advisory_titles(language), language=language))
+                self.assertIn('`unfounded`: the findings of the reviews below whose evidence '
+                              'does not hold, and the fixes the implementer made that were not '
+                              'needed', text)
+                self.assertIn(f'"{title}"', text)
 
     def test_the_advisory_review_has_the_section(self):
         advisory = normalize_advisory(self.answer(['1/codex/R1-2: lo scenario passa.', ' ']))
         self.assertEqual(advisory['unfounded'], ['1/codex/R1-2: lo scenario passa.'])
-        body = render_advisory_review(advisory, 'codex', SHA1, 'h')['body']
-        section = re.search(rf'### {UNFOUNDED_TITLE}\n\n(.*?)\n\n###', body, re.S)
+        body = render_advisory_review(advisory, 'codex', SHA1, 'h', language='Italian')['body']
+        section = re.search(rf'### {ITALIAN_UNFOUNDED}\n\n(.*?)\n\n###', body, re.S)
         self.assertIsNotNone(section)
         self.assertEqual(section.group(1), '- 1/codex/R1-2: lo scenario passa.')
+        empty = render_advisory_review(normalize_advisory(self.answer([])), 'codex', SHA1, 'h',
+                                       language='Italian')
+        self.assertIn(f'### {ITALIAN_UNFOUNDED}\n\n_Nessuno indicato._', empty['body'])
+        # In English by default (#632).
         empty = render_advisory_review(normalize_advisory(self.answer([])), 'codex', SHA1, 'h')
-        self.assertIn(f'### {UNFOUNDED_TITLE}\n\n_Nessuno indicato._', empty['body'])
+        self.assertIn(f'### {UNFOUNDED_TITLE}\n\n_None indicated._', empty['body'])
 
 
 class AdvisoryTurnTests(AdvisoryBase):

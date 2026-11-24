@@ -30,6 +30,7 @@ from itertools import combinations
 
 from .activity import iso
 from .agents import AgentError
+from .conclave import TEXTS as CONCLAVE_TEXTS
 from .conclave import (DONE, MAX_DIFF, MAX_OPTION, MAX_OPTIONS, MAX_RESOLUTION, MAX_TEXT,
                        PENDING, STARTED, UNANIMOUS, VETO_COMMAND, VOTE_COMMAND, apply_proposal,
                        apply_substitute, apply_vote, await_substitute, calls_left, consistent,
@@ -294,15 +295,16 @@ class ConclaveMixin:
                 'head': self.gh.pr_head(pr.number) if pr is not None else None,
                 'diff': diff, 'diff_hash': text_hash(diff)}
 
-    @staticmethod
-    def _conclave_stale(record, context):
-        """Why the context frozen in ``record`` no longer holds, or ''."""
+    def _conclave_stale(self, record, context):
+        """Why the context frozen in ``record`` no longer holds, in the project's language
+        (#632), or ''."""
+        t = CONCLAVE_TEXTS.texts(self.cfg.language)
         if context['hash'] != record['issue_hash']:
-            return 'il testo dell\'issue è cambiato'
+            return t('why_issue_changed')
         if record['head'] is not None and context['head'] != record['head']:
-            return f'l\'head della PR è passato a `{(context["head"] or "")[:12]}`'
+            return t('why_head_moved', head=(context['head'] or '')[:12])
         if context['diff_hash'] != record['diff_hash']:
-            return 'le modifiche non committate dell\'agent fermo sono cambiate'
+            return t('why_diff_changed')
         return ''
 
     def _conclave_recheck(self, issue_number, view, pr, record):
@@ -310,7 +312,7 @@ class ConclaveMixin:
         try:
             return self._conclave_stale(record, self._conclave_context(issue_number, view, pr))
         except UntrustedChange as exc:
-            return f'il testo dell\'issue non è più fidato ({_short(exc)})'
+            return CONCLAVE_TEXTS.texts(self.cfg.language)('why_untrusted', error=_short(exc))
 
     def _do_conclave(self, target):
         """One step of the conclave of an issue or PR: open it, or resume it from its record,
@@ -341,10 +343,13 @@ class ConclaveMixin:
             return self._conclave_resume(number, pr, view)
         issue_number = pr.issue if pr is not None else number
         details, record, comment = view['details'], view['record'], view['comment']
+        # The reasons the record gets, in the project's language (#632).
+        language = self.cfg.language
+        t = CONCLAVE_TEXTS.texts(language)
         try:
             context, stale = self._conclave_context(issue_number, view, pr), ''
         except UntrustedChange as exc:
-            context, stale = None, f'il testo dell\'issue non è più fidato ({_short(exc)})'
+            context, stale = None, t('why_untrusted', error=_short(exc))
         if record is None:
             record = new_record(view['block'], details['step'], view['members'], issue_number,
                                 context['hash'] if context else '', details['commit'],
@@ -352,15 +357,14 @@ class ConclaveMixin:
                                 if pr is not None else None,
                                 context['diff_hash'] if context else '')
             if not stale and pr is not None and context['head'] != details['commit']:
-                stale = (f'l\'head della PR (`{(context["head"] or "")[:12]}`) non è il commit '
-                         'del blocco')
+                stale = t('why_head_not_commit', head=(context['head'] or '')[:12])
             self.log(f'  conclave opened: proposer {view["members"][0]}, voters '
                      + ', '.join(view['members'][1:]))
         else:
             stale = stale or self._conclave_stale(record, context)
-            settle_started(record)
+            settle_started(record, language)
         if stale:
-            make_stale(record, stale)
+            make_stale(record, stale, language)
         else:
             # The coordinator's substitute vote, or the end of the wait for it (#605).
             self._conclave_substitute(number, record, comments)
@@ -378,7 +382,7 @@ class ConclaveMixin:
                     # an old text of the issue.
                     stale = self._conclave_recheck(issue_number, view, pr, record)
                     if stale:
-                        make_stale(record, stale)
+                        make_stale(record, stale, language)
         record['outcome'] = outcome(record) or ''
         self._conclave_publish(number, comment, record, pr)
         self.log(f'  conclave: {record["outcome"] or "in progress"}')
@@ -395,6 +399,9 @@ class ConclaveMixin:
         #384), or not covered by the budget envelope of its story (``BudgetRefused``, #365),
         raises before anything is recorded."""
         cfg = self.cfg
+        # The reasons the record gets, in the project's language (#632).
+        language = cfg.language
+        t = CONCLAVE_TEXTS.texts(language)
         proposal = which == 'proposal'
         member = record['proposal'] if proposal else record['votes'][which]
         values = dict(prompt_values(cfg), repo=cfg.repo, issue_number=record['issue'],
@@ -412,7 +419,7 @@ class ConclaveMixin:
             text = record['proposal']['resolution']
             # The voters get exactly the recorded text: its hash must still be the one bound.
             if text_hash(text) != record['hash']:
-                missing(record, which, 'il testo della proposta non corrisponde al suo hash')
+                missing(record, which, t('why_hash_mismatch'), language)
                 return comment
             prompt = _template('conclave_vote', proposer=record['proposal']['agent'],
                                proposal=text, proposal_hash=record['hash'], **values)
@@ -439,15 +446,15 @@ class ConclaveMixin:
                                        path, label, self._conclave_allowed(record, member),
                                        where=(number, 'conclave'), note='conclave')
             except AgentError as exc:
-                why = f'agent fallito o in timeout: {_short(exc)}'
+                why = t('why_failed', error=_short(exc))
                 self.log(f'  conclave: {member["agent"]} failed: {_short(exc)}')
                 if proposal or cfg.coordinator is None:
                     # The proposer is never substituted (#605), nor any member without a
                     # coordinator.
-                    missing(record, which, why)
+                    missing(record, which, why, language)
                 else:
                     deadline = iso(self.clock() + cfg.conclave_substitute_timeout_seconds)
-                    await_substitute(record, which, why, deadline, comment, after)
+                    await_substitute(record, which, why, deadline, comment, after, language)
                     if waiting_substitute(record) is not None:
                         self.log(f'  conclave: waiting for the coordinator\'s substitute vote '
                                  f'until {deadline}')
@@ -456,9 +463,9 @@ class ConclaveMixin:
                 # on this tick or the next ones, stay distinct from it.
                 profile = self._profile(member['agent'], 'review', used)
                 if proposal:
-                    apply_proposal(record, self._redacted_proposal(raw), profile)
+                    apply_proposal(record, self._redacted_proposal(raw), profile, language)
                 else:
-                    apply_vote(record, which, raw, record['hash'], profile)
+                    apply_vote(record, which, raw, record['hash'], profile, language)
         finally:
             self.ws.remove(name)
         return comment
@@ -499,7 +506,7 @@ class ConclaveMixin:
         """Write ``record`` on issue or PR ``number``: a new comment when ``comment`` is None,
         else an edit of it. Returns the comment id; a new comment whose id is neither returned
         nor found again raises ``GitHubError``."""
-        body = render(record)
+        body = render(record, language=self.cfg.language)
         if comment is not None:
             self.gh.edit_comment(comment, body)
             return comment
@@ -514,18 +521,18 @@ class ConclaveMixin:
         return comment
 
     # The substitute vote of the coordinator (#605) ------------------------------------------
-    @staticmethod
-    def _vote_commands(comments, after):
+    def _vote_commands(self, comments, after):
         """``(comment, command)`` of the ``/devloop vote`` commands (``vote_command``) written
-        in ``comments`` after comment id ``after``, whoever wrote them, oldest first. devloop's
-        records and native reviews are never commands."""
+        in ``comments`` after comment id ``after``, whoever wrote them, oldest first, with the
+        ``error`` of a malformed one in the project's language (#632). devloop's records and
+        native reviews are never commands."""
         found = []
         for comment in comments:
             body, ident = comment.get('body') or '', comment.get('id')
             if (comment.get('native') or carries_record(body) or not isinstance(ident, int)
                     or isinstance(ident, bool) or ident <= after):
                 continue
-            command = vote_command(body)
+            command = vote_command(body, self.cfg.language)
             if command is not None:
                 found.append((comment, command))
         return sorted(found, key=lambda entry: entry[0]['id'])
@@ -562,24 +569,25 @@ class ConclaveMixin:
         substitute = waiting_substitute(record)
         if substitute is None:
             return
+        # The reasons the record gets, in the project's language (#632).
+        language = self.cfg.language
+        t = CONCLAVE_TEXTS.texts(language)
         for comment, command in self._vote_commands(comments, substitute['last']):
             ident, login = comment['id'], (comment.get('author') or {}).get('login')
             if not self._coordinator_may(login, 'vote'):
                 self.log(f'  #{number}: ignored `{VOTE_COMMAND}` by {login}: only the '
                          'coordinator\'s identity votes in place of a member')
                 continue
-            why = substitute_problem(record, command)
+            why = substitute_problem(record, command, language)
             # The comment is read as it is now: its latest change (``updated_at``), not only
             # its creation, must come before the deadline, or a comment written in time and
             # turned into a vote later would count.
             times = [_epoch(comment.get(key)) for key in ('created_at', 'updated_at')]
             deadline = _epoch(substitute['deadline'])
             if not why and (None in times or deadline is None):
-                why = ('l\'ora del comando, della sua ultima modifica o la scadenza non sono '
-                       'leggibili')
+                why = t('why_unreadable_time')
             elif not why and max(times) > deadline:
-                why = (f'scritto o modificato dopo la scadenza del voto sostitutivo '
-                       f'({substitute["deadline"]})')
+                why = t('why_late', deadline=substitute['deadline'])
             if why:
                 refuse_substitute(record, ident, why)
                 self.log(f'  #{number}: refused `{VOTE_COMMAND}` of comment {ident}: {why}')
@@ -590,7 +598,7 @@ class ConclaveMixin:
                      f'place of `{substitute["member"]}`')
             return
         if self._substitute_expired(substitute):
-            expire_substitute(record)
+            expire_substitute(record, language)
             self.log(f'  #{number}: no substitute vote by {substitute["deadline"]}: the block '
                      'stays with the operator')
 

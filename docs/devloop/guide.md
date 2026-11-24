@@ -187,8 +187,10 @@ of every PR:
   and declares in `trust_policy` whether the change the issue asks for touches the policy:
   `none`, `covered` (a decision of the operator covers it, cited in `trust_policy_reason`) or
   `uncovered`. An `uncovered` issue is not ready: devloop puts first among its gaps one of kind
-  `operator_decision` with the question "Approvi la modifica della policy di fiducia descritta
-  qui?" and the reason, and the issue goes to `agent:needs-operator` with class
+  `operator_decision` with the question "Do you approve the change to the trust policy
+  described here?" ("Approvi la modifica della policy di fiducia descritta qui?" in Italian, the
+  project's [language](reference.md#language-of-the-texts) choosing, #632) and the reason, and
+  the issue goes to `agent:needs-operator` with class
   `operator_decision`, to the operator also in `auto` mode
   ([Readiness check before implementation](#readiness-check-before-implementation)). The
   operator answers with a `/devloop approve` on the issue: the hash of the request changes and
@@ -729,7 +731,8 @@ An issue is ready only if the agent says so **and** lists no gap and no split: a
 `default_available` gap blocks too, until a trusted comment accepts the proposed default. A
 default the repository or the issue already prescribes is not a gap. An `uncovered` change to the
 trust policy is a gap of kind `operator_decision` that devloop writes itself, first, with the
-question "Approvi la modifica della policy di fiducia descritta qui?": the issue goes to the
+question "Do you approve the change to the trust policy described here?" (in the project's
+[language](reference.md#language-of-the-texts), #632): the issue goes to the
 operator, never to the supervisor; a `covered` one is shown in the comment of the check, with
 the decision it cites.
 
@@ -796,7 +799,8 @@ Any other comment after the check, with the header or not, does not stop the req
 check runs, the block is the check's again: a pass removes it, a failure keeps it. A request
 that runs no check, because the latest block is another one (an escalation of another class, for
 example), leaves the block in place: devloop logs why and answers once on the issue with a
-"Controllo di prontezza non ripetuto" comment that gives the reason. The answer spends a
+"Readiness check not run again" comment ("Controllo di prontezza non ripetuto" in Italian) that
+gives the reason. The answer spends a
 `/devloop recheck`; an `agent:ready` added again is answered once for each time it is added.
 An issue in `agent:needs-supervisor` (a recheck that failed and went to the supervisor as
 `tool_failure`, for example) runs no check either: a request there gets the same answer, naming
@@ -2191,7 +2195,7 @@ the operator gets the opinion `dubbi` or `contrario` and a first residual risk t
   [`devloop/schemas/advisory.json`](../../devloop/schemas/advisory.json): a summary of the PR,
   the residual risks, what the operator should look at, points the reviewers of the quorum may
   have missed, the findings of the quorum whose evidence does not hold and the fixes that were
-  not needed ("Finding senza evidenza o corretti senza necessità", #481), and a non-binding opinion (`ok`, `dubbi`, `contrario`). A head gets one turn,
+  not needed ("Findings without evidence or fixed without need", #481), and a non-binding opinion (`ok`, `dubbi`, `contrario`). A head gets one turn,
   even when it failed or its publication did (an action that failed before its result was kept
   gets one retry, see below); a new head gets its own while the PR is still in
   `agent:needs-operator`. The PR is read again before the turn and after it: when it is no
@@ -2215,10 +2219,12 @@ the operator gets the opinion `dubbi` or `contrario` and a first residual risk t
   review already published, is still published by the next ticks, without a turn.
 - **Where.** A native GitHub review of type `COMMENT` on the head, never `APPROVE` nor
   `REQUEST_CHANGES` (GitHub accepts a `COMMENT` from the PR's author too), with the agent's
-  identity and the title "Review consultiva: non conta per il quorum". The dispatcher then adds
-  the opinion to the current [receipt](protocol.md#pr-receipt) of the same head, if any, and
-  writes its summary for the operator ("Review consultiva per l'operatore"), with the agent and
-  the opinion only. A failed turn gets only the summary, which says so.
+  identity and the title "Advisory review: does not count for the quorum". The dispatcher then
+  adds the opinion to the current [receipt](protocol.md#pr-receipt) of the same head, if any, and
+  writes its summary for the operator ("Advisory review for the operator"), with the agent and
+  the opinion only. Titles and notes follow the project's
+  [language](reference.md#language-of-the-texts) (#632): in Italian they are "Review consultiva:
+  non conta per il quorum" and "Review consultiva per l'operatore". A failed turn gets only the summary, which says so.
 - **No effect.** It opens no round and does not count against `max_review_rounds`, creates no
   finding, changes no label and no promotion; devloop reads it to know whether a head already
   has one and to show its opinion, and for one decision only: with the

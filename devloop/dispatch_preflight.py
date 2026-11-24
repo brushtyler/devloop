@@ -15,8 +15,9 @@ from .context import (APPROVE_COMMAND, _render_issue_comments, _template,
                       format_operator_decisions, prompt_values, trust_policy_rule)
 from .dispatch_actions import Models, ready_approval
 from .dispatch_supervision import UntrustedChange
-from .markdown import (carries_record, read_marker, render_approve_refused, render_escalation,
-                       render_preflight, render_recheck)
+from .i18n import ENGLISH, Catalog
+from .markdown import (TEXTS, carries_record, read_marker, render_approve_refused,
+                       render_escalation, render_preflight, render_recheck)
 from .planning import (RECHECK_COMMAND, label_names, operator_blocked, preflight_state,
                        repository_bound)
 from .supervision import (ACCEPT_DEFAULTS, DECIDE, PREFLIGHT_DEFAULT, command_line, describe,
@@ -28,22 +29,42 @@ from .workspace import WorkspaceError
 PREFLIGHT_CLASSES = ('operator_decision', PREFLIGHT_DEFAULT)
 
 
-# The question of a readiness check to the operator on a change to the trust policy that no
+# The gaps of a readiness check that devloop writes itself, in the project's ``language``
+# (#632), when it makes the record; a record already published keeps its own.
+# ``trust_question``: the question to the operator on a change to the trust policy that no
 # decision covers (#472): the operator decides on the issue, before the implementation.
-TRUST_QUESTION = 'Approvi la modifica della policy di fiducia descritta qui?'
-# The gap of a readiness check on an issue the coordinator opened that touches the trust policy,
+# ``coordinator_gap``: the gap on an issue the coordinator opened that touches the trust policy,
 # or does not say whether it does, queued by no trusted user (#595, ``_coordinator_gate``).
-COORDINATOR_TRUST_GAP = ('L\'issue è stata aperta dal coordinatore e il controllo di prontezza '
-                         'dichiara toccata la policy di fiducia (`trust_policy` diverso da '
-                         '`none`), ma l\'ultimo `agent:ready` non è di un utente fidato: la '
-                         'mette in coda solo l\'operatore, rimettendo `agent:ready` di persona.')
-# The same gap on any other issue not opened by a trusted user, such as the supervisor's, with
-# ``[roles.coordinator]`` (#607): the coordinator's authorization does not queue it.
-AUTHORIZED_TRUST_GAP = ('L\'issue non è stata aperta da un utente fidato e il controllo di '
-                        'prontezza dichiara toccata la policy di fiducia (`trust_policy` diverso '
-                        'da `none`), ma l\'ultimo `agent:ready` non è di un utente fidato: anche '
-                        'se il coordinatore l\'ha autorizzata, la mette in coda solo '
-                        'l\'operatore, rimettendo `agent:ready` di persona.')
+# ``authorized_gap``: the same gap on any other issue not opened by a trusted user, such as the
+# supervisor's, with ``[roles.coordinator]`` (#607): the coordinator's authorization does not
+# queue it.
+GAP_TEXTS = Catalog(
+    en={
+        'trust_question': 'Do you approve the change to the trust policy described here?',
+        'coordinator_gap': ('The issue was opened by the coordinator and the readiness check '
+                            'declares the trust policy touched (`trust_policy` other than '
+                            '`none`), but the latest `agent:ready` is not a trusted user\'s: '
+                            'only the operator queues it, by adding `agent:ready` again in '
+                            'person.'),
+        'authorized_gap': ('The issue was not opened by a trusted user and the readiness check '
+                           'declares the trust policy touched (`trust_policy` other than '
+                           '`none`), but the latest `agent:ready` is not a trusted user\'s: even '
+                           'if the coordinator authorized it, only the operator queues it, by '
+                           'adding `agent:ready` again in person.'),
+    },
+    it={
+        'trust_question': 'Approvi la modifica della policy di fiducia descritta qui?',
+        'coordinator_gap': ('L\'issue è stata aperta dal coordinatore e il controllo di '
+                            'prontezza dichiara toccata la policy di fiducia (`trust_policy` '
+                            'diverso da `none`), ma l\'ultimo `agent:ready` non è di un utente '
+                            'fidato: la mette in coda solo l\'operatore, rimettendo '
+                            '`agent:ready` di persona.'),
+        'authorized_gap': ('L\'issue non è stata aperta da un utente fidato e il controllo di '
+                           'prontezza dichiara toccata la policy di fiducia (`trust_policy` '
+                           'diverso da `none`), ma l\'ultimo `agent:ready` non è di un utente '
+                           'fidato: anche se il coordinatore l\'ha autorizzata, la mette in coda '
+                           'solo l\'operatore, rimettendo `agent:ready` di persona.'),
+    })
 
 
 def devloop_text(body):
@@ -51,15 +72,16 @@ def devloop_text(body):
     return (body or '').lstrip().startswith('> [!NOTE]')
 
 
-def normalize_preflight(raw):
+def normalize_preflight(raw, language=ENGLISH):
     """The outcome of a readiness check: ready only without gaps and without a split, whatever
     the agent says (a ``default_available`` gap blocks too). A gap depends on the base branch
     (``repository_dependent``, #270) only when the agent says so.
 
     A change to the trust policy that no decision of the operator covers (``trust_policy``
     ``uncovered``, #472) is a first gap of kind ``operator_decision``, which devloop writes
-    itself: the question to the operator with the agent's reason. The schema requires the two
-    fields; an output without them (written before #472) is read as before."""
+    itself: the question to the operator, in ``language`` (the project's, #632), with the
+    agent's reason. The schema requires the two fields; an output without them (written before
+    #472) is read as before."""
     gaps = [dict(g, code_refs=list(g['code_refs']),
                  repository_dependent=g.get('repository_dependent') is True)
             for g in raw['gaps']]
@@ -69,7 +91,8 @@ def normalize_preflight(raw):
         trust = {'trust_policy': raw['trust_policy'], 'trust_policy_reason': reason}
         if raw['trust_policy'] == 'uncovered':
             gaps.insert(0, {'kind': 'operator_decision',
-                            'description': f'{TRUST_QUESTION} {reason}'.strip(),
+                            'description': (GAP_TEXTS.texts(language)('trust_question')
+                                            + f' {reason}').strip(),
                             'code_refs': [], 'proposed_default': '',
                             'repository_dependent': False})
     ready = bool(raw['ready']) and not gaps and not raw['split'].strip()
@@ -217,32 +240,28 @@ class PreflightMixin:
         devloop records) and the dispatcher wrote the only ``labeled`` event of the label
         since. Unlike ``_owns_block``, any other text after the check leaves the block to it:
         the person asking has read it. ``log`` is for the log, ``text`` for the answer on the
-        issue."""
+        issue, in the project's language (#632)."""
+        language = self.cfg.language
+        t = TEXTS.texts(language)
         if not self._owned_block(labels):
-            return ('the operator label is there under both its names',
-                    '`agent:needs-operator` è presente con entrambi i suoi nomi, e quale dei '
-                    'due sia del controllo non si può dire')
+            return ('the operator label is there under both its names', t('why_both_names'))
         if (not records or not records[-1][1]['blocked']
                 or records[-1][1].get('class') not in PREFLIGHT_CLASSES):
-            return ('the latest readiness check did not set the block',
-                    'l\'ultimo controllo di prontezza non ha messo `agent:needs-operator`, che '
-                    'era già presente')
+            return ('the latest readiness check did not set the block', t('why_not_set'))
         position, record = records[-1]
         for comment in comments[position + 1:]:
             notice = read_marker(comment.get('body', ''), 'notice')
             if (notice is not None and notice.get('class') != record['class']
                     and self._writes_records((comment.get('author') or {}).get('login'))):
                 cls = notice.get('class')
-                shown = f'`{cls}`' if isinstance(cls, str) else 'non indicata'
+                shown = f'`{cls}`' if isinstance(cls, str) else t('why_no_class')
                 return (f'an escalation of class {cls} came after the readiness check',
-                        f'dopo il controllo di prontezza c\'è un\'escalation di classe {shown} '
-                        f'({describe(cls)}): l\'ultimo blocco dell\'issue è quello, non il '
-                        'controllo di prontezza')
+                        t('why_escalation', cls=shown,
+                          described=describe(cls, language=language)))
         labelers = self._operator_labelers(number)
         if not (len(labelers) == record['labeled'] + 1 and self._wrote(labelers[-1], DISPATCHER)):
             return ('agent:needs-operator was added again after the readiness check, not by it',
-                    '`agent:needs-operator` è stato aggiunto di nuovo dopo il controllo di '
-                    'prontezza, e non dal controllo')
+                    t('why_added_again'))
         return None
 
     def _supervisor_block(self, comments, records):
@@ -258,13 +277,15 @@ class PreflightMixin:
                     (comment.get('author') or {}).get('login')):
                 cls = notice.get('class')
         label = self.cfg.labels.needs_supervisor
+        # The text in the project's language (#632).
+        language = self.cfg.language
+        t = TEXTS.texts(language)
         if not isinstance(cls, str):
             return (f'the issue waits for the supervisor ({label})',
-                    f'l\'issue è in `{label}` e attende il supervisore')
+                    t('why_supervisor', label=label))
         return (f'the issue waits for the supervisor ({label}) on an escalation of class {cls}',
-                f'l\'issue è in `{label}` e attende il supervisore, per un\'escalation di classe '
-                f'`{cls}` ({describe(cls)}): l\'ultimo blocco dell\'issue è quello, non il '
-                'controllo di prontezza')
+                t('why_supervisor_class', label=label, cls=cls,
+                  described=describe(cls, language=language)))
 
     def _answered(self, comments, records, request):
         """Whether the dispatcher already answered ``request``: a ``/devloop recheck`` is spent
@@ -422,15 +443,18 @@ class PreflightMixin:
                    for c, why in refused]
         author = self._as(agent_key, ISSUE_COMMENT)
         head = self.runner.header(agent)
+        # The comment and its notes in the project's language (#632).
+        language = self.cfg.language
+        t = TEXTS.texts(language)
         if outcome['ready']:
             if owned:
                 # Label first: if the comment is lost, the next tick checks the issue again.
                 self.gh.edit_labels(number, remove=sorted(labels & lb.operator()))
-                note = note or 'Il blocco messo dal controllo di prontezza è stato rimosso.'
+                note = note or t('note_block_removed')
             elif present:
-                note = (f'{shown} resta: non risulta messo dal controllo di prontezza, '
-                        'quindi lo rimuove una persona.')
-            author.comment(number, render_preflight(record, head, note, refused))
+                note = t('note_label_stays', labels=shown)
+            author.comment(number, render_preflight(record, head, note, refused,
+                                                    language=language))
             self.log('  ready' + (', block removed' if owned else ''))
             return
         # The class of the escalation (#182): in "auto" gaps that are all defaults go to the
@@ -440,7 +464,8 @@ class PreflightMixin:
             number, cls, 'preflight',
             key=self._issue_key('preflight', base, digest) if base else None)
         if supervised:
-            author.comment(number, render_preflight(record, head, note, refused))
+            author.comment(number, render_preflight(record, head, note, refused,
+                                                    language=language))
             self.gh.comment(number, render_escalation(
                 'Il controllo di prontezza ha trovato solo lacune con un default proposto '
                 '(`default_available`): il supervisore può accettarli con '
@@ -450,17 +475,16 @@ class PreflightMixin:
             self.log(f'  not ready: {len(record["gaps"])} gap(s), to the supervisor')
             return
         if why:
-            note = note or (f'In modalità di merge `auto` queste lacune andrebbero al supervisore, '
-                            f'ma l\'escalation resta all\'operatore: {why}.')
+            note = note or t('note_not_supervised', why=why)
         if owned:
             record.update(blocked=True, labeled=records[-1][1]['labeled'])
         elif present:
-            note = note or (f'{shown} era già presente e non è attribuito al controllo '
-                            'di prontezza: un nuovo esito positivo non lo rimuove.')
+            note = note or t('note_label_present', labels=shown)
         else:
             record.update(blocked=True, labeled=len(self._operator_labelers(number)))
         # Comment first: if the label is lost, the next tick blocks the issue again.
-        author.comment(number, render_preflight(record, head, note, refused))
+        author.comment(number, render_preflight(record, head, note, refused,
+                                                language=language))
         if record['blocked'] and not owned:
             self.gh.edit_labels(number, add=[lb.needs_operator])
         self.log(f'  not ready: {len(record["gaps"])} gap(s)')
@@ -515,13 +539,15 @@ class PreflightMixin:
                 raise
         finally:
             self.ws.remove(name)
-        outcome = self._coordinator_gate(history, normalize_preflight(raw))
+        outcome = self._coordinator_gate(history,
+                                         normalize_preflight(raw, language=self.cfg.language))
         self._publish_preflight(number, outcome, digest, agent.key, base=base,
                                 used=used, request=request, refused=refused)
 
     def _coordinator_gate(self, history, outcome):
         """``outcome`` of a readiness check, not ready with a first gap of kind
-        ``operator_decision`` (``COORDINATOR_TRUST_GAP``) on an issue the coordinator opened
+        ``operator_decision`` (``coordinator_gap`` of ``GAP_TEXTS``, in the project's language)
+        on an issue the coordinator opened
         (#595) when the check declares the trust policy touched (``trust_policy`` other than
         ``none``, or not declared: it fails closed) and the latest ``agent:ready`` of the
         issue's ``history`` is no trusted user's. Its labels and the supervisor's count there,
@@ -536,14 +562,15 @@ class PreflightMixin:
         With ``[roles.coordinator]`` the gate holds on every issue not opened by a trusted user
         (#607), such as the supervisor's: its authorization by the coordinator
         (``/devloop authorize``) does not queue a change of the trust policy, which stays the
-        operator's (``AUTHORIZED_TRUST_GAP``)."""
+        operator's (``authorized_gap``)."""
         author = history['author']
         if (self._coordinator_login() is None or author in self.cfg.trusted_users
                 or outcome.get('trust_policy') == 'none'):
             return outcome
         if ready_approval(history['labeled'], self.cfg.labels.ready, self.cfg.trusted_users):
             return outcome
-        text = COORDINATOR_TRUST_GAP if self._is_coordinator(author) else AUTHORIZED_TRUST_GAP
+        text = GAP_TEXTS.texts(self.cfg.language)(
+            'coordinator_gap' if self._is_coordinator(author) else 'authorized_gap')
         gap = {'kind': 'operator_decision', 'description': text,
                'code_refs': [], 'proposed_default': '', 'repository_dependent': False}
         return dict(outcome, ready=False, gaps=[gap, *outcome['gaps']])
@@ -568,7 +595,7 @@ class PreflightMixin:
         self.gh.comment(number, render_approve_refused(
             [c['id'] for c, _ in refused],
             [((c.get('author') or {}).get('login'), c.get('created_at'), why)
-             for c, why in refused]))
+             for c, why in refused], language=self.cfg.language))
 
     def _do_recheck_refused(self, number):
         """Answer, once, a request of a person for a new check that runs none (#468): the
@@ -582,7 +609,7 @@ class PreflightMixin:
         self.log(f'  {refused["request"]} by {refused["by"]} runs no readiness check: '
                  f'{refused["log"]}')
         record = {key: value for key, value in refused.items() if key != 'log'}
-        self.gh.comment(number, render_recheck(record))
+        self.gh.comment(number, render_recheck(record, language=self.cfg.language))
 
     def _do_preflight_block(self, number):
         """Block again an issue whose latest check, still valid for its text (and its base,
@@ -596,5 +623,4 @@ class PreflightMixin:
         outcome = {k: record[k] for k in ('ready', 'gaps', 'split', 'base', 'trust_policy',
                                           'trust_policy_reason') if k in record}
         self._publish_preflight(number, outcome, view['hash'], record['agent'],
-                                note='Esito del controllo precedente, riusato: il testo '
-                                     'dell\'issue non è cambiato.')
+                                note=TEXTS.texts(self.cfg.language)('note_reused'))

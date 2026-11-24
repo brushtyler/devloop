@@ -14,6 +14,7 @@ from pathlib import Path
 
 from .agents import AgentError, CliStateRefused, StartFailure
 from .config import LEGACY_NEEDS_OPERATOR
+from .i18n import ENGLISH, Catalog
 from .markdown import without_attribution
 from .planning import FIX_COMMAND
 from .ports import Tracker
@@ -121,14 +122,37 @@ def issue_decisions(comments, history, trusted_users, devloop_logins, working, t
     return found
 
 
-def refused_approvals(comments, trusted_users, devloop_logins):
+# Why devloop refuses a ``/devloop approve`` (``refused_approvals``), in the project's
+# ``language`` (#632): the reason the readiness check and the dispatcher's answer give.
+REFUSED_TEXTS = Catalog(
+    en={
+        'app': ('the author is the supervisor or an app: a decision on the trust policy is '
+                'taken by the operator only, in person'),
+        'header': ('the comment carries the agents\' header: it is the text of an agent or of '
+                   'the supervisor, not of the operator in person'),
+        'not_first': 'the command is not the first line of the comment',
+        'no_text': 'the text of the decision after the command is missing',
+    },
+    it={
+        'app': ('l\'autore è il supervisore o un\'app: una decisione sulla policy di fiducia '
+                'la prende solo l\'operatore, di persona'),
+        'header': ('il commento porta l\'intestazione degli agent: è il testo di un agent o '
+                   'del supervisore, non dell\'operatore di persona'),
+        'not_first': 'il comando non è la prima riga del commento',
+        'no_text': 'manca il testo della decisione dopo il comando',
+    })
+
+
+def refused_approvals(comments, trusted_users, devloop_logins, language=ENGLISH):
     """The ``APPROVE_COMMAND`` of ``comments`` that devloop refuses and says so (#483), oldest
     first, as ``(comment, reason)``: one written by an app (``_app``: the supervisor's identity,
     an app of devloop or any other), one of a trusted user after the attribution header (the
     text of an agent or of the supervisor with the operator's login), and one of a trusted user
     not on the first line of the comment or without the text of the decision. The command of
     anyone else is ignored, as any text of an untrusted author; one written outside the bounds
-    of ``issue_decisions`` simply does not count."""
+    of ``issue_decisions`` simply does not count. ``reason`` is in ``language``, the
+    project's (#632)."""
+    t = REFUSED_TEXTS.texts(language)
     found = []
     for c in comments:
         body = c.get('body') or ''
@@ -136,17 +160,15 @@ def refused_approvals(comments, trusted_users, devloop_logins):
             continue
         login = (c.get('author') or {}).get('login')
         if _app(login, devloop_logins):
-            reason = ('l\'autore è il supervisore o un\'app: una decisione sulla policy di '
-                      'fiducia la prende solo l\'operatore, di persona')
+            reason = t('app')
         elif login not in trusted_users:
             continue
         elif body.lstrip().startswith('> [!NOTE]'):
-            reason = ('il commento porta l\'intestazione degli agent: è il testo di un agent o '
-                      'del supervisore, non dell\'operatore di persona')
+            reason = t('header')
         elif approve_command(body) is None:
-            reason = 'il comando non è la prima riga del commento'
+            reason = t('not_first')
         elif not approve_command(body):
-            reason = 'manca il testo della decisione dopo il comando'
+            reason = t('no_text')
         else:
             continue
         found.append((c, reason))

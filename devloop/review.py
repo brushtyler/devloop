@@ -42,8 +42,107 @@ quorum, not by it: in a later round where every reviewer the round's receipt req
 import re
 
 from .acceptance import acceptance_findings
+from .i18n import ENGLISH, Catalog
 from .policy import receipt_of
 from .schema import load_schema, validate, with_defaults
+
+# The texts devloop writes in a new review record (#632): the notes on what it corrected, the
+# defaults of what the reviewer left out, and the review of a CI failure, in the project's
+# ``language`` (``i18n``) when the record is made. A record already published keeps them as
+# written: devloop never reads them back.
+TEXTS = Catalog(
+    en={
+        'derived': ('devloop added {count} blocking findings from the coverage map of the '
+                    'acceptance criteria.'),
+        'unproven': ('devloop recorded as non-blocking {count} findings that the reviewer gave '
+                     'as blocking without evidence ({ids}): they do not send the PR to the fix.'),
+        'not_assessed': 'Not assessed by the reviewer.',
+        'missing_previous': ('The reviewer did not assess every previous finding: the missing '
+                             'ones stay open.'),
+        'to_trust': ('Verdict corrected from {verdict} to needs_operator: the reviewer states '
+                     'that the PR touches the trust policy.'),
+        'to_changes': ('Verdict corrected from approve to request_changes: blocking findings '
+                       'stay open.'),
+        'to_unproven': ('Verdict corrected from request_changes to unproven: no blocking finding '
+                        'has evidence. It does not send the PR to the fix, but it is not an '
+                        'approval: it does not count for the quorum.'),
+        'no_findings_reason': 'The reviewer asked for changes without naming blocking findings.',
+        'inconsistent': 'Inconsistent verdict: request_changes without blocking findings.',
+        'no_trust_parts': 'The reviewer did not name the parts of the trust policy touched.',
+        'no_decision': 'The reviewer did not name the decision required.',
+        'foreign': ('The findings of other owners that the reviewer considers closed stay open '
+                    '({keys}): only who opened them, the CI or the operator closes them.'),
+        'findings_only': ('Findings-only review: the verdict counts neither for the quorum nor '
+                          'as a round of its own; the blocking findings go to the fix and the '
+                          'reviewers of the quorum close them.'),
+        # The review of a CI failure (``ci_failure_review``).
+        'ci_title': 'CI failed: {names}',
+        'ci_no_log': 'Log not available.',
+        'ci_fix': 'Fix the cause of the failure and make the CI pass.',
+        'ci_summary': ('The CI is not green ({names}). The review of the code resumes after the '
+                       'fix.'),
+        'ci_not_assessed': 'Not assessed: CI failed.',
+        # The notes of a CI failure (``ActionsMixin._do_ci_failed``).
+        'ci_voided': ('The review of round {round} approved this same commit: the failure of '
+                      'the CI voids the approval and joins its round, without opening a new one; '
+                      'the verdict of the round becomes `request_changes` and the fix answers '
+                      'the findings of the CI.'),
+        'ci_joined': ('The review of round {round} asked for changes on this same commit: the '
+                      'failure of the CI joins its round, without opening a new one, and a '
+                      'single fix answers every finding.'),
+        'ci_rerun': ('The failed jobs of this commit had already been run again once, because no '
+                     'failed module was pertinent to the PR (run {runs}; modules: {modules}). '
+                     'The new run failed too: {outcome}'),
+        'ci_no_modules': 'none',
+        'ci_rerun_joined': 'this failure joins the round.',
+        'ci_rerun_round': 'this failure counts as a round.',
+    },
+    it={
+        'derived': ('devloop ha aggiunto {count} finding bloccanti dalla mappa di copertura dei '
+                    'criteri di accettazione.'),
+        'unproven': ('devloop ha registrato come non bloccanti {count} finding che il reviewer '
+                     'indicava come bloccanti senza evidenza ({ids}): non mandano la PR in '
+                     'correzione.'),
+        'not_assessed': 'Non valutato dal reviewer.',
+        'missing_previous': ('Il reviewer non ha valutato tutti i finding precedenti: quelli '
+                             'mancanti restano aperti.'),
+        'to_trust': ('Verdetto corretto da {verdict} a needs_operator: il reviewer indica che '
+                     'la PR tocca la policy di fiducia.'),
+        'to_changes': ('Verdetto corretto da approve a request_changes: restano finding '
+                       'bloccanti aperti.'),
+        'to_unproven': ('Verdetto corretto da request_changes a unproven: nessun finding '
+                        'bloccante ha un\'evidenza. Non manda la PR in correzione, ma non è '
+                        'un\'approvazione: non conta per il quorum.'),
+        'no_findings_reason': ('Il reviewer ha chiesto modifiche senza indicare finding '
+                               'bloccanti.'),
+        'inconsistent': 'Verdetto incoerente: request_changes senza finding bloccanti.',
+        'no_trust_parts': 'Il reviewer non ha indicato le parti della policy di fiducia toccate.',
+        'no_decision': 'Il reviewer non ha indicato la decisione richiesta.',
+        'foreign': ('Restano aperti i finding di altri proprietari che il reviewer considera '
+                    'chiusi ({keys}): li chiude solo chi li ha aperti, la CI o l\'operatore.'),
+        'findings_only': ('Review di soli finding: il verdetto non conta per il quorum né come '
+                          'round a sé; i finding bloccanti vanno in correzione e li chiudono i '
+                          'reviewer del quorum.'),
+        'ci_title': 'CI fallita: {names}',
+        'ci_no_log': 'Log non disponibile.',
+        'ci_fix': 'Correggere la causa del fallimento e far passare la CI.',
+        'ci_summary': ('La CI non è verde ({names}). La review del codice riprende dopo la '
+                       'correzione.'),
+        'ci_not_assessed': 'Non valutato: CI fallita.',
+        'ci_voided': ('La review del round {round} ha approvato questo stesso commit: il '
+                      'fallimento della CI fa decadere l\'approvazione ed entra nel suo round, '
+                      'non ne apre uno nuovo; il verdetto del round diventa `request_changes` e '
+                      'la correzione risponde ai finding della CI.'),
+        'ci_joined': ('La review del round {round} ha chiesto modifiche su questo stesso '
+                      'commit: il fallimento della CI entra nel suo round, non ne apre uno '
+                      'nuovo, e una sola correzione risponde a tutti i finding.'),
+        'ci_rerun': ('I job falliti di questo commit erano già stati rilanciati una volta, '
+                     'perché nessun modulo fallito era pertinente alla PR (run {runs}; moduli: '
+                     '{modules}). Anche il rilancio è fallito: {outcome}'),
+        'ci_no_modules': 'nessuno',
+        'ci_rerun_joined': 'questo fallimento entra nel round.',
+        'ci_rerun_round': 'questo fallimento conta come round.',
+    })
 
 # The verdicts a reviewer gives: those of the schema.
 VERDICTS = ('approve', 'request_changes', 'needs_operator')
@@ -294,7 +393,7 @@ def open_findings(reviews, closures=()):
 
 
 def normalize_review(raw, *, previous_open, round_no, max_rounds, head_sha, ci, reviewer,
-                     criteria=(), acceptance_map=None, role=None):
+                     criteria=(), acceptance_map=None, role=None, language=ENGLISH):
     """Validate ``raw`` against the review schema and return a review record.
 
     ``previous_open`` comes from :func:`open_findings`. The reviewer may name a finding by its
@@ -319,15 +418,18 @@ def normalize_review(raw, *, previous_open, round_no, max_rounds, head_sha, ci, 
     ``role`` ``FINDINGS_ONLY`` (#416) records a findings-only review: its verdict acts only
     through its findings (``flow_verdict``). For a reviewer of the quorum, a findings-only
     finding it leaves ``unresolved`` counts as one of its own: it cannot approve.
+
+    ``language``: the project's (#632), of the notes devloop writes in the record and of the
+    defaults of what the reviewer left out (``TEXTS``); the reviewer's own texts are kept.
     """
+    t = TEXTS.texts(language)
     # An output without ``operator_reason`` (#434) is read as before: a ``decision``.
     raw = with_defaults('review', raw)
     validate(raw, load_schema('review'))
     notes = []
-    derived = acceptance_findings(criteria, acceptance_map)
+    derived = acceptance_findings(criteria, acceptance_map, language=language)
     if derived:
-        notes.append(f'devloop ha aggiunto {len(derived)} finding bloccanti dalla mappa di '
-                     'copertura dei criteri di accettazione.')
+        notes.append(t('derived', count=len(derived)))
     unproven = [dict(f, without_evidence=True) for f in raw['blocking_findings'] if not proven(f)]
     blocking = [dict(f, key=finding_key(round_no, reviewer, f['id']))
                 for f in _with_ids([f for f in raw['blocking_findings'] if proven(f)] + derived,
@@ -335,10 +437,8 @@ def normalize_review(raw, *, previous_open, round_no, max_rounds, head_sha, ci, 
     non_blocking = _with_ids(unproven + raw['non_blocking_findings'], round_no,
                              len(blocking) + 1)
     if unproven:
-        notes.append(f'devloop ha registrato come non bloccanti {len(unproven)} finding che il '
-                     'reviewer indicava come bloccanti senza evidenza ('
-                     + ', '.join(f['id'] for f in non_blocking[:len(unproven)])
-                     + '): non mandano la PR in correzione.')
+        notes.append(t('unproven', count=len(unproven),
+                       ids=', '.join(f['id'] for f in non_blocking[:len(unproven)])))
     ids = [f['id'] for f in previous_open]
     by_ref = {f['id']: f for f in previous_open if ids.count(f['id']) == 1}
     by_ref.update({f['key']: f for f in previous_open})
@@ -352,11 +452,11 @@ def normalize_review(raw, *, previous_open, round_no, max_rounds, head_sha, ci, 
         p = assessed.get(finding['key'])
         previous.append({'id': finding['id'], 'key': finding['key'],
                          'status': p['status'] if p else 'unresolved',
-                         'note': p['note'] if p else 'Non valutato dal reviewer.',
+                         'note': p['note'] if p else t('not_assessed'),
                          # The quorum closes it (#416): ``own_open_findings`` reads this.
                          **({'findings_only': True} if finding.get('findings_only') else {})})
     if len(assessed) < len(previous_open):
-        notes.append('Il reviewer non ha valutato tutti i finding precedenti: quelli mancanti restano aperti.')
+        notes.append(t('missing_previous'))
     unresolved = [p for p in previous if p['status'] == 'unresolved']
     # Another owner's open finding alone does not turn an approval into a request for changes
     # (#111): the dispatcher checks every finding before promoting or fixing.
@@ -374,31 +474,24 @@ def normalize_review(raw, *, previous_open, round_no, max_rounds, head_sha, ci, 
     human_reason = raw['human_reason']
     reason = raw['operator_reason']
     if reason == TRUST_POLICY and verdict != 'needs_operator':
-        notes.append(f'Verdetto corretto da {verdict} a needs_operator: il reviewer indica che la '
-                     'PR tocca la policy di fiducia.')
+        notes.append(t('to_trust', verdict=verdict))
         verdict = 'needs_operator'
     if verdict == 'approve' and (blocking or own_unresolved):
         verdict = 'request_changes'
-        notes.append('Verdetto corretto da approve a request_changes: restano finding bloccanti aperti.')
+        notes.append(t('to_changes'))
     # Another owner's open finding is not the reviewer's to fix (#111): it does not keep the
     # request for changes alive once its own blocking findings were demoted.
     elif verdict == 'request_changes' and unproven and not (blocking or own_unresolved):
         verdict = UNPROVEN
-        notes.append('Verdetto corretto da request_changes a unproven: nessun finding bloccante '
-                     'ha un\'evidenza. Non manda la PR in correzione, ma non è '
-                     'un\'approvazione: non conta per il quorum.')
+        notes.append(t('to_unproven'))
     elif verdict == 'request_changes' and not (blocking or unresolved):
         verdict = 'needs_operator'
-        human_reason = human_reason or 'Il reviewer ha chiesto modifiche senza indicare finding bloccanti.'
-        notes.append('Verdetto incoerente: request_changes senza finding bloccanti.')
+        human_reason = human_reason or t('no_findings_reason')
+        notes.append(t('inconsistent'))
     elif verdict == 'needs_operator' and not human_reason.strip():
-        human_reason = ('Il reviewer non ha indicato le parti della policy di fiducia toccate.'
-                        if reason == TRUST_POLICY
-                        else 'Il reviewer non ha indicato la decisione richiesta.')
+        human_reason = t('no_trust_parts' if reason == TRUST_POLICY else 'no_decision')
     if foreign:
-        notes.append('Restano aperti i finding di altri proprietari che il reviewer considera '
-                     'chiusi (' + ', '.join(foreign) + '): li chiude solo chi li ha aperti, la '
-                     'CI o l\'operatore.')
+        notes.append(t('foreign', keys=', '.join(foreign)))
 
     record = {
         'source': 'agent', 'reviewer': reviewer, 'verdict': verdict,
@@ -412,10 +505,7 @@ def normalize_review(raw, *, previous_open, round_no, max_rounds, head_sha, ci, 
         record['operator_reason'] = TRUST_POLICY if reason == TRUST_POLICY else DECISION
     if role == FINDINGS_ONLY:
         record['role'] = FINDINGS_ONLY
-        record['note'] = ' '.join(filter(None, [
-            'Review di soli finding: il verdetto non conta per il quorum né come round a sé; i '
-            'finding bloccanti vanno in correzione e li chiudono i reviewer del quorum.',
-            record['note']]))
+        record['note'] = ' '.join(filter(None, [t('findings_only'), record['note']]))
     return record
 
 
@@ -500,23 +590,26 @@ def trust_policy_parts(reviews):
     return [(owner_of(r), r['round'], (r.get('human_reason') or '').strip()) for r in found]
 
 
-def ci_failure_review(*, failed_checks, log_tail, previous_open, round_no, max_rounds, head_sha):
-    """A review record that sends a PR with failing CI back to the implementer."""
+def ci_failure_review(*, failed_checks, log_tail, previous_open, round_no, max_rounds, head_sha,
+                      language=ENGLISH):
+    """A review record that sends a PR with failing CI back to the implementer, its texts in
+    the project's ``language`` (#632)."""
+    t = TEXTS.texts(language)
     names = ', '.join(failed_checks) or 'CI'
     finding = {'id': f'R{round_no}-1', 'key': finding_key(round_no, CI, f'R{round_no}-1'),
                'file': '', 'line': 0,
-               'title': f'CI fallita: {names}',
-               'detail': log_tail.strip() or 'Log non disponibile.',
-               'suggested_fix': 'Correggere la causa del fallimento e far passare la CI.',
+               'title': t('ci_title', names=names),
+               'detail': log_tail.strip() or t('ci_no_log'),
+               'suggested_fix': t('ci_fix'),
                # Written by devloop, not by a reviewer (#405): a CI failure is not a security
                # finding, so that the delegation of rounds may follow a CI round.
                'security': False}
     return {
         'source': 'ci', 'reviewer': CI, 'verdict': 'request_changes',
-        'summary': f'La CI non è verde ({names}). La review del codice riprende dopo la correzione.',
+        'summary': t('ci_summary', names=names),
         'human_reason': '', 'blocking_findings': [finding], 'non_blocking_findings': [],
         'previous_findings': [{'id': f['id'], 'key': f['key'], 'status': 'unresolved',
-                               'note': 'Non valutato: CI fallita.'} for f in previous_open],
+                               'note': t('ci_not_assessed')} for f in previous_open],
         'checks_performed': [], 'round': round_no, 'max_rounds': max_rounds,
         'head_sha': head_sha, 'ci': 'fail', 'note': '',
     }

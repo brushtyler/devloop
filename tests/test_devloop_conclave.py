@@ -27,6 +27,8 @@ from test_devloop import CFG, FakeRunner, FakeWS, implemented, pr, receipt  # no
 
 MEMBERS = ('claude', 'codex', 'agy')
 CCFG = dataclasses.replace(CFG, conclave=MEMBERS)
+# The reason of a call started without a result, in the project's language (#632).
+STARTED_WITHOUT_RESULT = conclave.TEXTS.texts(CCFG.language)('why_started')
 LOGINS = FakeIdentities.LOGINS
 NEEDS_OPERATOR = 'agent:needs-operator'
 SHA2 = 'b' * 40
@@ -555,7 +557,7 @@ class ResumeTests(Base):
         self.run_conclave(times=1)
         record = self.record()
         self.assertEqual(record['outcome'], conclave.BLOCKED)
-        self.assertEqual(record['votes'][0]['missing'], conclave.STARTED_WITHOUT_RESULT)
+        self.assertEqual(record['votes'][0]['missing'], STARTED_WITHOUT_RESULT)
         self.assertEqual([c[0] for c in self.runner.calls], ['claude', 'codex', 'agy'])
 
     def test_a_conclave_out_of_slots_resumes_at_the_next_tick(self):
@@ -660,7 +662,7 @@ class ResumeTests(Base):
                           if markdown.read_marker(c['body'], 'notice')], [])
         record = self.record(7)
         self.assertEqual(record['outcome'], conclave.BLOCKED)
-        self.assertEqual(record['votes'][0]['missing'], conclave.STARTED_WITHOUT_RESULT)
+        self.assertEqual(record['votes'][0]['missing'], STARTED_WITHOUT_RESULT)
         self.assertEqual(record['votes'][1]['state'], 'done')
         self.assertEqual([c[0] for c in self.runner.calls], ['claude', 'claude', 'codex', 'agy'])
 

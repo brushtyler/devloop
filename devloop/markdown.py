@@ -25,6 +25,7 @@ from .config import INSTALL_ROOT
 from .generated import generated_record, render_generated
 from .github import GitHubError
 from .hoststep import render_step
+from .i18n import ENGLISH, ITALIAN, Catalog
 from .journal import ATTEMPT_ID, PHASES, STORY_ID
 from .policy import EVENTS, valid_receipt
 from .review import (LEGACY_VERDICT, current_verdict, findings_only, own_open_findings,
@@ -135,11 +136,290 @@ def dispatcher_header(root=INSTALL_ROOT):
     return bot_header(DISPATCHER, devloop_version(root))
 
 
+# The texts of the review, the fix and the readiness check (#632), in the project's ``language``
+# (``i18n``); English for a language without translation. Markers, commands and labels are
+# never translated.
+TEXTS = Catalog(
+    en={
+        'truncated': ('> **Text truncated:** the review exceeds the limit of 65,536 characters '
+                      'of a GitHub text, and devloop shortened only its readable part. The full '
+                      'record, with every finding, is in the marker.'),
+        # Review.
+        'verdict_approve': 'Approved',
+        'verdict_request_changes': 'Changes requested',
+        'verdict_needs_operator': 'An operator decision is needed',
+        'verdict_unproven': 'No blocking finding with evidence: not approved',
+        'verdict_trust': 'Trust policy: review and merge by the operator',
+        'status_resolved': 'resolved',
+        'status_unresolved': 'unresolved',
+        'status_withdrawn': 'withdrawn',
+        'security': ' *(security)*',
+        'without_evidence': ' *(blocking without evidence: recorded as non-blocking)*',
+        'evidence': '*Evidence:*',
+        'suggested_fix': '*Suggested fix:*',
+        'review_title': '## Automatic review, round {round}/{max_rounds}',
+        'findings_only_title': '## Findings-only review, round {round}/{max_rounds}',
+        'verdict': '**Verdict:** {verdict}  ',
+        'review_level': ('**Review level:** {level} · **Base:** `{base}` · **Policy:** '
+                         '`{policy}`'),
+        'bases': ('> The base advanced during the round ({spans}) without touching files of the '
+                  'PR: the reviews already given stay valid and the round goes on.'),
+        'restarts': ('> Round {round} was abandoned because the base advanced touching files of '
+                     'the PR, or without non-interference being provable: that round does not '
+                     'count toward the round limit.'),
+        'resync_base_changed': ('the dispatcher revoked that approval because the base advanced '
+                                'touching files of the PR, or without non-interference being '
+                                'provable, and this round reviews the same commit'),
+        'resync_conflicts': ('the new head differs from it only by the merge of the base, with '
+                             'conflicts resolved by the agent'),
+        'resync_clean': ('the new head differs from it only by the merge of the base, without '
+                         'conflicts'),
+        'resync_counts_conflicts': ('this round does not count toward the round limit if it '
+                                    'approves; if it opens blocking findings it counts'),
+        'resync_counts': 'this round does not count toward the round limit',
+        'resync': '> Round {round} had approved `{sha}`; {why}: {counts}.',
+        'trust_touched': 'Trust policy touched',
+        'decision_required': 'Decision required',
+        'trust_note': ('> The PR touches the trust policy: devloop does not stop. With open '
+                       'blocking findings the PR goes back to the implementer for the fix, as '
+                       'for a request for changes; without them, and with the CI green, it goes '
+                       'to the operator once, for the review and the merge.'),
+        'native_open': 'blocking findings of the reviewer stay open',
+        'native_none': 'no blocking finding of the reviewer stays open',
+        'native_wait_trust': 'the merge stays with the operator',
+        'native_wait': ('the decision stays with the operator, and devloop holds the PR waiting '
+                        'for it'),
+        'native': '> Native review `{native}`: {outcome}. It is not an approval of the merge: '
+                  '{wait}.',
+        'blocking': '### Blocking',
+        'non_blocking': '### Non-blocking',
+        'previous': '### Findings of the previous rounds',
+        'previous_table': '| ID | Status | Note |',
+        'checks': '<details><summary>Checks performed</summary>',
+        # Fix.
+        'action_fixed': 'fixed',
+        'action_disputed': 'disputed',
+        'action_not_applicable': 'not applicable',
+        'fix_requested_title': '## Fixes asked with `/devloop fix` on `{sha}`',
+        'comment_id': 'comment {comment}',
+        'comment': 'comment',
+        'fix_request': 'Request of `{by}` ({cited}):',
+        'fix_title': '## Fixes for round {round}',
+        'base_merge': ('Before the fix the dispatcher merged `origin/{branch}` (`{base}`) into '
+                       'the branch, without conflicts: merge commit `{head}`, pushed with the '
+                       'fix. The merge does not use up a review round.'),
+        'responses_table': '| Finding | Action | Note |',
+        'fix_conclave': ('The fix followed the resolution of the conclave recorded in comment '
+                         '{comment}.'),
+        # Readiness check.
+        'gap_operator_decision': 'Operator decision',
+        'gap_default_available': 'Default available, to be accepted',
+        'gap_tool_unavailable': 'Tool not available',
+        'preflight_resume': (
+            'To go on, a trusted user answers in the issue: they decide the open points or '
+            'accept the proposed defaults in a comment, or they change title or body. The check '
+            'runs again at the next tick; to run it again without changes, a comment with '
+            '`/devloop recheck` as its first line is enough, or `agent:ready` added again (by a '
+            'trusted user or the supervisor). If a gap depends on the content of the base '
+            'branch, the check runs again by itself when the base branch advances. If the '
+            'outcome is positive devloop removes the `agent:needs-operator` it had added and the '
+            'issue goes back to the queue.'),
+        'refused_intro': 'These commands do not count as a decision of the operator:',
+        'refused_line': '- the comment of `{login}` of {at}: {reason}.',
+        'unknown_time': 'an unknown time',
+        'refused_title': '`/devloop approve` refused',
+        'approve_rule': ('A decision on the trust policy is taken only by the operator, in '
+                         'person: a comment whose first line is `/devloop approve`, followed by '
+                         'the text of the decision, written after the latest change of the text '
+                         'of the issue and before the takeover.'),
+        'ready_title': '## Readiness check passed',
+        'ready_text': ('The issue can be implemented in one RUN: the implementation can '
+                       'start.'),
+        'not_ready_title': '## Readiness check: issue not ready',
+        'not_ready_text': 'The implementer does not start until the gaps below are resolved.',
+        'gaps': '### Gaps',
+        'gap_base': '  *Depends on the base branch:* the check runs again when it advances.',
+        'gap_refs': '  *References:* ',
+        'gap_default': '  *Proposed default:* {default}',
+        'split': '### Proposed split',
+        'no_gaps': 'The check indicated neither gaps nor a split.',
+        'trust_covered': ('**Trust policy:** touched, covered by a decision of the '
+                          'operator.'),
+        'recheck_command': 'The command `/devloop recheck`',
+        'recheck_relabeled': '`agent:ready` added again',
+        'recheck_title': '## Readiness check not run again',
+        'recheck_text': ('{what} of `{by}` does not run the readiness check again: {reason}.\n\n'
+                         'The block stays, and is resolved as its comment says. When the latest '
+                         'block of the issue is again the readiness check\'s, a new '
+                         '`/devloop recheck` runs it again.'),
+        # Why a request runs no check (``PreflightMixin._preflight_block``,
+        # ``_supervisor_block``), the ``reason`` of the ``recheck`` record.
+        'why_both_names': ('`agent:needs-operator` is there under both its names, and which of '
+                           'the two is the check\'s cannot be told'),
+        'why_not_set': ('the latest readiness check did not set `agent:needs-operator`, which '
+                        'was already there'),
+        'why_escalation': ('after the readiness check there is an escalation of class {cls} '
+                           '({described}): the latest block of the issue is that one, not the '
+                           'readiness check'),
+        'why_no_class': 'not stated',
+        'why_added_again': ('`agent:needs-operator` was added again after the readiness check, '
+                            'and not by the check'),
+        'why_supervisor': 'the issue is in `{label}` and waits for the supervisor',
+        'why_supervisor_class': ('the issue is in `{label}` and waits for the supervisor, for an '
+                                 'escalation of class `{cls}` ({described}): the latest block of '
+                                 'the issue is that one, not the readiness check'),
+        # The notes of the readiness check (``PreflightMixin._publish_preflight``).
+        'note_block_removed': 'The block set by the readiness check was removed.',
+        'note_label_stays': ('{labels} stays: it was not set by the readiness check, so a '
+                             'person removes it.'),
+        'note_not_supervised': ('In merge mode `auto` these gaps would go to the supervisor, '
+                                'but the escalation stays with the operator: {why}.'),
+        'note_label_present': ('{labels} was already there and is not attributed to the '
+                               'readiness check: a new positive outcome does not remove it.'),
+        'note_reused': ('Outcome of the previous check, reused: the text of the issue has not '
+                        'changed.'),
+    },
+    it={
+        'truncated': ('> **Testo troncato:** la review supera il limite di 65 536 caratteri di '
+                      'un testo di GitHub, e devloop ne ha accorciato solo la parte leggibile. '
+                      'Il record completo, con tutti i finding, è nel marker.'),
+        'verdict_approve': 'Approvata',
+        'verdict_request_changes': 'Modifiche richieste',
+        'verdict_needs_operator': 'Serve una decisione dell\'operatore',
+        'verdict_unproven': 'Nessun finding bloccante con evidenza: non approvata',
+        'verdict_trust': 'Policy di fiducia: review e merge dell\'operatore',
+        'status_resolved': 'risolto',
+        'status_unresolved': 'non risolto',
+        'status_withdrawn': 'ritirato',
+        'security': ' *(sicurezza)*',
+        'without_evidence': ' *(bloccante senza evidenza: registrato come non bloccante)*',
+        'evidence': '*Evidenza:*',
+        'suggested_fix': '*Correzione suggerita:*',
+        'review_title': '## Review automatica, round {round}/{max_rounds}',
+        'findings_only_title': '## Review di soli finding, round {round}/{max_rounds}',
+        'verdict': '**Verdetto:** {verdict}  ',
+        'review_level': ('**Livello di review:** {level} · **Base:** `{base}` · **Policy:** '
+                         '`{policy}`'),
+        'bases': ('> La base è avanzata durante il round ({spans}) senza toccare file della PR: '
+                  'le review già date restano valide e il round continua.'),
+        'restarts': ('> Il round {round} è stato abbandonato perché la base è avanzata toccando '
+                     'file della PR, o senza che la non interferenza fosse dimostrabile: quel '
+                     'round non conta per il limite dei round.'),
+        'resync_base_changed': ('il dispatcher ha revocato quell\'approvazione perché la base è '
+                                'avanzata toccando file della PR, o senza che la non '
+                                'interferenza fosse dimostrabile, e questo round rivede lo '
+                                'stesso commit'),
+        'resync_conflicts': ('il nuovo head ne differisce solo per il merge della base, con '
+                             'conflitti risolti dall\'agent'),
+        'resync_clean': ('il nuovo head ne differisce solo per il merge della base senza '
+                         'conflitti'),
+        'resync_counts_conflicts': ('questo round non conta per il limite dei round se approva; '
+                                    'se apre finding bloccanti conta'),
+        'resync_counts': 'questo round non conta per il limite dei round',
+        'resync': '> Il round {round} aveva approvato `{sha}`; {why}: {counts}.',
+        'trust_touched': 'Policy di fiducia toccata',
+        'decision_required': 'Decisione richiesta',
+        'trust_note': ('> La PR tocca la policy di fiducia: devloop non si ferma. Con finding '
+                       'bloccanti aperti la PR torna all\'implementer per la correzione, come per '
+                       'una richiesta di modifiche; senza, e con la CI verde, va all\'operatore '
+                       'una sola volta, per la review e il merge.'),
+        'native_open': 'restano aperti finding bloccanti del reviewer',
+        'native_none': 'non resta aperto nessun finding bloccante del reviewer',
+        'native_wait_trust': 'il merge resta all\'operatore',
+        'native_wait': ('la decisione resta all\'operatore, e devloop tiene la PR in attesa '
+                        'della sua decisione'),
+        'native': ('> Review nativa `{native}`: {outcome}. Non è un\'approvazione del merge: '
+                   '{wait}.'),
+        'blocking': '### Bloccanti',
+        'non_blocking': '### Non bloccanti',
+        'previous': '### Finding dei round precedenti',
+        'previous_table': '| ID | Stato | Nota |',
+        'checks': '<details><summary>Controlli eseguiti</summary>',
+        'action_fixed': 'corretto',
+        'action_disputed': 'contestato',
+        'action_not_applicable': 'non applicabile',
+        'fix_requested_title': '## Correzioni richieste con `/devloop fix` su `{sha}`',
+        'comment_id': 'commento {comment}',
+        'comment': 'commento',
+        'fix_request': 'Richiesta di `{by}` ({cited}):',
+        'fix_title': '## Correzioni per il round {round}',
+        'base_merge': ('Prima della correzione il dispatcher ha fatto il merge di '
+                       '`origin/{branch}` (`{base}`) nel branch, senza conflitti: merge commit '
+                       '`{head}`, pubblicato con la correzione. Il merge non consuma un round di '
+                       'review.'),
+        'responses_table': '| Finding | Azione | Nota |',
+        'fix_conclave': ('La correzione ha seguito la risoluzione del conclave registrata nel '
+                         'commento {comment}.'),
+        'gap_operator_decision': 'Decisione dell\'operatore',
+        'gap_default_available': 'Default disponibile, da accettare',
+        'gap_tool_unavailable': 'Strumento non disponibile',
+        'preflight_resume': (
+            'Per proseguire, un utente fidato risponde nella issue: decide i punti aperti o '
+            'accetta i default proposti in un commento, oppure modifica titolo o corpo. Il '
+            'controllo si ripete al tick successivo; per ripeterlo senza modifiche basta un '
+            'commento con `/devloop recheck` come prima riga, oppure rimettere `agent:ready` '
+            '(un utente fidato o il supervisore). Se una lacuna dipende dal contenuto del branch '
+            'base, il controllo si ripete da solo quando il branch base avanza. Se l\'esito è '
+            'positivo devloop rimuove `agent:needs-operator` che aveva messo e l\'issue torna in '
+            'coda.'),
+        'refused_intro': 'Questi comandi non valgono come decisione dell\'operatore:',
+        'refused_line': '- il commento di `{login}` del {at}: {reason}.',
+        'unknown_time': 'momento non noto',
+        'refused_title': '`/devloop approve` rifiutati',
+        'approve_rule': ('Una decisione sulla policy di fiducia la prende solo l\'operatore, di '
+                         'persona: un commento la cui prima riga è `/devloop approve`, seguita '
+                         'dal testo della decisione, scritto dopo l\'ultima modifica del testo '
+                         'dell\'issue e prima della presa in carico.'),
+        'ready_title': '## Controllo di prontezza superato',
+        'ready_text': ('L\'issue è implementabile in una RUN: l\'implementazione può '
+                       'partire.'),
+        'not_ready_title': '## Controllo di prontezza: issue non pronta',
+        'not_ready_text': ('L\'implementer non parte finché le lacune qui sotto non sono '
+                           'risolte.'),
+        'gaps': '### Lacune',
+        'gap_base': '  *Dipende dal branch base:* il controllo si ripete quando avanza.',
+        'gap_refs': '  *Riferimenti:* ',
+        'gap_default': '  *Default proposto:* {default}',
+        'split': '### Suddivisione proposta',
+        'no_gaps': 'Il controllo non ha indicato lacune né una suddivisione.',
+        'trust_covered': ('**Policy di fiducia:** toccata, coperta da una decisione '
+                          'dell\'operatore.'),
+        'recheck_command': 'Il comando `/devloop recheck`',
+        'recheck_relabeled': '`agent:ready` rimesso',
+        'recheck_title': '## Controllo di prontezza non ripetuto',
+        'recheck_text': ('{what} di `{by}` non ripete il controllo di prontezza: {reason}.\n\n'
+                         'Il blocco resta, e si risolve come dice il suo commento. Quando '
+                         'l\'ultimo blocco dell\'issue torna a essere quello del controllo di '
+                         'prontezza, un nuovo `/devloop recheck` lo ripete.'),
+        'why_both_names': ('`agent:needs-operator` è presente con entrambi i suoi nomi, e quale '
+                           'dei due sia del controllo non si può dire'),
+        'why_not_set': ('l\'ultimo controllo di prontezza non ha messo `agent:needs-operator`, '
+                        'che era già presente'),
+        'why_escalation': ('dopo il controllo di prontezza c\'è un\'escalation di classe {cls} '
+                           '({described}): l\'ultimo blocco dell\'issue è quello, non il '
+                           'controllo di prontezza'),
+        'why_no_class': 'non indicata',
+        'why_added_again': ('`agent:needs-operator` è stato aggiunto di nuovo dopo il controllo '
+                            'di prontezza, e non dal controllo'),
+        'why_supervisor': 'l\'issue è in `{label}` e attende il supervisore',
+        'why_supervisor_class': ('l\'issue è in `{label}` e attende il supervisore, per '
+                                 'un\'escalation di classe `{cls}` ({described}): l\'ultimo '
+                                 'blocco dell\'issue è quello, non il controllo di prontezza'),
+        'note_block_removed': 'Il blocco messo dal controllo di prontezza è stato rimosso.',
+        'note_label_stays': ('{labels} resta: non risulta messo dal controllo di prontezza, '
+                             'quindi lo rimuove una persona.'),
+        'note_not_supervised': ('In modalità di merge `auto` queste lacune andrebbero al '
+                                'supervisore, ma l\'escalation resta all\'operatore: {why}.'),
+        'note_label_present': ('{labels} era già presente e non è attribuito al controllo di '
+                               'prontezza: un nuovo esito positivo non lo rimuove.'),
+        'note_reused': ('Esito del controllo precedente, riusato: il testo dell\'issue non è '
+                        'cambiato.'),
+    })
+
 # The longest body GitHub accepts for a comment or a review, in characters.
 MAX_BODY = 65536
-TRUNCATED = ('> **Testo troncato:** la review supera il limite di 65 536 caratteri di un testo di '
-             'GitHub, e devloop ne ha accorciato solo la parte leggibile. Il record completo, '
-             'con tutti i finding, è nel marker.')
+# The notice of a review cut short, in English (``TEXTS``: ``truncated`` in every language).
+TRUNCATED = TEXTS.tables[ENGLISH]['truncated']
 
 
 class BodyTooLong(GitHubError):
@@ -639,17 +919,9 @@ def carries_record(text):
     return any(read_marker(text, kind) is not None for kind in _VALID)
 
 
-_VERDICT_TEXT = {
-    'approve': 'Approvata',
-    'request_changes': 'Modifiche richieste',
-    'needs_operator': 'Serve una decisione dell\'operatore',
-    # #481: a request for changes whose blocking findings all lacked evidence.
-    'unproven': 'Nessun finding bloccante con evidenza: non approvata',
-}
-# A ``needs_operator`` for the trust policy (#434).
-_TRUST_TEXT = 'Policy di fiducia: review e merge dell\'operatore'
-_STATUS_TEXT = {'resolved': 'risolto', 'unresolved': 'non risolto', 'withdrawn': 'ritirato'}
-_ACTION_TEXT = {'fixed': 'corretto', 'disputed': 'contestato', 'not_applicable': 'non applicabile'}
+# The verdicts of a review record; their texts are ``verdict_<verdict>`` of ``TEXTS``.
+# #481: ``unproven``, a request for changes whose blocking findings all lacked evidence.
+_VERDICT_TEXT = ('approve', 'request_changes', 'needs_operator', 'unproven')
 
 
 def _location(finding):
@@ -659,113 +931,99 @@ def _location(finding):
     return f' `{finding["file"]}{line}`'
 
 
-def _findings(findings):
+def _findings(t, findings):
     lines = []
     for f in findings:
         # A finding the reviewer marked as one of security (#405, ADR 0005, D5).
-        tag = ' *(sicurezza)*' if f.get('security') is True else ''
+        tag = t('security') if f.get('security') is True else ''
         # A blocking finding without evidence, recorded as non-blocking (#481).
         if f.get('without_evidence') is True:
-            tag += ' *(bloccante senza evidenza: registrato come non bloccante)*'
+            tag += t('without_evidence')
         lines.append(f'- **{f.get("key") or f["id"]}**{_location(f)}: {f["title"]}{tag}')
         if f['detail']:
             lines.append(f'  {f["detail"]}'.replace('\n', '\n  '))
         if isinstance(f.get('evidence'), str) and f['evidence'].strip():
-            lines.append(f'  *Evidenza:* {f["evidence"].strip()}'.replace('\n', '\n  '))
+            lines.append(f'  {t("evidence")} {f["evidence"].strip()}'.replace('\n', '\n  '))
         if f['suggested_fix']:
-            lines.append(f'  *Correzione suggerita:* {f["suggested_fix"]}'.replace('\n', '\n  '))
+            lines.append(f'  {t("suggested_fix")} {f["suggested_fix"]}'.replace('\n', '\n  '))
     return '\n'.join(lines)
 
 
-def render_review(review, head, native=None):
+def render_review(review, head, native=None, language=ENGLISH):
     """Markdown body (after the header) for a normalized review record. ``native``: the event
-    of the native review that carries it, stated for a ``needs_operator`` verdict (#418)."""
+    of the native review that carries it, stated for a ``needs_operator`` verdict (#418).
+    ``language``: the project's (#632), of the readable text; the record is the same."""
+    t = TEXTS.texts(language)
     trust = trust_policy(review)
-    verdict = _TRUST_TEXT if trust else _VERDICT_TEXT[review['verdict']]
-    parts = [f'## Review automatica, round {review["round"]}/{review["max_rounds"]}', '',
-             f'**Verdetto:** {verdict}  ',
+    # A ``needs_operator`` for the trust policy (#434).
+    verdict = t('verdict_trust') if trust else t(f'verdict_{review["verdict"]}')
+    title = 'findings_only_title' if findings_only(review) else 'review_title'
+    parts = [t(title, round=review['round'], max_rounds=review['max_rounds']), '',
+             t('verdict', verdict=verdict),
              f'**Commit:** `{review["head_sha"][:12]}` · **CI:** {review["ci"]}']
     receipt = review.get('receipt')
     if valid_receipt(receipt):
         parts[-1] += '  '
-        parts.append(f'**Livello di review:** {receipt["level"]} · **Base:** '
-                     f'`{receipt["base"][:12]}` · **Policy:** `{receipt["policy"][:12]}`')
-    if findings_only(review):
-        parts[0] = (f'## Review di soli finding, round {review["round"]}/'
-                    f'{review["max_rounds"]}')
+        parts.append(t('review_level', level=receipt['level'], base=receipt['base'][:12],
+                       policy=receipt['policy'][:12]))
     if review.get('note'):
         parts += ['', f'> {review["note"]}']
     # #160: the base advanced during the round.
     if review.get('bases'):
         spans = ', '.join(f'`{c["from"][:12]}` → `{c["to"][:12]}`' for c in review['bases'])
-        parts += ['', f'> La base è avanzata durante il round ({spans}) senza toccare file della '
-                      'PR: le review già date restano valide e il round continua.']
+        parts += ['', t('bases', spans=spans)]
     if review.get('restarts'):
-        parts += ['', f'> Il round {review["restarts"]["round"]} è stato abbandonato perché la '
-                      'base è avanzata toccando file della PR, o senza che la non interferenza '
-                      'fosse dimostrabile: quel round non conta per il limite dei round.']
+        parts += ['', t('restarts', round=review['restarts']['round'])]
     # #235: the approved head was synced with the base, without conflicts.
     # #252: the same head again, after the base touching the PR revoked its approval.
     # #458: the approved head was synced with the base, with conflicts the implementer resolved.
     if review.get('resync'):
         reason = review['resync'].get('reason')
-        why = ('il dispatcher ha revocato quell\'approvazione perché la base è avanzata toccando '
-               'file della PR, o senza che la non interferenza fosse dimostrabile, e questo '
-               'round rivede lo stesso commit'
-               if reason == 'base_changed'
-               else 'il nuovo head ne differisce solo per il merge della base, con conflitti '
-                    'risolti dall\'agent' if reason == 'resync_conflicts'
-               else 'il nuovo head ne differisce solo per il merge della base senza conflitti')
-        counts = ('questo round non conta per il limite dei round se approva; se apre finding '
-                  'bloccanti conta' if reason == 'resync_conflicts'
-                  else 'questo round non conta per il limite dei round')
-        parts += ['', f'> Il round {review["resync"]["round"]} aveva approvato '
-                      f'`{review["resync"]["from"][:12]}`; {why}: {counts}.']
-    parts +=['', review['summary'].strip()]
+        why = t('resync_base_changed' if reason == 'base_changed'
+                else 'resync_conflicts' if reason == 'resync_conflicts' else 'resync_clean')
+        counts = t('resync_counts_conflicts' if reason == 'resync_conflicts'
+                   else 'resync_counts')
+        parts += ['', t('resync', round=review['resync']['round'],
+                        sha=review['resync']['from'][:12], why=why, counts=counts)]
+    parts += ['', review['summary'].strip()]
     if review['verdict'] == 'needs_operator' and review['human_reason']:
-        title = 'Policy di fiducia toccata' if trust else 'Decisione richiesta'
+        title = t('trust_touched') if trust else t('decision_required')
         parts += ['', f'### {title}', '', review['human_reason'].strip()]
     if trust:
         # #434: the loop goes on; only the merge is the operator's.
-        parts += ['', '> La PR tocca la policy di fiducia: devloop non si ferma. Con finding '
-                      'bloccanti aperti la PR torna all\'implementer per la correzione, come per '
-                      'una richiesta di modifiche; senza, e con la CI verde, va all\'operatore '
-                      'una sola volta, per la review e il merge.']
+        parts += ['', t('trust_note')]
     if review['verdict'] == 'needs_operator' and native:
-        outcome = ('restano aperti finding bloccanti del reviewer'
-                   if native == 'REQUEST_CHANGES'
-                   else 'non resta aperto nessun finding bloccante del reviewer')
-        wait = ('il merge resta all\'operatore' if trust
-                else 'la decisione resta all\'operatore, e devloop tiene la PR in attesa della '
-                     'sua decisione')
-        parts += ['', f'> Review nativa `{native}`: {outcome}. Non è un\'approvazione del merge: '
-                      f'{wait}.']
+        outcome = t('native_open' if native == 'REQUEST_CHANGES' else 'native_none')
+        wait = t('native_wait_trust' if trust else 'native_wait')
+        parts += ['', t('native', native=native, outcome=outcome, wait=wait)]
     if review['blocking_findings']:
-        parts += ['', '### Bloccanti', '', _findings(review['blocking_findings'])]
+        parts += ['', t('blocking'), '', _findings(t, review['blocking_findings'])]
     if review['non_blocking_findings']:
-        parts += ['', '### Non bloccanti', '', _findings(review['non_blocking_findings'])]
+        parts += ['', t('non_blocking'), '', _findings(t, review['non_blocking_findings'])]
     if review['previous_findings']:
-        parts += ['', '### Finding dei round precedenti', '', '| ID | Stato | Nota |', '|---|---|---|']
+        parts += ['', t('previous'), '', t('previous_table'), '|---|---|---|']
         for p in review['previous_findings']:
             note = p['note'].replace('|', '\\|').replace('\n', ' ')
-            parts.append(f'| {p.get("key") or p["id"]} | {_STATUS_TEXT[p["status"]]} | {note} |')
+            parts.append(f'| {p.get("key") or p["id"]} | {t("status_" + p["status"])} | '
+                         f'{note} |')
     if review['checks_performed']:
-        parts += ['', '<details><summary>Controlli eseguiti</summary>', '']
+        parts += ['', t('checks'), '']
         parts += [f'- {c}' for c in review['checks_performed']]
         parts += ['', '</details>']
-    return fitted(head, '\n'.join(parts), 'review', review)
+    return fitted(head, '\n'.join(parts), 'review', review, language=language)
 
 
-def fitted(head, text, kind, payload, limit=MAX_BODY):
+def fitted(head, text, kind, payload, limit=MAX_BODY, language=ENGLISH):
     """``publishable(head + text)`` with its marker, within ``limit`` characters (#325). A
     longer body keeps the header and the marker whole and cuts only ``text``, the readable part,
-    followed by ``TRUNCATED``. When header, notice and marker alone exceed ``limit`` it raises
-    ``BodyTooLong``: nothing of the record is dropped, and nothing else is published."""
+    followed by the notice ``truncated`` of ``TEXTS`` in ``language``. When header, notice and
+    marker alone exceed ``limit`` it raises ``BodyTooLong``: nothing of the record is dropped,
+    and nothing else is published."""
     body = publishable(head + '\n' + text, kind, payload)
     if len(body) <= limit:
         return body
     top = neutralize(head).rstrip('\n') + '\n'
-    tail = '\n\n' + TRUNCATED + '\n\n' + marker(kind, payload) + '\n'
+    tail = '\n\n' + TEXTS.texts(language)('truncated') + '\n\n' + marker(kind, payload) + '\n'
     room = limit - len(top) - len(tail)
     if room < 0:
         raise BodyTooLong(f'the {kind} record does not fit the {limit} characters of a GitHub '
@@ -799,38 +1057,40 @@ def native_event(review):
     return _REVIEW_EVENT[verdict]
 
 
-def render_native_review(review, head):
+def render_native_review(review, head, language=ENGLISH):
     """``{event, body}`` of the GitHub review of an agent with an app of its own (#325): the
     whole review with its marker (``render_review``), the record devloop reads, and the event
     of ``native_event`` for GitHub and branch protection."""
     event = native_event(review)
-    return {'event': event, 'body': render_review(review, head, native=event)}
+    return {'event': event,
+            'body': render_review(review, head, native=event, language=language)}
 
 
-def render_fix(fix, head, round_no):
+def render_fix(fix, head, round_no, language=ENGLISH):
+    """The comment of a fix, its readable text in ``language`` (#632) and its ``fix`` record."""
+    t = TEXTS.texts(language)
     requests = fix.get('requests') or []
     if requests:
         # A fix asked with /devloop fix (#195): it cites the comments that asked for it.
-        parts = [f'## Correzioni richieste con `/devloop fix` su `{fix["from"][:12]}`', '']
+        parts = [t('fix_requested_title', sha=fix['from'][:12]), '']
         for r in requests:
-            cited = f'commento {r["comment"]}' if r.get('comment') is not None else 'commento'
-            parts += [f'Richiesta di `{r["by"]}` ({cited}):', '',
+            cited = (t('comment_id', comment=r['comment']) if r.get('comment') is not None
+                     else t('comment'))
+            parts += [t('fix_request', by=r['by'], cited=cited), '',
                       '\n'.join('> ' + line for line in r['request'].splitlines()), '']
         parts.append(fix['summary'].strip())
     else:
-        parts = [f'## Correzioni per il round {round_no}', '', fix['summary'].strip()]
+        parts = [t('fix_title', round=round_no), '', fix['summary'].strip()]
     merged = fix.get('base_merge')
     if merged:
         # The base merged into the branch before the fix (#250), pushed with it.
-        parts += ['', f'Prima della correzione il dispatcher ha fatto il merge di '
-                      f'`origin/{merged["branch"]}` (`{merged["base"][:12]}`) nel branch, senza '
-                      f'conflitti: merge commit `{merged["head"][:12]}`, pubblicato con la '
-                      'correzione. Il merge non consuma un round di review.']
+        parts += ['', t('base_merge', branch=merged['branch'], base=merged['base'][:12],
+                        head=merged['head'][:12])]
     if fix['responses']:
-        parts += ['', '| Finding | Azione | Nota |', '|---|---|---|']
+        parts += ['', t('responses_table'), '|---|---|---|']
         for r in fix['responses']:
             note = r['note'].replace('|', '\\|').replace('\n', ' ')
-            parts.append(f'| {r["finding_id"]} | {_ACTION_TEXT[r["action"]]} | {note} |')
+            parts.append(f'| {r["finding_id"]} | {t("action_" + r["action"])} | {note} |')
     payload = {'round': round_no, 'head_sha': fix['head_sha'], 'responses': fix['responses']}
     if requests:
         payload['requests'] = [{'comment': r.get('comment'), 'by': r['by'],
@@ -858,82 +1118,75 @@ def render_fix(fix, head, round_no):
         payload.update(generated_record(fix['generated_files']))
     if fix.get('conclave') is not None:
         # The conclave decision whose resolution the fix had (#142).
-        parts += ['', f'La correzione ha seguito la risoluzione del conclave registrata nel '
-                      f'commento {fix["conclave"]}.']
+        parts += ['', t('fix_conclave', comment=fix['conclave'])]
         payload['conclave'] = fix['conclave']
     return publishable(head + '\n' + '\n'.join(parts), 'fix', payload)
 
 
-_GAP_TEXT = {'operator_decision': 'Decisione dell\'operatore',
-             'default_available': 'Default disponibile, da accettare',
-             'tool_unavailable': 'Strumento non disponibile'}
-PREFLIGHT_RESUME = (
-    'Per proseguire, un utente fidato risponde nella issue: decide i punti aperti o accetta i '
-    'default proposti in un commento, oppure modifica titolo o corpo. Il controllo si ripete al '
-    'tick successivo; per ripeterlo senza modifiche basta un commento con `/devloop recheck` '
-    'come prima riga, oppure rimettere `agent:ready` (un utente fidato o il supervisore). Se '
-    'una lacuna dipende dal contenuto del branch base, il controllo si ripete da solo quando il '
-    'branch base avanza. Se l\'esito è positivo devloop rimuove `agent:needs-operator` che aveva '
-    'messo e l\'issue torna in coda.')
+# What resumes an issue the readiness check blocked, as the escalations to the operator still
+# say it (``dispatch_supervision``): in Italian until #628 translates them.
+PREFLIGHT_RESUME = TEXTS.tables[ITALIAN]['preflight_resume']
 
 
-def _refused_lines(refused):
+def preflight_resume(language=ENGLISH):
+    """What resumes an issue the readiness check blocked, in ``language`` (#632)."""
+    return TEXTS.texts(language)('preflight_resume')
+
+
+def _refused_lines(t, refused):
     """The lines that answer the ``/devloop approve`` refused (#483), ``(login, time,
     reason)``."""
-    return ['Questi comandi non valgono come decisione dell\'operatore:', '',
-            *(f'- il commento di `{login}` del {at or "momento non noto"}: {reason}.'
+    return [t('refused_intro'), '',
+            *(t('refused_line', login=login, at=at or t('unknown_time'), reason=reason)
               for login, at, reason in refused)]
 
 
-def render_approve_refused(ids, refused):
+def render_approve_refused(ids, refused, language=ENGLISH):
     """The dispatcher's answer to the ``/devloop approve`` it refuses when no readiness check
     answers them (#483), with an ``approve`` marker that names the comments ``ids``: each is
-    answered once. ``refused``: ``(login, time, reason)``, as ``render_preflight`` shows them."""
+    answered once. ``refused``: ``(login, time, reason)``, as ``render_preflight`` shows them.
+    ``language``: the project's (#632), of the readable text."""
+    t = TEXTS.texts(language)
     return publishable(
-        dispatcher_header() + '\n## `/devloop approve` rifiutati\n\n'
-        + '\n'.join(_refused_lines(refused)) + '\n\n'
-        'Una decisione sulla policy di fiducia la prende solo l\'operatore, di persona: un '
-        'commento la cui prima riga è `/devloop approve`, seguita dal testo della decisione, '
-        'scritto dopo l\'ultima modifica del testo dell\'issue e prima della presa in carico.\n',
+        dispatcher_header() + f'\n## {t("refused_title")}\n\n'
+        + '\n'.join(_refused_lines(t, refused)) + '\n\n' + t('approve_rule') + '\n',
         'approve', {'comments': list(ids)})
 
 
-def render_preflight(record, head, note='', refused=()):
+def render_preflight(record, head, note='', refused=(), language=ENGLISH):
     """The comment of a readiness check (#114): ``record`` is its ``preflight`` marker.
     ``refused``: the ``/devloop approve`` the check did not count as decisions of the operator
-    (#483), as ``(login, time, reason)``, answered here; they are not part of the record."""
+    (#483), as ``(login, time, reason)``, answered here; they are not part of the record.
+    ``language``: the project's (#632), of the readable text; the record is the same."""
+    t = TEXTS.texts(language)
     if record['ready']:
-        parts = ['## Controllo di prontezza superato', '',
-                 'L\'issue è implementabile in una RUN: l\'implementazione può partire.']
+        parts = [t('ready_title'), '', t('ready_text')]
     else:
-        parts = ['## Controllo di prontezza: issue non pronta', '',
-                 'L\'implementer non parte finché le lacune qui sotto non sono risolte.']
+        parts = [t('not_ready_title'), '', t('not_ready_text')]
         if record['gaps']:
-            parts += ['', '### Lacune', '']
+            parts += ['', t('gaps'), '']
             for gap in record['gaps']:
-                parts.append(f'- **{_GAP_TEXT[gap["kind"]]}:** {gap["description"].strip()}'
+                parts.append(f'- **{t("gap_" + gap["kind"])}:** {gap["description"].strip()}'
                              .replace('\n', '\n  '))
                 if gap.get('repository_dependent'):
-                    parts.append('  *Dipende dal branch base:* il controllo si ripete quando '
-                                 'avanza.')
+                    parts.append(t('gap_base'))
                 if gap['code_refs']:
-                    parts.append('  *Riferimenti:* ' + ', '.join(f'`{ref}`'
-                                                                 for ref in gap['code_refs']))
+                    parts.append(t('gap_refs') + ', '.join(f'`{ref}`'
+                                                           for ref in gap['code_refs']))
                 if gap['proposed_default'].strip():
-                    parts.append(f'  *Default proposto:* {gap["proposed_default"].strip()}'
+                    parts.append(t('gap_default', default=gap['proposed_default'].strip())
                                  .replace('\n', '\n  '))
         if record['split'].strip():
-            parts += ['', '### Suddivisione proposta', '', record['split'].strip()]
+            parts += ['', t('split'), '', record['split'].strip()]
         if not record['gaps'] and not record['split'].strip():
-            parts += ['', 'Il controllo non ha indicato lacune né una suddivisione.']
-        parts += ['', PREFLIGHT_RESUME]
+            parts += ['', t('no_gaps')]
+        parts += ['', t('preflight_resume')]
     if record.get('trust_policy') == 'covered':
         # #472: the decision of the operator the check found for the trust policy, shown.
         reason = record.get('trust_policy_reason', '').strip()
-        parts += ['', '**Policy di fiducia:** toccata, coperta da una decisione dell\'operatore.'
-                      + (f' {reason}' if reason else '')]
+        parts += ['', t('trust_covered') + (f' {reason}' if reason else '')]
     if refused:
-        parts += ['', '### `/devloop approve` rifiutati', '', *_refused_lines(refused)]
+        parts += ['', f'### {t("refused_title")}', '', *_refused_lines(t, refused)]
     if note:
         parts += ['', f'> {note}']
     return publishable(head + '\n' + '\n'.join(parts), 'preflight', record)
@@ -1010,18 +1263,16 @@ def render_cycle(record):
         'cycle', record)
 
 
-def render_recheck(record):
+def render_recheck(record, language=ENGLISH):
     """The dispatcher's answer to a request for a new readiness check that starts none (#468),
-    with a ``recheck`` marker: each request is answered once."""
-    what = ('Il comando `/devloop recheck`' if record['request'] == 'recheck'
-            else '`agent:ready` rimesso')
+    with a ``recheck`` marker: each request is answered once. ``language``: the project's
+    (#632), of the readable text; the ``reason`` of the record is shown as recorded, composed in
+    the same language by the dispatcher (``why_*`` of ``TEXTS``)."""
+    t = TEXTS.texts(language)
+    what = t('recheck_command' if record['request'] == 'recheck' else 'recheck_relabeled')
     return publishable(
-        dispatcher_header() + '\n## Controllo di prontezza non ripetuto\n\n'
-        f'{what} di `{record["by"]}` non ripete il controllo di prontezza: '
-        f'{record["reason"]}.\n\n'
-        'Il blocco resta, e si risolve come dice il suo commento. Quando l\'ultimo blocco '
-        'dell\'issue torna a essere quello del controllo di prontezza, un nuovo '
-        '`/devloop recheck` lo ripete.\n',
+        dispatcher_header() + f'\n{t("recheck_title")}\n\n'
+        + t('recheck_text', what=what, by=record['by'], reason=record['reason']) + '\n',
         'recheck', record)
 
 

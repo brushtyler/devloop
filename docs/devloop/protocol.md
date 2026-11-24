@@ -370,7 +370,9 @@ again keeps the `base` of its record.
 Since #472 the marker also records `trust_policy` (`none`, `covered` or `uncovered`) and
 `trust_policy_reason`, the check's declaration on the trust policy. An `uncovered` outcome is
 never ready: its first gap, of kind `operator_decision`, is written by devloop with the question
-"Approvi la modifica della policy di fiducia descritta qui?" followed by the reason, so the class
+"Do you approve the change to the trust policy described here?" ("Approvi la modifica della
+policy di fiducia descritta qui?" in Italian, the project's
+[language](reference.md#language-of-the-texts) choosing, #632) followed by the reason, so the class
 of the escalation is `operator_decision`. Records written before #472 lack both fields and are
 read as `none`; a reused outcome keeps them.
 
@@ -797,7 +799,7 @@ blocking finding whose `security` is not `false`, a finding of a review written 
 included, keeps a PR at the round limit with the operator: the supervisor may not
 [grant it a round](guide.md#granting-a-review-round). The findings devloop writes itself, of a CI
 failure and of the acceptance map, carry `security: false`; the published review marks a
-security finding with *(sicurezza)*.
+security finding with *(security)* (*(sicurezza)* in Italian).
 
 **Evidence** (#481). A blocking finding also carries `evidence`, required by the schema of the
 blocking findings only: what shows the defect, so that the implementer can verify it. That is
@@ -808,8 +810,8 @@ records a blocking finding whose `evidence` is empty, or only blanks, among the 
 findings of the review, with `without_evidence: true`, and the `note` of the record names it: it
 opens no finding and does not send the PR to the fix. A finding with `security: true` stays
 blocking without evidence too: in doubt, the rule fails closed. The published review shows the
-evidence of each finding (*Evidenza:*) and marks a demoted one *(bloccante senza evidenza:
-registrato come non bloccante)*; the fix prompt and the previous rounds of the next review show
+evidence of each finding (*Evidence:*, *Evidenza:* in Italian) and marks a demoted one
+*(blocking without evidence: recorded as non-blocking)*; the fix prompt and the previous rounds of the next review show
 it as `Evidence:`. The previous rounds, which the review and the advisory review read, also list
 each review's assessments of the earlier findings and its findings demoted for lack of evidence
 ("Blocking findings without evidence"); the fix prompt shows, under each open finding, the
@@ -962,15 +964,20 @@ review stays out of the conversation, as before.
 
 **Advisory review** (#369). The [advisory review](guide.md#advisory-review-for-the-operator) of a
 PR in `agent:needs-operator` is always a native review of type `COMMENT`, with the identity of
-the agent of `advisory_reviewer` (its app, or the ambient login without one), titled "Review
-consultiva: non conta per il quorum". The agent answers with JSON validated against
+the agent of `advisory_reviewer` (its app, or the ambient login without one), titled "Advisory
+review: does not count for the quorum" ("Review consultiva: non conta per il quorum" in Italian,
+the project's [language](reference.md#language-of-the-texts) choosing, #632). The agent answers
+with JSON validated against
 [`devloop/schemas/advisory.json`](../../devloop/schemas/advisory.json) (prompt
-`devloop/prompts/advisory.md`); since #481 its `unfounded` field lists the findings of the
-quorum whose evidence does not hold and the fixes that were not needed, shown in the section
-"Finding senza evidenza o corretti senza necessità". Its body ends with an `advisory` marker, never a `review`
-one: `head`, `reviewer`, `outcome` (`done`) and `opinion` (`ok`, `dubbi`, `contrario`). It is
+`devloop/prompts/advisory.md`, which names the titles in the same language); since #481 its
+`unfounded` field lists the findings of the quorum whose evidence does not hold and the fixes
+that were not needed, shown in the section "Findings without evidence or fixed without need"
+("Finding senza evidenza o corretti senza necessità"). Its body ends with an `advisory` marker,
+never a `review` one: `head`, `reviewer`, `outcome` (`done`) and `opinion` (`ok`, `dubbi`,
+`contrario`, in every language). It is
 never part of the PR's conversation as the review records see it, so it is no round, no verdict
-and no finding. The dispatcher's summary of it ("Review consultiva per l'operatore") ends with
+and no finding. The dispatcher's summary of it ("Advisory review for the operator", "Review
+consultiva per l'operatore" in Italian) ends with
 an `advisory` marker too, with the same fields, or `outcome: failed` and `opinion: null` when
 the turn failed: only the dispatcher's identity writes it, and it carries no text of the agent.
 A head has its advisory review once it has that summary, written last. A published native
@@ -984,7 +991,7 @@ every finding, and counts them as if all its rounds were comments.
 
 **Length.** GitHub accepts at most 65 536 characters in the body of a comment or a review. A
 longer review keeps its header and its marker whole, with every finding, and only its readable
-text is cut, followed by a notice (`Testo troncato`). When header, notice and marker alone exceed
+text is cut, followed by a notice (`Text truncated`, `Testo troncato` in Italian). When header, notice and marker alone exceed
 the limit, nothing is published and the step escalates (`failure`): no finding is dropped and no
 other comment is written in its place. The same rule applies to the review comment of an agent
 without an app.
@@ -1414,7 +1421,7 @@ the same content as a record of its own:
 - the `sync` event of the merge of the base the dispatcher made before the fix (#250), when it
   made one, written once the merge is pushed with the fix.
 
-With the implementer's "Correzioni per il round N" comment, which has another author and stays
+With the implementer's "Fixes for round N" comment ("Correzioni per il round N" in Italian), which has another author and stays
 apart, a fix leaves two elements in the PR's timeline instead of four. The rules of the
 [round register](#round-register) apply: the register is created with the first turn, `open`,
 before the CLI starts (if that write fails the turn does not start); every write re-reads it from
