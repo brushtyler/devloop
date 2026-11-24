@@ -541,8 +541,12 @@ ops_load_params() {
     # COORDINATOR_WAIT_PERIOD, se params.env lo scrive (#543).
     : "${ROLE_WAIT_PERIOD:=3600}"
     : "${COORDINATOR_WAIT_PERIOD:=$ROLE_WAIT_PERIOD}"
-    # L'istanza del watchdog dei ruoli (#602): il progetto, o default senza PROJECT.
-    WATCHDOG_INSTANCE=${PROJECT:-default}
+    # Il nome del progetto nei nomi per progetto dei ruoli (#602): PROJECT, o _default senza
+    # PROJECT. '_' non è ammesso in PROJECT, così l'installazione senza PROJECT non coincide mai
+    # con un progetto (PROJECT=default compreso): unità, drop-in e stato restano distinti.
+    OPS_INSTANCE=${PROJECT:-_default}
+    # L'istanza del watchdog dei ruoli (#602).
+    WATCHDOG_INSTANCE=$OPS_INSTANCE
     WATCHDOG_UNIT=devloop-role-watchdog@$WATCHDOG_INSTANCE
     WATCHDOG_DROPIN=$SYSTEMD_DIR/$WATCHDOG_UNIT.service.d/project.conf
     WATCHDOG_FAILED_DROPIN=$SYSTEMD_DIR/devloop-role-watchdog-failed@$WATCHDOG_INSTANCE.service.d/project.conf

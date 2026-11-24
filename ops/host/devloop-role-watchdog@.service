@@ -1,6 +1,6 @@
 # Unità template del watchdog dei ruoli di devloop (ops/host/devloop-role-watchdog@.service,
 # #602; ADR 0002, seconda precisazione del 2026-11-23, punto 6). L'istanza è il progetto:
-# devloop-role-watchdog@<progetto> (default senza PROJECT), come devloop@<progetto>. La avvia il
+# devloop-role-watchdog@<progetto> (_default senza PROJECT), come devloop@<progetto>. La avvia il
 # timer devloop-role-watchdog@<progetto>.timer, ogni 5 minuti: controlla i battiti di supervisore
 # e coordinatore (ops/host/role-watchdog.sh), rileva e non agisce, senza chiavi GitHub.
 # setup-supervisor.sh e setup-coordinator.sh la installano in SYSTEMD_DIR, una volta per host, e

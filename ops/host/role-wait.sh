@@ -15,7 +15,10 @@
 #
 # Si sveglia, ed esce con 0, su:
 # - un messaggio nella casella del ruolo (to-supervisor/ o to-coordinator/ di COORDINATION_DIR):
-#   lo segnala senza consumarlo; il ruolo lo legge, poi lo sposta in done/ o lo rimuove;
+#   lo segnala senza consumarlo; il ruolo lo legge, poi lo sposta in done/ o lo rimuove. La
+#   casella si controlla ogni secondo anche mentre devloop watch gira, in background: il giro
+#   in corso finisce da sé, e il risveglio successivo lo aspetta e ne legge le righe invece di
+#   avviarne un altro;
 # - un evento di devloop-pinned watch come utente devloop, con il comando dei sudoers dei ruoli
 #   e un file di stato per ruolo dello state_dir (watch-state.json, il default di devloop, per il
 #   supervisore; coordinator-watch-state.json per il coordinatore), così un ruolo non consuma
@@ -33,8 +36,9 @@
 # Ogni riga dice perché si è svegliata: "casella:", "evento:", "log:", "servizio:", "periodo:".
 # Esce con 1 se devloop watch non riesce (il sudoers manca o non è aggiornato, devloop non
 # parte), con 2 su un'opzione sbagliata. Non scrive nulla fuori dal battito e dal suo stato, in
-# ~/.local/state/devloop-<ruolo>-wait/ dell'utente del ruolo: le righe di run.log già viste e
-# l'ultimo stato del servizio. Va eseguito come l'utente del ruolo, dalla copia di root che
+# ~/.local/state/devloop-<ruolo>-wait/<progetto>/ dell'utente del ruolo (_default senza
+# PROJECT): le righe di run.log già viste, l'ultimo stato del servizio e il giro di devloop
+# watch in corso (le sue righe, il suo codice e il suo lock; serve flock, di util-linux). Va eseguito come l'utente del ruolo, dalla copia di root che
 # setup-supervisor.sh (SUPERVISOR_OPS_DIR) o setup-coordinator.sh (COORDINATOR_OPS_DIR)
 # installa, con i suoi parametri.
 
@@ -123,10 +127,21 @@ BOX=$COORDINATION_DIR/$INBOX
     || die "non leggo la casella $BOX: setup-$ROLE.sh, poi una sessione nuova del $ROLE_NAME (il gruppo $COORDINATION_GROUP)"
 LOG=$STATE_PATH/run.log
 WATCH_STATE=$STATE_PATH/$WATCH_STATE_NAME
-MINE=${HOME:?}/.local/state/devloop-$ROLE-wait/${PROJECT:-default}
+# Lo stato per progetto: OPS_INSTANCE, il progetto o _default senza PROJECT, così il supervisore
+# di più progetti (o un progetto "default") non mescola il suo stato fra installazioni.
+MINE=${HOME:?}/.local/state/devloop-$ROLE-wait/$OPS_INSTANCE
 mkdir -p -m 700 "$MINE" || die "non creo $MINE"
 SEEN=$MINE/run.log.seen
 SERVICE_SEEN=$MINE/service
+# Il giro di devloop watch in corso (#602): gira in background, così la casella si controlla ogni
+# POLL secondi anche durante il giro. WATCH_LOCK è tenuto dal giro finché gira; WATCH_OUT e
+# WATCH_ERR sono le sue righe, WATCH_STATUS il suo codice d'uscita, scritto quando finisce.
+WATCH_OUT=$MINE/watch.out
+WATCH_ERR=$MINE/watch.err
+WATCH_STATUS=$MINE/watch.status
+WATCH_LOCK=$MINE/watch.lock
+POLL=1
+command -v flock >/dev/null || die "manca flock (util-linux): serve al giro di devloop watch in background"
 
 # L'issue degli allarmi ([run].alert_issue dell'overlay), se il ruolo la legge.
 ALERT_ISSUE=$(python3 -I -B - "$STATE_PATH/config.local.toml" 2>/dev/null <<'EOF'
@@ -208,10 +223,9 @@ log_events() {
     fi
 }
 
-# In EVENTS le righe della casella, del log e del servizio, una per evento; vuoto se nulla.
-local_events() {
-    local found=() name names='' state last
-    EVENTS=''
+# In EVENTS, aggiunta, la riga dei messaggi della casella, se ce ne sono.
+inbox_events() {
+    local found=() name names=''
     while IFS= read -r -d '' name; do
         found+=("$name")
     done < <(find "$BOX" -mindepth 1 -maxdepth 1 -type f ! -name '.*' -printf '%f\0' 2>/dev/null \
@@ -220,6 +234,13 @@ local_events() {
         names=$(printf ' %s' "${found[@]}")
         EVENTS+="casella: ${#found[@]} messaggi in $BOX:$names"$'\n'
     fi
+}
+
+# In EVENTS le righe della casella, del log e del servizio, una per evento; vuoto se nulla.
+local_events() {
+    local state last
+    EVENTS=''
+    inbox_events
     [ "$ROLE" = coordinator ] && log_events
     state=$(systemctl is-active "$SERVICE_NAME" 2>/dev/null)
     state=${state:-sconosciuto}
@@ -234,6 +255,56 @@ local_events() {
 WATCH=(sudo -n -u "$DEVLOOP_USER" -- $LAUNCHER_CMD watch --until-change
        --interval "$WATCH_INTERVAL" --timeout "$WATCH_TIMEOUT" --state "$WATCH_STATE")
 
+# Avvia un giro di devloop watch in background, se non ne gira già uno e non ce n'è uno finito da
+# leggere. Il giro tiene WATCH_LOCK finché gira (il lock è preso prima di avviarlo, così non c'è
+# un istante in cui sembra finito); il comando di sudo non lo eredita. Il giro di un risveglio
+# precedente, uscito su un messaggio della casella, non si ferma: sudo è di root e l'utente del
+# ruolo non lo interrompe. Non se ne avvia un secondo sullo stesso file di stato: si aspetta
+# quello e se ne leggono le righe, che sono gli eventi che ha già tolto dallo stato.
+start_watch() {
+    exec 9>>"$WATCH_LOCK" || die "non apro $WATCH_LOCK"
+    if ! flock -n 9 || [ -f "$WATCH_STATUS" ]; then
+        exec 9>&-
+        return 0
+    fi
+    rm -f "$WATCH_OUT" "$WATCH_ERR"
+    (
+        "${WATCH[@]}" >"$WATCH_OUT" 2>"$WATCH_ERR" </dev/null 9>&-
+        printf '%s\n' "$?" >"$WATCH_STATUS.tmp" && mv -f "$WATCH_STATUS.tmp" "$WATCH_STATUS"
+    ) >/dev/null 2>&1 </dev/null &
+    exec 9>&-
+}
+
+# Aspetta la fine del giro e controlla intanto la casella ogni POLL secondi: un messaggio lo
+# stampa ed esce con 0, subito, e il giro finisce da sé (lo legge il risveglio successivo). Alla
+# fine del giro, in OUT e STATUS le sue righe e il suo codice, il suo stderr sullo stderr, e i suoi
+# file tolti; STATUS vuoto se il giro è stato interrotto prima di scrivere il codice.
+wait_watch() {
+    local free
+    OUT='' STATUS=''
+    until [ -f "$WATCH_STATUS" ]; do
+        exec 8>>"$WATCH_LOCK" || die "non apro $WATCH_LOCK"
+        flock -n 8
+        free=$?
+        exec 8>&-
+        if [ "$free" = 0 ] && ! [ -f "$WATCH_STATUS" ]; then
+            rm -f "$WATCH_OUT" "$WATCH_ERR"
+            return 0
+        fi
+        EVENTS=''
+        inbox_events
+        if [ -n "$EVENTS" ]; then
+            printf '%s' "$EVENTS"
+            exit 0
+        fi
+        sleep "$POLL"
+    done
+    OUT=$(cat "$WATCH_OUT" 2>/dev/null)
+    STATUS=$(cat "$WATCH_STATUS" 2>/dev/null)
+    [ -s "$WATCH_ERR" ] && cat "$WATCH_ERR" >&2
+    rm -f "$WATCH_OUT" "$WATCH_ERR" "$WATCH_STATUS"
+}
+
 SECONDS=0
 while :; do
     local_events
@@ -245,22 +316,22 @@ while :; do
         say "periodo: ${PERIOD}s senza eventi del $ROLE_NAME: il controllo periodico"
         exit 0
     fi
-    out=$("${WATCH[@]}")
-    status=$?
-    case $status in
+    start_watch
+    wait_watch
+    case $STATUS in
         0)
             events=''
             while IFS= read -r line; do
                 role_event "$line" && events+="evento: $line"$'\n'
-            done <<<"$out"
+            done <<<"$OUT"
             if [ -n "$events" ]; then
                 printf '%s' "$events"
                 exit 0
             fi
             ;;
-        3) ;;  # nessuna novità entro WATCH_TIMEOUT
+        3 | '') ;;  # nessuna novità entro WATCH_TIMEOUT, o il giro interrotto
         *)
-            say "errore: devloop watch come $DEVLOOP_USER è uscito con $status (sudoers del $ROLE_NAME, setup-$ROLE.sh; o devloop non parte)"
+            say "errore: devloop watch come $DEVLOOP_USER è uscito con $STATUS (sudoers del $ROLE_NAME, setup-$ROLE.sh; o devloop non parte)"
             exit 1
             ;;
     esac

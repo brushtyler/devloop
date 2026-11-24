@@ -842,9 +842,13 @@ allarmi `[run].alert_issue`, un errore del watch; gli altri eventi li salta), un
 non attivo (`servizio:`, una volta per cambio di stato), o la fine del periodo
 (`COORDINATOR_WAIT_PERIOD`, per default `ROLE_WAIT_PERIOD`, 3600 secondi, o `--period`;
 `periodo:`). Legge GitHub con il comando del sudoers, al più 300 secondi per giro, poi rilegge
-casella, log e servizio. Esce con 1 se il watch non riesce (il sudoers non è aggiornato, devloop
-non parte). Tiene il suo stato (le righe di `run.log` già viste, l'ultimo stato del servizio) in
-`~/.local/state/devloop-coordinator-wait/` del coordinatore.
+casella, log e servizio. Il giro gira in background e la casella si controlla ogni secondo anche
+durante il giro: un messaggio sveglia subito il ruolo, il giro finisce da sé e il risveglio
+successivo lo aspetta e ne legge le righe, senza avviarne un altro (serve `flock`, di
+util-linux). Esce con 1 se il watch non riesce (il sudoers non è aggiornato, devloop non parte).
+Tiene il suo stato (le righe di `run.log` già viste, l'ultimo stato del servizio, il giro in
+corso) in `~/.local/state/devloop-coordinator-wait/<progetto>/` del coordinatore (`_default`
+senza `PROJECT`).
 
 Il supervisore usa lo stesso script dalla sua copia di root, che `setup-supervisor.sh` installa in
 `SUPERVISOR_OPS_DIR` (`/usr/local/lib/devloop-supervisor`; con `PROJECT`,
@@ -860,9 +864,9 @@ un avviso su stderr, non ferma il risveglio. Il primo messaggio di `start-role.s
 ruolo il comando di risveglio suo e dell'altro.
 
 **Watchdog dei ruoli** (#602; ADR 0002, seconda precisazione del 2026-11-23, punto 6). Un timer
-systemd per progetto, `devloop-role-watchdog@<progetto>.timer` (`default` senza `PROJECT`), avvia
-ogni 5 minuti `devloop-role-watchdog@<progetto>.service`, che esegue `role-watchdog.sh` dalla
-copia di root `WATCHDOG_OPS_DIR` (`/usr/local/lib/devloop-role-watchdog`; con `PROJECT`,
+systemd per progetto, `devloop-role-watchdog@<progetto>.timer` (`_default` senza `PROJECT`, che
+non coincide con nessun progetto), avvia ogni 5 minuti
+`devloop-role-watchdog@<progetto>.service`, che esegue `role-watchdog.sh` dalla copia di root `WATCHDOG_OPS_DIR` (`/usr/local/lib/devloop-role-watchdog`; con `PROJECT`,
 `-<progetto>`) con i parametri del progetto copiati lì. Un ruolo è fermo se il suo battito manca o
 è più vecchio di due periodi (quello scritto nel battito):
 

@@ -293,22 +293,23 @@ Il passo sull'host di #602, su un host già attivo, a loop attivo: non tocca dev
 fissata. Porta il risveglio dei ruoli (`ops/host/role-wait.sh`) al supervisore, con la sua copia
 di root, i battiti nella casella e il watchdog dei ruoli, il timer
 `devloop-role-watchdog@<progetto>` ([ops/README.md](../README.md#10-coordinatore-facoltativo),
-"Watchdog dei ruoli"). I valori qui sotto sono quelli di questo host (`PROJECT=devloop`); per un
-altro progetto si usa il suo file di parametri con `--params` e il suo nome di progetto.
+"Watchdog dei ruoli"). Nei comandi, `<checkout>` è il checkout dell'operatore e `<progetto>` il
+`PROJECT` del file di parametri (`_default` senza `PROJECT`); `$COORDINATOR_USER`,
+`$COORDINATION_GROUP` e `$WATCHDOG_USER` sono i valori del file di parametri o i loro default
+(`ops/params.env.example`). Per un altro progetto dello stesso host si ripete il passo con il suo
+file di parametri (`--params`).
 
-Come root, dal checkout dell'operatore aggiornato (`git -C /root/repos/ssdlc fetch origin` e
-`git -C /root/repos/ssdlc checkout --detach origin/main`):
+Come root, dal checkout dell'operatore aggiornato (`git -C <checkout> fetch origin` e
+`git -C <checkout> checkout --detach origin/main`):
 
-1. **I parametri.** Nessun parametro nuovo è obbligatorio: i default di `PROJECT` sono
-   `SUPERVISOR_OPS_DIR=/usr/local/lib/devloop-supervisor-devloop`,
-   `WATCHDOG_OPS_DIR=/usr/local/lib/devloop-role-watchdog-devloop` e
-   `WATCHDOG_USER=role-watchdog-devloop` (`ops/params.env.example`). Il periodo del risveglio è
-   ora di un'ora per entrambi i ruoli (`ROLE_WAIT_PERIOD`): se `params.env` scrive
-   `COORDINATOR_WAIT_PERIOD`, il coordinatore tiene quel valore; per l'ora della decisione si
-   toglie la riga.
+1. **I parametri.** Nessun parametro nuovo è obbligatorio: `SUPERVISOR_OPS_DIR`,
+   `WATCHDOG_OPS_DIR` e `WATCHDOG_USER` hanno default per progetto (`ops/params.env.example`).
+   Il periodo del risveglio è ora di un'ora per entrambi i ruoli (`ROLE_WAIT_PERIOD`): se il file
+   di parametri scrive `COORDINATOR_WAIT_PERIOD`, il coordinatore tiene quel valore; per l'ora
+   della decisione si toglie la riga.
 
    ```bash
-   grep -n '^COORDINATOR_WAIT_PERIOD=' /root/repos/ssdlc/ops/params.env
+   grep -n '^COORDINATOR_WAIT_PERIOD=' <checkout>/ops/params.env
    ```
 
 2. **Il supervisore**: la directory `heartbeat/` della casella, la copia di root di
@@ -316,19 +317,19 @@ Come root, dal checkout dell'operatore aggiornato (`git -C /root/repos/ssdlc fet
    dichiara), anche l'istanza:
 
    ```bash
-   sudo bash /root/repos/ssdlc/ops/host/setup-supervisor.sh --dry-run
-   sudo bash /root/repos/ssdlc/ops/host/setup-supervisor.sh
+   sudo bash <checkout>/ops/host/setup-supervisor.sh --dry-run
+   sudo bash <checkout>/ops/host/setup-supervisor.sh
    ```
 
 3. **Il coordinatore**, se c'è: la copia di root aggiornata, con `role-wait.sh`, e l'istanza del
-   watchdog, cioè l'utente `role-watchdog-devloop` (fuori dal gruppo `devloop-roles`), le sue ACL
+   watchdog, cioè l'utente `$WATCHDOG_USER` (fuori dal gruppo `$COORDINATION_GROUP`), le sue ACL
    sulla casella del progetto, la copia di root del watchdog, le drop-in di
-   `devloop-role-watchdog@devloop` e `devloop-role-watchdog-failed@devloop`, e il timer abilitato
-   e avviato:
+   `devloop-role-watchdog@<progetto>` e `devloop-role-watchdog-failed@<progetto>`, e il timer
+   abilitato e avviato:
 
    ```bash
-   sudo bash /root/repos/ssdlc/ops/host/setup-coordinator.sh --dry-run
-   sudo bash /root/repos/ssdlc/ops/host/setup-coordinator.sh
+   sudo bash <checkout>/ops/host/setup-coordinator.sh --dry-run
+   sudo bash <checkout>/ops/host/setup-coordinator.sh
    ```
 
 4. **Verificare**: nessun errore nei passi `Casella fra supervisore e coordinatore`, `Risveglio del
@@ -336,25 +337,26 @@ Come root, dal checkout dell'operatore aggiornato (`git -C /root/repos/ssdlc fet
    minuti:
 
    ```bash
-   sudo bash /root/repos/ssdlc/ops/host/check-host.sh --no-apps
+   sudo bash <checkout>/ops/host/check-host.sh --no-apps
    systemctl list-timers 'devloop-role-watchdog@*'
    ```
 
 5. **Riavviare le sessioni** di supervisore e coordinatore con `ops/host/start-role.sh` (passo
    dell'operatore), prima del primo controllo del watchdog: il primo messaggio dà a ciascun ruolo
    il comando di risveglio suo e dell'altro, e la sezione *Watching* del runbook lo avvia. La
-   sveglia di prima del coordinatore si ferma con `pkill -u coordinator -f coordinator-wait.sh`.
-   Dopo il primo controllo, il journal dice lo stato dei due ruoli:
+   sveglia di prima del coordinatore si ferma con
+   `pkill -u "$COORDINATOR_USER" -f coordinator-wait.sh`. Dopo il primo controllo, il journal dice
+   lo stato dei due ruoli:
 
    ```bash
-   journalctl -u devloop-role-watchdog@devloop -n 20 --no-pager
+   journalctl -u devloop-role-watchdog@<progetto> -n 20 --no-pager
    ```
 
    La riga `supervisore ok (…), coordinatore ok (…)` dice che i battiti arrivano. Un messaggio del
    watchdog arrivato prima del riavvio lo leggono i ruoli all'avvio, e lo spostano in `done/`.
 
-**Rollback**: `systemctl disable --now devloop-role-watchdog@devloop.timer` ferma il watchdog; i
-ruoli tornano alla sveglia di prima con `coordinator-wait.sh`, che resta lo stesso comando.
+**Rollback**: `systemctl disable --now devloop-role-watchdog@<progetto>.timer` ferma il watchdog;
+i ruoli tornano alla sveglia di prima con `coordinator-wait.sh`, che resta lo stesso comando.
 
 ## Configurazione di ssdlc nel suo file di progetto
 
