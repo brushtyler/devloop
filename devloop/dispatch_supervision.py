@@ -27,12 +27,14 @@ from .planning import (FIX_COMMAND, Action, PullRequest, closed_by_first, findin
                        label_names, last_counted_ci, missing_verdicts, operator_blocked,
                        waiver)
 from .policy import ZERO_LEVEL, profile_of
-from .review import current_round, current_verdict, finding_state, owner_of
+from .review import COORDINATOR as CLOSED_BY_COORDINATOR
+from .review import (FINDING_COMMAND, current_round, current_verdict, finding_commands,
+                     finding_state, flow_verdict, owner_of, trust_policy_findings)
 from .supervision import (ACCEPT_DEFAULTS, BUDGET_GRANTABLE, CAPACITY, CAPACITY_REFUSED, DECIDE,
-                          DESIGN_LABEL, ESCALATE, GRANT_BUDGET, GRANT_ROUND, ISSUE_STEPS,
+                          DESIGN_LABEL, ESCALATE, FINDING, GRANT_BUDGET, GRANT_ROUND, ISSUE_STEPS,
                           MAX_CAPACITY, MAX_COORDINATOR_OPERATOR_ROUNDS, MAX_MERGE_BUDGET,
-                          MAX_RETRIES, MERGE, MERGE_BUDGET, MERGED_ISSUE, OPERATOR_ROUNDS_TEXT,
-                          PREFLIGHT_DEFAULT, REREVIEW, RETRY, RETRY_STEPS,
+                          MAX_RETRIES, MERGE, MERGE_BUDGET, MERGED_ISSUE, OPEN_FINDINGS,
+                          OPERATOR_ROUNDS_TEXT, PREFLIGHT_DEFAULT, REREVIEW, RETRY, RETRY_STEPS,
                           ROUND_GRANTABLE, SYNC_FAILED, TOOL_FAILURE, capacity_arguments,
                           changed_input, command_line, coordinator_command,
                           coordinator_refusal, critical,
@@ -44,6 +46,8 @@ from .workspace import WorkspaceError
 # operator records (#595): the story, the kind and the agent of the turn, for the coordinator's
 # extension of the envelope (``_operator_grant_budget``), and the refusal's category.
 BUDGET_FIELDS = ('story', 'kind', 'agent', 'category')
+# How the trace of the coordinator's closure of findings (#606) names each status.
+CLOSED_TEXT = {'resolved': 'risolto', 'withdrawn': 'ritirato'}
 
 
 def budget_fields(source):
@@ -392,9 +396,11 @@ class SupervisionMixin:
                 # The coordinator's commands no supervisor command names (#528): the reserved
                 # ones, such as ``reconcile``, and those not listed, such as ``veto``, are
                 # refused below; the delegated ones read elsewhere (``recheck``, ``fix``,
-                # ``hold``, ``release``) are none of this reader's.
+                # ``hold``, ``release``) are none of this reader's. Its ``finding`` (#606) is a
+                # command of an escalation, applied by ``_coordinator_findings``.
                 parsed = coordinator_command(body)
-                if parsed is not None and coordinator_refusal(parsed[0]) is None:
+                if (parsed is not None and coordinator_refusal(parsed[0]) is None
+                        and parsed[0] != FINDING):
                     continue
             if parsed is None:
                 continue
@@ -547,7 +553,7 @@ class SupervisionMixin:
             ``command`` on an escalation of class ``cls``."""
             name, by = command['command'], command['by']
 
-            def trace(outcome, text, **extra):
+            def trace(outcome, text, records=(), **extra):
                 record = dict(command=name, by=by, reason=command['reason'] or '',
                               comment=command['comment'], outcome=outcome, **extra)
                 record['class'] = cls if isinstance(cls, str) else None
@@ -559,7 +565,7 @@ class SupervisionMixin:
                     record, f'`/devloop {name}` di `{by}`: {text.strip()}',
                     COORDINATOR_MERGE_TITLE if coordinator and operator
                     else MERGE_TITLE if name == MERGE and operator
-                    else OPERATOR_TITLE if operator else SUPERVISOR_TITLE))
+                    else OPERATOR_TITLE if operator else SUPERVISOR_TITLE, records))
                 self.log(f'  {name} by {by}: {outcome}')
             return trace
 
@@ -611,16 +617,19 @@ class SupervisionMixin:
                    else f'Il comando è speso; {where} resta in `{lb.needs_supervisor}`.\n\n'
                    + self._supervisor_resume(escalation, is_pr))
             return trace('refused', f'non applicabile: {command["refusal"]}. {how}')
-        if name in (CAPACITY, MERGE_BUDGET) or name == MERGE and not operator:
+        if name in (CAPACITY, MERGE_BUDGET) or name in (MERGE, FINDING) and not operator:
             # A temporary capacity limit (#412) and an extension of the delegated merges (#486)
             # are never a decision on an escalation; a delegated merge applies only to a PR
-            # whose merge is the operator's (#486).
+            # whose merge is the operator's (#486), the coordinator's closure of findings only
+            # on an ``open_findings`` escalation, always the operator's (#606).
             where = 'la PR' if is_pr else 'l\'issue'
             label = lb.needs_operator if operator else lb.needs_supervisor
             resume = (self._operator_resume(command['anchor'], is_pr) if operator
                       else self._supervisor_resume(escalation, is_pr))
             what = ('vale solo su una PR pronta il cui merge spetta all\'operatore, non su '
                     'un\'escalation al supervisore' if name == MERGE
+                    else 'vale solo su un\'escalation `open_findings` all\'operatore'
+                    if name == FINDING
                     else 'vale solo sulla issue del riepilogo (`[report] issue`), non su '
                          'un\'escalation')
             return trace('refused', f'non applicabile: `/devloop {name}` {what}. Il '
@@ -1749,7 +1758,9 @@ class SupervisionMixin:
           to the supervisor (#411), and the values of the envelope stay the operator's.
         - ``merge``: only from the supervisor's identity, on a PR (``_delegated_merge``, #486),
           or from the coordinator's, its reserved merge (#529); a trusted user's is answered:
-          the operator merges by hand."""
+          the operator merges by hand.
+        - ``finding``: only from the coordinator's identity, on an ``open_findings`` escalation
+          of a PR (``_coordinator_findings``, #606)."""
         lb = self.cfg.labels
         is_pr = isinstance(target, PullRequest)
         name, anchor = command['command'], command['anchor']
@@ -1773,6 +1784,11 @@ class SupervisionMixin:
                 return refuse(f'`/devloop {MERGE}` vale solo su una PR pronta il cui merge spetta '
                               'all\'operatore')
             return self._delegated_merge(target, number, comments, command, trace)
+        if name == FINDING:
+            # Only the coordinator's identity writes it as a command (#606): a trusted user's
+            # line is the closure it always was, read once the PR is back in review.
+            return self._coordinator_findings(target, number, labels, fresh, comments, command,
+                                              trace, refuse)
         if name == ESCALATE:
             return refuse('l\'escalation è già all\'operatore')
         if name == GRANT_ROUND:
@@ -1839,6 +1855,98 @@ class SupervisionMixin:
 
         self._apply_retry(number, is_pr, comments, record,
                           sorted(labels & (lb.operator() | {lb.needs_supervisor})), trace, limit)
+
+    def _coordinator_findings(self, target, number, labels, fresh, comments, command, trace,
+                              refuse):
+        """Apply the coordinator's ``/devloop finding`` on PR ``number`` in an ``open_findings``
+        escalation to the operator (#606, ADR 0002, second precision of 2026-11-23, point 3):
+        the closure of findings no agent can close any more, with the form of the operator's
+        (``review.FINDING_COMMAND``). Its comment may hold one such line per finding, each with
+        its key, ``resolved`` or ``withdrawn``, and its reason; the command applies whole or not
+        at all. With ``pr`` and its thread read now (``_fresh_pr``) it is refused:
+
+        - from any identity but the coordinator's, or on another escalation;
+        - with a line without a reason, or malformed;
+        - while a reviewer of the latest round does not approve the PR's head, or that round is
+          not of the head: the coordinator closes a finding, it never overrides a verdict;
+        - for a finding a ``trust_policy`` review opened or keeps open
+          (``trust_policy_findings``): it stays the operator's;
+        - for a finding not open on the PR.
+
+        The closures are a ``finding`` record of the dispatcher (``by: coordinator``) in the
+        comment of the ``supervision`` record that spends the command (``closed``), so that the
+        one is never written without the other. When no finding is left open the PR goes back to
+        ``agent:review``, where the recorded approval is applied again without a new review; the
+        promotion and the merge follow their rules. Otherwise it stays with the operator, and
+        the escalation still takes the coordinator's commands. ``refuse(why)`` answers why it
+        does not apply."""
+        lb = self.cfg.labels
+        anchor = command['anchor']
+        record = anchor['record']
+        if not self._is_coordinator(command['by']):
+            return refuse(f'`/devloop {FINDING}` come comando di un\'escalation è solo del '
+                          'coordinatore; un utente fidato chiude un finding con la stessa riga e '
+                          f'poi riporta la PR in `{lb.review}`')
+        if (not isinstance(target, PullRequest) or anchor['kind'] != 'notice'
+                or record.get('event') != 'escalation' or record.get('class') != OPEN_FINDINGS):
+            return refuse(f'`/devloop {FINDING}` del coordinatore vale solo su un\'escalation '
+                          f'`{OPEN_FINDINGS}` di una PR')
+        body = next((c.get('body') or '' for c in comments
+                     if not c.get('native') and command['comment'] is not None
+                     and c.get('id') == command['comment']), None)
+        if body is None:
+            body = f'{FINDING_COMMAND} {command["reason"]}'  # only the first line is known
+        lines = finding_commands(body)
+        if not lines or any(parsed is None for _, parsed in lines):
+            return refuse(f'ogni riga va scritta come `{FINDING_COMMAND} <round/reviewer/ID> '
+                          'resolved|withdrawn <motivo>`, e il motivo è obbligatorio')
+        pr = self._fresh_pr(target, labels, fresh, comments)
+        if pr.finding_problems:
+            return refuse('alcuni finding della PR non hanno un proprietario ricostruibile')
+        latest = current_round(pr.reviews)
+        if not latest or latest[0]['head_sha'] != pr.head_sha:
+            return refuse('l\'ultimo round di review non è del head della PR '
+                          f'(`{pr.head_sha[:12]}`): serve una nuova review, non la chiusura di '
+                          'un finding')
+        asking = [owner_of(r) for r in latest if flow_verdict(r) != 'approve']
+        if asking:
+            return refuse(f'nel round {latest[0]["round"]} '
+                          + ', '.join(f'`{who}`' for who in asking)
+                          + ' non approva il head e chiede ancora modifiche o una decisione: il '
+                          'coordinatore chiude un finding, non scavalca un verdetto')
+        state = finding_state(pr.reviews, pr.closures)
+        still_open = {f['key'] for f in state.open}
+        held = trust_policy_findings(pr.reviews)
+        asked = {}
+        for _, (key, status, reason) in lines:
+            asked.setdefault(key, (status, reason))
+        trust = [key for key in asked if key in held]
+        if trust:
+            return refuse('un reviewer ha marcato `trust_policy` '
+                          + ', '.join(f'`{key}`' for key in trust)
+                          + ': i finding sulla politica di fiducia restano dell\'operatore')
+        absent = [key for key in asked if key not in still_open]
+        if absent:
+            return refuse(', '.join(f'`{key}`' for key in absent)
+                          + ' non è aperto su questa PR')
+        author = command['by']
+        closed = [{'key': key, 'status': status, 'by': CLOSED_BY_COORDINATOR, 'author': author,
+                   'reason': reason, 'head_sha': pr.head_sha}
+                  for key, (status, reason) in asked.items()]
+        listed = '\n'.join(f'- `{c["key"]}`: {CLOSED_TEXT[c["status"]]}: '
+                           + ' '.join(c['reason'].split()) for c in closed)
+        left = [f['key'] for f in state.open if f['key'] not in asked]
+        records = [('finding', {'closed': closed})]
+        if left:
+            return trace('closed', f'chiusi dal coordinatore:\n\n{listed}\n\nRestano aperti '
+                         + ', '.join(f'`{key}`' for key in left) + f': la PR resta in '
+                         f'`{lb.needs_operator}`.', records=records, head=pr.head_sha)
+        trace('closed', f'chiusi dal coordinatore:\n\n{listed}\n\nNessun finding resta aperto: '
+              f'la PR torna in `{lb.review}`, dove l\'approvazione registrata viene riapplicata '
+              'senza una nuova review; promozione e merge seguono le loro regole.',
+              records=records, head=pr.head_sha)
+        self.gh.edit_labels(number, add=[lb.review],
+                            remove=sorted(labels & (lb.operator() | {lb.needs_supervisor})))
 
     def _operator_grant_budget(self, target, number, labels, comments, command, trace, refuse):
         """Apply the coordinator's ``/devloop grant-budget <reason>`` on issue or PR ``number``

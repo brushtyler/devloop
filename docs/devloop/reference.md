@@ -1920,6 +1920,9 @@ model = "gpt-6.1-sol"
   under the same conditions and caps; a command reserved to the operator, or not listed, never
   counts. `merge` is the coordinator's reserved merge (#529), under conditions and a daily cap of
   its own ([The reserved merge of the coordinator](guide.md#the-reserved-merge-of-the-coordinator)).
+  `finding` (#606) closes findings on an `open_findings` escalation, never those on the trust
+  policy nor while a reviewer asks for changes on the head
+  ([Closing findings as the coordinator](guide.md#closing-findings-as-the-coordinator)).
 - devloop never reads the app's key and never writes with it: `python3 -m devloop apps` does not
   list it, the watcher does not count it among the writers of devloop's records, and
   `devloop token` and `scripts/agent-token.py` refuse it (`unknown actor`). Its key is only in

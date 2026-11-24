@@ -130,15 +130,14 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(set(supervision.COORDINATOR_DELEGATED),
                          {'retry', 'rereview', 'recheck', 'fix', 'hold', 'release',
                           'grant-round', 'grant-budget', 'capacity', 'accept-defaults',
-                          'decide', 'merge'})
+                          'decide', 'merge', 'finding'})
         self.assertEqual(set(supervision.COORDINATOR_RESERVED),
                          {'approve', 'merge-budget', 'reconcile'})
         self.assertFalse(set(supervision.COORDINATOR_DELEGATED)
                          & set(supervision.COORDINATOR_RESERVED))
         for command in supervision.COORDINATOR_DELEGATED:
             self.assertIsNone(supervision.coordinator_refusal(command))
-        for command in (*supervision.COORDINATOR_RESERVED, 'escalate', 'veto', 'finding',
-                        'nuovo'):
+        for command in (*supervision.COORDINATOR_RESERVED, 'escalate', 'veto', 'nuovo'):
             with self.subTest(command=command):
                 self.assertIsNotNone(supervision.coordinator_refusal(command))
 
@@ -249,6 +248,10 @@ class RefusedEscalationTests(EscalationCase):
         # issue, a grant-budget only on a budget escalation.
         'capacity': ('/devloop capacity max_open_prs 3 2h motivo',
                      'vale solo sulla issue del riepilogo'),
+        # Delegated since #606, only on an open_findings escalation to the operator
+        # (test_devloop_coordinator_findings).
+        'finding': ('/devloop finding 1/codex/F1 resolved corretto',
+                    'escalation `open_findings`'),
         # Reserved to the operator in person.
         'merge-budget': ('/devloop merge-budget 2 motivo', 'riservato all\'operatore'),
         # Reserved too, and no supervisor command (#528): read for the coordinator alone.
@@ -258,8 +261,6 @@ class RefusedEscalationTests(EscalationCase):
         # test_devloop_coordinator_merge).
         'escalate': ('/devloop escalate motivo', 'non è tra i comandi delegati'),
         'veto': ('/devloop veto motivo', 'non è tra i comandi delegati'),
-        'finding': ('/devloop finding 1/codex/F1 resolved corretto',
-                    'non è tra i comandi delegati'),
         'nuovo': ('/devloop nuovo motivo', 'non è tra i comandi delegati'),
     }
 
@@ -659,12 +660,13 @@ class ReservedTests(unittest.TestCase):
         # (test_approve).
         self.assertNotIn(COORDINATOR, d.cfg.trusted_users)
 
-    def test_finding_and_veto_not_listed(self):
+    def test_finding_no_operator_closure_and_veto_not_listed(self):
         d = self.make()
+        # Its finding is a command of an open_findings escalation (#606), never an operator's
+        # closure read in review.
         body = '/devloop finding 1/codex/F1 resolved corretto'
         self.assertEqual(d._finding_commands(pr(), [self.comment(body)],
                                              finding_state([], [])), [])
-        self.assertTrue(self.logged('ignored `/devloop finding'))
         self.assertEqual(d._veto_commands([self.comment('/devloop veto motivo')], 7), [])
         self.assertTrue(self.logged('ignored `/devloop veto`'))
 

@@ -260,9 +260,25 @@ the mailbox.
   with fewer reviewers than the level asks, never replace a reviewer with your judgement. When
   the unavailability lasts more than a day, write it in the summary for the operator, with the
   choices (wait, change the fallback model, a review of the operator): the choice is theirs.
-- **Open findings** (`open_findings`, point 3, from #606): while the operator is away, you
-  handle the open findings that only the operator closes today, with the reason in the journal.
-  Those on the trust policy stay the operator's.
+- **Open findings** (`open_findings`, point 3, #606; [Closing findings as the
+  coordinator](../guide.md#closing-findings-as-the-coordinator)). A pull request in
+  `agent:needs-operator` with the class `open_findings` was approved, but keeps findings no agent
+  can close any more. Read each open finding the escalation lists, and the code of the pull
+  request at its head, then for each one:
+  - **resolved or not blocking**: close it with a comment on the pull request whose first line,
+    after your attribution header, is
+    `/devloop finding <round/reviewer/ID> resolved|withdrawn <reason>`; one more line per
+    finding to close in the same comment. The reason is required: it goes in the record of the
+    pull request and in the daily summary;
+  - **still valid**: do not close it; ask for a fix with `/devloop fix <request>`, and the pull
+    request goes back to the implementer.
+
+  When no finding is left open, devloop puts the pull request back in `agent:review` and applies
+  the recorded approval again; the promotion and the merge follow their rules. devloop refuses
+  the whole command when a line has no reason, when a reviewer of the latest round still asks
+  for changes on the head (you close a finding, you never override a verdict), and for a finding
+  a reviewer marked `trust_policy`: those stay the operator's, and you leave them in the summary
+  for the operator.
 - **The conclave** (point 3, from #605): when a member is unavailable, the third vote is yours,
   recorded as a substitute vote with your model. The reserved perimeter of the conclave does not
   change.
@@ -316,7 +332,8 @@ the mailbox.
   opened that the readiness check declares touching the trust policy goes to
   `agent:needs-operator`: only the operator's `agent:ready` admits it.
 - The other delegated commands of the table of [The coordinator](../guide.md#the-coordinator)
-  (`retry`, `accept-defaults`, `decide`, `rereview`, `recheck`, `fix`, `hold`, `release`), under
+  (`retry`, `accept-defaults`, `decide`, `rereview`, `recheck`, `fix`, `hold`, `release`,
+  `finding`), under
   its conditions, each with its reason.
 - Write the problems of the system as issues, each with its evidence.
 - Prepare for the operator the decisions that are theirs, and a periodic summary.

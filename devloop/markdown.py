@@ -296,7 +296,8 @@ def _valid_policy(p):
 
 def _valid_closure(c):
     return (isinstance(c, dict) and isinstance(c.get('key'), str)
-            and c.get('status') in ('resolved', 'withdrawn') and c.get('by') in ('ci', 'operator')
+            and c.get('status') in ('resolved', 'withdrawn')
+            and c.get('by') in ('ci', 'operator', 'coordinator')
             and all(isinstance(c.get(k), str) for k in ('author', 'reason', 'head_sha')))
 
 
@@ -1017,9 +1018,11 @@ def render_operator_merge(head, labeled, promotion, reasons, label):
                                         'labeled': labeled, 'promotion': promotion})
 
 
-def render_supervision(record, text, title='Decisione del supervisore'):
+def render_supervision(record, text, title='Decisione del supervisore', records=()):
     """The dispatcher's trace of a supervisor command (#182), or of a command on an escalation
     to the operator (#321, with its own ``title``): what was asked, by whom, and the outcome,
-    in a ``supervision`` marker."""
+    in a ``supervision`` marker. ``records``: more ``(kind, payload)`` markers of the same
+    comment, such as the ``finding`` record of the coordinator's closures (#606), written
+    together with the trace that spends their command."""
     return publishable(dispatcher_header() + f'\n## {title}\n\n{text.strip()}',
-                       'supervision', record)
+                       'supervision', record, records)

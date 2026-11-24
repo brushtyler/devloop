@@ -24,6 +24,10 @@ Days are UTC days:
 - the reserved merges of the coordinator (#529): every ``merge`` of the coordinator's identity
   the dispatcher answered that day (its ``supervision`` record with ``role: coordinator``),
   apart from the delegated merges, with the same columns and the coordinator's own cap;
+- the findings the coordinator closed on an ``open_findings`` escalation (#606): one row per
+  finding of each ``finding`` command it applied that day (``outcome: closed``), from the
+  ``finding`` record in the comment of its ``supervision`` record, with the time, the PR, the
+  key, the status, the author and the first line of the reason;
 - the auto-pins that did not move ``current`` (#453): the ``pin`` record of the dispatcher's alert
   on ``[run].alert_issue``, one per commit, with the time, the commit of ``origin/<base_branch>``
   left behind and the reason the alert shows (the step of the smoke test, or the first line of
@@ -51,7 +55,7 @@ from pathlib import Path
 
 from .apps import COORDINATOR, DISPATCHER
 from .markdown import dispatcher_header, publishable, read_marker
-from .supervision import CAPACITY, GRANT_BUDGET, GRANT_ROUND, MERGE, MERGE_BUDGET
+from .supervision import CAPACITY, FINDING, GRANT_BUDGET, GRANT_ROUND, MERGE, MERGE_BUDGET
 from .watch import failure_class
 
 # In state_dir: the time of the last automatic attempt (``AutoReport``), and the lock that keeps
@@ -73,6 +77,8 @@ _GRANT_OUTCOME = {'granted': 'concessa', 'refused': 'rifiutata'}
 MERGE_COMMANDS = (MERGE, MERGE_BUDGET)
 _MERGE_OUTCOME = {'merged': 'mergiata', 'granted': 'concessa', 'refused': 'rifiutato'}
 REASON_CHARS = 120  # the first line of a reason, at most
+# The status of a finding the coordinator closed (#606).
+_CLOSED = {'resolved': 'risolto', 'withdrawn': 'ritirato'}
 
 
 class ReportError(Exception):
@@ -128,6 +134,8 @@ class Summary:
     delegated: list = field(default_factory=list)
     # The same rows for the reserved merges of the coordinator (#529)
     coordinator: list = field(default_factory=list)
+    # (time, number, key, status, author, reason): the findings the coordinator closed (#606)
+    closures: list = field(default_factory=list)
     # (time, number, ref, commit, reason): the auto-pins that did not move ``current`` (#453)
     pins: list = field(default_factory=list)
     opened: list = field(default_factory=list)       # PR numbers
@@ -140,7 +148,8 @@ class Summary:
 
     def empty(self):
         return not (self.actions or self.merges or self.escalations or self.ci or self.grants
-                    or self.delegated or self.coordinator or self.pins or self.opened
+                    or self.delegated or self.coordinator or self.closures or self.pins
+                    or self.opened
                     or self.merged or self.rounds)
 
 
@@ -273,6 +282,12 @@ class Records:
                     rows = (out.coordinator if supervision.get('role') == COORDINATOR
                             else out.delegated)
                     rows.append(_delegated_row(_hour(created), number, supervision))
+                elif (supervision['command'] == FINDING and supervision['outcome'] == 'closed'
+                      and _day_of(created) == day):
+                    # The coordinator's closures (#606): the record in the same comment.
+                    closed = (read_marker(body, 'finding') or {}).get('closed', [])
+                    out.closures += [(_hour(created), number, c['key'], c['status'],
+                                      c['author'], first_line(c['reason'])) for c in closed]
                 continue
             notice = read_marker(body, 'notice')
             if (notice is not None and notice.get('event') == 'escalation'
@@ -289,7 +304,7 @@ class Records:
                 out.merges.append((_hour(merged), number, None, None))
         out.merged = sorted(merged_numbers | by_devloop)
         for rows in (out.actions, out.merges, out.escalations, out.ci, out.grants, out.delegated,
-                     out.coordinator, out.pins):
+                     out.coordinator, out.closures, out.pins):
             rows.sort(key=lambda row: (row[0], row[1]))
         return out
 
@@ -443,6 +458,15 @@ def render(summary):
         for at, number, command, by, reason, outcome, cap in rows:
             parts.append(f'| {at} | #{number} | `{command}` | `{_code(by)}` | {_cell(reason)} '
                          f'| {_cell(outcome)} | {_cell(cap)} |')
+        parts.append('')
+    if summary.closures:
+        parts += ['### Finding chiusi dal coordinatore', '',
+                  '| Ora (UTC) | Numero | Finding | Esito | Autore | Motivo |',
+                  '|---|---|---|---|---|---|']
+        for at, number, key, status, by, reason in summary.closures:
+            outcome = _CLOSED.get(status, status)
+            parts.append(f'| {at} | #{number} | `{_code(key)}` | {_cell(outcome)} '
+                         f'| `{_code(by)}` | {_cell(reason)} |')
         parts.append('')
     if summary.pins:
         parts += ['### Pin automatico non riuscito', '']
