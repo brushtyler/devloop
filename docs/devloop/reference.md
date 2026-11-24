@@ -183,7 +183,10 @@ false, default false, #412) lets the supervisor set a
 `capacity_max_open_prs` (default 6), `capacity_max_parked_prs` (default 6) and
 `capacity_max_hours` (default 24) may only lower the caps of the code, `MAX_CAPACITY` and
 `MAX_CAPACITY_HOURS` in `devloop/supervision.py`. `max_parallel_actions` is not delegated: it
-applies only at a restart. `merge` (true or false, default false, #486) lets the supervisor
+applies only at a restart. With `[roles.coordinator]` the coordinator sets the same limits and
+grants the same one extension of a budget envelope, also on a `budget` escalation to the
+operator (#595), within these caps and `max_grants_per_day`, whatever `capacity` and `budget`
+say: those keys stay the switches of the supervisor's delegations. `merge` (true or false, default false, #486) lets the supervisor
 [merge a PR whose merge is the operator's](guide.md#delegated-merge) with `/devloop merge <sha>
 <reason>`, when every condition of the delegation holds; it needs
 `review_policy.advisory_reviewer`. `max_merges_per_day` (default 5) may only lower the cap of the
@@ -1450,7 +1453,7 @@ Each agent and the dispatcher can act on GitHub with its own GitHub App (#65), c
 | advisory reviewer (`advisory_reviewer`) | the [advisory review](guide.md#advisory-review-for-the-operator) of a head of a PR in `agent:needs-operator`: always a native review of type `COMMENT`, also from an agent without an app (with the ambient login) and also when it is the PR's implementer; the dispatcher writes its summary and edits the receipt |
 | merger | only the merges of the `strict` and `auto` [merge modes](guide.md#merge-modes) and the [reserved merges of the coordinator](guide.md#the-reserved-merge-of-the-coordinator) (see [The merger app](#the-merger-app)) |
 | supervisor | not devloop: the supervisor's commands, labels, issues, diary and fix or hold requests, with `[roles.supervisor]` as a table (see [The supervisor app](#the-supervisor-app)) |
-| coordinator | not devloop: the coordinator's commands inside its closed perimeter, and its `agent:ready`, with `[roles.coordinator]` (see [The coordinator app](#the-coordinator-app)) |
+| coordinator | not devloop: the coordinator's commands inside its closed perimeter, and its `agent:ready` and priority labels, with `[roles.coordinator]` (see [The coordinator app](#the-coordinator-app)) |
 
 Apps are per agent, not per role: GitHub keeps one review state per identity, and it already
 refuses an approval from the author of a PR. Least privilege per role comes from the tokens:
@@ -1896,8 +1899,13 @@ model = "gpt-6.1-sol"
   restart, as every key of `[roles]`. The roles have no constraint between them; a model of the
   coordinator other than the supervisor's is recommended.
 - The coordinator's identity is the login of `[apps.coordinator]` (`<slug>[bot]`). It is never a
-  trusted user, never the supervisor, never one of devloop's apps: an issue it opens is not one
-  of devloop's, and `trusted_users` refuses a bot. Its commands count only inside a **closed
+  trusted user and never the supervisor, and `trusted_users` refuses a bot. Since #595 it is one
+  of devloop's apps: an issue it opens is one of devloop's, which the supervisor and the
+  coordinator may queue, unless its readiness check declares the trust policy touched: then only
+  a trusted user's `agent:ready` admits it, and without a readiness check only the trusted users'
+  labels count on it ([Labels from the supervisor](guide.md#labels-from-the-supervisor)). Its
+  `agent:ready` and priority labels count where the supervisor's do; its dependency and
+  implementer labels never. Its commands count only inside a **closed
   perimeter**, a constant of the code (`supervision.COORDINATOR_DELEGATED` and
   `COORDINATOR_RESERVED`) that no key widens; the guide lists it
   ([The coordinator](guide.md#the-coordinator)). A delegated command counts as a trusted user's,

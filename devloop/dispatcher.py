@@ -95,7 +95,10 @@ with ``[roles.supervisor]`` as a table the role app ``[apps.supervisor]``, #408)
 ``agent:ready`` and the priority labels count also when the supervisor's app added them, but
 only on issues opened by a trusted user or by one of devloop's apps (``label_admitters``). On anyone else's issue only a
 trusted user's label counts. The issue text stays trusted only while no one outside
-``trusted_users`` edits it after the label.
+``trusted_users`` edits it after the label. With ``[roles.coordinator]`` (#528, #595) the
+coordinator's ``agent:ready`` and priority labels count on the same issues, and its app is one of
+devloop's: an issue it opened that the readiness check declares touching the trust policy waits
+for a trusted user's ``agent:ready`` (``_coordinator_gate``).
 
 Parallel actions (#176, ``max_parallel_actions`` above 1): the actions of a tick on different
 issues and PRs run at once, up to that many (``schedule``). Actions on the same number, or on a
@@ -201,7 +204,7 @@ from .dispatch_base import BaseMixin, MainAlerts
 from .dispatch_conclave import ConclaveMixin
 from .dispatch_merge import MergeMixin
 from .dispatch_preflight import PreflightMixin
-from .dispatch_supervision import SupervisionMixin, UntrustedChange
+from .dispatch_supervision import SupervisionMixin, UntrustedChange, budget_fields
 from .github import GitHubError, GitHubUncertain, author_login
 from .journal import (CLOSED, MERGED, RECONCILE_COMMAND, JournalError, TurnBlocked, blocked_text,
                       reconcile_command)
@@ -846,9 +849,12 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
 
     def _devloop_logins(self):
         """The logins of devloop's apps whose issues count as devloop's (#178, #182): the
-        agents', the dispatcher's and the supervisor's identity."""
+        agents', the dispatcher's, the supervisor's identity and, with ``[roles.coordinator]``,
+        the coordinator's (#595). A coordinator's issue that the readiness check declares
+        touching the trust policy still needs a trusted user's ``agent:ready``
+        (``_coordinator_gate``)."""
         return ({self._app_login(actor) for actor in (*self.cfg.agents, DISPATCHER)}
-                | {self._supervisor_login()}) - {None}
+                | {self._supervisor_login(), self._coordinator_login()}) - {None}
 
     def _may_hold(self, login):
         """Whether ``login`` may hold or release a merge (#172), or ask for a fix (#195): a
@@ -876,20 +882,27 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         user's."""
         return self._is_coordinator(login) and command in COORDINATOR_DELEGATED
 
-    def _admitters(self, author, ready=False):
-        """The logins whose ``agent:ready`` and priority labels count on an issue opened by
-        ``author`` (#178, ``label_admitters``): the supervisor's identity counts only when it
-        has one, and only on issues of trusted users or of devloop's apps. ``ready``: the
-        logins whose ``agent:ready`` counts, also the coordinator's identity on the same issues
-        (#528: the resume with the labels); its priority, dependency and implementer labels
-        never count."""
+    def _admitters(self, author, coordinator=False):
+        """The logins whose labels count on an issue opened by ``author`` (#178,
+        ``label_admitters``): the supervisor's identity counts only when it has one, and only
+        on issues of trusted users or of devloop's apps. ``coordinator``: the logins whose
+        ``agent:ready`` and priority labels count, also the coordinator's identity on the same
+        issues (#528: the resume with the labels; #595: its priorities); its dependency and
+        implementer labels never count.
+
+        On an issue the coordinator opened (#595) the labels of the supervisor and of the
+        coordinator count only with a readiness check, which says whether it touches the trust
+        policy (``_coordinator_gate``): without one only the trusted users' do (it fails
+        closed)."""
+        coordinator_login = self._coordinator_login()
+        if self._is_coordinator(author) and not self.cfg.preflight:
+            return set(self.cfg.trusted_users)
         supervisor = self._supervisor_login()
         admitters = (label_admitters(author, self.cfg.trusted_users, supervisor,
                                      self._devloop_logins())
                      if supervisor else set(self.cfg.trusted_users))
-        coordinator = self._coordinator_login()
-        if ready and coordinator:
-            admitters |= label_admitters(author, self.cfg.trusted_users, coordinator,
+        if coordinator and coordinator_login:
+            admitters |= label_admitters(author, self.cfg.trusted_users, coordinator_login,
                                          self._devloop_logins())
         return admitters
 
@@ -908,7 +921,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         """``untrusted_change`` of an issue, with the admitters of its author's
         ``agent:ready``."""
         return untrusted_change(history, self.cfg.labels.ready, self.cfg.trusted_users,
-                                self._admitters(history['author'], ready=True))
+                                self._admitters(history['author'], coordinator=True))
 
     # Supervision (#182) --------------------------------------------------------
     def _accepted(self, comment):
@@ -1242,10 +1255,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             admitted = ([e for e in events if e['label'] == lb.ready] or [{}])[-1]
             # Whose labels count depends on who opened the issue (#178).
             author = author_login(raw.get('author'))
-            admitters = self._admitters(author)
+            # The coordinator's agent:ready (#528) and priority labels (#595) count too.
+            admitters = self._admitters(author, coordinator=True)
             issue = {'number': raw['number'], 'title': raw['title'], 'labels': labels,
                      'labeler': admitted.get('by'), 'ready_at': admitted.get('at'),
-                     'admitted': admitted.get('by') in self._admitters(author, ready=True),
+                     'admitted': admitted.get('by') in admitters,
                      'priority': issue_priority(labels, events, admitters,
                                                 self.cfg.priority_labels)}
             if issue['admitted'] and not issue['labels'] & skip and issue['number'] not in pr_issues:
@@ -2021,9 +2035,12 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                 # retry resumes it.
                 remove = [label for label in remove if label != lb.working]
             # A budget refusal on a PR records its head (#396): an advisory review waits only
-            # on the refusal of the head it would review (``_advisory_held``).
+            # on the refusal of the head it would review (``_advisory_held``). To the operator
+            # it records the story, the kind and the agent of the refused turn too, for the
+            # coordinator's extension of its envelope (#595, ``_operator_grant_budget``).
             extra = ({'category': exc.category,
-                      **({'head': pr.head_sha} if pr is not None else {})}
+                      **({'head': pr.head_sha} if pr is not None else {}),
+                      **({} if supervised else budget_fields(exc))}
                      if isinstance(exc, BudgetRefused)
                      else {'turns': [t['turn'] for t in exc.turns]}
                      if isinstance(exc, TurnBlocked) else None)
@@ -2050,7 +2067,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         # record a decision of the operator for the reviewers (#472), written before the takeover.
         issue = dict(self.gh.issue(number), title=history['title'], body=history['body'],
                      labeled=history['labeled'], admitters=self._admitters(history['author']),
-                     ready_admitters=self._admitters(history['author'], ready=True),
+                     ready_admitters=self._admitters(history['author'], coordinator=True),
                      accepted=accepted, request=self._request_hash(history, listed),
                      thread=listed, decisions=self._issue_decisions(listed, history, taken=True))
         return issue, _render_issue_comments(issue.get('comments') or [], self.cfg.trusted_users,

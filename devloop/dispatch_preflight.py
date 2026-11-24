@@ -31,6 +31,12 @@ PREFLIGHT_CLASSES = ('operator_decision', PREFLIGHT_DEFAULT)
 # The question of a readiness check to the operator on a change to the trust policy that no
 # decision covers (#472): the operator decides on the issue, before the implementation.
 TRUST_QUESTION = 'Approvi la modifica della policy di fiducia descritta qui?'
+# The gap of a readiness check on an issue the coordinator opened that touches the trust policy,
+# or does not say whether it does, queued by no trusted user (#595, ``_coordinator_gate``).
+COORDINATOR_TRUST_GAP = ('L\'issue è stata aperta dal coordinatore e il controllo di prontezza '
+                         'dichiara toccata la policy di fiducia (`trust_policy` diverso da '
+                         '`none`), ma l\'ultimo `agent:ready` non è di un utente fidato: la '
+                         'mette in coda solo l\'operatore, rimettendo `agent:ready` di persona.')
 
 
 def devloop_text(body):
@@ -361,7 +367,7 @@ class PreflightMixin:
         if not records or records[-1][1]['ready']:
             return None
         approved = ready_approval(history['labeled'], self.cfg.labels.ready,
-                                  self._admitters(history['author'], ready=True))
+                                  self._admitters(history['author'], coordinator=True))
         written = comments[records[-1][0]].get('created_at')
         if approved and isinstance(written, str) and approved[1] > written:
             return approved[0], approved[1]
@@ -496,8 +502,27 @@ class PreflightMixin:
                 raise
         finally:
             self.ws.remove(name)
-        self._publish_preflight(number, normalize_preflight(raw), digest, agent.key, base=base,
+        outcome = self._coordinator_gate(history, normalize_preflight(raw))
+        self._publish_preflight(number, outcome, digest, agent.key, base=base,
                                 used=used, request=request, refused=refused)
+
+    def _coordinator_gate(self, history, outcome):
+        """``outcome`` of a readiness check, not ready with a first gap of kind
+        ``operator_decision`` (``COORDINATOR_TRUST_GAP``) on an issue the coordinator opened
+        (#595) when the check declares the trust policy touched (``trust_policy`` other than
+        ``none``, or not declared: it fails closed) and the latest ``agent:ready`` of the
+        issue's ``history`` is no trusted user's. Its labels and the supervisor's count there,
+        since its app is one of devloop's (``_devloop_logins``), but a change to the trust policy
+        is queued by the operator only: the issue goes to ``agent:needs-operator`` without
+        starting, and the operator's ``agent:ready`` added again runs a new check that admits
+        it (``_relabeled``). Any other outcome is returned as it is."""
+        if not self._is_coordinator(history['author']) or outcome.get('trust_policy') == 'none':
+            return outcome
+        if ready_approval(history['labeled'], self.cfg.labels.ready, self.cfg.trusted_users):
+            return outcome
+        gap = {'kind': 'operator_decision', 'description': COORDINATOR_TRUST_GAP,
+               'code_refs': [], 'proposed_default': '', 'repository_dependent': False}
+        return dict(outcome, ready=False, gaps=[gap, *outcome['gaps']])
 
     def _log_refused(self, number, refused):
         """Log the ``/devloop approve`` ``refused`` (#483), as ``(comment, reason)``."""
