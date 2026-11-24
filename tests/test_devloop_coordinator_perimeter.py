@@ -138,6 +138,23 @@ class CapacityTests(CapacityCase):
         self.assertIn('la delega dei limiti di capacità è spenta',
                       ' '.join(self.body().split()))
 
+    def test_a_grant_replaced_is_not_restored_by_a_revocation(self):
+        # The latest grant of a key is chosen before its delegation is checked: revoking it
+        # gives the configured value back, never an earlier grant it replaced.
+        both = coordinated(CAPACITY_ON)
+        for first, second, revoked in ((None, COORDINATOR, CAPACITY_ON),
+                                       (COORDINATOR, None, coordinated(CAPACITY_OFF))):
+            with self.subTest(first=first, second=second):
+                d = self.make(both)
+                self.command('/devloop capacity max_open_prs 6 6h ' + CAPACITY_REASON,
+                             **({'login': first} if first else {}))
+                self.assertEqual(self.planned(d).max_open_prs, 6)
+                self.command('/devloop capacity max_open_prs 1 6h ' + CAPACITY_REASON,
+                             **({'login': second} if second else {}))
+                self.assertEqual(self.planned(d).max_open_prs, 1)
+                d.cfg = revoked
+                self.assertEqual(self.planned(d).max_open_prs, 2)
+
     def test_off_it_is_ignored(self):
         d = self.make(declared(CAPACITY_ON))
         self.command(COMMAND, login=COORDINATOR)
@@ -367,6 +384,33 @@ class CoordinatorIssueTests(recheck_tests.Case):
     def test_a_trusted_users_label_admits_it_at_once(self):
         d = self.issue('brushtyler')
         self.assertTrue(self.check(d, 'covered')['ready'])
+        self.assertEqual(self.planned(d, ISSUE_CFG), [('implement', 7)])
+
+    def test_a_reused_check_holds_only_while_a_trusted_user_queued_it(self):
+        # The operator's agent:ready replaced by the coordinator's or the supervisor's after a
+        # positive check: the reused outcome passes the gate again, and blocks the issue.
+        for ready_by in (COORDINATOR, SUPERVISOR_LOGIN):
+            with self.subTest(ready_by=ready_by):
+                d = self.issue('brushtyler')
+                self.assertTrue(self.check(d, 'covered')['ready'])
+                self.gh.relabel(ready_by)
+                self.assertEqual(self.planned(d, ISSUE_CFG), [('preflight_block', 7)])
+                self.assertEqual([a.kind for a in d.tick()], ['preflight_block'])
+                record = self.records()[-1]
+                self.assertFalse(record['ready'])
+                self.assertIn('aperta dal coordinatore', record['gaps'][0]['description'])
+                self.assertEqual(self.gh.labels[7], {READY, HUMAN})
+                self.assertEqual(self.planned(d, ISSUE_CFG), [])
+                # The operator's agent:ready admits it again, with a new check.
+                self.gh.relabel('brushtyler')
+                self.assertEqual(self.planned(d, ISSUE_CFG), [('preflight', 7)])
+                self.assertTrue(self.check(d, 'covered')['ready'])
+                self.assertEqual(self.planned(d, ISSUE_CFG), [('implement', 7)])
+
+    def test_a_reused_check_outside_the_trust_policy_still_holds(self):
+        d = self.issue('brushtyler')
+        self.assertTrue(self.check(d, 'none')['ready'])
+        self.gh.relabel(COORDINATOR)
         self.assertEqual(self.planned(d, ISSUE_CFG), [('implement', 7)])
 
     def test_an_issue_of_a_trusted_user_is_not_held(self):

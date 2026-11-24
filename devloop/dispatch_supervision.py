@@ -1424,22 +1424,26 @@ class SupervisionMixin:
         the configuration sets now (lowered after the grant) is not applied. A grant of the
         coordinator's identity (``role: coordinator``, #595) counts only with
         ``[roles.coordinator]`` on, any other only with ``[delegations] capacity`` on: turning
-        either off revokes its grants."""
+        either off revokes its grants. The latest grant of a key is chosen first, and only then
+        checked: one that does not apply leaves the configured value, never an earlier grant it
+        replaced."""
         rules, now = self.cfg.delegations, self.clock()
-        latest = {}
+        latest, roles = {}, {}
         for _, record in self._dispatcher_records(comments, 'supervision'):
             if record.get('command') != CAPACITY or record.get('outcome') != 'granted':
-                continue
-            if not (self.cfg.coordinator is not None if record.get('role') == COORDINATOR
-                    else rules.capacity):
                 continue
             key, value, until = record.get('setting'), record.get('value'), record.get('until')
             if (rules.capacity_cap(key) is not None and isinstance(value, int)
                     and not isinstance(value, bool) and _epoch(until) is not None):
                 latest[key] = {'value': value, 'until': until, 'by': record.get('by')}
+                roles[key] = record.get('role') == COORDINATOR
         limits = {}
         for key, limit in latest.items():
             if _epoch(limit['until']) <= now:
+                continue
+            if not (self.cfg.coordinator is not None if roles[key] else rules.capacity):
+                self.log(f'capacity: {key} = {limit["value"]} by {limit["by"]} is not applied: '
+                         'its delegation is off')
                 continue
             if not 1 <= limit['value'] <= rules.capacity_cap(key):
                 self.log(f'capacity: {key} = {limit["value"]} is above the cap of the '

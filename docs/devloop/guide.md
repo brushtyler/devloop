@@ -514,7 +514,10 @@ the coordinator may queue them. One exception holds them for the operator: when 
 declares the trust policy touched (`trust_policy` other than `none`, or not declared) and the
 latest `agent:ready` is not a trusted user's, the check fails with a gap of kind
 `operator_decision` and the issue goes to `agent:needs-operator` without starting. The operator
-admits it by adding `agent:ready` again in person: a new check runs, and the gap is gone. Without
+admits it by adding `agent:ready` again in person: a new check runs, and the gap is gone. The
+rule holds for a passed check reused too: if the coordinator or the supervisor adds `agent:ready`
+again after the operator's, the passed check reads as failed with that gap, and the issue goes
+back to `agent:needs-operator` before the implementation. Without
 a readiness check (`preflight` not set) nothing would say whether such an issue touches the trust
 policy, so on the coordinator's issues only the trusted users' labels count.
 
@@ -1500,7 +1503,9 @@ ones of `[delegations]`, every grant counted against `max_grants_per_day`, merge
 For the coordinator the delegation is on with `[roles.coordinator]`, whatever `[delegations]
 capacity` says: that key stays the switch of the supervisor's. Its records carry
 `role: coordinator`, and its limits are in force only while `[roles.coordinator]` is on; the
-supervisor's and the trusted users' only while `capacity = true`. Its `/devloop merge-budget`
+supervisor's and the trusted users' only while `capacity = true`. The latest grant of a key
+is the one checked: when its switch is off, the configured value applies, never an earlier grant
+it replaced. Its `/devloop merge-budget`
 stays the operator's: it is ignored and logged.
 
 **Revocation.** `capacity = false` revokes the delegation from the next tick: the limits in force

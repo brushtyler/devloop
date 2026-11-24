@@ -636,7 +636,8 @@ the dispatcher plans with; the same figures go in a ledger `event` `delegation_g
 `delegation` `capacity`, after a `grant` event in the turn journal. With the delegation off the
 command gets a `refused` record all the same, which spends it. The records of the coordinator's
 identity (#595) carry `role: coordinator`: its limits are in force only with
-`[roles.coordinator]` on, the others only with `[delegations] capacity` on. A
+`[roles.coordinator]` on, the others only with `[delegations] capacity` on; the latest grant of a
+key replaces the earlier ones whatever its switch, so one switched off restores none of them. A
 [delegated merge](guide.md#delegated-merge) (#486, `/devloop merge <sha> <reason>`) has its
 record on the PR, under the title "Merge delegato al supervisore", once the merge ran: outcome
 `merged`, with the `head`, the `opinion` of the advisory review, the delegated merges of the UTC
