@@ -16,7 +16,8 @@ on the PR (review, fix, sync, CI):
   be left open, whatever labels the issue or PR has later, so that the next tick finds them;
 - ``verification``: a test command the dispatcher ran, bound to the commit created right after
   only when the tree before the test, after it and in the commit is the same. The retry alone
-  of failed tests that would escalate ``host_tests`` (#598) names them in ``retried``;
+  of failed tests that would escalate ``host_tests`` or wait as ``base_broken`` (#598) names
+  them in ``retried``;
 - ``event``: what happens without a CLI, such as a CI round or a sync without conflicts.
 
 The turns of a review round and its ``ci_round`` event share one comment, the round's register
@@ -624,7 +625,7 @@ def _render_verification(r, title=None):
                     ('Eseguita il', r.get('at'))])]
     if isinstance(r.get('retried'), list):
         # #598: the failed tests of the attempt, which failed on the base commit too, run
-        # again alone before the escalation host_tests.
+        # again alone before the escalation host_tests or the wait base_broken.
         cases = ''.join(f'\n- `{str(c).replace("`", "")}`' for c in r['retried'])
         parts += ['', ('**Test instabili**: falliti nel tentativo e sul commit base, passano '
                        'rilanciati da soli. Il passo prosegue; il test va corretto:'

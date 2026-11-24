@@ -15,7 +15,7 @@ from devloop.dispatch_base import FLAKY_RETRY_PAUSE, MAX_CASES_LISTED, BaseBroke
 from devloop.dispatcher import Dispatcher
 from devloop.github import GitHubError, normalize_checks
 from devloop.ledger import Ledger
-from devloop.localtests import (Tests, case_command, case_modules, failed_cases,
+from devloop.localtests import (Tests, case_commands, case_modules, failed_cases,
                                 module_command)
 from devloop.planning import BASE_REPAIRED, Action, Snapshot, plan
 from devloop.ports import summarize_checks
@@ -30,6 +30,20 @@ from test_devloop_supervision import (AUTO, HUMAN, PREFLIGHT_AUTO, SUPER, SUPERV
                                       Case, crash)
 
 WORKING = 'agent:working'
+
+# Before base_broken and host_tests the failed tests run again alone after a pause (#598): here
+# the ``time`` of ``dispatch_base`` is a mock, so no test waits, and ``CLOCK.sleep`` records it.
+_CLOCK = mock.patch('devloop.dispatch_base.time')
+CLOCK = None
+
+
+def setUpModule():
+    global CLOCK
+    CLOCK = _CLOCK.start()
+
+
+def tearDownModule():
+    _CLOCK.stop()
 
 SEP = '=' * 70
 DASH = '-' * 70
@@ -185,9 +199,12 @@ class ImplementTests(unittest.TestCase):
         self.assertEqual(self.gh.created, [])
         self.assertEqual(self.gh.labels[7], {'agent:working'})
         self.assertFalse(any(markdown.read_marker(b, 'notice') for _, b in self.gh.comments))
-        # The failed modules ran on the base commit, one at a time, in their own copy.
+        # The failed modules ran on the base commit, one at a time, in their own copy; then
+        # the failed tests once again alone on the branch (#598), red again.
+        branch = self.ws.commands[0][0]
         self.assertEqual(self.ws.commands[1:], [(Path('/wt/issue-7-base'),
-                                                 module_command(['test_x.py']))])
+                                                 module_command(['test_x.py'])),
+                                                (branch, *case_commands(BRANCH))])
         self.assertIn('issue-7-base', self.ws.removed)
         self.assertIn('issue-7', self.ws.removed)
         record, = self.records()
@@ -684,12 +701,6 @@ class HostTestsTests(unittest.TestCase):
 
     LINK = f'https://github.com/{CFG.repo}/commit/{BASE}/checks'
 
-    def setUp(self):
-        # The failed tests run again alone (#598) fail here too, with no pause.
-        sleep = mock.patch('devloop.dispatch_base.time.sleep')
-        sleep.start()
-        self.addCleanup(sleep.stop)
-
     def implement(self, checks, cfg=CFG, gh=None):
         """``_do_implement`` of issue 7 whose local tests fail with ``BRANCH`` on the branch and
         on the base commit ``BASE``, whose CI has ``checks``."""
@@ -807,14 +818,26 @@ class GreenBaseLedgerGH(LedgerGH):
         return [dict(c) for c in PASSED]
 
 
+class TimedWS(FakeWS):
+    """``FakeWS`` that records the time limit of each test command."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.timeouts = []
+
+    def run_tests(self, path, command, timeout):
+        self.timeouts.append((command, timeout))
+        return super().run_tests(path, command, timeout)
+
+
 class UnstableTests(unittest.TestCase):
-    """#598: before ``host_tests`` the failed tests run once again alone on the branch, after a
-    pause; when they pass they are unstable under load, not a failure of the host."""
+    """#598: before ``host_tests`` and ``base_broken`` the failed tests run once again alone on
+    the branch, after a pause; when they pass they are unstable under load, not a failure of the
+    host nor of the base."""
 
     def setUp(self):
-        sleep = mock.patch('devloop.dispatch_base.time.sleep')
-        self.sleep = sleep.start()
-        self.addCleanup(sleep.stop)
+        CLOCK.reset_mock()
+        self.sleep = CLOCK.sleep
 
     def implement(self, tests):
         """``_do_implement`` of issue 7 with a ledger, whose local tests fail with ``BRANCH`` on
@@ -843,7 +866,7 @@ class UnstableTests(unittest.TestCase):
         branch = self.ws.commands[0][0]
         self.assertEqual(self.ws.commands[1:], [
             (Path('/wt/issue-7-base'), module_command(['test_x.py'])),
-            (branch, case_command(BRANCH))])
+            (branch, *case_commands(BRANCH))])
         # No escalation, no other turn of the agent: the PR opens.
         self.assertEqual(len(self.runner.calls), 1)
         self.assertEqual(self.notices(7), [])
@@ -854,7 +877,7 @@ class UnstableTests(unittest.TestCase):
         self.assertEqual((failed['outcome'], failed['commit'], 'retried' in failed),
                          ('fail', None, False))
         self.assertEqual((retry['outcome'], retry['attempt'], retry['retried'],
-                          retry['command']), ('pass', 1, BRANCH, case_command(BRANCH)))
+                          retry['command']), ('pass', 1, BRANCH, *case_commands(BRANCH)))
         self.assertIsNotNone(retry['commit'])
         body = self.verification_bodies(7)[-1]
         self.assertIn('**Test instabili**', body)
@@ -863,7 +886,7 @@ class UnstableTests(unittest.TestCase):
     def test_tests_failing_alone_too_escalate_host_tests(self):
         self.implement((False,))
         self.sleep.assert_called_once_with(FLAKY_RETRY_PAUSE)
-        self.assertEqual(self.ws.commands[-1][1], case_command(BRANCH))
+        self.assertEqual(self.ws.commands[-1][1], *case_commands(BRANCH))
         self.assertEqual(len(self.runner.calls), 1)
         self.assertEqual(self.gh.created, [])
         self.assertEqual(self.gh.labels[7], {'agent:needs-operator'})
@@ -889,30 +912,162 @@ class UnstableTests(unittest.TestCase):
         Dispatcher(CFG, gh, ws, runner, log=lambda m: None)._do_fix(
             pr(labels=['agent:changes'], reviews=[first]))
         self.assertEqual(len(runner.calls), 1)
-        self.assertEqual(ws.commands[-1][1], case_command(BRANCH))
+        self.assertEqual(ws.commands[-1][1], *case_commands(BRANCH))
         self.assertEqual(len(ws.pushes), 1)
         self.assertFalse(any(markdown.read_marker(b, 'notice') for _, b in gh.comments))
         self.assertNotIn('agent:needs-operator', gh.labels[100])
 
-    def test_a_base_broken_failure_is_not_run_again(self):
-        # A red CI of the base: the base's failure, the retry does not apply.
+    def base_broken(self, tests):
+        """``_do_implement`` of issue 7 whose local tests fail with ``BRANCH`` on the branch and
+        on its base commit, whose CI failed; ``tests`` as in ``implement``."""
         gh = MainGH({BASE: FAILED})
-        ws = FakeWS(files=['impact.py'], modules=['test_impact.py'], tests=(False,))
+        ws = FakeWS(files=['impact.py'], modules=['test_impact.py'], tests=tests)
         ws.cases = {'issue-7': BRANCH, 'issue-7-base': BRANCH}
         Dispatcher(CFG, gh, ws, FakeRunner(implemented()), log=lambda m: None)._do_implement(7)
-        self.sleep.assert_not_called()
-        self.assertEqual(len(ws.commands), 2)
+        records = [n for n, b in gh.comments if markdown.read_marker(b, 'basebroken')]
+        return gh, ws, records
+
+    def test_a_base_broken_failure_passing_alone_does_not_wait(self):
+        # A red CI of the base: the failed tests run again alone first, and pass.
+        gh, ws, records = self.base_broken((False, False, True))
+        self.sleep.assert_called_once_with(FLAKY_RETRY_PAUSE)
+        self.assertEqual(ws.commands[-1][1], *case_commands(BRANCH))
+        self.assertEqual(records, [])
+        self.assertEqual(len(gh.created), 1)
+        self.assertFalse(any(markdown.read_marker(b, 'notice') for _, b in gh.comments))
+
+    def test_a_base_broken_failure_failing_alone_too_waits_for_the_base(self):
+        gh, ws, records = self.base_broken((False,))
+        self.sleep.assert_called_once_with(FLAKY_RETRY_PAUSE)
+        self.assertEqual(len(ws.commands), 3)
+        self.assertEqual(records, [7])
+        self.assertEqual(gh.created, [])
+        self.assertEqual(gh.labels[7], {WORKING})
+
+    def test_each_module_of_the_retry_has_its_own_time_limit(self):
+        # Two modules: two commands, each with the whole test_timeout_seconds, not one command
+        # sharing it; the retry stops at the first that fails.
+        cases = ['test_x.Case.test_a', 'test_y.Case.test_b']
+        cfg = dataclasses.replace(CFG, test_timeout_seconds=7)
+        for tests, ran in [((True,), 2), ((False,), 1)]:
+            with self.subTest(tests=tests):
+                ws = TimedWS(tests=tests)
+                d = Dispatcher(cfg, FakeGH(), ws, FakeRunner(), log=lambda m: None)
+                passed, entry = d._retry_alone(None, Path('/wt/issue-7'), 1,
+                                               BaseBroken(BASE, cases))
+                self.assertEqual(passed, tests[0])
+                self.assertIsNone(entry)
+                self.assertEqual(ws.timeouts, [(c, 7) for c in case_commands(cases)[:ran]])
+
+    def test_the_ledger_records_the_commands_of_the_retry_as_one(self):
+        cases = ['test_x.Case.test_a', 'test_y.Case.test_b']
+        gh = GreenBaseLedgerGH()
+        ws = TreeWS(files=['impact.py'], modules=['test_impact.py'])
+        d = Dispatcher(CFG, gh, ws, FakeRunner(), log=lambda m: None, ledger=Ledger(gh))
+        passed, entry = d._retry_alone((7, 'implement'), Path('/wt/issue-7'), 2,
+                                       BaseBroken(BASE, cases))
+        self.assertTrue(passed)
+        self.assertEqual([c for _, c in ws.commands], case_commands(cases))
+        retry, = gh.records(7, 'verification')
+        self.assertEqual((retry['command'], retry['retried'], retry['attempt']),
+                         (' && '.join(case_commands(cases)), cases, 2))
+
+
+FIXTURE_MODULE = '''
+import os
+import unittest
+
+MARK = os.path.join(os.path.dirname(__file__), 'ran')
+
+
+def first():
+    """Whether this is the first run: a ``transient`` fixture fails only then."""
+    if os.path.exists(MARK):
+        return False
+    open(MARK, 'w').close()
+    return True
+
+
+def setUpModule():
+    if {module!r} == 'always' or {module!r} == 'transient' and first():
+        raise RuntimeError('setUpModule')
+
+
+class Case(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if {cls!r} == 'always' or {cls!r} == 'transient' and first():
+            raise RuntimeError('setUpClass')
+
+    def test_a(self):
+        pass
+
+
+class Other(unittest.TestCase):
+    def test_b(self):
+        pass
+'''
 
 
 class CaseCommandTests(unittest.TestCase):
-    """#598: ``case_command`` runs only the failed tests, each by its whole id."""
+    """#598: ``case_commands`` run only the failed tests, each by its whole id, one command
+    per module."""
 
     def test_one_command_per_module_each_test_once(self):
         self.assertEqual(
-            case_command(['test_y.Case.test_c', 'test_x.Case.test_a (i=1)',
-                          'test_x.Case.test_a (i=2)']),
-            "python3 -m unittest discover -s tests -p test_x.py -k '*test_x.Case.test_a' && "
-            "python3 -m unittest discover -s tests -p test_y.py -k '*test_y.Case.test_c'")
+            case_commands(['test_y.Case.test_c', 'test_x.Case.test_a (i=1)',
+                           'test_x.Case.test_a (i=2)']),
+            ["python3 -m unittest discover -s tests -p test_x.py -k '*test_x.Case.test_a'",
+             "python3 -m unittest discover -s tests -p test_y.py -k '*test_y.Case.test_c'"])
+
+    def test_a_failed_fixture_runs_its_class_or_its_module(self):
+        self.assertEqual(
+            case_commands(['test_x.Case.setUpClass', 'test_x.Case.test_a',
+                           'test_x.Other.tearDownClass', 'test_y.setUpModule',
+                           'test_y.Case.test_c', 'test_z.tearDownModule']),
+            ["python3 -m unittest discover -s tests -p test_x.py -k '*test_x.Case.*' "
+             "-k '*test_x.Case.test_a' -k '*test_x.Other.*'",
+             'python3 -m unittest discover -s tests -p test_y.py',
+             'python3 -m unittest discover -s tests -p test_z.py'])
+
+    def run_fixture(self, module='never', cls='never'):
+        """A real run of a module whose ``setUpModule`` and ``setUpClass`` fail ``always``,
+        ``never`` or only the first time (``transient``): ``(cases, passed, tail)``, the failed
+        tests of the first run, then the outcome of their run alone."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tests = Path(tmp) / 'tests'
+            tests.mkdir()
+            (tests / 'test_fixture.py').write_text(FIXTURE_MODULE.format(module=module, cls=cls))
+            ws = Workspace(tmp, '.state', 'main')
+            python = shlex.quote(sys.executable)
+            command = module_command(['test_fixture.py']).replace('python3', python)
+            self.assertFalse(ws.run_tests(tmp, command, 60)[0])
+            cases = ws.failed_cases(tmp)
+            passed, tail = True, ''
+            for command in case_commands(cases):
+                passed, tail = ws.run_tests(tmp, command.replace('python3', python), 60)
+                if not passed:
+                    break
+            return cases, passed, tail
+
+    def test_a_transient_fixture_passes_run_again(self):
+        for where, kwargs, case, ran in [
+                ('class', {'cls': 'transient'}, 'test_fixture.Case.setUpClass', 'Ran 1 test'),
+                ('module', {'module': 'transient'}, 'test_fixture.setUpModule', 'Ran 2 tests')]:
+            with self.subTest(where):
+                cases, passed, tail = self.run_fixture(**kwargs)
+                self.assertEqual(cases, [case])
+                self.assertTrue(passed, tail)
+                self.assertIn(ran, tail)
+
+    def test_a_persistent_fixture_fails_run_again(self):
+        for where, kwargs, case in [('class', {'cls': 'always'}, 'test_fixture.Case.setUpClass'),
+                                    ('module', {'module': 'always'}, 'test_fixture.setUpModule')]:
+            with self.subTest(where):
+                cases, passed, tail = self.run_fixture(**kwargs)
+                self.assertEqual(cases, [case])
+                self.assertFalse(passed)
+                self.assertIn(case.rsplit('.', 1)[1], tail)
 
     def test_a_real_run_selects_only_those_tests(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -934,10 +1089,10 @@ class CaseCommandTests(unittest.TestCase):
             ws = Workspace(tmp, '.state', 'main')
             python = shlex.quote(sys.executable)
             passed, tail = ws.run_tests(
-                tmp, case_command(['test_load.Case.test_a']).replace('python3', python), 60)
+                tmp, case_commands(['test_load.Case.test_a'])[0].replace('python3', python), 60)
             self.assertTrue(passed, tail)
             self.assertIn('Ran 1 test', tail)
-            command = case_command(['test_load.Case.test_b', 'test_load.Case.test_a'])
+            command, = case_commands(['test_load.Case.test_b', 'test_load.Case.test_a'])
             self.assertFalse(ws.run_tests(tmp, command.replace('python3', python), 60)[0])
             self.assertEqual(ws.failed_cases(tmp), ['test_load.Case.test_b'])
 
@@ -1008,6 +1163,9 @@ class HostTestsDuringTheWaitTests(unittest.TestCase):
         d._do_implement(7)
         self.assertEqual(gh.labels[7], {WORKING})
         self.assertTrue(any(markdown.read_marker(b, 'basebroken') for _, b in gh.comments))
+        # The failed tests ran again alone before the wait (#598), and failed again.
+        self.assertEqual(ws.commands[-1][1], *case_commands(BRANCH))
+        self.assertEqual(len(ws.commands), 3)
         self.waiting(gh, d)
         # The same base commit, its CI now green.
         gh.by_sha[BASE] = PASSED
@@ -1025,6 +1183,26 @@ class HostTestsDuringTheWaitTests(unittest.TestCase):
         self.assertEqual(self.tick(d), [])
         self.assertEqual(len(runner.calls), 1)
         self.assertEqual(gh.created, [])
+
+    def test_tests_passing_alone_while_the_ci_of_the_base_is_pending_never_escalate(self):
+        # #598: the CI of the base is pending, so the step would wait as base_broken and
+        # escalate host_tests once it turns green; the failed tests run again alone first, pass,
+        # and the implementation goes on: no wait, so no host_tests later.
+        gh = WaitingGH({BASE: PENDING})
+        ws = self.ws(files=['impact.py'], modules=['test_impact.py'], tests=(False, False, True))
+        ws.cases = {'issue-7': BRANCH, 'issue-7-base': BRANCH}
+        runner = FakeRunner(implemented())
+        d = Dispatcher(CFG, gh, ws, runner, log=lambda m: None)
+        gh.labels[7] = {WORKING}
+        d._do_implement(7)
+        self.assertEqual(ws.commands[-1][1], *case_commands(BRANCH))
+        self.assertEqual(len(ws.commands), 3)
+        self.assertFalse(any(markdown.read_marker(b, 'basebroken') for _, b in gh.comments))
+        self.assertEqual(len(gh.created), 1)
+        gh.by_sha[BASE] = PASSED
+        self.assertNotIn(('host_tests', 7), self.tick(d))
+        self.assertEqual(self.notices(gh, 7), [])
+        self.assertEqual(len(runner.calls), 1)
 
     def test_a_blocked_issue_escalates_once_its_block_is_lifted(self):
         wait = {'holds': True, 'labels': {WORKING, 'agent:needs-supervisor'}, 'preflight': None,
