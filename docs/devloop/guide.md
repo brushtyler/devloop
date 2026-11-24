@@ -17,7 +17,7 @@ plans the next steps and runs them. A crashed tick is resumed by the next one.
 
 | Step | Trigger | Result |
 |---|---|---|
-| Start | A trusted user adds `agent:ready` to an issue (or the [supervisor](#labels-from-the-supervisor), on an issue of a trusted user or of a devloop app) | `agent:working`; the implementer works in a fresh worktree |
+| Start | A trusted user adds `agent:ready` to an issue (or the [supervisor](#labels-from-the-supervisor), on an issue of a trusted user or of a devloop app; with `[roles.coordinator]` only on an issue the coordinator authorized with `/devloop authorize` for its current text, [#607](#authorization-by-the-coordinator)) | `agent:working`; the implementer works in a fresh worktree |
 | Implement | Changes made and [local tests](reference.md#local-tests) pass | Dispatcher commits, pushes `agent/issue-<n>`, opens a PR labelled `agent:review` |
 | CI | Checks pending | The review does not wait for them (#271); failing checks become a review round sent back as `agent:changes`, unless no failed test module is pertinent to the PR: then the failed jobs are re-run once, without a round (see [CI failures not pertinent to the PR](reference.md#ci-failures-not-pertinent-to-the-pr)) |
 | Review | CI pending, passed or absent, not failed (absent CI with `local_tests` other than `full`: the full suite first runs locally, except within the [window of a new head](reference.md#ci-of-a-new-head), see [Local tests](reference.md#local-tests)) | The dispatcher computes the PR's [review level](reference.md#review-level-and-policy-receipt); at level 1 a **different** agent posts a structured verdict (see [Structured review](protocol.md#structured-review)), at level 2 two [independent reviewers](reference.md#level-2-two-independent-reviewers) do, one per action, and their verdicts are applied together |
@@ -509,7 +509,9 @@ in [AGENTS.md](../../AGENTS.md) ("Contenuti di autori non fidati").
 With `[roles.coordinator]` ([The coordinator](#the-coordinator)) the coordinator's `agent:ready`
 and priority labels count on the same issues as the supervisor's (#595); its dependency and
 implementer labels never do. The issues the coordinator opens are devloop's: the supervisor and
-the coordinator may queue them. One exception holds them for the operator: when the
+the coordinator may queue them, the supervisor only with the coordinator's authorization
+([Authorization by the coordinator](#authorization-by-the-coordinator), #607). One exception
+holds them for the operator: when the
 [readiness check](#readiness-check-before-implementation) of an issue the coordinator opened
 declares the trust policy touched (`trust_policy` other than `none`, or not declared) and the
 latest `agent:ready` is not a trusted user's, the check fails with a gap of kind
@@ -530,6 +532,55 @@ user's would. The label approves the title and the body as they are; an edit by 
 
 Without `[roles].supervisor`, or without an app for it (the supervisor then acts with the
 operator's `gh` login), only `trusted_users` count, as before.
+
+#### Authorization by the coordinator
+
+With `[roles.coordinator]` the coordinator **authorizes** the work and decides its priority, the
+supervisor **queues** only authorized work, and whoever proposes a piece of work does not
+authorize it alone (#607, point 1 of the
+[second precision of 2026-11-23](../adr/0002-ruoli-e-responsabilita.md#seconda-precisazione-del-2026-11-23-modello-operativo-dei-ruoli-597)
+of ADR 0002):
+
+1. the supervisor opens an issue (a problem seen in the logs, an improvement) and adds
+   `agent:needs-coordinator`, not `agent:ready`. The label wakes the coordinator
+   (`ops/host/coordinator-wait.sh`), as `agent:needs-operator` does; `devloop setup` creates it
+   with the other `agent:*` labels;
+2. the coordinator reads the issue and, if it approves it, writes a comment whose first line
+   after the attribution header is `/devloop authorize`, or `/devloop authorize priority:<p>`
+   with `<p>` among `high`, `normal` and `low`; the rest of the comment is free text, such as
+   the reason. The dispatcher records the command once, with an `authorize` record
+   ([Protocol](protocol.md#authorization-by-the-coordinator)): the SHA-256 of the title and the
+   body, the priority, the author and the time. Then it removes `agent:needs-coordinator`;
+3. the supervisor adds `agent:ready` when it is time (dependencies, free slots, conflicts), in
+   the order of the priorities. The priority of the command is recorded for it: the start order
+   is still the one of the priority labels ([Start order](#start-order-of-ready-issues));
+4. the supervisor's `agent:ready` admits the issue only while an authorization holds for its
+   current text. Without one it is ignored, and the tick log says so (`issue #<n>: ignored
+   agent:ready by <login>: no authorization of the coordinator (/devloop authorize) holds for
+   its current text`): the issue does not start. A trusted user's `agent:ready` and the
+   coordinator's need none, and start the issue as before (the coordinator's is the fallback of
+   point 2 of the precision, when the supervisor does not answer).
+
+The coordinator authorizes with the same command the issues it opens and those of trusted users.
+The rules:
+
+- **The authorization is bound to the text.** It holds for the title and the body the
+  coordinator read: a change of either after the command, by anyone, a trusted user included,
+  voids it, and a new `/devloop authorize` is needed. A command recorded after a change of the
+  text that came after it (or in the same second) is refused.
+- **Only the coordinator authorizes.** A `/devloop authorize` from any other identity, a trusted
+  user or the supervisor included, is refused and recorded, as is one with malformed arguments,
+  or one on an issue opened by someone who is neither a trusted user nor one of devloop's apps.
+- **The trust policy stays the operator's.** When the readiness check of an issue that no trusted
+  user opened declares the trust policy touched (`trust_policy` other than `none`, or not
+  declared) and the latest `agent:ready` is not a trusted user's, the issue goes to
+  `agent:needs-operator` even when authorized, as for the coordinator's issues above (#595); the
+  operator admits it by adding `agent:ready` again in person.
+
+The dispatcher reads the commands on the issues in `agent:needs-coordinator`, and on the ready
+issues whose latest `agent:ready` is the supervisor's; a command elsewhere is recorded once one of
+the two holds. Without `[roles.coordinator]` nothing changes: `/devloop authorize` is not read,
+and the supervisor's labels count as above.
 
 ### Project direction
 
@@ -1954,6 +2005,7 @@ of ADR 0002:
 | labels | Delegated: its `agent:ready` added again and (#595) its priority labels count, as the supervisor's, only on issues opened by a trusted user or by a devloop app; its dependency and implementer labels never count ([Labels from the supervisor](#labels-from-the-supervisor)) |
 | `approve`, `merge-budget`, `reconcile`, `trusted_users` and the keys of trust | Reserved to the operator in person: never the coordinator's. On an escalation they are answered as not applicable and spent; elsewhere they are ignored and logged, as anyone else's; `trusted_users` and the overlay are the operator's |
 | `merge` | The coordinator's reserved merge (#529): [The reserved merge of the coordinator](#the-reserved-merge-of-the-coordinator) |
+| `authorize` | Delegated (#607): `/devloop authorize [priority:<p>]`, the authorization of an issue of a trusted user or of a devloop app, bound to its title and body, without which the supervisor's `agent:ready` does not start it; only the coordinator's counts, any other identity's is refused and recorded ([Authorization by the coordinator](#authorization-by-the-coordinator)); never a command of an escalation |
 | `vote` | Delegated (#605): the substitute vote in place of an unavailable member, only on a conclave waiting for it, bound to its comment and to the SHA-256 of its proposal, before its deadline ([Conclave on a block](#conclave-on-a-block)); elsewhere ignored, and never a command of an escalation |
 | any other (`escalate`, `finding`, `veto`, ...) | Refused: on an escalation answered as not applicable and spent, elsewhere ignored and logged |
 

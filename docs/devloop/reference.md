@@ -1920,7 +1920,12 @@ model = "gpt-6.1-sol"
   a trusted user's `agent:ready` admits it, and without a readiness check only the trusted users'
   labels count on it ([Labels from the supervisor](guide.md#labels-from-the-supervisor)). Its
   `agent:ready` and priority labels count where the supervisor's do; its dependency and
-  implementer labels never. Its commands count only inside a **closed
+  implementer labels never. With the table, its `/devloop authorize` (#607) authorizes the work:
+  the supervisor's `agent:ready` admits an issue only while an authorization of the coordinator
+  holds for its current title and body, and the label `agent:needs-coordinator` (the field
+  `needs_coordinator` of `Labels` in `devloop/config.py`, created by `devloop setup` with the
+  other labels) asks for one ([Authorization by the coordinator](guide.md#authorization-by-the-coordinator)).
+  Its commands count only inside a **closed
   perimeter**, a constant of the code (`supervision.COORDINATOR_DELEGATED` and
   `COORDINATOR_RESERVED`) that no key widens; the guide lists it
   ([The coordinator](guide.md#the-coordinator)). A delegated command counts as a trusted user's,

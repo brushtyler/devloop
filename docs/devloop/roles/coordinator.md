@@ -120,8 +120,8 @@ On the host of this repository (`PROJECT=devloop`, #563) the copy is
 session.
 
 It ends at the first of: a message in `to-coordinator/` (`casella:`, which it reports without
-consuming it), an event of yours on GitHub (`evento:`: `agent:needs-operator` added, "il merge
-spetta all'operatore", a comment on the issue of the alarms `[run].alert_issue`, an error of the
+consuming it), an event of yours on GitHub (`evento:`: `agent:needs-operator` or
+`agent:needs-coordinator` added, "il merge spetta all'operatore", a comment on the issue of the alarms `[run].alert_issue`, an error of the
 watch), a new line of `run.log` with a `Traceback`, an `ALERT:`, a `401` or the refusal of the
 start (`log:`), the service not active (`servizio:`), or the end of the period, 4 hours by
 default (`periodo:`, `--period <seconds>`). Read its lines, act, then start it again. Exit 1
@@ -233,13 +233,29 @@ the mailbox.
   replaces the whole direction, and the priorities follow it.
   Dictate the order to the supervisor in the mailbox, or with the priority labels yourself (from
   #595).
-- **Authorize the work** with `/devloop authorize [priority:<p>]` on the issue (from #607; until
-  then, with a comment on the issue and a message to the supervisor), the issues the supervisor
-  opens included: it marks them `agent:needs-coordinator` (from #607);
-  you authorize, remove the label, and the supervisor puts them in the queue. An issue of the
-  supervisor with neither the label nor an authorization, found at the periodic check, you
-  report to the supervisor. The issues that change the powers of a role or the trust policy
-  (`trust_policy` other than `none` in the readiness check) stay the operator's.
+- **Authorize the work** (#607; [Authorization by the
+  coordinator](../guide.md#authorization-by-the-coordinator)). The issues the supervisor opens
+  wait for you in `agent:needs-coordinator`, which wakes you (`evento:`). Read the issue, title
+  and body, and decide; if you approve it, write a comment whose first line, after your
+  attribution header, is `/devloop authorize` or `/devloop authorize priority:<p>` (`high`,
+  `normal`, `low`, from the direction, see "Priorities and order of the work"), with the reason
+  on the next lines. The dispatcher records it, bound to the SHA-256 of the title and the body as
+  they are, and removes `agent:needs-coordinator`; then the supervisor puts the issue in the
+  queue. If you do not approve it, say why in a comment and leave the label; the decision to
+  close it or change it is the supervisor's, or the operator's.
+  - The authorization holds for the text you read: when the title or the body changes, it lapses,
+    and the supervisor's `agent:ready` no longer starts the issue. Read the new text, and
+    authorize again if it still holds.
+  - You may authorize with the same command your issues and those of trusted users. A command of
+    any other identity is refused, and so is one on the issue of an untrusted author: such an
+    issue starts only with a trusted user's `agent:ready`.
+  - Your own `agent:ready` needs no authorization: use it only as the reserve of "Stalled work in
+    the queue".
+  - An issue of the supervisor with neither the label nor an authorization, found at the
+    periodic check, you report to the supervisor.
+  - The issues that change the powers of a role or the trust policy (`trust_policy` other than
+    `none` in the readiness check) stay the operator's: even authorized, such an issue goes to
+    `agent:needs-operator`, and only the operator's `agent:ready` admits it.
 - Verify the work of the supervisor: its decisions on the escalations, its grants within the
   caps, its delegated merges, its labels, the order in which it puts the work in the queue. When
   something does not convince you, ask it in the mailbox, and decide what is yours to decide;
@@ -347,7 +363,8 @@ the mailbox.
   opened that the readiness check declares touching the trust policy goes to
   `agent:needs-operator`: only the operator's `agent:ready` admits it.
 - The other delegated commands of the table of [The coordinator](../guide.md#the-coordinator)
-  (`retry`, `accept-defaults`, `decide`, `rereview`, `recheck`, `fix`, `hold`, `release`), under
+  (`retry`, `accept-defaults`, `decide`, `rereview`, `recheck`, `fix`, `hold`, `release`; and
+  `authorize`, above), under
   its conditions, each with its reason.
 - Write the problems of the system as issues, each with its evidence.
 - Prepare for the operator the decisions that are theirs, and a periodic summary.

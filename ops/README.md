@@ -817,7 +817,8 @@ bash /usr/local/lib/devloop-coordinator/host/coordinator-wait.sh --period 3600  
 
 Esce con 0 e una riga per motivo al primo di questi: un messaggio in `to-coordinator/` della
 casella (`casella:`, senza consumarlo), un evento del coordinatore su GitHub (`evento:`:
-`agent:needs-operator` aggiunta, "il merge spetta all'operatore", un commento sull'issue degli
+`agent:needs-operator` aggiunta, `agent:needs-coordinator` aggiunta (#607), "il merge spetta
+all'operatore", un commento sull'issue degli
 allarmi `[run].alert_issue`, un errore del watch; gli altri eventi li salta), una riga nuova di
 `run.log` con un `Traceback`, un `ALERT:`, un `401` o il rifiuto dell'avvio (`log:`), il servizio
 non attivo (`servizio:`, una volta per cambio di stato), o la fine del periodo

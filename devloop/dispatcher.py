@@ -100,6 +100,14 @@ coordinator's ``agent:ready`` and priority labels count on the same issues, and 
 devloop's: an issue it opened that the readiness check declares touching the trust policy waits
 for a trusted user's ``agent:ready`` (``_coordinator_gate``).
 
+Authorization (#607, with ``[roles.coordinator]``): the coordinator authorizes the work with
+``/devloop authorize [priority:<p>]``, which the ``authorize`` action records once, bound to the
+SHA-256 of the title and the body, removing ``agent:needs-coordinator``; a command of any other
+identity is refused and recorded. The supervisor's ``agent:ready`` admits an issue only while an
+authorization holds for its current text (``_ready_admitters``); otherwise it is ignored and
+logged. A readiness check that declares the trust policy touched on an issue no trusted user
+opened sends it to agent:needs-operator, authorized or not (``_coordinator_gate``).
+
 Parallel actions (#176, ``max_parallel_actions`` above 1): the actions of a tick on different
 issues and PRs run at once, up to that many (``schedule``). Actions on the same number, or on a
 PR and its issue, run one after the other in plan order; a global action (``GLOBAL_ACTIONS``)
@@ -189,6 +197,8 @@ from pathlib import Path
 from .agents import (TAIL_LINES, AgentError, ModelsUnavailable, ModelUnavailable, NoOutput,
                      PermissionDenied, TurnCancelled, background_unfinished, denied_retry_note)
 from .apps import COORDINATOR, DISPATCHER, ISSUE_COMMENT, PR_COMMENT, SUPERVISOR, app_login
+from .authorization import (AUTHORIZE, AUTHORIZE_COMMAND, authorize_arguments, changed_since,
+                            text_hash, valid_authorization)
 from .budget import BUDGET, OUTSIDE, BudgetRefused, extension_text
 from .budget import of_issue as budget_of_issue
 from .budget import reserve as budget_reserve
@@ -211,7 +221,7 @@ from .journal import (CLOSED, MERGED, RECONCILE_COMMAND, JournalError, TurnBlock
 from .ledger import attempt_branch, comment_ref, fix_register, open_turns, parse_branch
 from .localtests import module_command, select_modules
 from .markdown import (RESUME, carries_record, dispatcher_header, publishable, read_marker,
-                       render_cycle, render_escalation, render_operator_merge)
+                       render_authorize, render_cycle, render_escalation, render_operator_merge)
 from .activity import iso, restart_line
 from .outbox import SENT as PUBLISHED, describe as outbox_describe
 from .pin import (PREFIX, CheckFailed, PinError, PinHeld, Repinned, ScanFailed, SmokeError,
@@ -906,6 +916,112 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                                          self._devloop_logins())
         return admitters
 
+    # Authorization by the coordinator (#607) ----------------------------------
+    def _needs_authorization(self, login):
+        """Whether an ``agent:ready`` added by ``login`` admits an issue only with a valid
+        authorization of the coordinator (#607): the supervisor's identity, with
+        ``[roles.coordinator]``. A trusted user's and the coordinator's never need one."""
+        supervisor = self._supervisor_login()
+        return (bool(supervisor) and login == supervisor and self._coordinator_login() is not None
+                and login not in self.cfg.trusted_users)
+
+    def _authorize_records(self, comments):
+        """The dispatcher's ``authorize`` records of an issue's ``comments``, oldest first."""
+        return [record for _, record in self._dispatcher_records(comments, 'authorize')]
+
+    def _pending_authorizations(self, comments):
+        """The comments of ``comments`` with a ``/devloop authorize`` (#607) that no record of
+        the dispatcher answers yet, oldest first, from any author: each gets one record,
+        ``authorized`` or ``refused``. devloop's own records are never commands."""
+        recorded = {record['comment'] for record in self._authorize_records(comments)}
+        return [c for c in comments
+                if isinstance(c.get('id'), int) and not isinstance(c.get('id'), bool)
+                and c['id'] not in recorded and not carries_record(c.get('body') or '')
+                and authorize_arguments(c.get('body')) is not None]
+
+    def _authorization(self, history, comments):
+        """The coordinator's authorization that holds for the issue's current title and body
+        (``authorization.valid_authorization``), or None."""
+        return valid_authorization(self._authorize_records(comments), history)
+
+    def _ready_admitters(self, history, comments):
+        """The logins whose ``agent:ready`` admits the issue of ``history`` now: those of
+        ``_admitters`` with ``coordinator``, without the supervisor's identity when its label
+        needs an authorization of the coordinator (``_needs_authorization``) and none holds for
+        the current text (#607)."""
+        admitters = self._admitters(history['author'], coordinator=True)
+        supervisor = self._supervisor_login()
+        if (supervisor in admitters and self._needs_authorization(supervisor)
+                and self._authorization(history, comments) is None):
+            admitters.discard(supervisor)
+        return admitters
+
+    def _do_authorize(self, number):
+        """Record, once each and oldest first, the ``/devloop authorize`` of issue ``number``
+        that no record answers yet (#607), then remove ``agent:needs-coordinator`` when an
+        authorization holds for the current text.
+
+        A command authorizes only from the coordinator's identity (``COORDINATOR_DELEGATED``),
+        with well-formed arguments, on an issue of a trusted user or of one of devloop's apps,
+        and only when neither the title nor the body changed at or after it
+        (``changed_since``): the record binds the SHA-256 of the text the coordinator read
+        (``text_hash``). Any other is refused, with why. Comments and history are read again
+        here: what was recorded since the snapshot is left alone."""
+        lb = self.cfg.labels
+        comments = self.gh.issue_comments(number)
+        pending = self._pending_authorizations(comments)
+        if not pending:
+            self.log(f'  the {AUTHORIZE_COMMAND} were recorded since the snapshot')
+            return
+        history = self.gh.issue_history(number)
+        written = []
+        for comment in pending:
+            login = (comment.get('author') or {}).get('login') or ''
+            at = comment.get('created_at') if isinstance(comment.get('created_at'), str) else ''
+            priority, problem = authorize_arguments(comment.get('body'))
+            reason = (
+                'solo l\'identità del coordinatore (`[roles.coordinator]`) autorizza il lavoro'
+                if not self._coordinator_may(login, AUTHORIZE)
+                else problem if problem
+                else 'l\'issue non è stata aperta da un utente fidato né da un\'app di devloop: '
+                     'la mette in coda solo un utente fidato'
+                if not self._devloop_author(history.get('author'))
+                else 'il titolo o il corpo dell\'issue sono cambiati dopo il comando (o nello '
+                     'stesso secondo): si autorizza il testo che si è letto, serve un nuovo '
+                     f'`{AUTHORIZE_COMMAND}`'
+                if changed_since(history, at)
+                else '')
+            record = {'comment': comment['id'], 'by': login, 'at': at, 'priority': priority}
+            if reason:
+                record.update(outcome='refused', reason=reason)
+                self.log(f'  issue #{number}: refused {AUTHORIZE_COMMAND} by {login}: {reason}')
+            else:
+                record.update(outcome='authorized',
+                              hash=text_hash(history['title'], history['body']))
+                self.log(f'  issue #{number}: authorized by {login}'
+                         + (f', priority {priority}' if priority else ''))
+            self.gh.comment(number, render_authorize(record, lb.ready))
+            written.append(record)
+        labels = label_names(self.gh.issue(number).get('labels') or [])
+        if (lb.needs_coordinator in labels
+                and valid_authorization(self._authorize_records(comments) + written,
+                                        history) is not None):
+            self.gh.edit_labels(number, remove=[lb.needs_coordinator])
+            self.log(f'  issue #{number}: {lb.needs_coordinator} removed')
+
+    def _unauthorized_ready(self, number):
+        """Why the latest ``agent:ready`` of issue ``number``, read now, does not admit it for
+        lack of an authorization of the coordinator (#607), or ''."""
+        history = self.gh.issue_history(number)
+        approved = ready_approval(history['labeled'], self.cfg.labels.ready,
+                                  self._admitters(history['author'], coordinator=True))
+        if approved is None or not self._needs_authorization(approved[0]):
+            return ''
+        if self._authorization(history, self.gh.issue_comments(number)) is not None:
+            return ''
+        return (f'{self.cfg.labels.ready} by {approved[0]} without an authorization of the '
+                'coordinator for the current text')
+
     def _issue_decisions(self, comments, history, taken=False):
         """``issue_decisions`` of an issue (#472): neither the supervisor's identity nor any
         other app decides for the operator."""
@@ -1247,6 +1363,13 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         ready = []
         pr_issues = {pr.issue for pr in prs}
         skip = set(self.cfg.blocked_labels) | {lb.working, lb.needs_supervisor}
+        # The issues with a /devloop authorize to record (#607): those in
+        # agent:needs-coordinator, and the ready ones whose agent:ready needs an authorization.
+        authorizing = []
+        if self._coordinator_login() is not None:
+            for raw in self.gh.issues_with_label(lb.needs_coordinator):
+                if self._pending_authorizations(self.gh.issue_comments(raw['number'])):
+                    authorizing.append(raw['number'])
         for raw in self.gh.issues_with_label(lb.ready):
             labels = label_names(raw['labels'])
             events = self.gh.labeled_events(raw['number'])
@@ -1257,6 +1380,18 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             author = author_login(raw.get('author'))
             # The coordinator's agent:ready (#528) and priority labels (#595) count too.
             admitters = self._admitters(author, coordinator=True)
+            if admitted.get('by') in admitters and self._needs_authorization(admitted.get('by')):
+                # The supervisor's agent:ready admits only work the coordinator authorized for
+                # its current text (#607); a /devloop authorize not recorded yet is, first.
+                comments = self.gh.issue_comments(raw['number'])
+                if self._pending_authorizations(comments):
+                    authorizing.append(raw['number'])
+                admitters = self._ready_admitters(self.gh.issue_history(raw['number']),
+                                                  comments)
+                if admitted.get('by') not in admitters:
+                    self.log(f'  issue #{raw["number"]}: ignored {lb.ready} by '
+                             f'{admitted.get("by")}: no authorization of the coordinator '
+                             f'({AUTHORIZE_COMMAND}) holds for its current text')
             issue = {'number': raw['number'], 'title': raw['title'], 'labels': labels,
                      'labeler': admitted.get('by'), 'ready_at': admitted.get('at'),
                      'admitted': admitted.get('by') in admitters,
@@ -1313,6 +1448,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                         if holds else f'may start again: {self.cfg.base_branch} moved '
                         f'past {wait["base"][:12]}'))
         return Snapshot(prs=prs, ready_issues=ready, working_issues=working, base_waits=waits,
+                        authorizations=list(dict.fromkeys(authorizing)),
                         supervised=self._supervised_items(prs),
                         conclaves=self._conclave_items(prs),
                         advisories=self._advisory_items(prs))

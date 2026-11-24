@@ -220,6 +220,10 @@ class Snapshot:
     # while it holds, the link to the CI of that commit once all its checks succeeded, else ''
     # (#497): the issue escalates ``host_tests``.
     base_waits: dict = field(default_factory=dict)
+    # With ``[roles.coordinator]`` (#607), the numbers of the issues with a ``/devloop
+    # authorize`` the dispatcher has not recorded yet: those in agent:needs-coordinator, and
+    # the ready ones whose agent:ready is the supervisor's. One ``authorize`` action each.
+    authorizations: list = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -490,7 +494,8 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None, implement=Tr
             conclaves=[c for c in snapshot.conclaves
                        if not numbers_of(c['number'], issue_of) & busy],
             advisories=[a for a in snapshot.advisories
-                        if not numbers_of(a['number'], issue_of) & busy])
+                        if not numbers_of(a['number'], issue_of) & busy],
+            authorizations=[n for n in snapshot.authorizations if n not in busy])
     pr_issues = {pr.issue for pr in snapshot.prs}
     # Only the PRs devloop works on take the slots of max_open_prs; those waiting for a person
     # have their own limit, and once it is reached no new issue starts (#199), except a
@@ -499,6 +504,10 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None, implement=Tr
     slots = cfg.max_open_prs - working - reserved
     parked_full = held >= cfg.max_parked_prs
     free = 0 if parked_full else slots
+    # The coordinator's /devloop authorize to record (#607): no slot, no turn. The issue it
+    # admits starts on a later tick, from the record.
+    for number in snapshot.authorizations:
+        actions.append(Action('authorize', number, '/devloop authorize to record'))
     for item in snapshot.supervised:
         # A supervisor command (#182). A retry of an issue's step, or the extension of the
         # budget envelope of an issue's refused step (#411), runs that step, and takes a free PR

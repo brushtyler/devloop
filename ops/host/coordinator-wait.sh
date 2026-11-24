@@ -10,7 +10,8 @@
 # - un evento del coordinatore su GitHub, da devloop-pinned watch come utente devloop, con il
 #   comando esatto del suo sudoers e il suo file di stato (coordinator-watch-state.json dello
 #   state_dir), distinto da quello del supervisore, così non ne consuma gli eventi: la label
-#   agent:needs-operator aggiunta, "il merge spetta all'operatore", un commento sull'issue degli
+#   agent:needs-operator aggiunta, la label agent:needs-coordinator aggiunta (un'issue che aspetta
+#   il suo /devloop authorize, #607), "il merge spetta all'operatore", un commento sull'issue degli
 #   allarmi ([run].alert_issue dell'overlay), un errore del watch. Gli altri eventi li salta;
 # - una riga nuova di run.log (tail -n 200 come utente devloop, dal suo sudoers) con un
 #   Traceback, un allarme (ALERT:), un 401 o "Bad credentials", o il rifiuto dell'avvio
@@ -39,6 +40,7 @@ WATCH_TIMEOUT=300
 WATCH_STATE_NAME=coordinator-watch-state.json
 LOG_LINES=200
 NEEDS_OPERATOR=agent:needs-operator
+NEEDS_COORDINATOR=agent:needs-coordinator
 
 usage() {
     say "Uso: bash $0 [--params FILE] [--period SECONDI]"
@@ -96,10 +98,13 @@ EOF
 coordinator_event() {
     local line=$1
     [[ $line =~ ^[0-9]{2}:[0-9]{2}\ (.*)$ ]] && line=${BASH_REMATCH[1]}
-    # La label aggiunta, o fra quelle di un'issue o di una PR nuova ("new PR #N [a,b] titolo").
-    [[ $line == *" +$NEEDS_OPERATOR"* ]] && return 0
+    # Una delle due label aggiunta, o fra quelle di un'issue o di una PR nuova ("new PR #N [a,b]
+    # titolo").
+    [[ $line == *" +$NEEDS_OPERATOR"* || $line == *" +$NEEDS_COORDINATOR"* ]] && return 0
     if [[ $line =~ ^new\ (PR|issue)\ \#[0-9]+\ \[([^]]*)\] ]]; then
-        case ",${BASH_REMATCH[2]}," in *",$NEEDS_OPERATOR,"*) return 0 ;; esac
+        case ",${BASH_REMATCH[2]}," in
+            *",$NEEDS_OPERATOR,"* | *",$NEEDS_COORDINATOR,"*) return 0 ;;
+        esac
     fi
     [[ ${line,,} == *"merge spetta all'operatore"* ]] && return 0
     [[ $line == 'watch error:'* ]] && return 0
