@@ -2435,6 +2435,67 @@ serve riavviare nulla.
 versione di prima. La tabella `[direction]` si toglie dall'overlay; la copia di prima la rifiuta
 (`unknown key`), quindi va tolta **prima** del pin della copia di prima.
 
+## Autorizzazione del coordinatore (#607)
+
+Con #607, e con `[roles.coordinator]` nell'overlay, il coordinatore autorizza il lavoro con
+`/devloop authorize [priority:<p>]` e l'`agent:ready` del supervisore fa partire un'issue solo con
+un'autorizzazione valida per il testo di ora
+([docs/devloop/guide.md](../../docs/devloop/guide.md#authorization-by-the-coordinator)). Il
+supervisore segnala le issue che apre con la label `agent:needs-coordinator`, che sveglia il
+coordinatore. Il codice di devloop non legge chiavi nuove: senza `[roles.coordinator]` si comporta
+come prima. Servono però due cose sull'host e su GitHub:
+
+- la label `agent:needs-coordinator` sul repository, che `devloop setup` crea con le altre;
+- la copia di root di `ops/` del coordinatore aggiornata, con la sveglia `role-wait.sh --role
+  coordinator` (e il suo involucro `coordinator-wait.sh`) che esce anche su quella label: finché resta quella di prima, il coordinatore vede le issue da
+  autorizzare solo al controllo periodico.
+
+devloop mergia la PR di #607 come le altre, ma non fa il pin automatico di quel commit né dei
+successivi finché l'operatore non fa il pin a mano dopo il passo
+([Ogni cambio con un passo sull'host](#ogni-cambio-con-un-passo-sullhost)).
+
+**Prima del pin**, con `[roles.coordinator]` attivo: le issue già in `agent:ready` messe dal
+supervisore, senza un `agent:ready` dell'operatore o del coordinatore, dopo il pin non partono più
+senza autorizzazione. Il coordinatore scrive `/devloop authorize` su quelle da tenere in coda:
+devloop registra i comandi al primo tick con la copia nuova, poi le fa partire.
+
+Come root, **dal checkout dell'operatore**, mai dal clone di devloop, con i valori di
+`params.env` (`SERVICE_NAME`, `DEVLOOP_USER`, `DEVLOOP_CLONE`, `COORDINATOR_USER`):
+
+1. aggiornare il checkout dell'operatore a `origin/main`, con il merge di #607:
+
+   ```bash
+   git fetch origin
+   git checkout --detach origin/main
+   ```
+
+2. il coordinatore, se c'è: la copia di root di `ops/` con la sveglia nuova, che
+   `setup-coordinator.sh` aggiorna insieme al sudoers:
+
+   ```bash
+   sudo bash ops/host/setup-coordinator.sh --dry-run
+   sudo bash ops/host/setup-coordinator.sh
+   ```
+
+3. verificare: `sudo bash ops/host/check-host.sh --no-apps`, nessun errore nei passi del
+   coordinatore;
+
+4. a loop fermo, il pin a mano del commit di #607 o di uno successivo e la creazione della label,
+   come utente `DEVLOOP_USER`, dal suo clone `DEVLOOP_CLONE`, poi l'avvio del loop: lo stop è
+   `systemctl stop <SERVICE_NAME>`, il pin `python3 scripts/devloop-pinned pin origin/main`, la
+   label `python3 scripts/devloop-pinned setup` (crea `agent:needs-coordinator`; delle label che
+   ci sono già aggiorna solo colore e descrizione), l'avvio `systemctl start <SERVICE_NAME>`. Il pin a mano fa
+   riprendere il pin automatico;
+
+5. verificare: `devloop setup` ha stampato `labels ready:` con `agent:needs-coordinator`; la
+   label è nell'elenco delle label del repository su GitHub. La sessione del coordinatore usa la
+   sveglia nuova dal suo avvio successivo: non serve riavviarla.
+
+**Rollback.** Il pin a mano della copia di prima, a loop fermo, e `setup-coordinator.sh` dal
+checkout della versione di prima, che rimette la sveglia di prima. La label
+`agent:needs-coordinator` può restare: la copia di prima non la legge. Le autorizzazioni
+registrate restano commenti del dispatcher, che la copia di prima ignora.
+
 ## Test di `ops/` e dei runbook nel file di progetto (#615)
 
 `tests/test_ops.py` verifica anche `ops/` e i runbook dei ruoli in `docs/devloop/roles/`, ma

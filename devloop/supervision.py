@@ -214,8 +214,12 @@ LONG_TEXT = (DECIDE, GRANT_ROUND, GRANT_BUDGET, CAPACITY, MERGE, MERGE_BUDGET, R
 # ``budget`` escalation to the operator (``_operator_grant_budget``). ``vote`` is the substitute
 # vote in a conclave waiting for it (#605, ADR 0002, second precision of 2026-11-23, point 3),
 # read only there (``ConclaveMixin._conclave_substitute``), never on an escalation.
+# ``authorize`` is the authorization of an issue (#607, same precision, point 1), read only by
+# ``Dispatcher._do_authorize`` (``authorization``), never on an escalation; from any other
+# identity it is refused and recorded.
 COORDINATOR_DELEGATED = (RETRY, REREVIEW, 'recheck', 'fix', 'hold', 'release', GRANT_ROUND,
-                         GRANT_BUDGET, CAPACITY, ACCEPT_DEFAULTS, DECIDE, MERGE, 'vote')
+                         GRANT_BUDGET, CAPACITY, ACCEPT_DEFAULTS, DECIDE, MERGE, 'vote',
+                         'authorize')
 COORDINATOR_RESERVED = ('approve', MERGE_BUDGET, 'reconcile')
 # The name of a command of the coordinator's identity outside ``COMMANDS`` (#528), such as
 # ``reconcile`` or ``veto``: refused on an escalation, with its name in the record of the

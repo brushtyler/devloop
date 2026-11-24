@@ -12,7 +12,8 @@ With ``[roles.coordinator]`` the coordinator's identity:
   a second one stays the operator's;
 - sets priority labels that count where its ``agent:ready`` counts; its dependency and
   implementer labels still do not;
-- opens issues that count as devloop's: the supervisor and the coordinator queue them, but one
+- opens issues that count as devloop's: the supervisor (with the coordinator's
+  ``/devloop authorize`` since #607) and the coordinator queue them, but one
   the readiness check declares touching the trust policy goes to ``agent:needs-operator`` until
   a trusted user adds ``agent:ready``.
 """
@@ -475,7 +476,16 @@ class CoordinatorIssueTests(recheck_tests.Case):
         d = self.make(cfg=cfg)
         self.gh.author = COORDINATOR
         self.gh.ready_events = [(ready_by, self.gh.now())]
+        if ready_by == SUPERVISOR_LOGIN:
+            self.authorized(d)
         return d
+
+    def authorized(self, d):
+        """The coordinator authorizes the issue: since #607 the supervisor's agent:ready
+        admits it only so."""
+        self.gh.command(7, '/devloop authorize', login=COORDINATOR)
+        self.assertIn(('authorize', 7), self.planned(d, ISSUE_CFG))
+        d._do_authorize(7)
 
     def check(self, d, trust, ready=True):
         self.runner.outputs.append(checked(ready, trust=trust,
@@ -534,6 +544,8 @@ class CoordinatorIssueTests(recheck_tests.Case):
                 d = self.issue('brushtyler')
                 self.assertTrue(self.check(d, 'covered')['ready'])
                 self.gh.relabel(ready_by)
+                if ready_by == SUPERVISOR_LOGIN:
+                    self.authorized(d)
                 self.assertEqual(self.planned(d, ISSUE_CFG), [('preflight_block', 7)])
                 self.assertEqual([a.kind for a in d.tick()], ['preflight_block'])
                 record = self.records()[-1]

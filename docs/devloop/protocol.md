@@ -679,6 +679,34 @@ the cycle is gone. A `cycle` record counts only from the dispatcher's identity, 
 cycle is reported once on each issue; another cycle on the same issue is reported again. The
 record adds no label and blocks nothing by itself: the open blocks do.
 
+## Authorization by the coordinator
+
+With `[roles.coordinator]` (#607,
+[Authorization by the coordinator](guide.md#authorization-by-the-coordinator)), the `authorize`
+action records each `/devloop authorize [priority:<p>]` of an issue once: a dispatcher comment
+("Lavoro autorizzato dal coordinatore", or "`/devloop authorize` rifiutato") ending with an
+`authorize` marker, with `comment` (the id of the command), `by` and `at` (its author and time),
+`priority` (`high`, `normal`, `low`, or empty without one) and `outcome`:
+
+- `authorized`, with `hash`: the SHA-256 of the issue's title and body
+  (`authorization.text_hash`) as the dispatcher reads them, when the command comes from the
+  coordinator's identity, its arguments are well formed, the issue was opened by a trusted user
+  or by a devloop app, and neither the title nor the body changed at or after the command
+  (GitHub's times have one-second granularity: a change in the same second counts as after);
+- `refused`, with `reason` and without `hash`, otherwise.
+
+The action reads the comments and the history again first, and leaves alone the commands
+recorded since the snapshot; once an authorization holds for the current text it removes
+`agent:needs-coordinator`. An `authorize` record counts only from the dispatcher's identity. The
+supervisor's `agent:ready` admits the issue only while the latest `authorized` record carries the
+hash of the current title and body, and neither changed at or after its `at`
+(`authorization.valid_authorization`): any change of the text voids it, even one restored
+afterwards. A command not recorded yet does not admit the issue: the action records it first,
+and the issue starts on a later tick. The same holds at every start of the implementation: a
+restart after a `basebroken` record (#459) that no authorization admits is the `unauthorized`
+action, with no slot and no readiness check, which moves the issue from `agent:working` to
+`agent:needs-coordinator`.
+
 ## Base broken records
 
 When every failed test of an implementation or of a fix fails on the base commit of its branch
@@ -1214,7 +1242,8 @@ app, and only when the [turn journal](#story-identity) confirms it. `trusted_use
 stays for people: it
 decides who can start work with `agent:ready`, and it cannot contain bots. The only apps whose
 labels count are the supervisor's, on the issues described in
-[Labels from the supervisor](guide.md#labels-from-the-supervisor), and, with
+[Labels from the supervisor](guide.md#labels-from-the-supervisor) (with `[roles.coordinator]`
+its `agent:ready` only on an issue the coordinator authorized, #607), and, with
 `[roles.coordinator]` in the local overlay (#528, off by default), the coordinator's: only its
 `agent:ready` added again, and only on the issues opened by a trusted user or by a devloop app,
 never its priority, dependency or implementer labels
