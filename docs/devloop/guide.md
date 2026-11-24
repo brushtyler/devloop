@@ -531,6 +531,62 @@ user's would. The label approves the title and the body as they are; an edit by 
 Without `[roles].supervisor`, or without an app for it (the supervisor then acts with the
 operator's `gh` login), only `trusted_users` count, as before.
 
+### Project direction
+
+The operator's strategic direction of a project (#604,
+[ADR 0002, second precisazione of 2026-11-23, point 7](../adr/0002-ruoli-e-responsabilita.md#seconda-precisazione-del-2026-11-23-modello-operativo-dei-ruoli-597))
+lives in an issue dedicated to it, named by `[direction] issue` in the
+[local overlay](#local-config-as-an-overlay), validated as `[report] issue`. The direction is a
+comment of the operator on that issue whose first line is `## Direzione`:
+
+```markdown
+## Direzione
+1. <theme> — <goal, what "done" means>; issue: #N, #M
+2. <theme> — …
+In pausa: <themes or issues not to touch for now>
+Vincoli: <e.g. budget, what not to change>
+```
+
+- **Each direction is complete and replaces the one before**: it does not add to it. To change a
+  theme the operator publishes the whole direction again. The comments before stay as history.
+- **Only the latest comment that starts with the line `## Direzione`** (blank lines before it
+  aside) **and is written by a user of `trusted_users` counts.** The other comments of the issue
+  (questions, proposals of the coordinator or of the supervisor) are discussion and do not change
+  the direction. The comment of an app, devloop's included, never counts as a direction, even
+  with the heading.
+- **devloop does not interpret the content**: it gives it back as it is. Its structure (the
+  themes in order, "In pausa", "Vincoli", the issues it names) is for the coordinator, who
+  translates it into priorities.
+
+`devloop direction` prints the direction in force: a line with the issue, the author, the time
+of the comment (and of its last edit, when edited) and its link, then the comment as written.
+Without it, it says why: no `[direction] issue` configured, or no valid comment on it. A comment
+of a trusted user written after the direction in force that looks like one (a line `Direzione`
+as a heading of another level or in another case, or `Direzione:`) but does not start with the
+line `## Direzione` is not used: a line in the log says so, with its link. `devloop status` has
+a line on it as well, the first line of `devloop direction` (`direction: issue #N, comment of
+<login> at <time>: <link>`, or `direction: none: …`); with `[direction] issue`, a failed read of
+GitHub is a line of its own and does not stop `status`. Both read GitHub with the identity of
+the ticks' reads and write nothing; the configuration is read at each run, so a new
+`[direction]` needs no restart.
+
+The coordinator and the supervisor read it with `devloop-pinned direction`, which their sudoers
+allow, read only ([ops/README.md](../../ops/README.md); the step on the host:
+[ops/host/migrate.md](../../ops/host/migrate.md#direzione-delloperatore-nei-sudoers-dei-ruoli-604)).
+The coordinator translates it into priorities, with the priority labels
+([Start order of ready issues](#start-order-of-ready-issues)) or in its orders to the supervisor:
+
+- `priority:high`: what unblocks the first theme, and the critical operational problems;
+- `priority:normal`: the work of the active themes;
+- `priority:low`: the rest that is useful;
+- out of the queue: the paused themes and the proposals off theme, reported to the operator in
+  the summary.
+
+A priority label the operator put on an issue wins over the direction. devloop itself does not
+change: the start order is still that of the priority labels, and the direction never reaches
+the prompts of the implementer, the reviewers, the readiness check or the conclave. Without
+`[direction]` the roles behave as before: the priorities are those of the operator's labels.
+
 ### Choosing the implementer
 
 Every issue goes to `roles.implementer` unless a label chooses another (#407, ADR 0005, D7): an
@@ -1998,7 +2054,7 @@ the role's user, with the CLI and the model of `[roles.supervisor]` or `[roles.c
 # command (the launcher, scripts/devloop-pinned, passes them itself):
 devloop="python3 -m devloop --project-config .devloop/project.toml --local-config .devloop/config.local.toml"
 $devloop setup            # create the agent:* labels, the priority:* labels and the review level labels (reviews:0 only when level 0 is on)
-$devloop status           # running action, devloop PRs (with rounds counted on max_review_rounds, merge state and conflicts), ready issues in start order with their priority, planned actions; with [budget] on, the budget of the stories in progress; a pinned copy behind origin/main in the files of the installation
+$devloop status           # running action, devloop PRs (with rounds counted on max_review_rounds, merge state and conflicts), ready issues in start order with their priority, planned actions; with [budget] on, the budget of the stories in progress; a pinned copy behind origin/main in the files of the installation; the operator's direction in force
 $devloop apps             # check the GitHub App of each actor, on the project's repo and with its key_dir
 $devloop tick --dry-run   # print the ready issues in start order and the plan, change nothing (no lock: it runs beside a dispatcher)
 $devloop tick             # run one round
@@ -2009,6 +2065,7 @@ $devloop follow issue-52  # follow live the implementer of issue #52 (pr-<N>: re
 $devloop watch --timeout 3600  # wait for the next change on GitHub, for the supervising agent
 $devloop pin origin/main  # pin a commit of origin, after its smoke test (see Run from a pinned installation)
 $devloop report --day 2026-11-16  # print the summary of a UTC day from devloop's records (default: today; --publish: on [report] issue, see Daily summary)
+$devloop direction        # print the operator's direction in force, from [direction] issue (see Project direction)
 $devloop fallback reset agy-reviewer  # forget the models agy-reviewer remembers unavailable (see Memory of unavailable models)
 $devloop token claude -- gh pr comment 70 --body-file reply.md  # run a command as an agent's app of the project (see GitHub identities; scripts/agent-token.py calls it)
 ```

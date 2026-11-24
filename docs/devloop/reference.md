@@ -121,6 +121,10 @@ is not an issue number (an integer of at least 1), or an unknown key, stops devl
 [daily summary](guide.md#daily-summary): the dedicated issue it is published on and the minutes
 between two automatic publications of `devloop run`; an `issue` that is not an issue number, an
 `interval` that is not a whole number of at least 1, or an unknown key, stops devloop at startup.
+`[direction]` (`issue`, unset by default, a key of the overlay only, #604) names the issue of the
+operator's [direction of the project](guide.md#project-direction), which `devloop direction` and
+`devloop status` read and no prompt holds; an `issue` that is not an issue number, or an unknown
+key, stops devloop at startup, as for `[report]`. Unset, there is no direction.
 `[gc]` sets the [cleanup of the state directory](guide.md#cleanup-of-the-state-directory)
 (#380): `pins` (default `true`) with `keep_pins` (default 5, the pinned copies kept besides
 `current`), `worktrees` (default `true`), `logs` (default `false`) with `log_days` (default 14),

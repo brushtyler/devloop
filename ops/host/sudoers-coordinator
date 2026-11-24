@@ -3,8 +3,8 @@
 # visudo -c, sostituendo i segnaposto con i valori di params.env.
 #
 # Solo comandi di lettura (ADR 0002, precisazione del 2026-11-22), ciascuno con i suoi argomenti
-# esatti, senza caratteri jolly. Come utente devloop: lo stato di devloop (devloop-pinned status)
-# e le ultime righe di run.log, e la lettura di GitHub della sveglia del coordinatore (#543,
+# esatti, senza caratteri jolly. Come utente devloop: lo stato di devloop (devloop-pinned status),
+# la direzione dell'operatore (devloop-pinned direction, #604) e le ultime righe di run.log, e la lettura di GitHub della sveglia del coordinatore (#543,
 # ops/host/coordinator-wait.sh): devloop-pinned watch con i suoi intervalli e il suo file di
 # stato, distinto da quello del supervisore, con la configurazione di devloop, senza che il
 # coordinatore veda le chiavi del dispatcher. Come root: il journal e lo stato del servizio,
@@ -16,6 +16,7 @@ Defaults>@DEVLOOP_USER@ always_set_home, secure_path="@DEVLOOP_PATH@"
 
 @COORDINATOR_USER@ ALL=(@DEVLOOP_USER@) NOPASSWD: \
     @LAUNCHER_CMD@ status, \
+    @LAUNCHER_CMD@ direction, \
     @LAUNCHER_CMD@ watch --until-change --interval 60 --timeout 300 --state @STATE_PATH@/coordinator-watch-state.json, \
     /usr/bin/tail -n 200 @STATE_PATH@/run.log, \
     /usr/bin/tail -n 1000 @STATE_PATH@/run.log

@@ -1434,7 +1434,8 @@ class DeclarativeFileTests(unittest.TestCase):
         launcher = '@LAUNCHER_CMD@ '
         self.assertTrue(body[1].startswith('@SUPERVISOR_USER@ ALL=(@DEVLOOP_USER@) NOPASSWD:'))
         self.assertEqual(as_devloop, [launcher + args for args in (
-            'status', 'status *', 'watch *', 'report *', 'tick --dry-run', 'pin *')])
+            'status', 'status *', 'watch *', 'report *', 'direction', 'tick --dry-run',
+            'pin *')])
         as_root = [c.strip() for c in body[2].split('NOPASSWD:', 1)[1].split(',')]
         self.assertTrue(body[2].startswith('@SUPERVISOR_USER@ ALL=(root) NOPASSWD:'))
         self.assertEqual(as_root, ['/usr/bin/systemctl start @SERVICE_NAME@',
@@ -1456,7 +1457,8 @@ class DeclarativeFileTests(unittest.TestCase):
                                   'secure_path="@DEVLOOP_PATH@"')
         self.assertTrue(body[1].startswith('@COORDINATOR_USER@ ALL=(@DEVLOOP_USER@) NOPASSWD: '))
         as_devloop = [c.strip() for c in body[1].split('NOPASSWD:', 1)[1].split(',')]
-        self.assertEqual(as_devloop, ['@LAUNCHER_CMD@ status', WAIT_WATCH,
+        self.assertEqual(as_devloop, ['@LAUNCHER_CMD@ status', '@LAUNCHER_CMD@ direction',
+                                      WAIT_WATCH,
                                       '/usr/bin/tail -n 200 @STATE_PATH@/run.log',
                                       '/usr/bin/tail -n 1000 @STATE_PATH@/run.log'])
         # The watch is the one subcommand of devloop-pinned besides status, and not the
@@ -1476,13 +1478,14 @@ class DeclarativeFileTests(unittest.TestCase):
             self.assertNotIn(forbidden, rules)
         # Only reading programs and verbs: what the coordinator runs never changes the host,
         # starts the loop or a CLI, opens a pager or reaches devloop's clone as root.
-        reading = {'@LAUNCHER_CMD@': ['status'], '/usr/bin/tail': ['-n'],
+        # devloop-pinned direction (#604) reads the operator's direction and writes nothing.
+        reading = {'@LAUNCHER_CMD@': ['status', 'direction'], '/usr/bin/tail': ['-n'],
                    '/usr/bin/journalctl': ['--no-pager'], '/usr/bin/systemctl': ['status'],
                    '/usr/bin/bash': ['@COORDINATOR_OPS_DIR@/host/check-host.sh']}
         for command in as_devloop + as_root:
             with self.subTest(command=command):
                 program, verb = command.split()[:2]
-                self.assertEqual(reading[program], [verb])
+                self.assertIn(verb, reading[program])
                 for word in ('start', 'stop', 'restart', 'pin', 'tick', 'run', 'watch', 'apps',
                              'token', '--vacuum-size', '--rotate', '--flush', '-f', '-F'):
                     self.assertNotIn(word, command.split())
