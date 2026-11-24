@@ -5382,8 +5382,11 @@ class RoleRunbookTests(unittest.TestCase):
                       'agent', prohibitions)
         coordinator = ' '.join(ROLE_RUNBOOKS['coordinator'].read_text().split())
         coordinator_prohibitions = coordinator.split('## Prohibitions')[1]
-        self.assertIn('`grant-budget`, `capacity`, `reconcile` and the keys of trust are the '
-                      'operator\'s in person', coordinator_prohibitions)
+        # ADR 0002, first precisazione of 2026-11-23: grant-budget and capacity move to the
+        # coordinator's perimeter with #595; until then the dispatcher refuses them.
+        self.assertIn('`approve`, `merge-budget`, `reconcile` and the keys of trust are the '
+                      'operator\'s in person; `grant-budget` and `capacity` are the operator\'s '
+                      'in person too until #595 makes them yours', coordinator_prohibitions)
 
     def test_no_detail_of_the_host_in_public_texts(self):
         # #584: AGENTS.md states the rule for every published text, and each runbook recalls it
@@ -5416,8 +5419,8 @@ class RoleRunbookTests(unittest.TestCase):
         tasks = part(supervisor, 'Tasks')
         for phrase in ('**Detect the details of the host**', link,
                        'Following the stream of the events', 'of the agents, of the dispatcher, '
-                       'of the operator and of the coordinator', 'alert the operator and the '
-                       'coordinator with a message in the mailbox that names the text',
+                       'of the operator and of the coordinator', 'alert the coordinator with a '
+                       'message in the mailbox that names the text',
                        'without quoting its content', 'correct your own texts'):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, tasks)
@@ -5438,6 +5441,131 @@ class RoleRunbookTests(unittest.TestCase):
                        'The real values stay in your local report to the operator'):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, host)
+
+    @staticmethod
+    def part(text, heading):
+        return text.split(f' ## {heading} ')[1].split(' ## ')[0]
+
+    def test_the_coordinator_runbook_follows_the_operating_model_of_adr_0002(self):
+        # #603: the tasks of the two precisazioni of 2026-11-23 (#594, #597, points 2, 3, 4 and
+        # 5), what the coordinator decides, does not decide and with whom it talks, the channel
+        # with the operator of 2026-11-24, and the notes on the code still to come.
+        text = ' '.join(ROLE_RUNBOOKS['coordinator'].read_text().split())
+        adr = '(../../adr/0002-ruoli-e-responsabilita.md#'
+        for anchor in ('precisazione-del-2026-11-23-compiti-del-coordinatore-594)',
+                       'seconda-precisazione-del-2026-11-23-modello-operativo-dei-ruoli-597)'):
+            self.assertIn(adr + anchor, text.split(' ## Who you are ')[0])
+        self.assertIn('A part marked "(from #N)" depends on code that issue #N adds', text)
+        who = self.part(text, 'Who you are')
+        for phrase in ('**responsible for the operations**', '**You decide**',
+                       '**You do not decide**', '**You talk with**',
+                       '`/devloop authorize`, from #607', '`open_findings`, from #606',
+                       '(`review_level`)', 'in place of an unavailable member (from #605)',
+                       '`capacity` and `grant-budget` within the caps (from #595)',
+                       '`[direction] issue`, from #604', 'the issues opened by the supervisor',
+                       'when it does not answer, you put the work in the queue yourself',
+                       'the reserved merges, with the operator\'s decision',
+                       'the direction, the ADRs, `AGENTS.md`, the trust policy and the powers of '
+                       'the roles', 'the configuration, the caps',
+                       'a merge against a negative verdict', 'only operational interface'):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, who)
+        channel = self.part(text, 'Channel with the operator')
+        for phrase in ('**You are the operator\'s interface.**', '`to-coordinator/`',
+                       'with the commands ready', 'within 15 minutes',
+                       'security emergency', '**The operator does not follow the ticks.**',
+                       'you follow its outcome', '`/devloop recheck`, send it to them ready',
+                       'Never ask the operator to check the state of devloop or to wait for a '
+                       'tick', '**Commands verified before you give them.**',
+                       '`/devloop decide` and `/devloop accept-defaults` apply only when the '
+                       'gaps are all `default_available`', 'a plain comment'):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, channel)
+        self.assertIn('coordinator-wait.sh --period 3600', self.part(text, 'Watching'))
+        tasks = self.part(text, 'Tasks')
+        for phrase in (
+                # Stalled work (point 2).
+                '**Stalled work in the queue** (point 2 of the second precisazione)',
+                'every hour', 'free slots (`max_open_prs` not reached)', '`to-supervisor/`',
+                'A valid reason you respect', 'take it on as an operational problem',
+                'write in the journal what you decided and why', 'after 15 minutes',
+                'no recent heartbeat', 'put the issues in the queue yourself',
+                'tell the operator what happened and what you did', 'look for the cause',
+                'opening and authorizing the issues that are needed',
+                # Missing independent reviewers (point 3).
+                '**Missing independent reviewers** (`review_level`',
+                'remove `agent:needs-operator` and add `agent:review`',
+                'Never approve with fewer reviewers than the level asks',
+                'never replace a reviewer', 'more than a day',
+                'wait, change the fallback model, a review of the operator',
+                # Parked pull requests (point 4).
+                '**Parked pull requests** (`max_parked_prs`',
+                'those that touch `docs/adr/` or `AGENTS.md`', 'those with a step on the host',
+                'one below the limit, raise to `priority:high`',
+                '`/devloop capacity max_parked_prs <value> <duration> <reason>` (from #595)',
+                '6, at most 24 hours', 'write the reason in the journal',
+                # Steps on the host (point 5).
+                '**Steps on the host while the operator is away**',
+                'do not put it in the queue until the operator is back',
+                'hold the merge with `/devloop hold`', 'Release it (`/devloop release`)',
+                # Authorization and priorities.
+                '`/devloop authorize [priority:<p>]` on the issue (from #607',
+                '`agent:needs-coordinator` (from #607)', '`trust_policy` other than `none`',
+                'A priority label the operator put on an issue wins',
+                '**Open findings** (`open_findings`, point 3, from #606)',
+                '**The conclave** (point 3, from #605)'):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, tasks)
+        prohibitions = self.part(text, 'Prohibitions')
+        for phrase in ('Never decide what is the operator\'s',
+                       'Never approve with fewer reviewers than the level asks',
+                       'never give them a command you have not checked in the guide'):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, prohibitions)
+
+    def test_the_supervisor_runbook_follows_the_operating_model_of_adr_0002(self):
+        # #603: the supervisor puts in the queue only authorized work, in the coordinator's
+        # order, writes every stop on purpose in the journal, opens its issues for the
+        # coordinator and talks with the coordinator, not with the operator.
+        text = ' '.join(ROLE_RUNBOOKS['supervisor'].read_text().split())
+        self.assertIn('(../../adr/0002-ruoli-e-responsabilita.md#seconda-precisazione-del-'
+                      '2026-11-23-modello-operativo-dei-ruoli-597)',
+                      text.split(' ## Who you are ')[0])
+        self.assertNotIn('Order the queue and its priorities', text)
+        self.assertNotIn('alert the operator and the coordinator', text)
+        self.assertNotIn('you tell the operator what needs a person', text)
+        who = self.part(text, 'Who you are')
+        for phrase in ('**You decide**: the non-critical escalations and the delegated merges',
+                       'in the order the coordinator dictates', '**You do not decide**: the '
+                       'priorities and the authorization of the work',
+                       'nothing that is reserved to the operator',
+                       'you do not put your own issues in the queue',
+                       '**You talk with** the coordinator, not with the operator'):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, who)
+        channel = self.part(text, 'Channel with the coordinator')
+        for phrase in ('**The coordinator is the operator\'s interface**',
+                       'Ask the operator for no decision and give them no command to run',
+                       'write to the coordinator in `to-coordinator/`',
+                       'has not read one of your messages within 15 minutes',
+                       'a security emergency',
+                       'The journal and the escalations on GitHub stay as they are',
+                       'Move each message of the coordinator to `done/` as soon as you read it'):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, channel)
+        tasks = self.part(text, 'Tasks')
+        for phrase in ('only for the authorized issues', '`/devloop authorize`, from #607',
+                       'Follow the order and the priorities the coordinator dictates',
+                       '**Every stop of the queue on purpose** goes in the journal at once, with '
+                       'its reason', '`agent:needs-coordinator` (from #607): never put it in the '
+                       'queue yourself'):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, tasks)
+        prohibitions = self.part(text, 'Prohibitions')
+        for phrase in ('Never set the priorities of the work, never authorize it',
+                       'Never ask the operator for a decision and never give them a command'):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, prohibitions)
 
     def test_the_documents_cite_the_runbooks(self):
         readme = (OPS / 'README.md').read_text()
