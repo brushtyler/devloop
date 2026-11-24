@@ -21,8 +21,20 @@ the names of the parameters of ``ops/params.env`` in their place:
   ``$SERVICE_NAME``, standing alone or in a path or the name of a unit
   (``$SYSTEMD_DIR/$SERVICE_NAME.service``), under the same conditions as a user's.
 
-The records of the markers that end a body (``markdown.publishable``) stay as they are: the
-substitutions apply to the text around them, never to their payloads (#620).
+The records of the markers that end a body (``markdown.publishable``) are JSON in Base64, and
+anyone decodes them (#620). Their free texts (``TEXT_FIELDS``: reasons, summaries, findings,
+errors, the commands of a turn) pass through the same substitutions, whatever they hold, and the
+marker is encoded again. Everything else stays as devloop wrote it: the identifiers and the
+fields devloop compares when it reads a record back (heads, hashes, comment ids, classes, keys,
+steps, agents, logins, the profiles of the receipts), which a name or a user of the host may
+equal (``SERVICE_NAME=fix``, ``AGENT_USER=claude``). A marker with nothing to replace, of a kind
+without free texts, or that does not decode, is the very same line.
+
+The text of a conclave proposal is bound by its hash, which the votes and the ``/devloop vote``
+commands cite (``BOUND_FIELDS``): the dispatcher redacts a new proposal before hashing it
+(``redact_text``), so its record has nothing left to replace; a record whose proposal would
+still change is not published (``BoundTextChanged``): its hashes are never computed again, and
+no approval passes to a text other than the one voted.
 
 The map comes from ops (``ops/host/setup-devloop.sh`` writes ``MAP_FILE`` in the ``state_dir``
 from the resolved parameters, never reading a key) and devloop reads it at the start; the
@@ -36,12 +48,17 @@ absolute path of the host or the name of a key file is refused, unless the calle
 ``ALLOW_OPTION``, whose every use is logged (``publication_check``).
 """
 
+import base64
+import binascii
 import json
 import os
 import pwd
 import re
 import sys
 from pathlib import Path
+
+from .github import GitHubError
+from .markdown import marker
 
 # The map of the substitutions, in the state_dir, written by ops/host/setup-devloop.sh.
 MAP_FILE = 'redactions.json'
@@ -65,8 +82,48 @@ _AFTER_USER = r'(?![\w/-])'
 # (``/etc/systemd/system/<name>.service``), never a part of a longer name.
 _BEFORE_NAME = r'(?<![\w.@-])'
 _AFTER_NAME = r'(?![\w@-])'
-# A marker of a record (``markdown.marker``): its payload, JSON in Base64, stays as it is.
+# A marker of a record (``markdown.marker``): its payload, JSON in Base64.
 _MARKER = re.compile(r'<!-- devloop:(?P<kind>[a-z]+):v1 (?P<payload>[A-Za-z0-9+/=]+) -->')
+
+# The free texts of the records of each kind of marker (#620), as paths of their fields: ``*``
+# is every item of a list. Only these are redacted; every other field, and every kind not
+# listed, stays as devloop wrote it.
+_FINDING = ('title', 'detail', 'evidence', 'suggested_fix')
+_GAP = ('description', 'proposed_default')
+_CONTRIBUTION = ('missing', 'reserved_reason', 'operator_question', 'options.*')
+# Of a ledger turn, verification or event, alone or as a section of a register (#325, #355).
+_LEDGER = ('error', 'last_command', 'denied_command', 'command', 'reason')
+# Of the record of a write: the PR, a fix, a sync.
+_WRITE = ('acceptance_map.*.reason', 'host_step', 'skipped_models.*.reason')
+TEXT_FIELDS = {
+    'review': ('summary', 'human_reason', 'note', 'checks_performed.*',
+               *(f'{group}.*.{field}' for group in ('blocking_findings', 'non_blocking_findings')
+                 for field in _FINDING),
+               'previous_findings.*.note', 'skipped_models.*.reason'),
+    'fix': ('responses.*.note', 'requests.*.request', *_WRITE),
+    'pr': _WRITE,
+    'sync': _WRITE,
+    'preflight': ('split', 'trust_policy_reason', *(f'gaps.*.{field}' for field in _GAP)),
+    'notice': ('reason',),
+    'ledger': (*_LEDGER, *(f'records.*.{field}' for field in _LEDGER)),
+    'hold': ('reason',),
+    'supervision': ('reason', *(f'{group}.*.{field}' for group in ('defaults', 'gaps')
+                                for field in _GAP)),
+    'finding': ('closed.*.reason',),
+    'recheck': ('reason',),
+    'authorize': ('reason',),
+    'pin': ('reason',),
+    'conclave': ('stale', *(f'proposal.{field}' for field in _CONTRIBUTION),
+                 *(f'votes.*.{field}' for field in ('reason', *_CONTRIBUTION)),
+                 'substitute.why', 'substitute.refused.*.why'),
+}
+# The free texts bound by a hash that other records and commands cite: never rewritten.
+BOUND_FIELDS = {'conclave': ('proposal.resolution',)}
+
+
+class BoundTextChanged(GitHubError):
+    """A record whose text bound by a hash (``BOUND_FIELDS``) still holds a value of the host:
+    it is not published, and the write fails as any other (#620)."""
 
 # The check of the role scripts (#583): an absolute path under one of these prefixes, with at
 # least one name after it, or the name of a key file.
@@ -131,20 +188,47 @@ class Redactor:
     def redact(self, text):
         """``text`` with the names of the parameters in place of the host's values: the paths
         first, longest first, then the key files, then the other names, then the users standing
-        alone. Its markers stay as they are (#620): a name could match inside their Base64.
-        Anything else, None included, is returned as it is."""
+        alone. Its markers are never matched as text (a name could match inside their Base64):
+        the free texts of their records are redacted (``_marker``). Anything else, None
+        included, is returned as it is."""
         if not isinstance(text, str) or not text:
             return text
         out, end = [], 0
         for match in _MARKER.finditer(text):
-            out += [self._text(text[end:match.start()]), match.group(0)]
+            out += [self.redact_text(text[end:match.start()]), self._marker(match)]
             end = match.end()
-        out.append(self._text(text[end:]))
+        out.append(self.redact_text(text[end:]))
         return ''.join(out)
 
-    def _text(self, text):
-        """``redact`` of a text without markers."""
-        if not text:
+    def _marker(self, match):
+        """The marker of ``match`` with the free texts of its record redacted (``TEXT_FIELDS``),
+        encoded again: the very same line when nothing changes, its kind has none, or its
+        payload does not decode to an object. ``BoundTextChanged`` when a text bound by a hash
+        (``BOUND_FIELDS``) would change."""
+        kind = match.group('kind')
+        if kind not in TEXT_FIELDS and kind not in BOUND_FIELDS:
+            return match.group(0)
+        try:
+            payload = json.loads(base64.b64decode(match.group('payload'), validate=True))
+        except (binascii.Error, ValueError):
+            return match.group(0)
+        if not isinstance(payload, dict):
+            return match.group(0)
+        for path in BOUND_FIELDS.get(kind, ()):
+            if _apply(payload, path.split('.'), self.redact_text) != payload:
+                raise BoundTextChanged(
+                    f'the {kind} record holds, in {path}, details of the host that a hash binds: '
+                    'its hashes are not computed again, and the record is not updated')
+        redacted = payload
+        for path in TEXT_FIELDS.get(kind, ()):
+            redacted = _apply(redacted, path.split('.'), self.redact_text)
+        return match.group(0) if redacted == payload else marker(kind, redacted)
+
+    def redact_text(self, text):
+        """``redact`` of a text whose markers, if any, are text too: every substitution applies
+        to all of it. The free texts of the records, and a new conclave proposal before its hash
+        (#620)."""
+        if not isinstance(text, str) or not text:
             return text
         if self._path_re is not None:
             names = dict(self.paths)
@@ -176,6 +260,21 @@ class Redactor:
         names = data.get('names') if isinstance(data.get('names'), dict) else {}
         return cls(paths.items(), users.items(), roles, keep, data.get('app_prefix', ''),
                    names.items())
+
+
+def _apply(value, parts, redact):
+    """``value`` with ``redact`` applied to the strings at the path ``parts`` (``TEXT_FIELDS``),
+    a new object only where one changes: a field missing, or of another type, stays as it is."""
+    if not parts:
+        return redact(value) if isinstance(value, str) else value
+    head, rest = parts[0], parts[1:]
+    if head == '*':
+        if not isinstance(value, list):
+            return value
+        return [_apply(item, rest, redact) for item in value]
+    if not isinstance(value, dict) or head not in value:
+        return value
+    return dict(value, **{head: _apply(value[head], rest, redact)})
 
 
 def read_map(path):

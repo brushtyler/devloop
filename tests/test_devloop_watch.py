@@ -20,7 +20,8 @@ from devloop import watch
 from devloop.__main__ import main
 from devloop.apps import DISPATCHER, STEP_TIMEOUT, AppAuth, Identities, http_json
 from devloop.github import GitHub, GitHubError, GitHubNotFound
-from devloop.markdown import marker
+from devloop.authorization import text_hash
+from devloop.markdown import marker, render_authorize
 from helpers import ssdlc_project
 from helpers.ssdlc_project import load as load_config
 
@@ -45,6 +46,9 @@ class FakeGitHub:
         self.prs, self.issues, self.ci, self.reviews = {}, {}, {}, {}
         self.events, self.states, self.comments, self.authors = {}, {}, [], {}
         self.runs = {}  # the workflow runs of each head, as {status}
+        # The text of each issue and its history (#623), as ``issue_history`` reads it, and the
+        # comments of each issue as ``issue_comments`` does.
+        self.histories, self.threads = {}, {}
         self.failing = False
         self.calls = []
         self.on_call = None  # run with the name of each read, e.g. to move the clock
@@ -104,6 +108,14 @@ class FakeGitHub:
             raise GitHubNotFound('gh api repos/o/r/issues: Not Found (HTTP 404)')
         login, is_pr = self.authors[number]
         return {'login': login, 'pull_request': is_pr}
+
+    def issue_history(self, number):
+        self._call('issue_history')
+        return dict(self.histories[number])
+
+    def issue_comments(self, number):
+        self._call('issue_comments')
+        return [dict(c) for c in self.threads.get(number, [])]
 
     # Helpers for the tests
     def add_pr(self, number, author=CLAUDE, labels=('agent:review',), head=HEAD1, title=None):
@@ -697,6 +709,158 @@ class UntrustedTest(unittest.TestCase):
         h.run(timeout=1)
         h.run(timeout=1)
         self.assertEqual(gh.calls.count('labeled_events'), 1)
+
+
+SUP, COORD = 'dl-supervisor[bot]', 'dl-coordinator[bot]'
+WRITERS = {'claude': CLAUDE, 'codex': CODEX, 'dispatcher': DISPATCH}
+TEXT = ('Escalation non viste', 'La watch ignora le issue del coordinatore.')
+AUTHORIZED_AT = '2026-11-16T09:16:00Z'
+
+
+def roles_trust(preflight=True):
+    """A watcher's trust with the supervisor's and the coordinator's identities (#623)."""
+    return watch.Trust({OPERATOR}, WRITERS, 'agent:ready', supervisor=SUP, coordinator=COORD,
+                       devloop={CLAUDE, CODEX, DISPATCH, SUP, COORD}, preflight=preflight)
+
+
+def authorize_record(login=DISPATCH, outcome='authorized', text=TEXT):
+    """The dispatcher's record of the coordinator's ``/devloop authorize`` (#607) for ``text``,
+    as written by ``login``."""
+    record = {'comment': 7001, 'by': COORD, 'at': AUTHORIZED_AT, 'priority': '',
+              'outcome': outcome}
+    if outcome == 'authorized':
+        record['hash'] = text_hash(*text)
+    else:
+        record['reason'] = 'no'
+    return {'id': 7002, 'author': {'login': login}, 'body': render_authorize(record)}
+
+
+class DispatcherAdmissionTest(unittest.TestCase):
+    """The watch follows an issue of an untrusted author when the dispatcher admits it, with the
+    same admitters (#623): the supervisor's ``agent:ready`` with a valid authorization of the
+    coordinator included. The coordinator's app stays outside the trusted authors."""
+
+    def harness(self, author=COORD, preflight=True, edited=None):
+        h = Harness(self, trust=roles_trust(preflight))
+        h.gh.add_issue(5)
+        h.run(timeout=1)
+        h.out.clear()
+        h.gh.add_issue(620, author=author, title=TEXT[0])
+        h.gh.histories[620] = {'title': TEXT[0], 'body': TEXT[1], 'author': author,
+                               'last_edited_at': edited, 'editor': None, 'labeled': [],
+                               'renamed': [], 'complete': True}
+        return h
+
+    def ready(self, h, login, *labels):
+        h.gh.set_labels(620, 'agent:ready', *labels)
+        h.gh.events.setdefault(620, []).append({'label': 'agent:ready', 'by': login,
+                                                'at': '2026-11-16T09:31:00Z'})
+
+    def test_the_supervisors_agent_ready_on_an_authorized_coordinator_issue(self):
+        # The case of #620: opened by the coordinator's app, authorized, queued by the
+        # supervisor, sent to the operator by the dispatcher.
+        h = self.harness()
+        gh = h.gh
+        self.assertEqual(h.run(timeout=1)[0], 0)
+        self.assertEqual(h.lines(), ['new issue #620 by an untrusted author (ignored)'])
+        h.out.clear()
+        gh.comment(801, 620, COORD, '/devloop authorize')
+        gh.threads[620] = [authorize_record()]
+        gh.comment(802, 620, DISPATCH, gh.threads[620][0]['body'])
+        self.assertEqual(h.run(timeout=1)[0], 3)
+        self.ready(h, SUP)
+        self.assertEqual(h.run(timeout=1)[0], 0)
+        self.assertEqual(h.lines(), [f'issue #620 admitted with agent:ready by {SUP} '
+                                     '[agent:ready]'])
+        h.out.clear()
+        gh.set_labels(620, 'agent:needs-operator')
+        gh.comment(803, 620, DISPATCH, 'Il controllo di prontezza non è passato.')
+        gh.comment(804, 620, COORD, SECRET)  # the coordinator's app is not trusted
+        self.assertEqual(h.run(timeout=1)[0], 0)
+        self.assertEqual(h.lines(), ['issue #620 labels +agent:needs-operator -agent:ready',
+                                     f'issue #620 comment by {DISPATCH}: Il controllo di '
+                                     'prontezza non è passato.'])
+        self.assertFalse(h.trust.trusted(COORD))
+        self.assertNotIn(TEXT[0], '\n'.join(h.out) + h.path.read_text())
+        self.assertNotIn(SECRET, '\n'.join(h.out))
+
+    def test_without_a_valid_authorization_the_supervisors_label_is_ignored(self):
+        cases = (('none', []),
+                 ('refused', [authorize_record(outcome='refused')]),
+                 ('not the dispatcher', [authorize_record(login=COORD)]),
+                 ('another text', [authorize_record(text=('altro', TEXT[1]))]))
+        for name, thread in cases:
+            with self.subTest(name):
+                h = self.harness()
+                h.run(timeout=1)
+                h.out.clear()
+                h.gh.threads[620] = thread
+                self.ready(h, SUP)
+                self.assertEqual(h.run(timeout=1)[0], 3)
+                self.assertFalse(json.loads(h.path.read_text())['issues']['620']['admitted'])
+        # A text changed after the authorization voids it, even with the same hash.
+        h = self.harness(edited='2026-11-16T09:20:00Z')
+        h.run(timeout=1)
+        h.gh.threads[620] = [authorize_record()]
+        self.ready(h, SUP)
+        self.assertEqual(h.run(timeout=1)[0], 3)
+        # Authorized later: the admission is read again when the labels change.
+        h.gh.histories[620]['last_edited_at'] = None
+        h.gh.set_labels(620, 'agent:ready', 'priority:high')
+        self.assertEqual(h.run(timeout=1)[0], 0)
+        self.assertEqual(h.lines()[-1], f'issue #620 admitted with agent:ready by {SUP} '
+                                        '[agent:ready,priority:high]')
+
+    def test_the_coordinators_and_the_operators_agent_ready_need_no_authorization(self):
+        for login in (COORD, OPERATOR):
+            with self.subTest(login):
+                h = self.harness()
+                h.run(timeout=1)
+                h.out.clear()
+                self.ready(h, login)
+                self.assertEqual(h.run(timeout=1)[0], 0)
+                self.assertEqual(h.lines(), [f'issue #620 admitted with agent:ready by {login} '
+                                             '[agent:ready]'])
+                self.assertNotIn('issue_comments', h.gh.calls)
+                # The trusted user's label needs no other read.
+                self.assertEqual('issue_history' in h.gh.calls, login == COORD)
+
+    def test_without_a_readiness_check_only_a_trusted_user_admits_a_coordinator_issue(self):
+        h = self.harness(preflight=False)
+        h.run(timeout=1)
+        h.gh.threads[620] = [authorize_record()]
+        # A label of its own each time: the admission is read again only when they change.
+        for login in (SUP, COORD):
+            self.ready(h, login, login)
+            self.assertEqual(h.run(timeout=1)[0], 3)
+        self.ready(h, OPERATOR)
+        self.assertEqual(h.run(timeout=1)[0], 0)
+        self.assertEqual(h.gh.calls.count('labeled_events'), 4)
+
+    def test_the_supervisor_never_admits_a_strangers_issue(self):
+        h = self.harness(author=STRANGER)
+        h.run(timeout=1)
+        h.gh.threads[620] = [authorize_record()]
+        for login in (SUP, COORD):
+            self.ready(h, login, login)
+            self.assertEqual(h.run(timeout=1)[0], 3)
+        self.assertEqual(h.gh.calls.count('labeled_events'), 3)
+        self.assertFalse(json.loads(h.path.read_text())['issues']['620']['admitted'])
+
+    def test_a_closed_admitted_coordinator_issue_keeps_its_admission(self):
+        h = self.harness()
+        h.gh.threads[620] = [authorize_record()]
+        self.ready(h, SUP)
+        h.run(timeout=1)
+        h.out.clear()
+        del h.gh.issues[620]
+        h.gh.states[620] = {'state': 'CLOSED', 'stateReason': 'COMPLETED'}
+        self.assertEqual(h.run(timeout=1)[0], 0)
+        self.assertEqual(h.run(timeout=1)[0], 3)  # it leaves the state's open issues
+        h.out.clear()
+        h.gh.comment(811, 620, OPERATOR, 'thanks')
+        self.assertEqual(h.run(timeout=1)[0], 0)
+        self.assertEqual(h.lines(), ['issue #620 operator comment by brushtyler: thanks'])
 
 
 class StateTest(unittest.TestCase):
