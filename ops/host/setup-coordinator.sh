@@ -3,8 +3,10 @@
 # l'utente, l'ACL di solo attraversamento sulla home di devloop e quella di sola lettura
 # sull'overlay (#554), per leggere l'overlay, la key_dir
 # della sua GitHub App (700, #549), la casella fra supervisore e coordinatore (#543), una copia di
-# root di check-host.sh e della sveglia coordinator-wait.sh (#543) con i file che leggono e i
-# parametri, e un sudoers con soli comandi di lettura e la sveglia (ops/host/sudoers-coordinator);
+# root di check-host.sh e del risveglio dei ruoli role-wait.sh (#602, con il suo involucro
+# coordinator-wait.sh, #543) con i file che leggono e i parametri, un sudoers con soli comandi di
+# lettura e la sveglia (ops/host/sudoers-coordinator), e il watchdog dei ruoli (#602): le unità
+# template, e l'istanza del progetto, con il suo utente e le sue ACL, quando c'è il supervisore;
 # con SOURCE_REPO anche un clone della sorgente al tag SOURCE_REF, da cui lanciare
 # scripts/coordinator-token.py (#571).
 # Idempotente: si può rieseguire, fa solo ciò che manca; va rieseguito dopo ogni aggiornamento di
@@ -67,19 +69,6 @@ check_ops_dir_ancestors() {
 umask 022
 step "Directory sopra $COORDINATOR_OPS_DIR"
 check_ops_dir_ancestors
-
-# copy_file SRC DEST: DEST uguale a SRC byte per byte, 644 di root; lo riscrive solo se serve.
-copy_file() {
-    local src=$1 dest=$2
-    [ -f "$src" ] || die "manca $src"
-    if [ -f "$dest" ] && ! [ -L "$dest" ] && cmp -s "$src" "$dest" \
-        && [ "$(stat -c '%a %U' "$dest")" = '644 root' ]; then
-        ok "$dest è già aggiornato"
-        return
-    fi
-    run install -m 644 -o root -g root "$src" "$dest" \
-        || die "install non riesce a scrivere $dest: setup interrotto"
-}
 
 step "Utente $DEVLOOP_USER"
 if user_exists "$DEVLOOP_USER" && [ -d "$DEVLOOP_HOME" ]; then
@@ -151,13 +140,9 @@ fi
 
 # Il coordinatore esegue come root solo questa copia, di root, mai il clone di devloop (che
 # devloop scrive) né il checkout dell'operatore.
-step "Copia di root di check-host.sh ($COORDINATOR_OPS_DIR)"
-ensure_dir "$COORDINATOR_OPS_DIR" 755 root
-ensure_dir "$COORDINATOR_OPS_DIR/host" 755 root
-for name in $OPS_COORDINATOR_FILES; do
-    copy_file "$OPS_DIR/$name" "$COORDINATOR_OPS_DIR/$name"
-done
-copy_file "$PARAMS_FILE" "$COORDINATOR_OPS_DIR/params.env"
+step "Copia di root di check-host.sh e di role-wait.sh ($COORDINATOR_OPS_DIR)"
+# shellcheck disable=SC2086  # nomi di file senza spazi
+ops_root_copy "$COORDINATOR_OPS_DIR" $OPS_COORDINATOR_FILES
 
 step "sudoers del coordinatore ($COORDINATOR_SUDOERS_FILE)"
 SUDOERS=$(render "$OPS_DIR/host/sudoers-coordinator")
@@ -171,6 +156,15 @@ if [ "$DRY_RUN" != 1 ]; then
     rm -f "$candidate"
 fi
 put_file "$COORDINATOR_SUDOERS_FILE" 440 root "$SUDOERS" || true
+
+# Il watchdog dei ruoli (#602): le unità template, una volta per host, e l'istanza del progetto
+# quando c'è anche il supervisore.
+step "Watchdog dei ruoli ($WATCHDOG_UNIT, #602)"
+if user_exists "$SUPERVISOR_USER"; then
+    ensure_role_watchdog 1
+else
+    ensure_role_watchdog 0
+fi
 
 step 'Chiave, CLI e token (passi manuali)'
 for role in $COORDINATOR_KEYS; do
@@ -191,5 +185,5 @@ step 'Fatto'
 say "Poi: ops/host/check-host.sh per verificare utenti, permessi, sudoers e la copia."
 say "Il coordinatore verifica l'host con:"
 say "  sudo /usr/bin/bash $COORDINATOR_OPS_DIR/host/check-host.sh --read-only"
-say "e aspetta i suoi eventi con la sveglia (#543):"
-say "  bash $COORDINATOR_OPS_DIR/host/coordinator-wait.sh"
+say "e aspetta i suoi eventi con il risveglio dei ruoli (#602):"
+say "  bash $COORDINATOR_OPS_DIR/host/role-wait.sh --role coordinator"

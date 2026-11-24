@@ -287,6 +287,77 @@ poi i file `*.prima-543` al loro posto con `mv`, e
 `setup-coordinator.sh` dal checkout della versione di prima, che rimette copia e sudoers di
 prima. L'ACL `u:supervisor:r--` sui due file resta: è quella che serviva già.
 
+## Risveglio dei ruoli e watchdog dei ruoli (#602)
+
+Il passo sull'host di #602, su un host già attivo, a loop attivo: non tocca devloop né la copia
+fissata. Porta il risveglio dei ruoli (`ops/host/role-wait.sh`) al supervisore, con la sua copia
+di root, i battiti nella casella e il watchdog dei ruoli, il timer
+`devloop-role-watchdog@<progetto>` ([ops/README.md](../README.md#10-coordinatore-facoltativo),
+"Watchdog dei ruoli"). Nei comandi, `<checkout>` è il checkout dell'operatore e `<progetto>` il
+`PROJECT` del file di parametri (`_default` senza `PROJECT`); `$COORDINATOR_USER`,
+`$COORDINATION_GROUP` e `$WATCHDOG_USER` sono i valori del file di parametri o i loro default
+(`ops/params.env.example`). Per un altro progetto dello stesso host si ripete il passo con il suo
+file di parametri (`--params`).
+
+Come root, dal checkout dell'operatore aggiornato (`git -C <checkout> fetch origin` e
+`git -C <checkout> checkout --detach origin/main`):
+
+1. **I parametri.** Nessun parametro nuovo è obbligatorio: `SUPERVISOR_OPS_DIR`,
+   `WATCHDOG_OPS_DIR` e `WATCHDOG_USER` hanno default per progetto (`ops/params.env.example`).
+   Il periodo del risveglio è ora di un'ora per entrambi i ruoli (`ROLE_WAIT_PERIOD`): se il file
+   di parametri scrive `COORDINATOR_WAIT_PERIOD`, il coordinatore tiene quel valore; per l'ora
+   della decisione si toglie la riga.
+
+   ```bash
+   grep -n '^COORDINATOR_WAIT_PERIOD=' <checkout>/ops/params.env
+   ```
+
+2. **Il supervisore**: la directory `heartbeat/` della casella, la copia di root di
+   `role-wait.sh` e le unità template del watchdog; con il coordinatore del progetto (l'overlay lo
+   dichiara), anche l'istanza:
+
+   ```bash
+   sudo bash <checkout>/ops/host/setup-supervisor.sh --dry-run
+   sudo bash <checkout>/ops/host/setup-supervisor.sh
+   ```
+
+3. **Il coordinatore**, se c'è: la copia di root aggiornata, con `role-wait.sh`, e l'istanza del
+   watchdog, cioè l'utente `$WATCHDOG_USER` (fuori dal gruppo `$COORDINATION_GROUP`), le sue ACL
+   sulla casella del progetto, la copia di root del watchdog, le drop-in di
+   `devloop-role-watchdog@<progetto>` e `devloop-role-watchdog-failed@<progetto>`, e il timer
+   abilitato e avviato:
+
+   ```bash
+   sudo bash <checkout>/ops/host/setup-coordinator.sh --dry-run
+   sudo bash <checkout>/ops/host/setup-coordinator.sh
+   ```
+
+4. **Verificare**: nessun errore nei passi `Casella fra supervisore e coordinatore`, `Risveglio del
+   supervisore` e `Watchdog dei ruoli`; il timer attivo, con il prossimo controllo entro 10
+   minuti:
+
+   ```bash
+   sudo bash <checkout>/ops/host/check-host.sh --no-apps
+   systemctl list-timers 'devloop-role-watchdog@*'
+   ```
+
+5. **Riavviare le sessioni** di supervisore e coordinatore con `ops/host/start-role.sh` (passo
+   dell'operatore), prima del primo controllo del watchdog: il primo messaggio dà a ciascun ruolo
+   il comando di risveglio suo e dell'altro, e la sezione *Watching* del runbook lo avvia. La
+   sveglia di prima del coordinatore si ferma con
+   `pkill -u "$COORDINATOR_USER" -f coordinator-wait.sh`. Dopo il primo controllo, il journal dice
+   lo stato dei due ruoli:
+
+   ```bash
+   journalctl -u devloop-role-watchdog@<progetto> -n 20 --no-pager
+   ```
+
+   La riga `supervisore ok (…), coordinatore ok (…)` dice che i battiti arrivano. Un messaggio del
+   watchdog arrivato prima del riavvio lo leggono i ruoli all'avvio, e lo spostano in `done/`.
+
+**Rollback**: `systemctl disable --now devloop-role-watchdog@<progetto>.timer` ferma il watchdog;
+i ruoli tornano alla sveglia di prima con `coordinator-wait.sh`, che resta lo stesso comando.
+
 ## Configurazione di ssdlc nel suo file di progetto
 
 Con l'ADR 0006, R3, `devloop/config.toml` non contiene più i fatti di ssdlc né le restrizioni che
@@ -2375,8 +2446,8 @@ coordinatore. Il codice di devloop non legge chiavi nuove: senza `[roles.coordin
 come prima. Servono però due cose sull'host e su GitHub:
 
 - la label `agent:needs-coordinator` sul repository, che `devloop setup` crea con le altre;
-- la copia di root di `ops/` del coordinatore aggiornata, con la sveglia `coordinator-wait.sh`
-  che esce anche su quella label: finché resta quella di prima, il coordinatore vede le issue da
+- la copia di root di `ops/` del coordinatore aggiornata, con la sveglia `role-wait.sh --role
+  coordinator` (e il suo involucro `coordinator-wait.sh`) che esce anche su quella label: finché resta quella di prima, il coordinatore vede le issue da
   autorizzare solo al controllo periodico.
 
 devloop mergia la PR di #607 come le altre, ma non fa il pin automatico di quel commit né dei
@@ -2424,3 +2495,52 @@ Come root, **dal checkout dell'operatore**, mai dal clone di devloop, con i valo
 checkout della versione di prima, che rimette la sveglia di prima. La label
 `agent:needs-coordinator` può restare: la copia di prima non la legge. Le autorizzazioni
 registrate restano commenti del dispatcher, che la copia di prima ignora.
+
+## Test di `ops/` e dei runbook nel file di progetto (#615)
+
+`tests/test_ops.py` verifica anche `ops/` e i runbook dei ruoli in `docs/devloop/roles/`, ma
+`[tests.dir_modules]` collegava solo `devloop/` ai suoi test (`test_devloop`). Un fallimento di
+`test_ops.py` causato da una PR che cambia quelle directory risultava quindi non pertinente: con
+`ci_rerun_unrelated` il dispatcher rilanciava la CI invece di aprire subito il round, e dopo
+`implement` e `fix` `test_ops.py` non girava in locale. Da #615 l'esempio
+[`ops/host/ssdlc/project.toml`](ssdlc/project.toml) collega a `test_ops` le due directory.
+Il codice di devloop non cambia: la copia in uso accetta già le voci nuove, e senza di esse si
+comporta come prima. Il passo serve perché il file di progetto sull'host le abbia.
+
+devloop mergia la PR di #615 come le altre, ma non fa il pin automatico di quel commit né dei
+successivi finché l'operatore non fa il pin a mano dopo il passo
+([Ogni cambio con un passo sull'host](#ogni-cambio-con-un-passo-sullhost)).
+
+Con i valori di `params.env` (`SERVICE_NAME`, `DEVLOOP_USER`, `DEVLOOP_CLONE`, `STATE_DIR`; il
+file di progetto è `<STATE_DIR>/project.toml` del clone `DEVLOOP_CLONE`):
+
+1. **fermare il loop**, come root: `systemctl stop <SERVICE_NAME>`;
+2. **la copia del file di progetto di prima**, per il rollback, come `DEVLOOP_USER` dal clone
+   `DEVLOOP_CLONE`: `cp -p <STATE_DIR>/project.toml <STATE_DIR>/project.toml.prima-615`. È un
+   file nuovo: l'originale e le sue ACL non cambiano;
+3. **le due voci** in `[tests.dir_modules]` del file di progetto, sotto `"devloop/" =
+   "test_devloop"`, come nell'esempio:
+
+   ```toml
+   "ops/" = "test_ops"
+   "docs/devloop/roles/" = "test_ops"
+   ```
+
+   Il file si modifica sul posto, come `DEVLOOP_USER` perché resti suo, con un editor che non lo
+   sostituisce con un file nuovo: una sostituzione cancella le ACL del supervisore. Dopo la
+   modifica, come root, i controlli e i comandi di [ACL dell'overlay e del file di
+   progetto](#acl-delloverlay-e-del-file-di-progetto-543);
+4. **il pin a mano** del commit di #615 o di uno successivo, come `DEVLOOP_USER`, dal clone
+   `DEVLOOP_CLONE`: `python3 scripts/devloop-pinned pin origin/main`. Il pin carica la
+   configurazione con il file di progetto: un errore di sintassi nel file lo fa fallire, e la
+   copia in uso resta quella di prima. Il pin a mano fa riprendere il pin automatico;
+5. **riavviare il loop**, come root: `systemctl start <SERVICE_NAME>`.
+
+L'hash del file di progetto entra nella versione della policy: le approvazioni delle PR aperte
+decadono e serve una nuova review. Meglio con la coda vuota.
+
+**Rollback.** A loop fermo, come `DEVLOOP_USER` dal clone, `cp -p
+<STATE_DIR>/project.toml.prima-615 <STATE_DIR>/project.toml` (poi, come root, i comandi di [ACL
+dell'overlay e del file di progetto](#acl-delloverlay-e-del-file-di-progetto-543)), oppure si
+tolgono a mano le due voci; poi `systemctl start <SERVICE_NAME>`. La copia di prima e quella di
+#615 accettano il file con le voci e senza: l'ordine fra pin e file non conta.

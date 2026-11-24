@@ -326,7 +326,7 @@ class DocsTests(unittest.TestCase):
                 text = ' '.join((ROOT / path).read_text(encoding='utf-8').split())
                 for phrase in ('/devloop authorize', NEEDS, '#607'):
                     self.assertIn(phrase, text)
-        script = (ROOT / 'ops/host/coordinator-wait.sh').read_text(encoding='utf-8')
+        script = (ROOT / 'ops/host/role-wait.sh').read_text(encoding='utf-8')
         self.assertIn(NEEDS, script)
 
 

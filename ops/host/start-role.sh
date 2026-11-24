@@ -3,7 +3,8 @@
 # supervisore, il coordinatore o l'agent dell'host, ciascuno in una sessione tmux, con l'utente
 # del ruolo, la CLI e il modello del ruolo, e il suo runbook (docs/devloop/roles/<ruolo>.md di
 # questo checkout) come istruzioni iniziali; per supervisore e coordinatore, prima del runbook, i
-# valori dell'installazione per il canale fra i due ruoli e la sveglia del coordinatore (#543) e,
+# valori dell'installazione per il canale fra i due ruoli e il comando di risveglio di ciascuno
+# (role-wait.sh, #602) e,
 # per il coordinatore, la key_dir della sua app e il suo clone (#565).
 #
 # - supervisor, coordinator: CLI (kind) e modello dalla tabella [roles.<ruolo>] della
@@ -187,7 +188,7 @@ TOKENS=''
 [ "$ROLE" != coordinator ] \
     || TOKENS=" For the section \"GitHub\": the key_dir of your app (DEVLOOP_APP_KEY_DIR) is $COORDINATOR_KEY_DIR, and your clone, from which you run scripts/coordinator-token.py, is $TOKEN_CLONE."
 if [ -n "$INBOX" ]; then
-    CHANNEL="Values of this installation (ops/params.env), for the sections \"At startup\", \"Channel\" and \"Watching\" of the runbook: the state_dir of devloop is $STATE_PATH; the mailbox between supervisor and coordinator is $COORDINATION_DIR (group $COORDINATION_GROUP): your messages are in $COORDINATION_DIR/$INBOX/, yours to the other role go in $COORDINATION_DIR/$OUTBOX/; the coordinator's wake-up is bash $COORDINATOR_OPS_DIR/host/coordinator-wait.sh.$TOKENS Start now with the section \"At startup\".
+    CHANNEL="Values of this installation (ops/params.env), for the sections \"At startup\", \"Channel\" and \"Watching\" of the runbook: the state_dir of devloop is $STATE_PATH; the mailbox between supervisor and coordinator is $COORDINATION_DIR (group $COORDINATION_GROUP): your messages are in $COORDINATION_DIR/$INBOX/, yours to the other role go in $COORDINATION_DIR/$OUTBOX/; the wake-up of the supervisor is bash $SUPERVISOR_OPS_DIR/host/role-wait.sh --role supervisor, the wake-up of the coordinator is bash $COORDINATOR_OPS_DIR/host/role-wait.sh --role coordinator.$TOKENS Start now with the section \"At startup\".
 
 "
 fi

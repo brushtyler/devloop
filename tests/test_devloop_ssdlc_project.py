@@ -24,7 +24,8 @@ default; ``max_requested_fix_rounds`` of #536, the cap of the code by default;
 in ``config.toml``; the ``state_dir`` ``.devloop`` of #563, which replaces the value of before). A change of ssdlc's own
 values updates it the same way, saying so: the restrictions, the
 test prefix and the documentation map of the SSDLC engine, removed with it (ADR 0007, R1, #538),
-which change the policy version too.
+which change the policy version too; the entries ``ops/`` and ``docs/devloop/roles/`` of
+``tests.dir_modules``, which select ``tests/test_ops.py`` (#615).
 
 ``repo``, ``trusted_users`` and ``[apps]`` left ``devloop/config.toml`` with R6 (#425) for the
 overlay, beside the agy commands (``ops/host/ssdlc/overlay.toml``): ``devloop token``, which
@@ -280,11 +281,23 @@ class EquivalenceTests(unittest.TestCase):
         files = tracked() + ['ssdlc_new.py', 'devloop/new/x.md', 'tests/test_gone.py',
                              'pkg/ssdlc_impact.py', 'ssdlc_.py', 'scripts/devloop-pinned']
         self.assertGreater(len(files), 100)
+
+        def before(paths):
+            # Since #615 a file under ops/ or docs/devloop/roles/ selects test_ops.py too: a
+            # change of ssdlc's values, not of the code.
+            chosen = set(old.select_modules(paths, modules))
+            if any(p.startswith(('ops/', 'docs/devloop/roles/')) for p in paths):
+                chosen.add('test_ops.py')
+            return sorted(chosen)
+
         for path in files:
             self.assertEqual(localtests.select_modules([path], modules, self.after.tests),
-                             old.select_modules([path], modules), path)
+                             before([path]), path)
         self.assertEqual(localtests.select_modules(files, modules, self.after.tests),
-                         old.select_modules(files, modules))
+                         before(files))
+        for path in ('ops/host/check-host.sh', 'docs/devloop/roles/coordinator.md'):
+            self.assertIn('test_ops.py',
+                          localtests.select_modules([path], modules, self.after.tests))
         self.assertEqual(localtests.module_command(modules), old.module_command(modules))
 
     def test_the_ci_logs_are_read_as_before(self):
