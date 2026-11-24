@@ -4138,9 +4138,15 @@ exec "$@"''')
         self.assertIn('  ok: $COORDINATOR_SUDOERS_FILE coincide con ops/host/sudoers-coordinator\n',
                       out)
         self.assertIn("  ok: l'utente <COORDINATOR_USER> esiste\n", out)
-        for path in (self.agent, self.supervisor, self.state, sudoers):
+        for path in (self.agent, self.supervisor, self.state, sudoers,
+                     self.tmp / 'lib/devloop-supervisor', self.tmp / 'lib/devloop-role-watchdog'):
             self.assertNotIn(str(path), out + done.stderr)
         self.assertNotIn(FAKE_COORDINATOR, out + done.stderr)
+        # The root copies and the watchdog's user of #602 too, as the coordinator checks them.
+        self.assertNotIn(FAKE_WATCHDOG, out + done.stderr)
+        self.assertIn('==> Risveglio del supervisore: copia di root in $SUPERVISOR_OPS_DIR', out)
+        self.assertIn('$WATCHDOG_OPS_DIR/host', out)
+        self.assertIn('<WATCHDOG_USER>', out)
         self.assertNotIn('è diverso da', out)
         # Only status lines: steps, results and the count.
         for line in out.splitlines():
@@ -4161,11 +4167,13 @@ exec "$@"''')
                                redacted=True)
         out = done.stdout + done.stderr
         for path in (self.home, self.tmp / 'locks', self.tmp / 'coordination',
-                     self.tmp / 'systemd', self.tmp / 'sudoers.d', self.tmp / 'tmpfiles.d'):
+                     self.tmp / 'systemd', self.tmp / 'sudoers.d', self.tmp / 'tmpfiles.d',
+                     self.tmp / 'lib/devloop-supervisor', self.tmp / 'lib/devloop-role-watchdog'):
             self.assertNotIn(str(path), out)
         self.assertNotIn('.private-key.pem', out)
-        for user in (FAKE_AGENT, FAKE_SUPERVISOR):
+        for user in (FAKE_AGENT, FAKE_SUPERVISOR, FAKE_WATCHDOG):
             self.assertNotIn(user, out)
+        self.assertIn('copia di root in $SUPERVISOR_OPS_DIR', out)
         self.assertIn('$STATE_DIR/run.log', out)
         self.assertNotIn('$DEVLOOP_HOME/devloop/.devloop', out)
         self.assertIn("  ok: $DEVLOOP_KEY_DIR/<chiave dell'app dispatcher>: 600, ", out)
@@ -4248,7 +4256,9 @@ exec "$@"''')
                 f'{self.home}/devloop/.ghapps/{PREFIX}implementer.2026-01-02.private-key.pem\n'
                 f'sudo -u {FAKE_AGENT} ls {self.home}/agent {self.home}/agent-x devloop\n'
                 f'{self.home}/supervisor/.ghapps/x and dl-widget, not dl-widget-2\n'
-                f'{self.tmp}/systemd/loop-widget.service: loop-widget, not loop-widget-2\n')
+                f'{self.tmp}/systemd/loop-widget.service: loop-widget, not loop-widget-2\n'
+                f'{self.tmp}/lib/devloop-role-watchdog/role-watchdog.sh as {FAKE_WATCHDOG}, '
+                'role-watchdog\n')
         lib = shlex.quote(str(OPS / 'lib.sh'))
         done = subprocess.run([BASH, '-c', f'. {lib}; ops_redact_filter "$1"', '_', data],
                               input=text, capture_output=True, text=True, timeout=60)
@@ -4260,7 +4270,8 @@ exec "$@"''')
             "$DEVLOOP_KEY_DIR/<chiave dell'app implementer>",
             f'sudo -u <AGENT_USER> ls $AGENT_HOME {self.home}/agent-x devloop',
             '$SUPERVISOR_KEY_DIR/x and <DEVLOOP_USER>, not dl-widget-2',
-            '$SYSTEMD_DIR/$SERVICE_NAME.service: $SERVICE_NAME, not loop-widget-2'])
+            '$SYSTEMD_DIR/$SERVICE_NAME.service: $SERVICE_NAME, not loop-widget-2',
+            '$WATCHDOG_OPS_DIR/role-watchdog.sh as <WATCHDOG_USER>, role-watchdog'])
 
     def test_the_coordinator_is_checked_when_it_is_installed(self):
         # #530: absent, a line; present, its sudoers and the root copy, equal to this checkout.

@@ -394,8 +394,8 @@ ops_devloop_keys() {
 # per valore un percorso, sostituiti dal più lungo (STATE_DIR è STATE_PATH, lo state_dir risolto),
 # e quelli che sono nomi di utenti dei ruoli, sostituiti solo da soli e solo se non sono i default
 # documentati (OPS_PUBLIC_USERS, come PUBLIC_USERS di devloop/redact.py).
-OPS_REDACT_PATHS='STATE_DIR DEVLOOP_KEY_DIR SUPERVISOR_KEY_DIR COORDINATOR_KEY_DIR DEVLOOP_HOME AGENT_HOME SUPERVISOR_HOME COORDINATOR_HOME COORDINATION_DIR COORDINATOR_OPS_DIR LAUNCHER_DIR REPO_LOCK_DIR SYSTEMD_DIR SUDOERS_FILE AGENT_SUDOERS_FILE COORDINATOR_SUDOERS_FILE TMPFILES_FILE'
-OPS_REDACT_USERS='DEVLOOP_USER AGENT_USER SUPERVISOR_USER COORDINATOR_USER'
+OPS_REDACT_PATHS='STATE_DIR DEVLOOP_KEY_DIR SUPERVISOR_KEY_DIR COORDINATOR_KEY_DIR DEVLOOP_HOME AGENT_HOME SUPERVISOR_HOME COORDINATOR_HOME COORDINATION_DIR COORDINATOR_OPS_DIR SUPERVISOR_OPS_DIR WATCHDOG_OPS_DIR LAUNCHER_DIR REPO_LOCK_DIR SYSTEMD_DIR SUDOERS_FILE AGENT_SUDOERS_FILE COORDINATOR_SUDOERS_FILE TMPFILES_FILE'
+OPS_REDACT_USERS='DEVLOOP_USER AGENT_USER SUPERVISOR_USER COORDINATOR_USER WATCHDOG_USER'
 # Gli altri nomi dell'installazione, sostituiti da soli e nei nomi dei percorsi e delle unità
 # ($SYSTEMD_DIR/$SERVICE_NAME.service), alle condizioni degli utenti.
 OPS_REDACT_NAMES='SERVICE_NAME'
@@ -443,7 +443,7 @@ ops_redact_filter() {
 import json, re, sys
 data = json.loads(sys.argv[1])
 prefix = data.get("app_prefix") or ""
-public = {"devloop", "devloop-agent", "supervisor", "coordinator", "root"}
+public = {"devloop", "devloop-agent", "supervisor", "coordinator", "role-watchdog", "root"}
 paths = {}
 for name, value in data.get("paths", {}).items():
     value = value.rstrip("/")

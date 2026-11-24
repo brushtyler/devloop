@@ -1558,8 +1558,8 @@ body published. It covers every visible text: the output of the tests in a `host
   not match `/home/devloop-agent`), and a path with fewer than two names (`/`, `/srv`) is never
   replaced. `$HOME` alone is never used: a traceback holds the homes of several users.
 - A user is replaced only standing alone (not inside a name or a path), and never when it is a
-  documented default (`devloop`, `devloop-agent`, `supervisor`, `coordinator`), a common word of
-  devloop's own texts, a name shorter than three characters, or one of `trusted_users`. The
+  documented default (`devloop`, `devloop-agent`, `supervisor`, `coordinator`,
+  `role-watchdog`), a common word of devloop's own texts, a name shorter than three characters, or one of `trusted_users`. The
   name of the service follows the same conditions (its default `devloop` stays), but is replaced
   inside a path or the name of a unit too.
 - The substitutions apply to the visible text. The markers `devloop:<kind>:v1` that end a body

@@ -84,8 +84,9 @@ class RedactorTests(unittest.TestCase):
         self.assertEqual(r.redact('u-dl-x u-dl_x xu-dl /x/u-dl u-dl.'),
                          'u-dl-x u-dl_x xu-dl /x/u-dl <DEVLOOP_USER>.')
         defaults = redact.Redactor(users=[('DEVLOOP_USER', 'devloop'), ('AGENT_USER', 'devloop-agent'),
-                                          ('SUPERVISOR_USER', 'supervisor'), ('X_USER', 'ab')])
-        text = 'devloop, devloop-agent, supervisor, ab'
+                                          ('SUPERVISOR_USER', 'supervisor'),
+                                          ('WATCHDOG_USER', 'role-watchdog'), ('X_USER', 'ab')])
+        text = 'devloop, devloop-agent, supervisor, role-watchdog, role-watchdog.sh, ab'
         self.assertEqual(defaults.redact(text), text)
         # A user that is one of the trusted GitHub logins stays: the records name them.
         kept = redactor(keep=['U-DL'])
