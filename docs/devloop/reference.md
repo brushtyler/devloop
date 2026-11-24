@@ -410,20 +410,29 @@ Today these texts follow it:
   short), the comment of a fix, the comment of a readiness check with its notes, and the
   dispatcher's answers to a refused `/devloop approve` and to a `/devloop recheck` that runs no
   check, with the reason it gives;
+- the gaps of a readiness check that devloop writes itself (#632), when it makes the record: the
+  question on a change to the trust policy that no decision covers, before the agent's reason,
+  and the gap of an issue the coordinator opened, or not opened by a trusted user, that touches
+  the trust policy without a trusted user's `agent:ready`; the gaps the agent lists stay in its
+  own words, written in the project's language as its prompt asks;
 - the texts devloop writes in a new review record (#632), when it makes it: the note on what it
   corrected (a blocking finding without evidence, a corrected verdict, the findings it added
   from the acceptance map), the defaults of what the reviewer left out, the findings of the
   acceptance map, and the review of a CI failure with its notes;
 - the [advisory review](guide.md#advisory-review-for-the-operator) and the dispatcher's summary
   of it (#632), whose titles the advisory prompt names in the same language;
-- the comment of a [conclave](guide.md#conclave-on-a-block) (#632).
+- the comment of a [conclave](guide.md#conclave-on-a-block) (#632), and the reasons devloop
+  writes in a new conclave record: a contribution missing (an agent failed or timed out, an
+  output beyond the limits, a call started without a result, no proposal to vote on), a
+  context changed, a substitute vote of the coordinator refused or not given by its deadline.
+  The checks of a record read back (`consistent`) are only logged, in Italian.
 
 Only the text devloop composes changes, in the language of the moment it composes it. The
 values of the records stay as written, in every language: the opinions `ok`, `dubbi`,
 `contrario` and the votes `APPROVA`, `BLOCCA` of the agents' schemas, the texts of the agents
-(the reasons of a conclave vote, the gaps of a readiness check) and the texts of a record
-already published, such as the note of an earlier review or the reason of an earlier recheck,
-are shown as recorded. The other texts of the dispatcher (escalations, with the descriptions of
+(the reasons of a conclave vote, the gaps of a readiness check the agent lists) and the texts of
+a record already published, such as the note of an earlier review, the reason of an earlier
+recheck or of a conclave already recorded, are shown as recorded. The other texts of the dispatcher (escalations, with the descriptions of
 their classes, merge and receipts among them, and the acceptance map and the step on the host
 that the comment of a fix repeats from the pull request) are still in Italian, until the parts
 of #628 that translate them.

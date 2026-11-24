@@ -21,7 +21,8 @@ from devloop import agents, conclave, config, markdown, report  # noqa: E402
 from devloop.activity import iso  # noqa: E402
 from devloop.config import AppConfig, ConfigError, CoordinatorActor  # noqa: E402
 from helpers import ssdlc_project  # noqa: E402
-from test_devloop_conclave import CCFG, LOGINS, RESOLUTION, Base, proposal, vote  # noqa: E402
+from test_devloop_conclave import (CCFG, LOGINS, RESOLUTION, STARTED_WITHOUT_RESULT,  # noqa: E402
+                                   Base, proposal, vote)
 from test_devloop_report import DISPATCHER as REPORT_DISPATCHER  # noqa: E402
 from test_devloop_report import TRUST, ReportGH  # noqa: E402
 from test_devloop_report import CFG as REPORT_CFG  # noqa: E402
@@ -317,7 +318,7 @@ class TwoMissingTests(SubstituteBase):
         record = self.record()
         self.assertEqual(record['outcome'], conclave.BLOCKED)
         self.assertEqual([v['state'] for v in record['votes']], ['missing', 'missing'])
-        self.assertEqual(record['votes'][0]['missing'], conclave.STARTED_WITHOUT_RESULT)
+        self.assertEqual(record['votes'][0]['missing'], STARTED_WITHOUT_RESULT)
         self.assertIsNone(record.get('substitute'))
         self.assertFalse(self.due())
 
@@ -337,7 +338,7 @@ class TwoMissingTests(SubstituteBase):
         record = self.record()
         self.assertEqual(record['outcome'], conclave.BLOCKED)
         self.assertEqual([v['state'] for v in record['votes']], ['missing', 'missing'])
-        self.assertEqual(record['votes'][1]['missing'], conclave.STARTED_WITHOUT_RESULT)
+        self.assertEqual(record['votes'][1]['missing'], STARTED_WITHOUT_RESULT)
         self.assertEqual(record['substitute']['state'], 'void')
         self.assertEqual(len(self.runner.calls), 3)
         self.assertFalse(self.due())
@@ -387,7 +388,8 @@ class RecordTests(unittest.TestCase):
                      '/devloop vote 900 abc BLOCK m', f'/devloop vote 900 {digest} APPROVA m'):
             with self.subTest(text=text):
                 self.assertTrue(conclave.vote_command(text)['error'])
-        long = conclave.vote_command(f'/devloop vote 900 {digest} BLOCK ' + 'x' * 1001)
+        long = conclave.vote_command(f'/devloop vote 900 {digest} BLOCK ' + 'x' * 1001,
+                                     'Italian')
         self.assertIn('supera', long['error'])
 
 

@@ -370,7 +370,9 @@ again keeps the `base` of its record.
 Since #472 the marker also records `trust_policy` (`none`, `covered` or `uncovered`) and
 `trust_policy_reason`, the check's declaration on the trust policy. An `uncovered` outcome is
 never ready: its first gap, of kind `operator_decision`, is written by devloop with the question
-"Approvi la modifica della policy di fiducia descritta qui?" followed by the reason, so the class
+"Do you approve the change to the trust policy described here?" ("Approvi la modifica della
+policy di fiducia descritta qui?" in Italian, the project's
+[language](reference.md#language-of-the-texts) choosing, #632) followed by the reason, so the class
 of the escalation is `operator_decision`. Records written before #472 lack both fields and are
 read as `none`; a reused outcome keeps them.
 

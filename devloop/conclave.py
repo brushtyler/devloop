@@ -76,8 +76,10 @@ MAX_REFUSED = 5
 _PROPOSAL_HASH = re.compile(r'[0-9a-f]{64}')
 _COMMENT_ID = re.compile(r'[1-9][0-9]{0,19}')
 
-STARTED_WITHOUT_RESULT = ('chiamata avviata senza un risultato durevole (riavvio o errore del '
-                          'dispatcher): conta come `BLOCCA` e non si ripete')
+# The reasons devloop writes in the record (a contribution missing, a context changed, a
+# substitute vote refused or not given) are composed in ``language``, the project's (#632), when
+# they are written: the ``why_`` texts of ``TEXTS``. The functions that write them default to
+# English, as ``render``.
 
 
 def text_hash(text):
@@ -103,16 +105,17 @@ def new_record(block, step, members, issue, issue_hash, commit, head, diff_hash)
             'votes': votes, 'stale': '', 'hash': '', 'outcome': ''}
 
 
-def too_long(raw, main_key, main_limit):
-    """Why ``raw`` exceeds the limits, or ''."""
+def too_long(raw, main_key, main_limit, language=ENGLISH):
+    """Why ``raw`` exceeds the limits, in ``language``, or ''."""
+    t = TEXTS.texts(language)
     if len(raw.get(main_key) or '') > main_limit:
-        return f'`{main_key}` supera {main_limit} caratteri'
+        return t('why_field_long', field=main_key, limit=main_limit)
     for key in ('reserved_reason', 'operator_question', 'reason'):
         if len(raw.get(key) or '') > MAX_TEXT:
-            return f'`{key}` supera {MAX_TEXT} caratteri'
+            return t('why_field_long', field=key, limit=MAX_TEXT)
     options = raw.get('options') or []
     if len(options) > MAX_OPTIONS or any(len(o) > MAX_OPTION for o in options):
-        return f'più di {MAX_OPTIONS} opzioni, o un\'opzione oltre {MAX_OPTION} caratteri'
+        return t('why_options', count=MAX_OPTIONS, limit=MAX_OPTION)
     return ''
 
 
@@ -124,56 +127,59 @@ def _reserved_fields(raw):
             else []}
 
 
-def apply_proposal(record, raw, profile=None):
+def apply_proposal(record, raw, profile=None, language=ENGLISH):
     """``record`` with the proposer's schema-valid output ``raw``, given with ``profile``. A
     reserved perimeter ends the protocol: no proposal, and the votes are not asked. A proposal
-    without text, or beyond the limits, is a failed contribution."""
+    without text, or beyond the limits, is a failed contribution, its reason in ``language``."""
+    t = TEXTS.texts(language)
     proposal = record['proposal']
-    why = too_long(raw, 'resolution', MAX_RESOLUTION)
+    why = too_long(raw, 'resolution', MAX_RESOLUTION, language)
     if why:
-        return missing(record, 'proposal', f'output oltre i limiti: {why}')
+        return missing(record, 'proposal', t('why_over_limits', why=why), language)
     if raw['reserved']:
         proposal.update(state=DONE, profile=profile, **_reserved_fields(raw))
         for vote in record['votes']:
-            vote.update(state=MISSING, missing='non richiesto: il proponente ha segnalato il '
-                                               'perimetro riservato all\'operatore')
+            vote.update(state=MISSING, missing=t('why_not_asked'))
         return record
     text = raw['resolution']
     if not text.strip():
-        return missing(record, 'proposal', 'risoluzione vuota')
+        return missing(record, 'proposal', t('why_empty'), language)
     proposal.update(state=DONE, resolution=text, hash=text_hash(text), profile=profile,
                     **_reserved_fields(raw))
     record['hash'] = proposal['hash']
     return record
 
 
-def apply_vote(record, index, raw, proposal_hash, profile=None):
+def apply_vote(record, index, raw, proposal_hash, profile=None, language=ENGLISH):
     """``record`` with the schema-valid vote ``raw`` of voter ``index``, given with ``profile``
-    on the proposal whose hash is ``proposal_hash``."""
+    on the proposal whose hash is ``proposal_hash``; a vote beyond the limits is missing, its
+    reason in ``language``."""
     vote = record['votes'][index]
-    why = too_long(raw, 'reason', MAX_TEXT)
+    why = too_long(raw, 'reason', MAX_TEXT, language)
     if why:
-        return missing(record, index, f'output oltre i limiti: {why}')
+        return missing(record, index, TEXTS.texts(language)('why_over_limits', why=why),
+                       language)
     vote.update(state=DONE, vote=raw['vote'], reason=raw['reason'].strip(),
                 proposal_hash=proposal_hash, profile=profile, **_reserved_fields(raw))
     return record
 
 
-def missing(record, which, reason):
+def missing(record, which, reason, language=ENGLISH):
     """``record`` with contribution ``which`` (``'proposal'`` or a voter's index) missing for
     ``reason``. A missing proposal leaves nothing to vote on: the votes are missing too. A
     contribution missing while a vote waits for the coordinator's substitute vote ends the wait
     (#605): one substitute vote per conclave, so two members missing leave it to the operator,
     however the second one went missing (a failed call, an output over the limits, a call
-    started without a result)."""
+    started without a result). The reasons it adds are in ``language``."""
+    t = TEXTS.texts(language)
     item = record['proposal'] if which == 'proposal' else record['votes'][which]
     item.update(state=MISSING, missing=reason)
     if which == 'proposal':
         for vote in record['votes']:
             if vote['state'] in (PENDING, STARTED):
-                vote.update(state=MISSING, missing='nessuna proposta da votare')
+                vote.update(state=MISSING, missing=t('why_no_proposal'))
     if waiting_substitute(record) is not None:
-        _void(record, 'un secondo membro non ha votato: un solo voto sostitutivo per conclave')
+        _void(record, t('why_second_member'))
     return record
 
 
@@ -192,7 +198,7 @@ def substitute_vote(record):
     return None
 
 
-def await_substitute(record, index, reason, deadline, conclave, after):
+def await_substitute(record, index, reason, deadline, conclave, after, language=ENGLISH):
     """``record`` whose voter ``index`` failed for ``reason``, with a coordinator: the vote
     waits for the coordinator's substitute vote until ``deadline`` (ISO 8601, UTC), on the
     conclave of comment ``conclave``; ``after`` is the latest comment id read before the wait,
@@ -200,12 +206,12 @@ def await_substitute(record, index, reason, deadline, conclave, after):
     member is already substituted, or waits, this vote is missing, and so is the waiting one;
     when another vote is already missing (an output over the limits, a call started without a
     result), this one is missing too, and no wait opens: two members missing leave the
-    conclave to the operator at once."""
+    conclave to the operator at once. The reasons it adds are in ``language``."""
     if record.get('substitute'):
-        return missing(record, index, reason)
+        return missing(record, index, reason, language)
     if any(vote['state'] == MISSING for i, vote in enumerate(record['votes']) if i != index):
-        return missing(record, index, f'{reason}; un altro membro non ha votato: un solo voto '
-                                      'sostitutivo per conclave')
+        return missing(record, index,
+                       TEXTS.texts(language)('why_other_member', reason=reason), language)
     record['votes'][index].update(state=WAITING, missing=reason)
     record['substitute'] = {'index': index, 'member': record['votes'][index]['agent'],
                             'why': reason, 'deadline': deadline, 'conclave': conclave,
@@ -221,11 +227,11 @@ def _void(record, reason, state=SUB_VOID):
     substitute['state'] = state
 
 
-def expire_substitute(record):
+def expire_substitute(record, language=ENGLISH):
     """``record`` whose substitute vote did not come before its deadline: the vote is missing,
-    and the conclave goes to the operator as before (#605)."""
+    and the conclave goes to the operator as before (#605). The reason is in ``language``."""
     if waiting_substitute(record) is not None:
-        _void(record, 'nessun voto sostitutivo del coordinatore entro la scadenza', SUB_EXPIRED)
+        _void(record, TEXTS.texts(language)('why_expired'), SUB_EXPIRED)
     return record
 
 
@@ -239,18 +245,19 @@ def refuse_substitute(record, comment, why):
     return record
 
 
-def substitute_problem(record, command):
+def substitute_problem(record, command, language=ENGLISH):
     """Why the coordinator's ``command`` (``vote_command``) does not apply to the substitute
-    vote ``record`` waits for, in Italian, or ''. Who wrote it and when are the dispatcher's
-    checks."""
+    vote ``record`` waits for, in ``language`` (that of the command's ``error`` too), or ''.
+    Who wrote it and when are the dispatcher's checks."""
+    t = TEXTS.texts(language)
     substitute = record['substitute']
     if command['error']:
         return command['error']
     if command['conclave'] != substitute['conclave']:
-        return (f'il comando nomina il conclave {command["conclave"]}, non questo '
-                f'({substitute["conclave"]})')
+        return t('why_other_conclave', named=command['conclave'],
+                 conclave=substitute['conclave'])
     if command['hash'] != record['hash']:
-        return 'lo SHA-256 non è quello della proposta corrente del conclave'
+        return t('why_hash')
     return ''
 
 
@@ -271,26 +278,29 @@ def apply_substitute(record, command, comment, by, profile, at):
     return record
 
 
-def make_stale(record, reason):
+def make_stale(record, reason, language=ENGLISH):
     """``record`` whose frozen context no longer holds: every contribution not done is missing,
-    and the outcome is ``BLOCKED`` (unless a member already flagged the reserved perimeter)."""
+    and the outcome is ``BLOCKED`` (unless a member already flagged the reserved perimeter).
+    The reasons it adds are in ``language``."""
     record['stale'] = reason
+    changed = TEXTS.texts(language)('why_stale', reason=reason)
     if waiting_substitute(record) is not None:
-        _void(record, f'contesto cambiato: {reason}')
+        _void(record, changed)
     for item in [record['proposal'], *record['votes']]:
         if item['state'] in (PENDING, STARTED):
-            item.update(state=MISSING, missing=f'contesto cambiato: {reason}')
+            item.update(state=MISSING, missing=changed)
     return record
 
 
-def settle_started(record):
+def settle_started(record, language=ENGLISH):
     """``record`` with every call started without a durable result marked missing: it counts as
-    a failure, ``BLOCCA``, and is not repeated."""
+    a failure, ``BLOCCA``, and is not repeated. The reason is in ``language``."""
+    why = TEXTS.texts(language)('why_started')
     if record['proposal']['state'] == STARTED:
-        missing(record, 'proposal', STARTED_WITHOUT_RESULT)
+        missing(record, 'proposal', why, language)
     for index, vote in enumerate(record['votes']):
         if vote['state'] == STARTED:
-            missing(record, index, STARTED_WITHOUT_RESULT)
+            missing(record, index, why, language)
     return record
 
 
@@ -470,12 +480,12 @@ def veto_command(body):
     return tokens[2].strip() if len(tokens) > 2 else ''
 
 
-def vote_command(body):
+def vote_command(body, language=ENGLISH):
     """The coordinator's substitute vote in ``body`` (#605), or None when the first line after
     the attribution header is no ``/devloop vote``: ``{conclave, hash, verdict, reason,
     error}``, ``conclave`` the comment id of the conclave (None when it is not one), ``reason``
-    the rest of the comment from the rest of the first line on, and ``error``, in Italian, why
-    the command is malformed ('' when it is not)."""
+    the rest of the comment from the rest of the first line on, and ``error``, in ``language``
+    (the project's, #632), why the command is malformed ('' when it is not)."""
     lines = (body or '').strip().splitlines()
     while lines and (not lines[0].strip() or lines[0].strip().startswith('>')):
         lines.pop(0)
@@ -491,10 +501,9 @@ def vote_command(body):
                'error': ''}
     if (command['conclave'] is None or not _PROPOSAL_HASH.fullmatch(command['hash'])
             or command['verdict'] not in SUBSTITUTE_VERDICTS or not reason):
-        command['error'] = ('comando non ben formato: va scritto come `/devloop vote <conclave> '
-                            '<sha256> APPROVE|BLOCK|RESERVED <motivo>`')
+        command['error'] = TEXTS.texts(language)('why_malformed')
     elif len(reason) > MAX_TEXT:
-        command['error'] = f'il motivo supera {MAX_TEXT} caratteri'
+        command['error'] = TEXTS.texts(language)('why_reason_long', limit=MAX_TEXT)
     return command
 
 
@@ -533,7 +542,8 @@ def _closing(t, record):
 # The texts of the conclave's comment (#632), in the project's ``language`` (``i18n``); English
 # for a language without translation. The votes (``APPROVA``, ``BLOCCA``), the outcomes and the
 # commands are values of the record and of the agents' answers: they are never translated. The
-# reasons the record holds (a contribution missing, a context changed) are shown as recorded.
+# reasons the record holds (a contribution missing, a context changed) are shown as recorded:
+# devloop composes them in the project's language when it writes them (the ``why_`` texts).
 TEXTS = Catalog(
     en={
         'outcome_UNANIMOUS': 'the proposal and two `APPROVA`: three agreements',
@@ -592,6 +602,38 @@ TEXTS = Catalog(
         'evidence': ('The uncommitted changes of the stopped agent are not taken up as work: '
                      'they are saved as evidence in `{file}` (log of the dispatcher, {bytes} '
                      'bytes, SHA-256 `{sha256}`).'),
+        # The reasons devloop writes in a new record (#632): a contribution missing, a context
+        # changed, a substitute vote refused or not given.
+        'why_started': ('call started without a durable result (restart or error of the '
+                        'dispatcher): it counts as `BLOCCA` and is not repeated'),
+        'why_field_long': '`{field}` exceeds {limit} characters',
+        'why_options': 'more than {count} options, or an option over {limit} characters',
+        'why_over_limits': 'output beyond the limits: {why}',
+        'why_not_asked': ('not asked: the proposer flagged the perimeter reserved to the '
+                          'operator'),
+        'why_empty': 'empty resolution',
+        'why_no_proposal': 'no proposal to vote on',
+        'why_second_member': ('a second member did not vote: one substitute vote per '
+                              'conclave'),
+        'why_other_member': ('{reason}; another member did not vote: one substitute vote per '
+                             'conclave'),
+        'why_expired': 'no substitute vote of the coordinator by the deadline',
+        'why_other_conclave': 'the command names conclave {named}, not this one ({conclave})',
+        'why_hash': 'the SHA-256 is not the one of the current proposal of the conclave',
+        'why_stale': 'context changed: {reason}',
+        'why_malformed': ('malformed command: it is written as `/devloop vote <conclave> '
+                          '<sha256> APPROVE|BLOCK|RESERVED <reason>`'),
+        'why_reason_long': 'the reason exceeds {limit} characters',
+        'why_issue_changed': 'the text of the issue changed',
+        'why_head_moved': 'the head of the PR moved to `{head}`',
+        'why_diff_changed': 'the uncommitted changes of the stopped agent changed',
+        'why_untrusted': 'the text of the issue is no longer trusted ({error})',
+        'why_head_not_commit': 'the head of the PR (`{head}`) is not the commit of the block',
+        'why_hash_mismatch': 'the text of the proposal does not match its hash',
+        'why_failed': 'agent failed or timed out: {error}',
+        'why_unreadable_time': ('the time of the command, of its latest change or the deadline '
+                                'cannot be read'),
+        'why_late': 'written or changed after the deadline of the substitute vote ({deadline})',
     },
     it={
         'outcome_UNANIMOUS': 'la proposta e due `APPROVA`: tre consensi',
@@ -652,6 +694,38 @@ TEXTS = Catalog(
         'evidence': ('Le modifiche non committate dell\'agent fermo non sono riprese come '
                      'lavoro: sono salvate come evidenza in `{file}` (log del dispatcher, '
                      '{bytes} byte, SHA-256 `{sha256}`).'),
+        'why_started': ('chiamata avviata senza un risultato durevole (riavvio o errore del '
+                        'dispatcher): conta come `BLOCCA` e non si ripete'),
+        'why_field_long': '`{field}` supera {limit} caratteri',
+        'why_options': 'più di {count} opzioni, o un\'opzione oltre {limit} caratteri',
+        'why_over_limits': 'output oltre i limiti: {why}',
+        'why_not_asked': ('non richiesto: il proponente ha segnalato il perimetro riservato '
+                          'all\'operatore'),
+        'why_empty': 'risoluzione vuota',
+        'why_no_proposal': 'nessuna proposta da votare',
+        'why_second_member': ('un secondo membro non ha votato: un solo voto sostitutivo per '
+                              'conclave'),
+        'why_other_member': ('{reason}; un altro membro non ha votato: un solo voto sostitutivo '
+                             'per conclave'),
+        'why_expired': 'nessun voto sostitutivo del coordinatore entro la scadenza',
+        'why_other_conclave': ('il comando nomina il conclave {named}, non questo '
+                               '({conclave})'),
+        'why_hash': 'lo SHA-256 non è quello della proposta corrente del conclave',
+        'why_stale': 'contesto cambiato: {reason}',
+        'why_malformed': ('comando non ben formato: va scritto come `/devloop vote <conclave> '
+                          '<sha256> APPROVE|BLOCK|RESERVED <motivo>`'),
+        'why_reason_long': 'il motivo supera {limit} caratteri',
+        'why_issue_changed': 'il testo dell\'issue è cambiato',
+        'why_head_moved': 'l\'head della PR è passato a `{head}`',
+        'why_diff_changed': 'le modifiche non committate dell\'agent fermo sono cambiate',
+        'why_untrusted': 'il testo dell\'issue non è più fidato ({error})',
+        'why_head_not_commit': ('l\'head della PR (`{head}`) non è il commit del blocco'),
+        'why_hash_mismatch': 'il testo della proposta non corrisponde al suo hash',
+        'why_failed': 'agent fallito o in timeout: {error}',
+        'why_unreadable_time': ('l\'ora del comando, della sua ultima modifica o la scadenza '
+                                'non sono leggibili'),
+        'why_late': ('scritto o modificato dopo la scadenza del voto sostitutivo '
+                     '({deadline})'),
     })
 
 

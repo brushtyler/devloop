@@ -9,6 +9,7 @@ import unittest
 
 from devloop import (acceptance, conclave, dispatch_advisory, i18n, ledger, markdown, review,
                      supervision, watch)
+from devloop.agents import AgentError
 from devloop.context import _template, prompt_values
 from devloop.dispatcher import Dispatcher
 from devloop.i18n import ENGLISH, ITALIAN, Catalog, language_code
@@ -20,6 +21,16 @@ from test_devloop_preflight import PCFG, IssueGH
 from test_devloop_preflight import gap as recheck_gap
 from test_devloop_preflight_recheck import CFG as RECHECK_CFG
 from test_devloop_preflight_recheck import Case as RecheckCase
+from test_devloop_authorize import CFG as AUTHORIZE_CFG
+from test_devloop_authorize import TextGH
+from test_devloop_conclave import SHA2, proposal, vote
+from test_devloop_conclave_substitute import (CCFG, COORDINATED, NOW, TIMEOUT, UNAVAILABLE,
+                                              SubstituteBase)
+from test_devloop_coordinator import COORDINATOR
+from test_devloop_preflight import checked
+from test_devloop_supervision import SUPERVISOR_LOGIN, Identities
+from test_devloop_trust_decisions import (BOT, HEADER, LATER, APPROVAL, PreflightGH, comment,
+                                          history)
 
 TURN = {'type': 'turn', 'state': 'open', 'kind': 'review', 'agent': 'codex', 'identity': None,
         'mode': 'read', 'model': 'm', 'effort': 'high', 'fallback_for': None,
@@ -538,6 +549,206 @@ class RecheckLanguageTests(RecheckCase):
                 self.assertIn(reason, body)
                 if language != 'Italian':
                     self.assertNotIn('attende', body)
+
+
+class TrustLanguageTests(unittest.TestCase):
+    """The texts devloop composes about the trust policy in a readiness check (#632): the
+    question of an uncovered change, the reasons of a refused ``/devloop approve`` and the gaps
+    of the coordinator's gate, in the project's ``language``, on the real paths."""
+
+    LANGUAGES = {
+        'Italian': ('Approvi la modifica della policy di fiducia descritta qui?',
+                    'l\'autore è il supervisore o un\'app',
+                    'il commento porta l\'intestazione degli agent'),
+        'English': ('Do you approve the change to the trust policy described here?',
+                    'the author is the supervisor or an app',
+                    'the comment carries the agents\' header'),
+    }
+    LANGUAGES['French'] = LANGUAGES['English']
+    ITALIAN_WORDS = ('Approvi', 'l\'autore', 'il commento', 'intestazione')
+
+    def make(self, language, thread=()):
+        self.gh = PreflightGH(list(thread), history(taken=None))
+        self.runner = FakeRunner(checked(True, trust='uncovered', reason='Point 4.'))
+        return Dispatcher(dataclasses.replace(PCFG, language=language), self.gh, FakeWS(),
+                          self.runner, log=lambda m: None)
+
+    def test_a_readiness_check_writes_the_question_and_the_refusals(self):
+        for language, (question, app, header) in self.LANGUAGES.items():
+            with self.subTest(language=language):
+                d = self.make(language, [comment(login=BOT),
+                                         comment(at='2026-11-19T11:10:00Z',
+                                                 body=HEADER + APPROVAL)])
+                self.assertEqual([a.kind for a in d.tick()], ['preflight'])
+                body = self.gh.thread[-1]['body']
+                record = markdown.read_marker(body, 'preflight')
+                self.assertEqual(record['gaps'][0]['description'], f'{question} Point 4.')
+                self.assertIn(question, body)
+                self.assertIn(app, body)
+                self.assertIn(header, body)
+                self.assertEqual(record['refused'], [1000, 1001])
+                if language != 'Italian':
+                    for word in self.ITALIAN_WORDS:
+                        self.assertNotIn(word, body)
+
+    def test_the_answer_to_a_refused_approve(self):
+        for language, (_, app, _) in self.LANGUAGES.items():
+            with self.subTest(language=language):
+                d = self.make(language)
+                self.assertEqual([a.kind for a in d.tick()], ['preflight'])
+                self.gh.thread.append(comment(at=LATER, login=BOT))
+                self.assertEqual([a.kind for a in d.tick()], ['approve_refused'])
+                body = self.gh.thread[-1]['body']
+                self.assertIsNotNone(markdown.read_marker(body, 'approve'))
+                self.assertIn(f'`{BOT}`', body)
+                self.assertIn(app, body)
+                if language != 'Italian':
+                    for word in self.ITALIAN_WORDS:
+                        self.assertNotIn(word, body)
+
+    def test_the_gaps_of_the_coordinators_gate(self):
+        expected = {
+            'Italian': ('L\'issue è stata aperta dal coordinatore',
+                        'L\'issue non è stata aperta da un utente fidato'),
+            'English': ('The issue was opened by the coordinator',
+                        'The issue was not opened by a trusted user'),
+        }
+        expected['French'] = expected['English']
+        outcome = {'ready': True, 'gaps': [], 'split': '', 'trust_policy': 'covered',
+                   'trust_policy_reason': 'Decided.'}
+        for language, (opened, authorized) in expected.items():
+            with self.subTest(language=language):
+                gh = TextGH()
+                d = Dispatcher(dataclasses.replace(AUTHORIZE_CFG, language=language), gh,
+                               FakeWS(), FakeRunner(), log=lambda m: None,
+                               identities=Identities(gh))
+                for author, says in ((COORDINATOR, opened), (SUPERVISOR_LOGIN, authorized)):
+                    gated = d._coordinator_gate({'author': author, 'labeled': []}, outcome)
+                    self.assertFalse(gated['ready'])
+                    self.assertEqual(gated['gaps'][0]['kind'], 'operator_decision')
+                    self.assertTrue(gated['gaps'][0]['description'].startswith(says))
+
+
+class ConclaveReasonLanguageTests(SubstituteBase):
+    """The reasons devloop writes in a new conclave record (#632), a contribution missing, a
+    context changed, a substitute vote refused or not given, in the project's ``language``,
+    on the real paths of the dispatcher: the comment carries no text of another language."""
+
+    LANGUAGES = ('Italian', 'English', 'French')
+    ITALIAN_WORDS = ('fallito', 'nessuna proposta', 'non richiesto', 'contesto cambiato',
+                     'non è quello', 'nomina il conclave', 'non ben formato', 'scadenza',
+                     'senza un risultato', 'è passato')
+
+    def run_in(self, language, cfg=None):
+        self.cfg = dataclasses.replace(cfg or COORDINATED, language=language)
+
+    def texts(self, language):
+        return conclave.TEXTS.texts(language)
+
+    def body(self):
+        (body,) = [c['body'] for c in self.gh.thread[100]
+                   if markdown.read_marker(c['body'], 'conclave')]
+        return body
+
+    def check_language(self, language, *phrases):
+        body = self.body()
+        for phrase in phrases:
+            self.assertIn(phrase, body)
+        if language != 'Italian':
+            for word in self.ITALIAN_WORDS:
+                self.assertNotIn(word, body)
+
+    def test_a_failed_proposer(self):
+        for language, (failed, none) in zip(self.LANGUAGES, (
+                ('agent fallito o in timeout: claude crashed', 'nessuna proposta da votare'),
+                ('agent failed or timed out: claude crashed', 'no proposal to vote on'),
+                ('agent failed or timed out: claude crashed', 'no proposal to vote on'))):
+            with self.subTest(language=language):
+                self.run_in(language)
+                self.make(AgentError('claude crashed'))
+                self.block_pr()
+                self.run_conclave(times=1)
+                record = self.record()
+                self.assertEqual(record['outcome'], conclave.BLOCKED)
+                self.assertEqual(record['proposal']['missing'], failed)
+                self.assertEqual([v['missing'] for v in record['votes']], [none] * 2)
+                self.check_language(language, failed, none)
+
+    def test_a_proposer_that_flags_the_reserved_perimeter(self):
+        for language in self.LANGUAGES:
+            with self.subTest(language=language):
+                self.run_in(language)
+                self.make(proposal(reserved=True, question='Grant `contents: write`?'))
+                self.block_pr()
+                self.run_conclave(times=1)
+                record = self.record()
+                self.assertEqual(record['outcome'], conclave.RESERVED)
+                why = self.texts(language)('why_not_asked')
+                self.assertEqual([v['missing'] for v in record['votes']], [why] * 2)
+                self.check_language(language, why)
+        self.assertTrue(self.texts('English')('why_not_asked').startswith('not asked'))
+
+    def test_a_changed_context(self):
+        for language, moved in zip(self.LANGUAGES, (
+                f'l\'head della PR è passato a `{SHA2[:12]}`',
+                f'the head of the PR moved to `{SHA2[:12]}`',
+                f'the head of the PR moved to `{SHA2[:12]}`')):
+            with self.subTest(language=language):
+                self.run_in(language, CCFG)
+                self.make(proposal(), vote(), vote())
+                self.block_pr()
+                self.run_conclave(times=1)
+                self.gh.head = SHA2
+                self.run_conclave(times=1)
+                record = self.record()
+                self.assertEqual(record['outcome'], conclave.BLOCKED)
+                self.assertEqual(record['stale'], moved)
+                changed = self.texts(language)('why_stale', reason=moved)
+                self.assertEqual([v['missing'] for v in record['votes']], [changed] * 2)
+                self.check_language(language, moved)
+
+    def test_a_substitute_vote_refused_then_not_given(self):
+        for language, (other, malformed, expired) in zip(self.LANGUAGES, (
+                ('il comando nomina il conclave', 'comando non ben formato',
+                 'nessun voto sostitutivo del coordinatore entro la scadenza'),
+                ('the command names conclave', 'malformed command',
+                 'no substitute vote of the coordinator by the deadline'),
+                ('the command names conclave', 'malformed command',
+                 'no substitute vote of the coordinator by the deadline'))):
+            with self.subTest(language=language):
+                self.run_in(language)
+                record = self.start(proposal(), UNAVAILABLE, vote())
+                failed = self.texts(language)('why_failed', error='codex: usage limit reached')
+                self.assertEqual(record['substitute']['why'], failed)
+                self.vote_cmd(conclave_id=self.conclave_id() + 1)
+                self.vote_cmd(verdict='FORSE')
+                self.run_conclave(times=1)
+                whys = [r['why'] for r in self.record()['substitute']['refused']]
+                self.assertTrue(whys[0].startswith(other), whys[0])
+                self.assertTrue(whys[1].startswith(malformed), whys[1])
+                self.now = NOW + TIMEOUT
+                self.run_conclave(times=1)
+                record = self.record()
+                self.assertEqual(record['substitute']['state'], 'expired')
+                self.assertEqual(record['votes'][0]['missing'], f'{failed}; {expired}')
+                self.check_language(language, other, malformed, expired)
+
+    def test_a_call_started_without_a_result(self):
+        for language in self.LANGUAGES:
+            with self.subTest(language=language):
+                self.run_in(language, CCFG)
+                self.make(proposal(), RuntimeError('dispatcher crash'), vote())
+                self.block_pr()
+                self.run_conclave(times=1)
+                with self.assertRaises(RuntimeError):
+                    self.run_conclave(times=1)
+                self.run_conclave(times=2)
+                record = self.record()
+                self.assertEqual(record['outcome'], conclave.BLOCKED)
+                why = self.texts(language)('why_started')
+                self.assertEqual(record['votes'][0]['missing'], why)
+                self.check_language(language, why)
+        self.assertTrue(self.texts('French')('why_started').startswith('call started'))
 
 
 if __name__ == '__main__':

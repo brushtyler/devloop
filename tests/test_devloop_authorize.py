@@ -22,7 +22,7 @@ from pathlib import Path
 import test_devloop_preflight_recheck as recheck_tests
 from devloop import authorization, markdown, supervision
 from devloop.dispatch_base import BaseBroken
-from devloop.dispatch_preflight import AUTHORIZED_TRUST_GAP
+from devloop.dispatch_preflight import GAP_TEXTS
 from devloop.dispatcher import Dispatcher
 from devloop.planning import Snapshot, plan
 from test_devloop import implemented
@@ -34,6 +34,8 @@ NEEDS = 'agent:needs-coordinator'
 WORKING = 'agent:working'
 CFG = coordinated(recheck_tests.CFG)
 ROOT = Path(__file__).resolve().parents[1]
+# The gap devloop writes, in the language of the tests' project (Italian, #632).
+AUTHORIZED_TRUST_GAP = GAP_TEXTS.texts(CFG.language)('authorized_gap')
 
 
 class TextGH(recheck_tests.ClockGH):

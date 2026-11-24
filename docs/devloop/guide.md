@@ -187,8 +187,10 @@ of every PR:
   and declares in `trust_policy` whether the change the issue asks for touches the policy:
   `none`, `covered` (a decision of the operator covers it, cited in `trust_policy_reason`) or
   `uncovered`. An `uncovered` issue is not ready: devloop puts first among its gaps one of kind
-  `operator_decision` with the question "Approvi la modifica della policy di fiducia descritta
-  qui?" and the reason, and the issue goes to `agent:needs-operator` with class
+  `operator_decision` with the question "Do you approve the change to the trust policy
+  described here?" ("Approvi la modifica della policy di fiducia descritta qui?" in Italian, the
+  project's [language](reference.md#language-of-the-texts) choosing, #632) and the reason, and
+  the issue goes to `agent:needs-operator` with class
   `operator_decision`, to the operator also in `auto` mode
   ([Readiness check before implementation](#readiness-check-before-implementation)). The
   operator answers with a `/devloop approve` on the issue: the hash of the request changes and
@@ -729,7 +731,8 @@ An issue is ready only if the agent says so **and** lists no gap and no split: a
 `default_available` gap blocks too, until a trusted comment accepts the proposed default. A
 default the repository or the issue already prescribes is not a gap. An `uncovered` change to the
 trust policy is a gap of kind `operator_decision` that devloop writes itself, first, with the
-question "Approvi la modifica della policy di fiducia descritta qui?": the issue goes to the
+question "Do you approve the change to the trust policy described here?" (in the project's
+[language](reference.md#language-of-the-texts), #632): the issue goes to the
 operator, never to the supervisor; a `covered` one is shown in the comment of the check, with
 the decision it cites.
 
