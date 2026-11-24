@@ -3626,8 +3626,10 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         unblocked = self._human_merge(pr)
         if unblocked is not None:
             lines.append('- il lavoro di questa PR è ripartito dopo la decisione del conclave '
-                         f'registrata nel commento {unblocked}: dopo ogni sblocco il merge resta '
-                         'umano.')
+                         f'registrata nel commento {unblocked}: dopo ogni sblocco devloop non la '
+                         'mergia da solo. La mergia l\'operatore, o il coordinatore con il suo '
+                         'merge riservato se la decisione era unanime e resta valida e un round '
+                         'di review completo dopo la ripartenza ha approvato l\'head.')
         if not lines:
             self.log(f'  merge mode {merge.mode_for(level, paths)}: devloop may merge this PR')
         return '\n'.join(lines)

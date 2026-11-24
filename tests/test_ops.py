@@ -6358,7 +6358,8 @@ class RoleRunbookTests(unittest.TestCase):
                        '`capacity` and `grant-budget` within the caps (from #595)',
                        '`[direction] issue`, from #604', 'the issues opened by the supervisor',
                        'when it does not answer, you put the work in the queue yourself',
-                       'the reserved merges, with the operator\'s decision',
+                       'the reserved merges that meet every condition, without a decision of '
+                       'the operator on each PR (#624)',
                        'the direction, the ADRs, `AGENTS.md`, the trust policy and the powers of '
                        'the roles', 'the configuration, the caps',
                        'a merge against a negative verdict', 'only operational interface'):

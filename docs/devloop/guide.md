@@ -989,12 +989,16 @@ a restart is never repeated, also after a crash.
   rounds `max_review_rounds` still allows; with none left the PR escalates for the round limit,
   as usual.
 
-No limit, round or slot grows. The normal review of the PR and the human merge stay mandatory
-after every restart: the decision only settles the gap the step stopped on. Once a record of the
-issue or of its PR is `resumed`, devloop **never merges** that PR, whatever `[merge]` says
+No limit, round or slot grows. The normal review of the PR and a merge that is not devloop's own
+stay mandatory after every restart: the decision only settles the gap the step stopped on. Once
+a record of the issue or of its PR is `resumed`, devloop **never merges** that PR by itself, whatever `[merge]` says
 (`strict` or `auto`), also after the resolution lapses or is vetoed: the PR counts as one in
 mode `off`, ready PRs get the [operator merge](#ready-prs-whose-merge-is-the-operators) notice with the comment of the decision,
-and the final check before a merge refuses it as well.
+and the final check before a merge refuses it as well. The only merge of such a PR that is not
+made by a person is the [reserved merge of the coordinator](#the-reserved-merge-of-the-coordinator)
+(#624), when the decision was unanimous and still holds and a complete review round after the
+restart approved the head: the coordinator checks the direction, and devloop never merges by
+itself.
 
 **What reaches the prompts.** The trust in bots' comments does not widen, and `trusted_users`
 stays as it is. The prompts of the implementation, of the fixes and of the reviews of that issue
@@ -1128,9 +1132,11 @@ Which modes exist, and that choosing one is the operator's decision, is set by
   operator's for any of these reasons (mode `"off"`, a level `"off"`, an operator-only path) may
   also be merged by devloop with the merger app on a `/devloop merge` of the coordinator, under
   the conditions and the daily cap of
-  [The reserved merge of the coordinator](#the-reserved-merge-of-the-coordinator) (#529). The
-  merge mode decides only what devloop merges by itself; without the coordinator, or without
-  its command, the PR stays a person's.
+  [The reserved merge of the coordinator](#the-reserved-merge-of-the-coordinator) (#529),
+  without a decision of the operator on the PR itself (#624). The same holds for a PR whose
+  work restarted after a unanimous [conclave](#after-a-unanimous-decision) decision, which
+  devloop never merges by itself. The merge mode decides only what devloop merges by itself;
+  without the coordinator, or without its command, the PR stays a person's.
 - **The merge mode of a PR** is therefore `mode`, made more restrictive by the override of the
   PR's review level, and `"off"` when its diff touches an operator-only path. Elsewhere in this
   guide, "the merge mode of a PR" means this one.
@@ -2030,9 +2036,14 @@ a `/devloop fix`, as the supervisor's.
 #### The reserved merge of the coordinator
 
 The coordinator merges the ready PRs whose merge is the operator's that the
-[delegated merge](#delegated-merge) of the supervisor does not cover, after the quorum and with
-the operator's decision ([ADR 0002](../adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-22-modello-a-quattro-ruoli-524-527),
-"Merge riservato del coordinatore", #529). With `[roles.coordinator]`, its identity writes, as
+[delegated merge](#delegated-merge) of the supervisor does not cover, after the quorum
+([ADR 0002](../adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-22-modello-a-quattro-ruoli-524-527),
+"Merge riservato del coordinatore", #529). No decision of the operator on the PR itself is
+needed (#624, [precision of 2026-11-24](../adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-24-merge-riservato-del-coordinatore-624)):
+at its periodic check the coordinator merges the reserved PRs that are ready and meet every
+condition below, and the operator stops one with [`/devloop hold`](#holding-a-merge). Where a
+case needs a decision of the operator, it is the one given on the issue before the
+implementation (the `/devloop approve` below). With `[roles.coordinator]`, its identity writes, as
 the first line after the attribution header of a comment on a PR in `agent:ready-to-merge` with
 the dispatcher's own `agent:needs-operator` and its comment "Il merge spetta all'operatore"
 ([an operator merge](#ready-prs-whose-merge-is-the-operators)):
@@ -2059,12 +2070,24 @@ The dispatcher plans it in the [merge lane](#the-merge-lane), as the supervisor'
   [Changes to the trust policy](#changes-to-the-trust-policy)), read now
   with the API. A decision recorded only in an ADR does not count;
 - each reviewer of the quorum, on its latest review of `<sha>`, has `operator_reason` `none` or
-  `decision`, never `trust_policy`, as for the delegated merge.
+  `decision`, never `trust_policy`, as for the delegated merge;
+- work restarted after a [conclave](#after-a-unanimous-decision) refuses nothing by itself
+  (#624), under three more conditions, read now: each decision that restarted work of the PR or
+  of its issue is `UNANIMOUS`, and the latest of them is still the latest unanimous decision;
+  none of them was annulled with `/devloop veto` or has lapsed (the request of the issue, its
+  text with the operator's decisions on it, is still the one each was taken on); and the latest
+  review round, complete and approving `<sha>`, and the quorum's reviews of `<sha>` come after
+  the restart (a round greater than every round recorded on the PR before the decision; any
+  round when the decision restarted the implementation, which opens the PR). The coordinator
+  also verifies that the resolution of the conclave stays within the authorized request of the
+  issue, with the operator's decisions on it, and says so in the reason of its command; when it
+  does not, or the doubt remains, it does not merge and brings the PR to the operator. The
+  `supervision` record `merged` then names the decision (`conclave`).
 
 What stays as for the delegated merge: `<sha>` the PR's head and the approved one, the quorum, no
 open finding, the acceptance map, `MERGEABLE` and `CLEAN`, the CI `pass`, the advisory review of
 `<sha>` with the opinion `ok` or `dubbi` (without `review_policy.advisory_reviewer` every
-coordinator's merge is refused), no work restarted after a conclave, no `/devloop hold` written
+coordinator's merge is refused), no `/devloop hold` written
 after the command, and the labels read again just before the merge call. When a condition does
 not hold, or cannot be verified, the command is refused with why, spent, and the PR stays with the
 operator.
