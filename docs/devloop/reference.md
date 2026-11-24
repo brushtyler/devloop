@@ -491,7 +491,10 @@ failed test fails there too the step waits for the base branch to advance, witho
 attempts nor escalation ([Tests red on the base too](guide.md#tests-red-on-the-base-too)), unless
 the CI of that base commit passed, every check with a success: then the failure is the host's,
 and the step escalates `host_tests` to the operator (#497), also when that CI turns green during
-the wait. Each module runs with `test_timeout_seconds`.
+the wait. Each module runs with `test_timeout_seconds`. Before that escalation, not the one
+after a wait, the failed tests run once again alone on the branch, 5 seconds later
+(`FLAKY_RETRY_PAUSE`, #598): when they pass they are unstable under load, the step goes on
+without another attempt, and the `verification` record of the retry names them.
 
 **The CI stays the gate.** A defect the local modules miss becomes a CI round. The review may
 start while the CI runs, but an approval leads to `agent:ready-to-merge` only once the CI of the

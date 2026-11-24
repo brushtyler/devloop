@@ -20,6 +20,7 @@ the summary of the CI in the review and fix prompts (#300).
 (#459), and ``case_modules`` the test modules they belong to: a failure that the same modules
 reproduce on the base commit of the branch is the base's, not the implementer's. Both read what
 unittest prints, so the check runs only with the ``python-unittest-modules`` selection.
+``case_command`` runs those failed tests alone, before the failure is the host's (#598).
 
 The project declares both (ADR 0006, R5, ``Tests``): the selection is a strategy of the
 installation, with a name, and the project's name rules as its parameters (``SELECTIONS``); the
@@ -214,3 +215,17 @@ def module_command(modules):
     that its output ends the tail the implementer gets back."""
     return ' && '.join(f'python3 -m unittest discover -s tests -p {shlex.quote(m)}'
                        for m in modules)
+
+
+def case_command(cases):
+    """One shell command running only the failed tests ``cases`` (``failed_cases``), one module
+    at a time, stopping at the first that fails (#598). Each test is selected with ``-k`` by a
+    pattern that ends with its id, so that ``test_a`` does not select ``test_ab`` too; a subtest
+    runs its whole test. ``cases`` belong to test modules (``case_modules``)."""
+    ids = {}
+    for case in cases:
+        test_id = case.split(' ', 1)[0]
+        ids.setdefault(test_id.split('.', 1)[0] + '.py', {})[test_id] = None
+    return ' && '.join(f'python3 -m unittest discover -s tests -p {shlex.quote(module)}'
+                       + ''.join(f' -k {shlex.quote("*" + i)}' for i in ids[module])
+                       for module in sorted(ids))

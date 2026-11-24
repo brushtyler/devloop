@@ -7,13 +7,16 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from devloop import markdown
 from devloop.config import LEGACY_NEEDS_OPERATOR
-from devloop.dispatch_base import MAX_CASES_LISTED, BaseBroken, MainAlerts
+from devloop.dispatch_base import FLAKY_RETRY_PAUSE, MAX_CASES_LISTED, BaseBroken, MainAlerts
 from devloop.dispatcher import Dispatcher
 from devloop.github import GitHubError, normalize_checks
-from devloop.localtests import Tests, case_modules, failed_cases, module_command
+from devloop.ledger import Ledger
+from devloop.localtests import (Tests, case_command, case_modules, failed_cases,
+                                module_command)
 from devloop.planning import BASE_REPAIRED, Action, Snapshot, plan
 from devloop.ports import summarize_checks
 from devloop.workspace import Workspace
@@ -21,6 +24,7 @@ from devloop.workspace import Workspace
 from helpers.devloop_fakes import SHA1, FakeGH, SnapshotGH
 from test_devloop import (BASE, CFG, REV, FakeRunner, FakeWS, finding, fixed, implemented, norm,
                           pr, raw_review)
+from test_devloop_ledger import LedgerGH, TreeWS
 from test_devloop_preflight import PCFG, IssueGH, checked, gap
 from test_devloop_supervision import (AUTO, HUMAN, PREFLIGHT_AUTO, SUPER, SUPERVISOR_LOGIN,
                                       Case, crash)
@@ -680,6 +684,12 @@ class HostTestsTests(unittest.TestCase):
 
     LINK = f'https://github.com/{CFG.repo}/commit/{BASE}/checks'
 
+    def setUp(self):
+        # The failed tests run again alone (#598) fail here too, with no pause.
+        sleep = mock.patch('devloop.dispatch_base.time.sleep')
+        sleep.start()
+        self.addCleanup(sleep.stop)
+
     def implement(self, checks, cfg=CFG, gh=None):
         """``_do_implement`` of issue 7 whose local tests fail with ``BRANCH`` on the branch and
         on the base commit ``BASE``, whose CI has ``checks``."""
@@ -788,6 +798,148 @@ class HostTestsTests(unittest.TestCase):
                 self.assertEqual(len(self.basebroken(7)), 1)
         self.implement(checks('success', 'success'))
         self.assertEqual(self.notices(7)[0]['class'], 'host_tests')
+
+
+class GreenBaseLedgerGH(LedgerGH):
+    """``LedgerGH`` whose every commit has a green CI."""
+
+    def check_details(self, sha):
+        return [dict(c) for c in PASSED]
+
+
+class UnstableTests(unittest.TestCase):
+    """#598: before ``host_tests`` the failed tests run once again alone on the branch, after a
+    pause; when they pass they are unstable under load, not a failure of the host."""
+
+    def setUp(self):
+        sleep = mock.patch('devloop.dispatch_base.time.sleep')
+        self.sleep = sleep.start()
+        self.addCleanup(sleep.stop)
+
+    def implement(self, tests):
+        """``_do_implement`` of issue 7 with a ledger, whose local tests fail with ``BRANCH`` on
+        the branch and on its base commit, whose CI is green; ``tests``, the outcome of each
+        test command: the branch's, the base's, then the retry alone."""
+        self.gh = GreenBaseLedgerGH()
+        self.ws = TreeWS(files=['impact.py'], modules=['test_impact.py'], tests=tests)
+        self.ws.cases = {'issue-7': BRANCH, 'issue-7-base': BRANCH}
+        self.runner = FakeRunner(implemented(), implemented())
+        Dispatcher(CFG, self.gh, self.ws, self.runner, log=lambda m: None,
+                   ledger=Ledger(self.gh))._do_implement(7)
+
+    def notices(self, number):
+        return [markdown.read_marker(c['body'], 'notice') for c in self.gh.thread.get(number, [])
+                if markdown.read_marker(c['body'], 'notice')]
+
+    def verification_bodies(self, number):
+        return [c['body'] for c in self.gh.thread[number]
+                if (markdown.read_marker(c['body'], 'ledger') or {}).get('type')
+                == 'verification']
+
+    def test_tests_passing_alone_are_unstable_and_the_implementation_goes_on(self):
+        self.implement((False, False, True))
+        # The pause, then the failed tests alone on the branch, after the base.
+        self.sleep.assert_called_once_with(FLAKY_RETRY_PAUSE)
+        branch = self.ws.commands[0][0]
+        self.assertEqual(self.ws.commands[1:], [
+            (Path('/wt/issue-7-base'), module_command(['test_x.py'])),
+            (branch, case_command(BRANCH))])
+        # No escalation, no other turn of the agent: the PR opens.
+        self.assertEqual(len(self.runner.calls), 1)
+        self.assertEqual(self.notices(7), [])
+        self.assertEqual(len(self.gh.created), 1)
+        # The failed verification stays; the retry names the unstable tests and is the one
+        # bound to the commit.
+        failed, retry = self.gh.records(7, 'verification')
+        self.assertEqual((failed['outcome'], failed['commit'], 'retried' in failed),
+                         ('fail', None, False))
+        self.assertEqual((retry['outcome'], retry['attempt'], retry['retried'],
+                          retry['command']), ('pass', 1, BRANCH, case_command(BRANCH)))
+        self.assertIsNotNone(retry['commit'])
+        body = self.verification_bodies(7)[-1]
+        self.assertIn('**Test instabili**', body)
+        self.assertIn('`test_x.Case.test_b`', body)
+
+    def test_tests_failing_alone_too_escalate_host_tests(self):
+        self.implement((False,))
+        self.sleep.assert_called_once_with(FLAKY_RETRY_PAUSE)
+        self.assertEqual(self.ws.commands[-1][1], case_command(BRANCH))
+        self.assertEqual(len(self.runner.calls), 1)
+        self.assertEqual(self.gh.created, [])
+        self.assertEqual(self.gh.labels[7], {'agent:needs-operator'})
+        notice, = self.notices(7)
+        self.assertEqual((notice['class'], notice['critical'], notice['to']),
+                         ('host_tests', True, 'operator'))
+        self.assertEqual(notice['host_tests']['cases'], BRANCH)
+        failed, retry = self.gh.records(7, 'verification')
+        self.assertEqual((failed['outcome'], retry['outcome'], retry['retried']),
+                         ('fail', 'fail', BRANCH))
+        body = self.verification_bodies(7)[-1]
+        self.assertIn('**Test rilanciati da soli**, falliscono ancora', body)
+        self.assertNotIn('Test instabili', body)
+
+    def test_a_fix_whose_tests_pass_alone_is_pushed_without_escalation(self):
+        first = norm(raw_review('request_changes', [finding()]))
+        gh = MainGH({BASE: PASSED})
+        ws = FakeWS(files=['devloop/review.py'], modules=['test_devloop.py'],
+                    tests=(False, False, True))
+        ws.cases = {'pr-100': BRANCH, 'pr-100-base': BRANCH}
+        runner = FakeRunner(fixed(), fixed())
+        gh.labels[100] = {'agent:changes'}
+        Dispatcher(CFG, gh, ws, runner, log=lambda m: None)._do_fix(
+            pr(labels=['agent:changes'], reviews=[first]))
+        self.assertEqual(len(runner.calls), 1)
+        self.assertEqual(ws.commands[-1][1], case_command(BRANCH))
+        self.assertEqual(len(ws.pushes), 1)
+        self.assertFalse(any(markdown.read_marker(b, 'notice') for _, b in gh.comments))
+        self.assertNotIn('agent:needs-operator', gh.labels[100])
+
+    def test_a_base_broken_failure_is_not_run_again(self):
+        # A red CI of the base: the base's failure, the retry does not apply.
+        gh = MainGH({BASE: FAILED})
+        ws = FakeWS(files=['impact.py'], modules=['test_impact.py'], tests=(False,))
+        ws.cases = {'issue-7': BRANCH, 'issue-7-base': BRANCH}
+        Dispatcher(CFG, gh, ws, FakeRunner(implemented()), log=lambda m: None)._do_implement(7)
+        self.sleep.assert_not_called()
+        self.assertEqual(len(ws.commands), 2)
+
+
+class CaseCommandTests(unittest.TestCase):
+    """#598: ``case_command`` runs only the failed tests, each by its whole id."""
+
+    def test_one_command_per_module_each_test_once(self):
+        self.assertEqual(
+            case_command(['test_y.Case.test_c', 'test_x.Case.test_a (i=1)',
+                          'test_x.Case.test_a (i=2)']),
+            "python3 -m unittest discover -s tests -p test_x.py -k '*test_x.Case.test_a' && "
+            "python3 -m unittest discover -s tests -p test_y.py -k '*test_y.Case.test_c'")
+
+    def test_a_real_run_selects_only_those_tests(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tests = Path(tmp) / 'tests'
+            tests.mkdir()
+            (tests / 'test_load.py').write_text(textwrap.dedent('''
+                import unittest
+
+                class Case(unittest.TestCase):
+                    def test_a(self):
+                        pass
+
+                    def test_ab(self):
+                        self.fail('not selected')
+
+                    def test_b(self):
+                        self.fail('red')
+            '''))
+            ws = Workspace(tmp, '.state', 'main')
+            python = shlex.quote(sys.executable)
+            passed, tail = ws.run_tests(
+                tmp, case_command(['test_load.Case.test_a']).replace('python3', python), 60)
+            self.assertTrue(passed, tail)
+            self.assertIn('Ran 1 test', tail)
+            command = case_command(['test_load.Case.test_b', 'test_load.Case.test_a'])
+            self.assertFalse(ws.run_tests(tmp, command.replace('python3', python), 60)[0])
+            self.assertEqual(ws.failed_cases(tmp), ['test_load.Case.test_b'])
 
 
 class WaitingGH(MainGH):

@@ -197,7 +197,7 @@ from .context import (LABEL_STYLE, _cli_state_refused, _describe_bases, _failure
                       label_transition, refused_approvals, transition_labels)
 from .dispatch_actions import ActionsMixin, Models, ready_approval, rerun_of
 from .dispatch_advisory import AdvisoryFailures, AdvisoryMixin, AdvisoryResults
-from .dispatch_base import BaseMixin, MainAlerts
+from .dispatch_base import BaseMixin, HostTests, MainAlerts
 from .dispatch_conclave import ConclaveMixin
 from .dispatch_merge import MergeMixin
 from .dispatch_preflight import PreflightMixin
@@ -2585,9 +2585,10 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                                  self.cfg.tests)
         return (module_command(modules) if modules else None), {'mode': mode, 'modules': modules}
 
-    def _run_tests(self, where, path, attempt, command):
+    def _run_tests(self, where, path, attempt, command, retried=None):
         """Run ``command``, recording it in the ledger with the tree tested; returns
-        ``(passed, tail, entry)``. The test of a fix is a section of its register (#355)."""
+        ``(passed, tail, entry)``. The test of a fix is a section of its register (#355).
+        ``retried``: the failed tests that ``command`` runs again alone (#598), recorded."""
         if self.ledger is None or where is None:
             return (*self.ws.run_tests(path, command, self.cfg.test_timeout_seconds), None)
         before = self.ws.tree(path)
@@ -2598,7 +2599,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         entry = self.ledger.verification(where[0], kind=where[1], attempt=attempt,
                                          command=command, passed=passed,
                                          duration_ms=duration, tree_before=before,
-                                         tree_after=after, register=fix_register(where))
+                                         tree_after=after, register=fix_register(where),
+                                         retried=retried)
         return passed, tail, entry
 
     def _verify(self, where, path, attempt):
@@ -3064,7 +3066,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         With ``base_check`` (an implementation or a fix, #459) a failure whose failed tests all
         fail on the base commit of the branch too is not retried: the reason to escalate is then
         a ``BaseBroken`` (``dispatch_base``), and the step waits for the base branch to advance;
-        a ``HostTests`` when they pass in the CI of that commit (#497), escalated to the operator.
+        a ``HostTests`` when they pass in the CI of that commit (#497), escalated to the operator,
+        unless they pass once run again alone on the branch (#598, ``_retry_alone``): then the
+        turn succeeds, with the record of that retry as the passing test.
         ``prompt`` is the text, or a function of the attempt (0 first) that renders it, so that
         each attempt gets what its worktree holds then (#203).
         Returns the output, ``None`` on success or a reason to escalate, the agent configuration
@@ -3105,6 +3109,12 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             if passed:
                 return result, None, used, tested, local
             broken = self._base_broken(path, tail) if base_check else None
+            if isinstance(broken, HostTests):
+                # Before the host's failure, its tests once again alone (#598): when they pass
+                # they are unstable under load, and the step goes on as after passing tests.
+                passed, tested = self._retry_alone(where, path, attempt + 1, broken)
+                if passed:
+                    return result, None, used, tested, local
             if broken is not None:
                 return result, broken, used, None, local
             failures += ('\n\n## Test failures after your previous attempt\n\nThe test command '

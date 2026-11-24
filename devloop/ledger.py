@@ -15,7 +15,8 @@ on the PR (review, fix, sync, CI):
   the authority of which this record is the projection: the journal also says where turns may
   be left open, whatever labels the issue or PR has later, so that the next tick finds them;
 - ``verification``: a test command the dispatcher ran, bound to the commit created right after
-  only when the tree before the test, after it and in the commit is the same;
+  only when the tree before the test, after it and in the commit is the same. The retry alone
+  of failed tests that would escalate ``host_tests`` (#598) names them in ``retried``;
 - ``event``: what happens without a CLI, such as a CI round or a sync without conflicts.
 
 The turns of a review round and its ``ci_round`` event share one comment, the round's register
@@ -467,13 +468,17 @@ class Ledger:
             raise
 
     def verification(self, number, *, kind, attempt, command, passed, duration_ms, tree_before,
-                     tree_after, register=None):
-        """A test the dispatcher ran; with ``register``, a section of that fix register."""
+                     tree_after, register=None, retried=None):
+        """A test the dispatcher ran; with ``register``, a section of that fix register.
+        ``retried``: the failed tests of the attempt that the command ran again alone (#598),
+        unstable when it passed."""
         record = {
             'type': 'verification', 'kind': kind, 'attempt': attempt, 'command': command,
             'outcome': 'pass' if passed else 'fail', 'duration_ms': duration_ms,
             'tree_before': tree_before, 'tree_after': tree_after, 'commit': None,
             'at': self._now()}
+        if retried is not None:
+            record['retried'] = list(retried)
         if register is None:
             return self._post(number, record)
         return self._section(number, record, None, register)
@@ -609,14 +614,23 @@ def _render_request(r):
 
 
 def _render_verification(r, title=None):
-    return [title or '## Registro devloop: verifica locale', '',
-            'Comando eseguito dal dispatcher. Il commit è indicato solo se l\'albero testato, '
-            'prima e dopo il test, coincide con quello committato.', '',
-            _rows([('Passo', r.get('kind')), ('Tentativo', r.get('attempt')),
-                   ('Comando', r.get('command')), ('Esito', r.get('outcome')),
-                   ('Durata (ms)', r.get('duration_ms')), ('Albero prima', r.get('tree_before')),
-                   ('Albero dopo', r.get('tree_after')), ('Commit', r.get('commit')),
-                   ('Eseguita il', r.get('at'))])]
+    parts = [title or '## Registro devloop: verifica locale', '',
+             'Comando eseguito dal dispatcher. Il commit è indicato solo se l\'albero testato, '
+             'prima e dopo il test, coincide con quello committato.', '',
+             _rows([('Passo', r.get('kind')), ('Tentativo', r.get('attempt')),
+                    ('Comando', r.get('command')), ('Esito', r.get('outcome')),
+                    ('Durata (ms)', r.get('duration_ms')), ('Albero prima', r.get('tree_before')),
+                    ('Albero dopo', r.get('tree_after')), ('Commit', r.get('commit')),
+                    ('Eseguita il', r.get('at'))])]
+    if isinstance(r.get('retried'), list):
+        # #598: the failed tests of the attempt, which failed on the base commit too, run
+        # again alone before the escalation host_tests.
+        cases = ''.join(f'\n- `{str(c).replace("`", "")}`' for c in r['retried'])
+        parts += ['', ('**Test instabili**: falliti nel tentativo e sul commit base, passano '
+                       'rilanciati da soli. Il passo prosegue; il test va corretto:'
+                       if r.get('outcome') == 'pass' else
+                       '**Test rilanciati da soli**, falliscono ancora:') + cases]
+    return parts
 
 
 def _render_event(r, title=None):

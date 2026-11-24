@@ -400,7 +400,10 @@ def _valid_ledger(r):
     if r['type'] == 'request':
         return isinstance(r.get('hash'), str) and isinstance(r.get('comments'), list)
     if r['type'] == 'verification':
-        return isinstance(r.get('command'), str) and r.get('outcome') in ('pass', 'fail')
+        # ``retried`` (#598): the failed tests run again alone, only on such a retry.
+        return (isinstance(r.get('command'), str) and r.get('outcome') in ('pass', 'fail')
+                and ('retried' not in r or isinstance(r['retried'], list)
+                     and all(isinstance(c, str) for c in r['retried'])))
     return isinstance(r.get('event'), str)
 
 
