@@ -111,13 +111,18 @@ class FixRegisterLedgerTests(unittest.TestCase):
 
     def test_a_requested_fix_has_a_register_of_round_zero(self):
         gh = LedgerGH()
-        lg = Ledger(gh)
+        lg = Ledger(gh, language='Italian')
         fix = lg.fix_register(100, 0)
         lg.close_turn(self.open(lg, register=fix), 'success')
         (only,) = gh.thread[100]
         self.assertEqual(fix.comment_id, only['id'])
         self.assertEqual(markdown.read_marker(only['body'], 'ledger')['round'], 0)
         self.assertIn('## Registro devloop: correzione prima di ogni review', only['body'])
+        # Without a language the ledger writes in English (#631).
+        english = LedgerGH()
+        lg = Ledger(english)
+        lg.close_turn(self.open(lg, register=lg.fix_register(100, 0)), 'success')
+        self.assertIn('## devloop ledger: fix before any review', english.thread[100][0]['body'])
 
     def test_each_fix_has_its_own_register_apart_from_the_rounds(self):
         gh = LedgerGH()

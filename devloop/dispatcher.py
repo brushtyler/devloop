@@ -712,9 +712,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
 
     @ledger.setter
     def ledger(self, ledger):
-        """The ledger edits only the round registers the dispatcher signed (#325)."""
+        """The ledger edits only the round registers the dispatcher signed (#325), and writes
+        in the project's ``language`` (#631)."""
         if ledger is not None:
             ledger.signed = self._signed
+            ledger.language = self.cfg.language
         self._ledger = ledger
 
     # Identities ------------------------------------------------------------

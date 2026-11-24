@@ -1296,7 +1296,11 @@ records (only that identity's records count), on the issue for the implementatio
 readiness check, on the PR for review, fix, sync and CI. The turns of a review round and its
 `ci_round` event share one comment, the [round register](#round-register); the turns, the
 `sync` and the local tests of a fix share another, the [fix register](#fix-register). The
-[PR receipt](#pr-receipt) (#135) gathers them at the promotion.
+[PR receipt](#pr-receipt) (#135) gathers them at the promotion. The readable part of a record,
+before its marker, is in the project's [language](reference.md#language-of-the-texts) (#631):
+Italian or English, English for any other language; the marker and its fields are the same in
+every language, and only the marker is read. The titles below are the English ones; in Italian
+they begin with `## Registro devloop`.
 
 | Record | When | Content |
 |---|---|---|
@@ -1327,7 +1331,8 @@ The token counts of different CLIs do not mean the same thing: codex's input inc
 input, claude's and agy's do not. Compare them only within the same agent; the totals of the
 [PR receipt](#pr-receipt) add up what each turn reports, whatever its agent.
 
-A value that is not attested is `null`, never 0, and the comment shows `non riportato`; the real
+A value that is not attested is `null`, never 0, and the comment shows `not reported` (`non
+riportato` in Italian); the real
 model stays `null` next to the configured one when the CLI attests none. An agy envelope that is
 missing, not JSON or without `usage` leaves every field `null`, duration and turns included; a
 duration that does not fit a finite number of milliseconds is `null`. Telemetry never makes a
@@ -1365,7 +1370,7 @@ written by agents.
 ### Round register
 
 Since #325 the review turns of a round and its `ci_round` event are not comments of their own:
-the dispatcher writes **one comment per round** on the PR, `## Registro devloop: round <n>`,
+the dispatcher writes **one comment per round** on the PR, `## devloop ledger: round <n>`,
 ending with a `ledger` marker of type `round`. Its `records` hold every review turn of the round,
 retries and fallback models included, of every reviewer, and the `ci_round` event of the round
 (also of a CI failure round, and the one a promotion records later for that round), each in a
@@ -1396,8 +1401,8 @@ round, stay valid and are read as before.
 ### Fix register
 
 Since #355 a fix (the answer to a review round, or one asked with `/devloop fix`) writes **one
-dispatcher comment** on the PR, `## Registro devloop: correzione del round <n>` (`correzione
-prima di ogni review` for a fix asked before any review, round 0), ending with a `ledger` marker
+dispatcher comment** on the PR, `## devloop ledger: fix of round <n>` (`fix before any
+review` for a fix asked before any review, round 0), ending with a `ledger` marker
 of type `fix`. Its `records` hold, each in a section of its own with its number (`section`) and
 the same content as a record of its own:
 

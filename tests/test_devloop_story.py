@@ -193,7 +193,7 @@ class StoryDispatcherTests(unittest.TestCase):
                       if markdown.read_marker(c['body'], 'ledger')['type'] == 'request']
         self.assertIsNone(markdown.read_marker(comment['body'], 'story'))
         self.assertEqual(comment['body'], ledger.render(
-            markdown.read_marker(comment['body'], 'ledger')))
+            markdown.read_marker(comment['body'], 'ledger'), language=CFG.language))
         self.assertFalse([e for e in journal_events(self.state)
                           if e['event'] in ('story', 'request', 'child')])
         self.assertEqual(self.ledger.journal.stories(), {})

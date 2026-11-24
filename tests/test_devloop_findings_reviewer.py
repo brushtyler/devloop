@@ -317,8 +317,11 @@ class FindingTests(unittest.TestCase):
         turn = {'type': 'turn', 'state': 'open', 'kind': 'review', 'agent': KEY,
                 'identity': 'claude-agent[bot]', 'model': 'claude-sonnet-5-5',
                 'effort': 'high', 'started_at': 't', 'role': 'findings'}
-        self.assertIn('- **Ruolo:** `finding-only`', '\n'.join(ledger._render_turn(turn)))
-        self.assertNotIn('Ruolo', '\n'.join(ledger._render_turn(dict(turn, role=None))))
+        t = ledger.TEXTS.texts('it')
+        self.assertIn('- **Ruolo:** `finding-only`', '\n'.join(ledger._render_turn(t, turn)))
+        self.assertNotIn('Ruolo', '\n'.join(ledger._render_turn(t, dict(turn, role=None))))
+        english = '\n'.join(ledger._render_turn(ledger.TEXTS.texts('en'), turn))
+        self.assertIn('- **Role:** `finding-only`', english)
         # And the receipt of the PR, which keeps the role only of such a turn.
         kept = receipt._turn(dict(turn, state='closed'), 'pr')
         self.assertEqual(kept['role'], FINDINGS_ONLY)
