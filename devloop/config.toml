@@ -261,6 +261,13 @@ check = true
 # issue = 123
 interval = 15
 
+# `devloop direction` (issue #604): the operator's direction of the project, the latest comment
+# of a user of trusted_users on this issue that starts with the line `## Direzione`, given back
+# as it is to the coordinator and the supervisor; never in a prompt. Without it the priorities
+# stay those of the operator's labels. Which issue is the operator's choice (local overlay).
+# [direction]
+# issue = 123
+
 # The CI of a new head (issue #263). With local_tests other than "full", a PR in agent:review
 # whose head has no CI yet is not reviewed for grace_minutes after its push (the dispatcher's own
 # push, else the commit date): GitHub may not have registered the CI yet. After that the full

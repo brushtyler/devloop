@@ -2289,3 +2289,77 @@ test "$(valore "$parametro")" = "$vecchia" && echo params
 `test` stampa `params`. Poi i passi 7, 8 e 9: script di setup, verifica e riavvio. La posizione
 di prima è quella pubblicata: il rollback la rimette in uso finché non si riprova lo
 spostamento.
+
+## Direzione dell'operatore nei sudoers dei ruoli (#604)
+
+Con #604 devloop ha il comando `devloop direction`, che stampa la direzione dell'operatore in
+vigore, l'ultimo commento di un utente di `trusted_users` su `[direction] issue` che inizia con la
+riga `## Direzione`
+([docs/devloop/guide.md](../../docs/devloop/guide.md#project-direction)). Coordinatore e
+supervisore la leggono con `devloop-pinned direction`, che i loro sudoers ammettono da #604, in
+sola lettura, senza argomenti. Il sudoers installato sull'host è quello di prima finché gli script
+di setup non lo riscrivono: fino ad allora `check-host.sh` lo segnala diverso da quello generato,
+e i ruoli non leggono la direzione. Il codice di devloop non ha bisogno d'altro: senza
+`[direction]` nell'overlay si comporta come prima.
+
+devloop mergia la PR di #604 come le altre, ma non fa il pin automatico di quel commit né dei
+successivi finché l'operatore non fa il pin a mano dopo il passo
+([Ogni cambio con un passo sull'host](#ogni-cambio-con-un-passo-sullhost)).
+
+Come root, **dal checkout dell'operatore**, mai dal clone di devloop, con i valori di
+`params.env` (`SERVICE_NAME`, `DEVLOOP_USER`, `DEVLOOP_CLONE`, `SUPERVISOR_USER`,
+`COORDINATOR_USER`):
+
+1. aggiornare il checkout dell'operatore a `origin/main`, con il merge di #604:
+
+   ```bash
+   git fetch origin
+   git checkout --detach origin/main
+   ```
+
+2. il sudoers del supervisore, che `setup-supervisor.sh` riscrive dopo `visudo -c`:
+
+   ```bash
+   sudo bash ops/host/setup-supervisor.sh --dry-run
+   sudo bash ops/host/setup-supervisor.sh
+   ```
+
+3. il coordinatore, se c'è: il suo sudoers e la copia di root di `ops/`, che
+   `setup-coordinator.sh` aggiorna insieme:
+
+   ```bash
+   sudo bash ops/host/setup-coordinator.sh --dry-run
+   sudo bash ops/host/setup-coordinator.sh
+   ```
+
+4. verificare: `sudo bash ops/host/check-host.sh --no-apps`, nessun errore nei passi del sudoers
+   del supervisore e del coordinatore;
+
+5. a loop fermo, il pin a mano del commit di #604 o di uno successivo, come utente
+   `DEVLOOP_USER`, dal suo clone, poi l'avvio del loop: lo stop è `systemctl stop
+   <SERVICE_NAME>`, il pin `python3 scripts/devloop-pinned pin origin/main` nel clone
+   `DEVLOOP_CLONE`, l'avvio `systemctl start <SERVICE_NAME>`. Il pin a mano fa riprendere il pin
+   automatico;
+
+6. verificare come i ruoli: `sudo -u <COORDINATOR_USER> -H sudo -n -l` e `sudo -u
+   <SUPERVISOR_USER> -H sudo -n -l` elencano `devloop-pinned direction`; il comando, eseguito
+   come nei sudoers, stampa `direction: none: no [direction] issue is configured; …` finché
+   l'overlay non ha `[direction]`.
+
+**La chiave `[direction] issue`** non fa parte del passo: quale issue usare, e quando, lo decide
+l'operatore. Crea l'issue e il primo commento di direzione
+([docs/devloop/quickstart.md](../../docs/devloop/quickstart.md#later)), poi aggiunge all'overlay
+dello `state_dir`, come utente `DEVLOOP_USER`, la tabella con il numero dell'issue:
+
+```toml
+[direction]
+issue = <N>
+```
+
+Un valore che non è il numero di un'issue ferma devloop all'avvio, come `[report] issue`. Il loop
+non la usa: `devloop direction` e `devloop status` leggono l'overlay a ogni esecuzione, e non
+serve riavviare nulla.
+
+**Rollback.** I sudoers di prima si rimettono rieseguendo i passi 2 e 3 dal checkout della
+versione di prima. La tabella `[direction]` si toglie dall'overlay; la copia di prima la rifiuta
+(`unknown key`), quindi va tolta **prima** del pin della copia di prima.

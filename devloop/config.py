@@ -116,6 +116,15 @@ class ReportPolicy:
 
 
 @dataclass(frozen=True)
+class DirectionPolicy:
+    """``[direction]`` (#604, ADR 0002, second precisazione of 2026-11-23, point 7): the issue
+    on which the operator writes the direction of the project, read by ``devloop direction`` and
+    ``devloop status``, or 0 when none is configured (the priorities stay those of the
+    operator's labels)."""
+    issue: int = 0
+
+
+@dataclass(frozen=True)
 class CIPolicy:
     """``[ci]`` (#263): a head without CI, with ``local_tests`` other than ``full``, is not
     reviewed for ``grace_minutes`` after its push (the dispatcher's push, else the commit date):
@@ -680,6 +689,8 @@ class Config:
     run: RunPolicy = field(default_factory=RunPolicy)
     # The daily summary (#256).
     report: ReportPolicy = field(default_factory=ReportPolicy)
+    # The operator's direction (#604).
+    direction: DirectionPolicy = field(default_factory=DirectionPolicy)
     # The wait for the CI of a new head (#263).
     ci: CIPolicy = field(default_factory=CIPolicy)
     # The cleanup of state_dir (#380).
@@ -1123,6 +1134,22 @@ def parse_report(table):
                 raise ConfigError(f'report.{key}: expected {what}')
             values[key] = value
     return ReportPolicy(**values)
+
+
+def parse_direction(table):
+    """``[direction]`` (#604): ``issue``, optional, the number of an issue (at least 1), as
+    ``[report] issue``."""
+    if not isinstance(table, dict):
+        raise ConfigError('direction: expected a table')
+    unknown = set(table) - {'issue'}
+    if unknown:
+        raise ConfigError(f'direction: unknown keys {sorted(unknown)}')
+    if 'issue' not in table:
+        return DirectionPolicy()
+    value = table['issue']
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ConfigError('direction.issue: expected the number of an issue')
+    return DirectionPolicy(issue=value)
 
 
 def parse_ci(table):
@@ -1990,6 +2017,7 @@ def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
         pin=parse_pin(data.get('pin', {}), sensitive_lists(data)),
         run=parse_run(data.get('run', {})),
         report=report,
+        direction=parse_direction(data.get('direction', {})),
         ci=parse_ci(data.get('ci', {})),
         gc=parse_gc(data.get('gc', {})),
         agent_user=parse_agent_user(data.get('agent_user', {})),
@@ -2107,6 +2135,7 @@ OVERLAY_KEYS = {
     'pin': {'auto': None},
     'run': {'alert_issue': None},
     'report': dict.fromkeys(('issue', 'interval')),
+    'direction': {'issue': None},
     'ci': dict.fromkeys(('grace_minutes', 'required_timeout_minutes')),
     'gc': dict.fromkeys(('pins', 'keep_pins', 'worktrees', 'logs', 'log_days',
                          'interval_minutes')),
