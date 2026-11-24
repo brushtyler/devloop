@@ -21,14 +21,17 @@ from pathlib import Path
 
 import test_devloop_preflight_recheck as recheck_tests
 from devloop import authorization, markdown, supervision
+from devloop.dispatch_base import BaseBroken
 from devloop.dispatch_preflight import AUTHORIZED_TRUST_GAP
 from devloop.dispatcher import Dispatcher
 from devloop.planning import Snapshot, plan
+from test_devloop import implemented
 from test_devloop_coordinator import COORDINATOR, coordinated, declared, header
 from test_devloop_preflight import checked
 from test_devloop_supervision import HUMAN, READY, SUPERVISOR_LOGIN, Identities
 
 NEEDS = 'agent:needs-coordinator'
+WORKING = 'agent:working'
 CFG = coordinated(recheck_tests.CFG)
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -51,6 +54,11 @@ class TextGH(recheck_tests.ClockGH):
         """``login`` changes the body: even a trusted user's edit voids an authorization."""
         self.body = body
         self.edits = (self.now(), login)
+
+    def rename(self, title, login='brushtyler'):
+        """``login`` changes the title."""
+        self.title = title
+        self.renames = [*self.renames, (login, self.now())]
 
     def ready(self, login=SUPERVISOR_LOGIN):
         """``login`` adds agent:ready."""
@@ -169,6 +177,25 @@ class AuthorizeTests(Case):
         self.authorize(d)
         self.assertEqual(self.planned(d), [('preflight', 7)])
 
+    def test_a_text_changed_and_restored_after_the_authorization_does_not_start(self):
+        # The text the coordinator read comes back, but a change followed the command: the
+        # authorization does not come back with it.
+        for change in ('body', 'title'):
+            with self.subTest(change=change):
+                d = self.make()
+                self.authorize(d)
+                if change == 'body':
+                    self.gh.edit('Testo temporaneo')
+                    self.gh.edit('Do the thing.')
+                else:
+                    self.gh.rename('Titolo temporaneo')
+                    self.gh.rename('Issue 7')
+                self.gh.ready()
+                self.assertEqual(self.planned(d), [])
+                self.assertTrue(self.ignored())
+                self.authorize(d)
+                self.assertEqual(self.planned(d), [('preflight', 7)])
+
     def test_a_text_changed_after_the_command_and_before_its_record_is_refused(self):
         d = self.make()
         self.gh.say(7, COORDINATOR, header() + '\n/devloop authorize')
@@ -196,6 +223,55 @@ class AuthorizeTests(Case):
         self.assertNotIn('agent:working', self.gh.labels[7])
         self.assertTrue(any('without an authorization of the coordinator' in m
                             for m in self.logs))
+
+    def waiting(self, d):
+        """The authorized issue 7, queued by the supervisor and checked, whose implementation
+        waits for a base branch that has already moved on (#459): it keeps agent:working."""
+        self.authorize(d)
+        self.gh.ready()
+        if self.cfg.preflight:
+            self.check(d)
+        self.gh.labels[7] = {WORKING}
+        d._wait_base(7, 'implement', BaseBroken('f' * 40, ['test_x.Case.test_a']), 'f' * 40)
+
+    def test_a_restart_after_the_base_wait_needs_an_authorization_of_the_current_text(self):
+        for preflight in (True, False):
+            with self.subTest(preflight=preflight):
+                cfg = CFG if preflight else coordinated(
+                    dataclasses.replace(recheck_tests.CFG, preflight=''))
+                d = self.make(cfg)
+                self.waiting(d)
+                self.gh.edit('Do another thing.')
+                turns = len(self.runner.calls)
+                # No check and no implementation: the issue goes back to the coordinator.
+                self.assertEqual(self.ticked(d), [('unauthorized', 7)])
+                self.assertEqual(len(self.runner.calls), turns)
+                self.assertEqual(self.gh.labels[7], {NEEDS})
+                self.assertEqual(self.gh.created, [])
+                self.assertEqual(self.planned(d), [])
+                # A new authorization of the text read now, then the supervisor's agent:ready.
+                self.authorize(d)
+                self.assertEqual(self.gh.labels[7], set())
+                self.gh.ready()
+                self.assertEqual(self.planned(d),
+                                 [('preflight' if preflight else 'implement', 7)])
+
+    def test_a_restart_with_a_valid_authorization_starts_again(self):
+        d = self.make()
+        self.waiting(d)
+        self.assertEqual(self.planned(d), [('implement', 7)])
+        self.runner.outputs.append(implemented())
+        self.assertEqual(self.ticked(d), [('implement', 7)])
+        self.assertEqual(len(self.gh.created), 1)
+
+    def test_a_change_after_the_snapshot_stops_the_restart(self):
+        d = self.make()
+        self.waiting(d)
+        self.assertEqual(self.planned(d), [('implement', 7)])
+        self.gh.edit('Do another thing.')
+        d._do_implement(7)
+        self.assertEqual(self.gh.labels[7], {NEEDS})
+        self.assertEqual(self.gh.created, [])
 
     def test_the_supervisors_ready_without_authorization_does_not_start_and_is_logged(self):
         d = self.make()

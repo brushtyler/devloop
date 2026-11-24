@@ -5,7 +5,7 @@ The coordinator authorizes the work with a comment whose first line after the at
 is ``/devloop authorize [priority:<p>]``: the dispatcher records it (an ``authorize`` record, bound
 to the SHA-256 of the title and the body, ``text_hash``) and removes ``agent:needs-coordinator``.
 With ``[roles.coordinator]`` the supervisor's ``agent:ready`` admits an issue only while a recorded
-authorization holds for its current text: a text changed since voids it, and a new
+authorization holds for its current text: a text changed since voids it, even if restored afterwards, and a new
 ``/devloop authorize`` is needed. A command of any other identity is refused, and recorded.
 
 The functions here are pure: the dispatcher reads GitHub and writes the records
@@ -62,7 +62,10 @@ def changed_since(history, at):
 def valid_authorization(records, history):
     """The latest ``authorized`` record of ``records`` (the dispatcher's ``authorize`` records
     of the issue, oldest first) bound to the issue's current title and body (``history``), or
-    None: a text changed since the authorization voids it."""
+    None: a text changed since the authorization voids it, even when restored afterwards to
+    the text the coordinator read. Both are checked: the hash of the current text, and the
+    history of the changes against the time of the command (``changed_since``)."""
     digest = text_hash(history['title'], history['body'])
     return next((r for r in reversed(records)
-                 if r['outcome'] == 'authorized' and r.get('hash') == digest), None)
+                 if r['outcome'] == 'authorized' and r.get('hash') == digest
+                 and not changed_since(history, r.get('at'))), None)

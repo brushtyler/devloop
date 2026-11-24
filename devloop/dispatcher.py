@@ -1011,7 +1011,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
 
     def _unauthorized_ready(self, number):
         """Why the latest ``agent:ready`` of issue ``number``, read now, does not admit it for
-        lack of an authorization of the coordinator (#607), or ''."""
+        lack of an authorization of the coordinator (#607), or ''. The latest ``labeled`` event
+        decides even when devloop removed the label since, at the takeover: an implementation
+        that waited for the base branch (#459) starts again only while one holds too."""
+        if self._coordinator_login() is None:
+            return ''
         history = self.gh.issue_history(number)
         approved = ready_approval(history['labeled'], self.cfg.labels.ready,
                                   self._admitters(history['author'], coordinator=True))
@@ -1021,6 +1025,30 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             return ''
         return (f'{self.cfg.labels.ready} by {approved[0]} without an authorization of the '
                 'coordinator for the current text')
+
+    def _stop_unauthorized(self, number, why):
+        """Stop the start of issue ``number`` that no authorization of the coordinator admits
+        (``why``, from ``_unauthorized_ready``, #607). A ready issue only does not start: the
+        snapshot no longer admits it. One that holds ``agent:working``, an implementation that
+        waited for the base branch (#459), leaves it for ``agent:needs-coordinator``: the
+        coordinator authorizes its current text again, then the supervisor queues it again."""
+        lb = self.cfg.labels
+        if lb.working not in label_names(self.gh.issue(number).get('labels') or []):
+            self.log(f'  {why}; it does not start')
+            return
+        self.gh.edit_labels(number, add=[lb.needs_coordinator], remove=[lb.working])
+        self.log(f'  issue #{number}: {why}; it does not start again: {lb.working} replaced '
+                 f'by {lb.needs_coordinator}')
+
+    def _do_unauthorized(self, number):
+        """The restart of issue ``number``, whose implementation waited for the base branch
+        (#459), that no authorization of the coordinator admits (``planning.base_restart``,
+        #607): ``_stop_unauthorized``, unless one holds again now."""
+        why = self._unauthorized_ready(number)
+        if not why:
+            self.log('  an authorization of the coordinator holds now; next tick')
+            return
+        self._stop_unauthorized(number, why)
 
     def _issue_decisions(self, comments, history, taken=False):
         """``issue_decisions`` of an issue (#472): neither the supervisor's identity nor any
@@ -1440,7 +1468,12 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             holds = self._base_holds(wait, base_head)
             ci = base_ci(wait['base']) if holds else ''
             waits[number] = {'holds': holds, 'labels': labels, 'preflight': None, 'ci': ci}
-            if not holds and self.cfg.preflight:
+            # It starts again only while an authorization of the coordinator holds (#607): a
+            # text changed during the wait voids it, with no check run first.
+            unauthorized = '' if holds else self._unauthorized_ready(number)
+            if unauthorized:
+                waits[number]['unauthorized'] = unauthorized
+            elif not holds and self.cfg.preflight:
                 waits[number]['preflight'] = self._preflight_view(number, labels, base_head)
             self.log(f'  issue #{number}: the implementation '
                      + (f'waits for {self.cfg.base_branch} to move past {wait["base"][:12]}'

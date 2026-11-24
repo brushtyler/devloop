@@ -218,7 +218,8 @@ class Snapshot:
     # (a set), with ``preflight`` configured, the view of its readiness check
     # (``preflight_state``) once the wait no longer holds, else None (``base_restart``), and
     # while it holds, the link to the CI of that commit once all its checks succeeded, else ''
-    # (#497): the issue escalates ``host_tests``.
+    # (#497): the issue escalates ``host_tests``. ``unauthorized`` (#607), only once the wait
+    # no longer holds and no authorization of the coordinator admits its restart: why.
     base_waits: dict = field(default_factory=dict)
     # With ``[roles.coordinator]`` (#607), the numbers of the issues with a ``/devloop
     # authorize`` the dispatcher has not recorded yet: those in agent:needs-coordinator, and
@@ -925,7 +926,10 @@ def base_restart(number, wait, cfg, free, implement=True):
     changed during the wait, a new check was asked) is checked first, one whose check failed
     is blocked again (``preflight_block``); under a block that the check owns, only a check
     asked by a change of the text runs. An implementation or a check takes a ``free`` slot;
-    without ``implement`` (#342) no implementation is planned.
+    without ``implement`` (#342) no implementation is planned. With ``[roles.coordinator]``
+    (#607), a restart that no authorization of the coordinator admits (``unauthorized``, why)
+    is the ``unauthorized`` action instead, with no slot: the issue goes back to the
+    coordinator.
 
     While the wait holds, once the CI of the base commit passed (#497) the issue escalates
     ``host_tests`` (``host_tests``), unless the same blocks hold it: no slot is taken."""
@@ -937,6 +941,10 @@ def base_restart(number, wait, cfg, free, implement=True):
         return next(iter(host_tests(number, wait)), None) if not held else None
     if blocked:
         return None
+    if wait.get('unauthorized'):
+        # No authorization of the coordinator holds for its current text (#607): it does not
+        # start again, and goes back to the coordinator, with no slot and no check.
+        return Action('unauthorized', number, wait['unauthorized'])
     view = wait.get('preflight') if cfg.preflight else None
     if cfg.preflight and view is None:
         return None  # nothing is known about its check

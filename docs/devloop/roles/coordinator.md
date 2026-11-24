@@ -263,8 +263,10 @@ the mailbox.
   queue. If you do not approve it, say why in a comment and leave the label; the decision to
   close it or change it is the supervisor's, or the operator's.
   - The authorization holds for the text you read: when the title or the body changes, it lapses,
-    and the supervisor's `agent:ready` no longer starts the issue. Read the new text, and
-    authorize again if it still holds.
+    and the supervisor's `agent:ready` no longer starts the issue, even if the text is restored
+    afterwards. Read the new text, and authorize again if it still holds. An implementation that
+    waited for the base branch and whose text changed meanwhile comes back to you in
+    `agent:needs-coordinator`, instead of starting again.
   - You may authorize with the same command your issues and those of trusted users. A command of
     any other identity is refused, and so is one on the issue of an untrusted author: such an
     issue starts only with a trusted user's `agent:ready`.

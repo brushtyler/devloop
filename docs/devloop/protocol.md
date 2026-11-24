@@ -699,8 +699,13 @@ The action reads the comments and the history again first, and leaves alone the 
 recorded since the snapshot; once an authorization holds for the current text it removes
 `agent:needs-coordinator`. An `authorize` record counts only from the dispatcher's identity. The
 supervisor's `agent:ready` admits the issue only while the latest `authorized` record carries the
-hash of the current title and body: any change of the text voids it. A command not recorded yet
-does not admit the issue: the action records it first, and the issue starts on a later tick.
+hash of the current title and body, and neither changed at or after its `at`
+(`authorization.valid_authorization`): any change of the text voids it, even one restored
+afterwards. A command not recorded yet does not admit the issue: the action records it first,
+and the issue starts on a later tick. The same holds at every start of the implementation: a
+restart after a `basebroken` record (#459) that no authorization admits is the `unauthorized`
+action, with no slot and no readiness check, which moves the issue from `agent:working` to
+`agent:needs-coordinator`.
 
 ## Base broken records
 

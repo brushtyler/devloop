@@ -36,8 +36,7 @@ from .markdown import (dispatcher_header, publishable, render_fix, render_native
 from .config import foreign, provider_quorum, same_agent
 from .planning import (BASE_CHANGED, FIX_COMMAND, RESYNC_AFTER_APPROVAL, RESYNC_CONFLICTS,
                        carried_resync, ci_joins_round, closed_by_first, counted_rounds,
-                       findings_reviewers, implementer_choice, label_names, next_requested,
-                       pending_reviewers,
+                       findings_reviewers, implementer_choice, next_requested, pending_reviewers,
                        preflight_state, voided_approval, waived_rounds, waiver,
                        waiting_reviewers)
 from .policy import (PARALLEL_CANCEL, SEQUENTIAL, ZERO_LEVEL, another_model, distinct,
@@ -140,18 +139,17 @@ class ActionsMixin:
 
     def _do_implement(self, number):
         cfg, lb = self.cfg, self.cfg.labels
+        # The supervisor's agent:ready admits only work the coordinator authorized for its
+        # current text (#607), at every start: a text changed after the snapshot voids it, and
+        # so does one changed while the implementation waited for the base branch (#459).
+        unauthorized = self._unauthorized_ready(number)
+        if unauthorized:
+            return self._stop_unauthorized(number, unauthorized)
         if cfg.preflight and preflight_state(self._preflight_view(number, ()))[0] != 'ready':
             # The text changed, or a new check was asked, after the snapshot.
             self.log('  the readiness check does not cover the current text; next tick')
             return
         issue, comments = self._issue_context(number)
-        if lb.ready in label_names(issue.get('labels') or []):
-            # The supervisor's agent:ready admits only work the coordinator authorized for its
-            # current text (#607): a text changed after the snapshot voids it.
-            unauthorized = self._unauthorized_ready(number)
-            if unauthorized:
-                self.log(f'  {unauthorized}; it does not start')
-                return
         # The implementer is chosen at the takeover (ADR 0005, D7, #407) and recorded in the
         # request and in the PR marker: a label changed later does not change it.
         key, why, problem = implementer_choice(cfg, issue.get('labels') or [], issue['labeled'],

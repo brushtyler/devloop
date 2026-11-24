@@ -566,8 +566,15 @@ The rules:
 
 - **The authorization is bound to the text.** It holds for the title and the body the
   coordinator read: a change of either after the command, by anyone, a trusted user included,
-  voids it, and a new `/devloop authorize` is needed. A command recorded after a change of the
-  text that came after it (or in the same second) is refused.
+  voids it, even when the text is restored afterwards to the one authorized, and a new
+  `/devloop authorize` is needed. A command recorded after a change of the text that came after
+  it (or in the same second) is refused.
+- **Every start checks it.** The check holds at every start of the implementation, a restart
+  included: an implementation that waits for the base branch
+  ([Tests red on the base too](#tests-red-on-the-base-too)) whose text changed during the wait
+  does not start again once the base advances. The issue leaves `agent:working` for
+  `agent:needs-coordinator`, with no readiness check run: after a new `/devloop authorize`, the
+  supervisor queues it again with `agent:ready`.
 - **Only the coordinator authorizes.** A `/devloop authorize` from any other identity, a trusted
   user or the supervisor included, is refused and recorded, as is one with malformed arguments,
   or one on an issue opened by someone who is neither a trusted user nor one of devloop's apps.
