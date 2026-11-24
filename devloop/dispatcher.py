@@ -218,6 +218,7 @@ from .dispatch_supervision import TEXTS as SUPERVISION_TEXTS
 from .dispatch_supervision import SupervisionMixin, UntrustedChange, budget_fields
 from .generated import changed_by_tests, generated_files
 from .github import GitHubError, GitHubUncertain, author_login
+from .i18n import ITALIAN
 from .journal import TEXTS as JOURNAL_TEXTS
 from .journal import (CLOSED, MERGED, RECONCILE_COMMAND, JournalError, TurnBlocked, blocked_text,
                       reconcile_command)
@@ -2130,7 +2131,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             # An escalation that takes the readiness away voids the receipt of the promotion
             # (#135), whatever its path: round limit, failure, open findings, lost marker.
             label = lb.needs_supervisor if supervised else lb.needs_operator
-            self._supersede_receipts(number, f'escalation `{cls}`: la PR è passata a `{label}`')
+            self._supersede_receipts(number, self._merge_texts()(
+                'supersede_escalation', cls=cls, label=label))
 
     def _log_hint(self, exc):
         log = getattr(exc, 'log', None)
@@ -3486,7 +3488,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                     else 'cambiati: ' + ', '.join(_RECEIPT_FIELDS[k] for k in changed) if changed
                     else 'manca l\'approvazione di ' + ', '.join(f'`{k}`' for k in missing))
             detail = (f'\n\nCommit di `{branch}` fra la base dell\'approvazione e quella '
-                      'corrente:\n\n' + _describe_bases(bases, branch)) if bases else ''
+                      'corrente:\n\n'
+                      # Still in Italian, as the text around it, until #628 translates it.
+                      + _describe_bases(bases, branch, ITALIAN)) if bases else ''
             payload = {'event': 'stale', 'receipt': current, 'bases': bases or []}
             # The new review of this same head does not count against the limit when only
             # the base revoked the approval (#252); any other revocation opens a round as usual.
@@ -3505,8 +3509,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             self.gh.edit_labels(pr.number, add=[lb.review],
                                 remove=[lb.changes, lb.ready_to_merge, *self._released(pr)])
             # A receipt of an earlier promotion no longer holds (#135).
-            self._supersede_receipts(pr.number, 'la ricevuta di policy ricalcolata non coincide più '
-                                         'con quella dell\'approvazione')
+            self._supersede_receipts(pr.number, self._merge_texts()('supersede_stale'))
             return None
         return bases
 
@@ -3534,8 +3537,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         verdict = round_verdict(records)
         if verdict != 'approve' and lb.ready_to_merge in pr.labels:
             # A CI round on a ready PR (#248) voids the receipt of its promotion (#135).
-            self._supersede_receipts(pr.number, f'il round {records[0]["round"]} non approva il '
-                                         f'commit `{records[0]["head_sha"][:12]}`')
+            self._supersede_receipts(pr.number, self._merge_texts()(
+                'supersede_round', round=records[0]['round'], head=records[0]['head_sha'][:12]))
         if verdict == 'approve':
             left = open_findings(reviews, pr.closures)
             if left and self._ci_closes(pr, records[0]['head_sha'], left):

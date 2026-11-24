@@ -660,7 +660,7 @@ class AdvisoryMixin:
         approved = None if policy['level'] == ZERO_LEVEL or not latest else latest[0]['round']
         content = self._receipt_content(pr, policy, marker['promotion'], approved,
                                         pr.reviews, comments, advisory=record)
-        body = pr_receipt.with_advisory(comment['body'], content)
+        body = pr_receipt.with_advisory(comment['body'], content, self.cfg.language)
         if body is None or len(body) > MAX_BODY:
             self.log('  receipt of the head not updated: it cannot hold the advisory section')
             return

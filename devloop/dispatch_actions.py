@@ -1392,7 +1392,7 @@ class ActionsMixin:
                                 remove=[lb.ready_to_merge, lb.changes, *self._released(pr)])
             if lb.ready_to_merge in pr.labels:
                 # The new head voids the receipt of the promotion (#135).
-                self._supersede_receipts(pr.number, f'la sincronizzazione ha portato il head a '
-                                             f'`{head[:12]}`')
+                self._supersede_receipts(pr.number, self._merge_texts()(
+                    'supersede_sync', head=head[:12]))
         self.ws.remove(name)
         self.log(f'  merged {base} into {pr.head_ref}: {head[:12]}')

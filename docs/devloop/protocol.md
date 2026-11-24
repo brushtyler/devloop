@@ -537,11 +537,12 @@ How devloop merges in the `"strict"` and `"auto"` [merge modes](guide.md#merge-m
   reads the labels of the PR again with the API (#519). It never reuses the read the tick or
   the merge started from, and applies the same label rules to the new read. An
   `agent:merge-hold` added a few seconds earlier, or another label that holds the merge, stops
-  it: devloop does not merge and writes why in the log and in a "Merge non eseguito" comment
-  on the PR, with the time of that read. In a [delegated merge](guide.md#delegated-merge) the
-  dispatcher's `agent:needs-operator` of the `operator_merge` is the expected one, while
-  `agent:merge-hold` refuses the command. The labels of the linked issue are not checked. The
-  "Mergiata da devloop" section gives the time of that read.
+  it: devloop does not merge and writes why in the log and in a "Merge not executed" comment
+  ("Merge non eseguito" in Italian) on the PR, with the time of that read. In a [delegated
+  merge](guide.md#delegated-merge) the dispatcher's `agent:needs-operator` of the
+  `operator_merge` is the expected one, while `agent:merge-hold` refuses the command. The labels
+  of the linked issue are not checked. The "Merged by devloop" section gives the time of that
+  read.
 - **How.** `gh pr merge --merge --match-head-commit <approved head>`: a merge commit, only if
   the head is still the approved one. It runs with the [merger app](reference.md#the-merger-app) when
   `[apps.merger]` is configured, with a token minted at that moment and limited to
@@ -555,7 +556,9 @@ How devloop merges in the `"strict"` and `"auto"` [merge modes](guide.md#merge-m
   [merge lane](guide.md#the-merge-lane), one merge at a time, alongside the actions on other numbers.
 - **Record.** A `merged` marker of the dispatcher records the head, the receipt, the
   level and the mode, and in `merged_by` the login of the merger app when it merged (none with
-  the local login). Its text, the section "Mergiata da devloop", says that devloop decided the
+  the local login). Its text, the section "Merged by devloop" ("Mergiata da devloop" in Italian:
+  like every text of a promotion, of a merge and of a receipt it follows the project's
+  [language](reference.md#language-of-the-texts), #634), says that devloop decided the
   merge and names who ran it: the merger app (its login without `[bot]`) or the local `gh`
   login. Since #338 they go in the comment of the promotion the merge concludes, which the
   dispatcher edits: the latest `promoted` record it signed, read just before the merge, for the
@@ -569,10 +572,11 @@ How devloop merges in the `"strict"` and `"auto"` [merge modes](guide.md#merge-m
   `merged` record on the day GitHub reports for the merge of its PR, when known, not on the day
   of its comment. A [delegated merge](guide.md#delegated-merge) (#486) has the same record, with
   `delegation`: the command (`merge`), its author (`by`), the id of its comment (`comment`) and
-  its `reason`; its section, "Mergiata da devloop su delega del supervisore", quotes the reason.
-  A [reserved merge of the coordinator](guide.md#the-reserved-merge-of-the-coordinator) (#529)
-  has the same record, whose `delegation` also carries `role: coordinator`; its section is
-  "Mergiata da devloop su comando del coordinatore".
+  its `reason`; its section, "Merged by devloop on delegation of the supervisor" ("Mergiata da
+  devloop su delega del supervisore"), quotes the reason. A [reserved merge of the
+  coordinator](guide.md#the-reserved-merge-of-the-coordinator) (#529) has the same record, whose
+  `delegation` also carries `role: coordinator`; its section is "Merged by devloop on the command
+  of the coordinator" ("Mergiata da devloop su comando del coordinatore").
 
 ## Supervision trace
 
@@ -1056,7 +1060,8 @@ without seeing a map. Before replaying an approval of the head from `agent:revie
 tick of a PR in `agent:ready-to-merge` (not at level 0, which has no review), the snapshot reads
 the issue text again and applies the rules above to the latest map. If one of them would add a
 finding, the approval is neither replayed nor kept: a ready PR goes back to `agent:review` with an
-"Approvazione sospesa" comment that lists why, and the PR gets a new review, whose
+"Approval suspended" comment ("Approvazione sospesa" in Italian) that lists why, and the PR
+gets a new review, whose
 `normalize_review()` adds the finding. That review is a new round: it counts against
 `max_review_rounds` like any other, and at the limit the PR goes to `agent:needs-operator`. An issue
 text changed by someone outside `trusted_users` cannot be checked: the approval does not hold, and
@@ -1832,9 +1837,13 @@ its **receipt** (#135): a comment for the operator who merges, bound to the appr
 the promotion, that tells what was asked, who did what with which model and at which cost, what
 was verified on which commit, how the findings were closed and how the criteria are covered. It
 is written only with a [ledger](#evidence-and-telemetry), before the label, in the comment of the
-promotion itself (#338): one dispatcher comment holds the promotion ("Pronta per il merge") and
-its receipt ("Ricevuta della PR #N"), and ends with the `policy` record of the promotion
-followed by the `receipt` record, one marker per line. The receipt has two forms in it:
+promotion itself (#338): one dispatcher comment holds the promotion ("Ready for merge") and
+its receipt ("Receipt of PR #N"), and ends with the `policy` record of the promotion
+followed by the `receipt` record, one marker per line. Their text follows the project's
+[language](reference.md#language-of-the-texts) (#634): in Italian "Pronta per il merge" and
+"Ricevuta della PR #N"; the content, its digest and the records are the same in every language,
+and the advisory review of the head recognises the receipt by its title in either. The receipt
+has two forms in it:
 
 - the readable text, under the promotion's and with the dispatcher's [header](#attribution);
 - a `receipt` marker, read like the other dispatcher records: only from the dispatcher's
@@ -1864,16 +1873,17 @@ renders.
 | Acceptance criteria | The latest map: for each entry, the criterion as the issue text states it now (not quoted when someone outside `trusted_users` changed the text), the status, the tests it declares (`file` and `name`) and its reason |
 | Story budget | Only with the [budget envelope](reference.md#budget-envelope) on (#393): the state of the budget of the issue's story as the dispatcher's journal records it when the receipt is built, per dimension (see after the table) |
 
-**Story budget** ("Budget della storia"): with `[budget] enabled` the content has a `budget` key
+**Story budget** ("Budget of the story", "Budget della storia" in Italian): with `[budget]
+enabled` the content has a `budget` key
 and the receipt a section of its own, a table with what is consumed, reserved and available
 against the cap of each dimension: the turns in total, per role and per kind of phase, the
 dollars of each kind (`metered_usd`, `cli_estimate_usd`) and the time (seconds from the story's
 start, with its deadline). Consumed: the turns with a confirmed outcome and the dollars the CLIs
 reported; reserved: the turns without a confirmed outcome (running, uncertain or without outcome)
 and the part of the reserves no reported cost covers. A dollar value no turn reports is
-`non attestato`, never 0: consumed is `non attestato` when no turn reports one, `almeno` the
-known sum when some do, with the number of turns that report none; available is `non attestato`
-while one of them has no reserve either. An issue that belongs to no story says so. With the
+`not attested` (`non attestato` in Italian), never 0: consumed is `not attested` when no turn
+reports one, `at least` (`almeno`) the known sum when some do, with the number of turns that
+report none; available is `not attested` while one of them has no reserve either. An issue that belongs to no story says so. With the
 budget off the content has no `budget` key and no section: content and digest are the ones
 before #393.
 
@@ -1882,7 +1892,8 @@ turns, the summed duration of the turns, the known tokens (input, output, cache 
 creation, and the thinking tokens agy reports apart) and the known cost, the number of turns whose cost is not reported and of those with
 no token reported. The duration of the verifications is apart: the local tests (ms) and the
 checks of the CI on the approved head (s). A value no record attests is `null` in the marker and
-`non riportato` in the text, never 0: a sum of values none of which is known is `null`.
+`not reported` in the text (`non riportato` in Italian), never 0: a sum of values none of which
+is known is `null`.
 
 **Coherence.** Before the promotion the dispatcher builds the receipt and checks it against the
 markers. A **contradiction** blocks the promotion: the PR goes to `agent:needs-operator` with an
@@ -1900,11 +1911,13 @@ record nor the receipt is written. These are contradictions:
 **Missing data** does not block: a PR or issue started before #133 or #134 has no snapshot, no
 turns, no turn of the implementation, no `ci_round` for the approved head, or no map, and the
 criteria cannot be quoted from a text no longer trusted. The receipt lists what is missing
-under "Dati storici mancanti" (`missing`: `request`, `turns`, `implement`, `ci`,
+under "Missing historical data" ("Dati storici mancanti") (`missing`: `request`, `turns`,
+`implement`, `ci`,
 `acceptance_map`, `criteria`) and reconstructs none of it.
 
 **Invalidation.** When the approval is revoked the receipt no longer holds, and its comment is
-edited: a warning "Ricevuta superata" with the time and the reason goes before its first title,
+edited: a warning "Receipt superseded" ("Ricevuta superata" in Italian), in the language of the
+moment, with the time and the reason goes before its first title,
 and its marker gets `state: superseded`, `superseded_at` and `reason`; the `policy` record of
 the promotion in the same comment stays as it is. This happens when a ready PR
 is [revoked](#merge-directives-and-record) (a new head, CI running again, the acceptance map or
@@ -1926,12 +1939,15 @@ a merge, a comment of its own with the `merged` record. When devloop merges the 
 
 **Advisory review** (#369). The opinion of the
 [advisory review](guide.md#advisory-review-for-the-operator) of the approved head is a section
-of its own, "Review consultiva": the agent, the head and the opinion (or that it failed), from
+of its own, "Advisory review" ("Review consultiva" in Italian): the agent, the head and the
+opinion (or that it failed), from
 the dispatcher's `advisory` record, never the agent's text. It is in the content, and so in the
 digest, only when the head has one: a receipt without it is the one before #369. After the
 advisory review the dispatcher edits the current receipt of the same head in place: section,
 digest and totals (with the `advisory` turn) recomputed from the ledger, while promotion,
-policy record and state stay, and so does the text before the receipt's title. A superseded
+policy record and state stay, and so does the text before the receipt's title. The title is
+recognised in every language devloop has, so a receipt published before a change of `language`
+is rewritten too, in the language of the moment (#634). A superseded
 receipt, or one of another head, is left as it is. Without a current receipt the opinion stays in
 the dispatcher's summary, and a later receipt of the same head carries it; no promotion is
 written for it. The receipt is edited before the dispatcher's summary: an edit that fails leaves

@@ -11,6 +11,9 @@ from helpers.devloop_fakes import FakeGH
 from test_devloop import CFG, IMPL, META, REV, SHA1, FakeRunner, FakeWS, raw_review
 from test_devloop_ledger import GREEN, SnapLedgerGH
 
+# The language of the texts these tests read, the one of ``CFG`` (#634).
+IT = 'Italian'
+
 CRITERIA_BODY = ('Do the thing.\n\n## Criteri di accettazione\n\n'
                  '- [ ] The thing is done.\n- [ ] The docs say so.\n')
 MAP = [{'criterion': 'The thing is done.', 'tests': [{'file': 'tests/t.py', 'name': 'test_a'}],
@@ -142,7 +145,7 @@ class ReceiptPromotionTests(unittest.TestCase):
                           thinking['tokens']['thinking_tokens'],
                           thinking['tokens_unreported']), (52, 42, 0))
         self.assertIn('ragionamento (contato a parte) `42`',
-                      '\n'.join(receipt._totals(thinking)))
+                      '\n'.join(receipt._totals(receipt.TEXTS.texts(IT), thinking)))
         self.assertIsNone(totals['verifications_ms'])
         self.assertIsNone(totals['ci_s'])
         self.assertEqual((totals['rounds'], totals['turns']), (0, 3))
@@ -157,7 +160,7 @@ class ReceiptPromotionTests(unittest.TestCase):
         body = comment['body']
         self.assertIn('**Dati storici mancanti**', body)
         for key in record['missing']:
-            self.assertIn(receipt.MISSING_TEXT[key], body)
+            self.assertIn(receipt.missing_text(key, IT), body)
         self.assertIn('Non registrato: l\'issue è stata presa in carico prima di #133.', body)
 
     def test_a_contradiction_with_the_markers_blocks_the_promotion(self):
@@ -345,7 +348,7 @@ class ReceiptContentTests(unittest.TestCase):
         for name, (kw, approved, expected) in cases.items():
             with self.subTest(name):
                 (found,) = receipt.contradictions(self.content(**kw), implementer=IMPL,
-                                                  approved_head=approved)
+                                                  approved_head=approved, language=IT)
                 self.assertIn(expected, found)
         self.assertEqual(receipt.contradictions(self.content(), implementer=IMPL,
                                                 approved_head=SHA1), [])
@@ -391,7 +394,7 @@ class ReceiptContentTests(unittest.TestCase):
         content = self.content(reviews=[*reviews, third], closures=closures, approved_round=3)
         self.assertEqual([(f['key'], f['status'], f['by']) for f in content['findings']],
                          [(f'1/{REV}/R1-1', 'resolved', REV), ('2/ci/R2-1', 'resolved', 'ci')])
-        body = receipt.render(content)
+        body = receipt.render(content, language=IT)
         self.assertIn(f'| `1/{REV}/R1-1` | risolto | `{REV}`, nel round 3 |', body)
         self.assertIn('| `2/ci/R2-1` | risolto | `ci` (`ci`) |', body)
         self.assertEqual(content['totals']['rounds'], 3)
@@ -407,7 +410,7 @@ class ReceiptContentTests(unittest.TestCase):
         maps = {}
         for name, acceptance_map in (('one', one), ('other', other)):
             content = self.content(criteria=['A', 'B'], acceptance_map=acceptance_map)
-            maps[name] = (content, receipt.render(content))
+            maps[name] = (content, receipt.render(content, language=IT))
         self.assertEqual(maps['one'][0]['acceptance']['map'],
                          [{'status': 'covered',
                            'tests': [{'file': 'tests/a.py', 'name': 'test_x'}], 'reason': ''},
@@ -435,8 +438,8 @@ class ReceiptContentTests(unittest.TestCase):
         off = self.content()
         self.assertNotIn('budget', off)
         self.assertEqual(off, self.content(budget=None))
-        self.assertNotIn('### Budget della storia', receipt.section(off))
-        self.assertNotIn('Budget', receipt.section(off))
+        self.assertNotIn('### Budget della storia', receipt.section(off, IT))
+        self.assertNotIn('Budget', receipt.section(off, IT))
         # On: the state of the story's budget, a dollar value no turn reports as such.
         policy = BudgetPolicy(enabled=True, turns=10, role_turns=(('implement', 3),),
                               phase_turns=(('implementation', 10),), wall_seconds=3600,
@@ -451,7 +454,7 @@ class ReceiptContentTests(unittest.TestCase):
         on = self.content(budget=found)
         self.assertEqual(on['budget'], found)
         self.assertNotEqual(receipt.digest(on), receipt.digest(off))
-        text = receipt.section(on)
+        text = receipt.section(on, IT)
         self.assertIn('### Budget della storia', text)
         self.assertIn('Storia `story-1-ab` (radice #7), stato del journal al '
                       '2027-01-15T08:10:00Z.', text)
@@ -465,14 +468,14 @@ class ReceiptContentTests(unittest.TestCase):
         self.assertNotIn('| `metered_usd` | 0', text)
         self.assertIn('| Tempo (s) | 600 | — | 3000 | 3600 |', text)
         # On, for an issue of no story.
-        text = receipt.section(self.content(budget={'story': None}))
+        text = receipt.section(self.content(budget={'story': None}), IT)
         self.assertIn('L\'issue non appartiene a nessuna storia del journal', text)
 
     def test_superseded_keeps_the_text_and_marks_the_marker(self):
         content = self.content()
-        body = receipt.render(content)
+        body = receipt.render(content, language=IT)
         marked = receipt.superseded(body, markdown.read_marker(body, 'receipt'), 'nuovo head',
-                                    '2026-11-18T10:00:00Z')
+                                    '2026-11-18T10:00:00Z', IT)
         record = markdown.read_marker(marked, 'receipt')
         self.assertEqual((record['state'], record['reason'], record['superseded_at']),
                          ('superseded', 'nuovo head', '2026-11-18T10:00:00Z'))
@@ -670,7 +673,7 @@ class MarkerBlockTests(unittest.TestCase):
                                     'policy', self.POLICY,
                                     records=[('receipt', receipt.record(content))])
         marked = receipt.superseded(body, markdown.read_marker(body, 'receipt'), 'nuovo head',
-                                    '2026-11-18T10:00:00Z')
+                                    '2026-11-18T10:00:00Z', IT)
         found = records_of(marked)
         self.assertEqual(found['policy'], self.POLICY)
         self.assertEqual(found['receipt']['state'], 'superseded')
