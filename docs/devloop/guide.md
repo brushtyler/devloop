@@ -2278,7 +2278,7 @@ comment text are cut short and control characters removed. What it reports:
 | Issue or PR closed or merged | `PR #N merged: title`, `issue #N closed (completed): title` |
 | Labels added or removed | `PR #N labels +agent:changes -agent:review` |
 | New head of a PR | `PR #N new head abc1234` |
-| CI turning `pass` or `fail` on the head (the checks the dispatcher reads) | `PR #N CI pass @abc1234` |
+| CI turning `pass` or `fail` on the head (the checks the dispatcher reads); never `pass` while a GitHub Actions workflow run of the head, a re-run of failed jobs included, is queued or running (#615) | `PR #N CI pass @abc1234` |
 | devloop review: the valid `review` record in the conversation, from the identity that may write it (its native review is not reported again) | `PR #N review codex approve round 2 @abc1234` |
 | devloop review in the body of the native review of an agent with its own app (#325), from that app | `PR #N review by brushtyler-devloop-codex-agent[bot]: approve round 2 @abc1234` |
 | Native `APPROVED` or `CHANGES_REQUESTED` review of a trusted user | `PR #N review by brushtyler: APPROVED @abc1234` |

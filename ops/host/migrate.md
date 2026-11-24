@@ -2434,3 +2434,52 @@ serve riavviare nulla.
 **Rollback.** I sudoers di prima si rimettono rieseguendo i passi 2 e 3 dal checkout della
 versione di prima. La tabella `[direction]` si toglie dall'overlay; la copia di prima la rifiuta
 (`unknown key`), quindi va tolta **prima** del pin della copia di prima.
+
+## Test di `ops/` e dei runbook nel file di progetto (#615)
+
+`tests/test_ops.py` verifica anche `ops/` e i runbook dei ruoli in `docs/devloop/roles/`, ma
+`[tests.dir_modules]` collegava solo `devloop/` ai suoi test (`test_devloop`). Un fallimento di
+`test_ops.py` causato da una PR che cambia quelle directory risultava quindi non pertinente: con
+`ci_rerun_unrelated` il dispatcher rilanciava la CI invece di aprire subito il round, e dopo
+`implement` e `fix` `test_ops.py` non girava in locale. Da #615 l'esempio
+[`ops/host/ssdlc/project.toml`](ssdlc/project.toml) collega a `test_ops` le due directory.
+Il codice di devloop non cambia: la copia in uso accetta già le voci nuove, e senza di esse si
+comporta come prima. Il passo serve perché il file di progetto sull'host le abbia.
+
+devloop mergia la PR di #615 come le altre, ma non fa il pin automatico di quel commit né dei
+successivi finché l'operatore non fa il pin a mano dopo il passo
+([Ogni cambio con un passo sull'host](#ogni-cambio-con-un-passo-sullhost)).
+
+Con i valori di `params.env` (`SERVICE_NAME`, `DEVLOOP_USER`, `DEVLOOP_CLONE`, `STATE_DIR`; il
+file di progetto è `<STATE_DIR>/project.toml` del clone `DEVLOOP_CLONE`):
+
+1. **fermare il loop**, come root: `systemctl stop <SERVICE_NAME>`;
+2. **la copia del file di progetto di prima**, per il rollback, come `DEVLOOP_USER` dal clone
+   `DEVLOOP_CLONE`: `cp -p <STATE_DIR>/project.toml <STATE_DIR>/project.toml.prima-615`. È un
+   file nuovo: l'originale e le sue ACL non cambiano;
+3. **le due voci** in `[tests.dir_modules]` del file di progetto, sotto `"devloop/" =
+   "test_devloop"`, come nell'esempio:
+
+   ```toml
+   "ops/" = "test_ops"
+   "docs/devloop/roles/" = "test_ops"
+   ```
+
+   Il file si modifica sul posto, come `DEVLOOP_USER` perché resti suo, con un editor che non lo
+   sostituisce con un file nuovo: una sostituzione cancella le ACL del supervisore. Dopo la
+   modifica, come root, i controlli e i comandi di [ACL dell'overlay e del file di
+   progetto](#acl-delloverlay-e-del-file-di-progetto-543);
+4. **il pin a mano** del commit di #615 o di uno successivo, come `DEVLOOP_USER`, dal clone
+   `DEVLOOP_CLONE`: `python3 scripts/devloop-pinned pin origin/main`. Il pin carica la
+   configurazione con il file di progetto: un errore di sintassi nel file lo fa fallire, e la
+   copia in uso resta quella di prima. Il pin a mano fa riprendere il pin automatico;
+5. **riavviare il loop**, come root: `systemctl start <SERVICE_NAME>`.
+
+L'hash del file di progetto entra nella versione della policy: le approvazioni delle PR aperte
+decadono e serve una nuova review. Meglio con la coda vuota.
+
+**Rollback.** A loop fermo, come `DEVLOOP_USER` dal clone, `cp -p
+<STATE_DIR>/project.toml.prima-615 <STATE_DIR>/project.toml` (poi, come root, i comandi di [ACL
+dell'overlay e del file di progetto](#acl-delloverlay-e-del-file-di-progetto-543)), oppure si
+tolgono a mano le due voci; poi `systemctl start <SERVICE_NAME>`. La copia di prima e quella di
+#615 accettano il file con le voci e senza: l'ordine fra pin e file non conta.

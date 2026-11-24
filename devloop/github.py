@@ -538,6 +538,15 @@ class GitHub:
                                 '--jq', '.check_runs[] | {id, name, app_id: .app.id, status, '
                                         'conclusion}')
 
+    def workflow_runs(self, sha):
+        """The GitHub Actions workflow runs of commit ``sha``, as ``{id, name, status,
+        conclusion, run_attempt}`` (#615). A re-run of failed jobs makes its run ``queued``
+        again at once, before its new jobs show among the check runs."""
+        return self._json_lines('api', '--paginate',
+                                f'repos/{self.repo}/actions/runs?head_sha={sha}&per_page=100',
+                                '--jq', '.workflow_runs[] | {id, name, status, conclusion, '
+                                        'run_attempt}')
+
     def pr_reviews(self, number):
         """The native reviews of PR ``number``, oldest first, as ``{id, login, state, body,
         submitted_at}`` (state: APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED, PENDING;
