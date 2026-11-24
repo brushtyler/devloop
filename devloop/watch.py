@@ -18,12 +18,16 @@ changed into lines ``HH:MM <type> #N <detail>`` (UTC):
 
 Trust follows AGENTS.md. An issue or PR counts if its author is in ``trusted_users`` or is one of
 devloop's apps. Anyone else's produces only ``new <type> #N by an untrusted author (ignored)``
-and nothing after it, except an issue whose latest ``agent:ready`` a trusted user added, still
-there or replaced since: while so its labels, closure and trusted comments are reported, never its
-title. Labels, heads, CI and closures of trusted objects are reported whoever changed them;
-comments and reviews only when their author is trusted or one of devloop's apps. A trusted comment
-on an issue or PR outside the open listings (closed before the baseline) is reported too: its
-author is read once; on an external issue the latest ``agent:ready`` is read again in each round
+and nothing after it, except an issue that the dispatcher admits (#623): its latest
+``agent:ready``, still there or replaced since, comes from one of the dispatcher's admitters for
+its author (``Trust.ready_admitters``), a trusted user's always, the supervisor's only with an
+authorization of the coordinator that holds for the current text when the dispatcher asks for one
+(#607). While so its labels, closure and trusted comments are reported, never its title. An issue
+of the coordinator's app is one of these: the app stays outside the trusted authors. Labels,
+heads, CI and closures of trusted objects are reported whoever changed them; comments and
+reviews only when their author is trusted or one of devloop's apps. A trusted comment on an
+issue or PR outside the open listings (closed before the baseline) is reported too: its author
+is read once; on an external issue the latest ``agent:ready`` is read again in each round
 with a new trusted comment on it, since the admission can change while the issue stays closed.
 
 Rounds compare states, so a change undone between two reads (a label added and removed) is not
@@ -56,8 +60,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .apps import (COORDINATOR, DISPATCHER, IMPLEMENTER, MERGER, SUPERVISOR, AppAuth,
-                   Identities, used)
+                   Identities, app_login, used)
+from .authorization import valid_authorization
 from .dispatch_actions import ready_approval
+from .dispatcher import label_admitters
 from .github import GitHubError, GitHubNotFound, author_login
 from .markdown import read_marker
 from .planning import label_names
@@ -116,13 +122,24 @@ def failure_class(exc):
 class Trust:
     """Who counts for the watcher: ``users`` (``trusted_users``) and ``writers``, the app login
     of each actor that has one (agents and the dispatcher). The ``merger`` app (#201) only
-    merges: it is never a writer, so its comments and records are not trusted."""
+    merges: it is never a writer, so its comments and records are not trusted.
 
-    def __init__(self, users, writers, ready_label):
+    Who admits an issue as the dispatcher does (#623, ``ready_admitters``): ``supervisor`` and
+    ``coordinator``, the logins of their identities (None without one), ``devloop``, the logins
+    of devloop's apps whose issues count as devloop's (``Dispatcher._devloop_logins``), and
+    ``preflight``, whether a readiness check is configured. They decide only which issues of
+    authors outside the trusted ones are followed: the coordinator is never trusted here."""
+
+    def __init__(self, users, writers, ready_label, *, supervisor=None, coordinator=None,
+                 devloop=(), preflight=False):
         self.users = frozenset(users)
         self.writers = {actor: login for actor, login in dict(writers).items() if actor != MERGER}
         self.apps = frozenset(self.writers.values())
         self.ready_label = ready_label
+        self.supervisor = supervisor
+        self.coordinator = coordinator
+        self.devloop = frozenset(devloop)
+        self.preflight = bool(preflight)
 
     @classmethod
     def from_config(cls, cfg):
@@ -131,8 +148,10 @@ class Trust:
         nothing, nor the supervisor's role app (#408) unless ``[roles.supervisor]`` is the
         supervisor actor that signs with it, nor the implementer's (#407) unless an agent
         declares it, nor the coordinator's (#528), which writes no record of devloop's. Each
-        agent key writes with the app it declares (``Config.app_of``). Only slugs are needed: no
-        private key is read."""
+        agent key writes with the app it declares (``Config.app_of``). The identities of the
+        supervisor and of the coordinator, for ``ready_admitters``, as the dispatcher derives
+        them (``Dispatcher._supervisor_login``, ``_coordinator_login``). Only slugs are needed:
+        no private key is read."""
         identities = Identities(cfg.repo, {actor: AppAuth(app.app_id, app.slug, None, cfg.repo)
                                            for actor, app in cfg.apps.items()
                                            if actor not in (MERGER, COORDINATOR) and (
@@ -144,7 +163,36 @@ class Trust:
         # ``implementer``, a reviewer with its agent's app.
         writers.update({key: identities.login(cfg.app_of(key)) for key in cfg.agents
                         if cfg.app_of(key) in identities.apps})
-        return cls(cfg.trusted_users, writers, cfg.labels.ready)
+        if cfg.supervisor_actor is not None:
+            supervisor = app_login(cfg.apps[SUPERVISOR].slug)
+        else:
+            supervisor = identities.login(cfg.app_of(cfg.supervisor)) if cfg.supervisor else None
+        coordinator = (app_login(cfg.apps[COORDINATOR].slug) if cfg.coordinator is not None
+                       else None)
+        devloop = ({identities.login(cfg.app_of(actor)) for actor in (*cfg.agents, DISPATCHER)}
+                   | {supervisor, coordinator}) - {None}
+        return cls(cfg.trusted_users, writers, cfg.labels.ready, supervisor=supervisor,
+                   coordinator=coordinator, devloop=devloop, preflight=bool(cfg.preflight))
+
+    def ready_admitters(self, author):
+        """The logins whose ``agent:ready`` admits an issue opened by ``author``, as the
+        dispatcher reads them (``Dispatcher._admitters`` with ``coordinator``): the trusted
+        users; the supervisor and the coordinator on issues of trusted users or of devloop's
+        apps, on the coordinator's own only with a readiness check."""
+        if self.coordinator and author == self.coordinator and not self.preflight:
+            return set(self.users)
+        admitters = (label_admitters(author, self.users, self.supervisor, self.devloop)
+                     if self.supervisor else set(self.users))
+        if self.coordinator:
+            admitters |= label_admitters(author, self.users, self.coordinator, self.devloop)
+        return admitters
+
+    def needs_authorization(self, login):
+        """Whether an ``agent:ready`` of ``login`` admits only with an authorization of the
+        coordinator (#607, ``Dispatcher._needs_authorization``): the supervisor's, with a
+        coordinator."""
+        return (bool(self.supervisor) and login == self.supervisor
+                and self.coordinator is not None and login not in self.users)
 
     def trusted(self, login):
         return bool(login) and (login in self.users or login in self.apps)
@@ -455,22 +503,40 @@ class Watcher:
         return issues
 
     def _admission(self, number, labels, previous):
-        """Whether an issue of an untrusted author is admitted: the latest ``labeled`` event of
-        ``agent:ready`` comes from a trusted user, whether the label is still there or was
-        replaced since (``agent:working``). A new ``agent:ready`` changes the labels, so the
-        events are read when the issue is first seen and whenever its labels differ from the
-        previous read; a label removed and added again between two reads is not seen."""
+        """Whether an issue of an untrusted author is admitted (``_approved``), whether the
+        label is still there or was replaced since (``agent:working``). A new ``agent:ready``
+        changes the labels, so the events are read when the issue is first seen and whenever its
+        labels differ from the previous read; a label removed and added again between two reads
+        is not seen, nor an authorization of the coordinator given or voided while the labels
+        stay the same."""
         if 'admitted' in previous and previous.get('labels') == labels:
             return {'admitted': previous['admitted'], 'by': previous.get('by')}
         approved = self._approved(number)
         return {'admitted': bool(approved), 'by': approved[0] if approved else None}
 
     def _approved(self, number):
-        """``(login, at)`` of the trusted user who added the latest ``agent:ready`` of issue
-        ``number``, or None."""
+        """``(login, at)`` of whoever added the latest ``agent:ready`` of issue ``number`` when
+        the dispatcher admits the issue with that label (#623), or None: a trusted user, or
+        another of the dispatcher's admitters for the issue's author (``Trust.ready_admitters``),
+        the supervisor only while an authorization of the coordinator recorded by the dispatcher
+        holds for the current text (``valid_authorization``). Author, text and records are read
+        only for a label of the supervisor or of the coordinator."""
         events = self.gh.labeled_events(int(number))
-        return ready_approval([(e.get('label'), e.get('by'), e.get('at')) for e in events],
-                              self.trust.ready_label, self.trust.users)
+        labeled = [(e.get('label'), e.get('by'), e.get('at')) for e in events]
+        roles = {self.trust.supervisor, self.trust.coordinator} - {None}
+        latest = ready_approval(labeled, self.trust.ready_label, self.trust.users | roles)
+        if latest is None or latest[0] in self.trust.users:
+            return latest
+        history = self.gh.issue_history(int(number))
+        if latest[0] not in self.trust.ready_admitters(history.get('author')):
+            return None
+        if self.trust.needs_authorization(latest[0]):
+            records = [read_marker(c.get('body') or '', 'authorize')
+                       for c in self.gh.issue_comments(int(number))
+                       if self.trust.wrote((c.get('author') or {}).get('login'), DISPATCHER)]
+            if valid_authorization([r for r in records if r is not None], history) is None:
+                return None
+        return latest
 
     def _read_comments(self, since):
         return sorted(self.gh.comments_since(since), key=lambda c: c['id'])
