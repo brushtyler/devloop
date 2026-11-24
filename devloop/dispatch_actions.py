@@ -26,6 +26,7 @@ from .context import (_cli_state_refused, _failure_text, _format_conflicts, _for
                       docs_diff_section, docs_map_section, docs_review_section, format_ci_summary,
                       format_fix_requests, format_operator_comments, format_operator_decisions,
                       format_previous_rounds, owner_assessments, prompt_values)
+from .generated import generated_record, render_generated
 from .github import GitHubError, GitHubUncertain, LogUnreadable, job_id
 from .hoststep import format_step, render_step
 from .hoststep import latest as latest_host_step
@@ -234,6 +235,7 @@ class ActionsMixin:
         protected = self._protected_changes(path)
         if protected:
             return self._escalate_protected(number, protected, remove=[lb.working])
+        generated = self._generated(path, start, tested)
         veto = self._veto_after(number, None, decision) if decision is not None else None
         if veto:
             # Nothing produced with a vetoed resolution is published (#142).
@@ -268,8 +270,12 @@ class ActionsMixin:
         step = (result.get('host_step') or '').strip()
         if step:
             meta['host_step'] = step
+        if generated:
+            # Pointed out, not left out (#627): a tracked file may be wanted. Informative only.
+            meta.update(generated_record(generated))
         body = publishable(self.runner.header(used) + '\n' + result['pr_body'].strip()
                            + (('\n\n' + render_step(step)) if step else '')
+                           + (('\n\n' + render_generated(generated)) if generated else '')
                            + '\n\n' + render_map(result['acceptance_map'])
                            + f'\n\nCloses #{number}', 'pr', meta)
         pr_number, url = self._as(agent.key, IMPLEMENT).create_pr(
@@ -1120,9 +1126,11 @@ class ActionsMixin:
                                       'la correzione prodotta con quella risoluzione non è '
                                       'pubblicata.')
         changes = self.ws.has_changes(path)
+        generated = []
         if changes or merged:
             auth = self._git_auth(agent.key, IMPLEMENT)
             if changes:
+                before = self.ws.head(path)
                 commit = self.ws.commit_all(
                     path, self._commit_message(agent, result['commit_message'], pr.issue),
                     author=auth)
@@ -1130,6 +1138,7 @@ class ActionsMixin:
                 protected = self._protected_changes(path, since=since)
                 if protected:
                     return self._escalate_protected(pr.number, protected, remove=remove)
+                generated = self._generated(path, before, tested)
             self.ws.push(path, pr.head_ref, auth=auth)
             self._pushed(path)
         if merged:
@@ -1143,6 +1152,8 @@ class ActionsMixin:
                    **skipped_models(used), **(extra or {}))
         if merged:
             fix['base_merge'] = dict(merged, branch=self.cfg.base_branch)
+        if generated:
+            fix['generated_files'] = generated  # pointed out, not left out (#627)
         if conclave is not None:
             fix['conclave'] = conclave
         self._as(agent.key, PR_COMMENT).comment(

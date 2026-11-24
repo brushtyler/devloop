@@ -564,6 +564,38 @@ The mode and the modules run (`local_tests`: `{mode, modules}`, only `{mode}` wi
 information only, to the markers of implement and fix: they are not part of the policy receipt
 and no approval depends on them.
 
+### Generated files in the commits
+
+The dispatcher commits everything the writing turn leaves in the worktree, the products of the
+tests included: a project that tracks its bytecode, or does not ignore it in `.gitignore`, sees
+the `__pycache__/` of the tests in the commit (#627). devloop does not leave such files out,
+since a tracked file may be wanted; it points them out:
+
+- **In the ledger.** A local test that changed files of the worktree (a tracked file it
+  rewrote, a file it created that git does not ignore) records them in `changed_by_tests` of its
+  [`verification`](protocol.md#evidence-and-telemetry), and the tick log names them. Its tree
+  after the test is not the one before, so the commit that follows is not bound to it (`the tree
+  of … is not the one tested: commit not bound`, with how many files the tests changed).
+- **In the PR and in the fix record.** Among the files of the commit of an implementation or a
+  fix, those that look generated (under a `__pycache__/` directory, or ending in `.pyc` or
+  `.pyo`), those git sees as binary (added or changed, not deleted: also a binary that the
+  agent's own tests regenerated during its turn, which the local test of the dispatcher no
+  longer changes) and those its passing local test changed go to a section `File generati nel
+  commit` of the PR body or of the fix comment, and to `generated_files` of the `pr` or `fix`
+  marker (`{path, reasons}`, `reasons` among `generated`, `binary` and `tests`). Information
+  only: no receipt nor approval depends on it, and the commit is pushed as it is. A sync is not
+  checked: its commit is the merge of the base.
+- **Within the limit of a GitHub text.** The section, the marker and `changed_by_tests` keep the
+  same files: at most 30, and at most 12000 characters of the body spent on them. A path counts
+  as it is published: its readable line and its form in the marker, where JSON escapes every
+  character outside ASCII and Base64 adds a third, so a path of emoji costs far more than its
+  length. The others are counted, in the text (`… e altri N`) and in the record
+  (`generated_omitted`, `changed_by_tests_omitted`), so that a commit or a test full of caches
+  does not take the body beyond the limit.
+
+Whether such a file belongs in the change is for the review; a project that does not want its
+bytecode tracked removes it and ignores it in `.gitignore`.
+
 ### CI of a new head
 
 In continuous mode a review can be planned a few seconds after a push, before GitHub registers

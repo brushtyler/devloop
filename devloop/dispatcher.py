@@ -215,6 +215,7 @@ from .dispatch_conclave import ConclaveMixin
 from .dispatch_merge import MergeMixin
 from .dispatch_preflight import PreflightMixin
 from .dispatch_supervision import SupervisionMixin, UntrustedChange, budget_fields
+from .generated import changed_by_tests, generated_files
 from .github import GitHubError, GitHubUncertain, author_login
 from .journal import (CLOSED, MERGED, RECONCILE_COMMAND, JournalError, TurnBlocked, blocked_text,
                       reconcile_command)
@@ -2796,11 +2797,17 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         passed, tail = self._run_each(path, commands)
         duration = int((time.monotonic() - started) * 1000)
         after = self.ws.tree(path)
+        # The files the test changed (#627): a tracked bytecode rewritten, a cache created.
+        # The commit that follows holds them, and is not the tree tested.
+        changed = self.ws.tree_changes(path, before, after) if before != after else []
+        if changed:
+            self.log('  the tests changed ' + ', '.join(changed[:10])
+                     + (f' and {len(changed) - 10} more' if len(changed) > 10 else ''))
         entry = self.ledger.verification(where[0], kind=where[1], attempt=attempt,
                                          command=' && '.join(commands), passed=passed,
                                          duration_ms=duration, tree_before=before,
                                          tree_after=after, register=fix_register(where),
-                                         retried=retried)
+                                         retried=retried, changed_by_tests=changed)
         return passed, tail, entry
 
     def _run_each(self, path, commands):
@@ -2829,9 +2836,22 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             return
         try:
             if not self.ledger.bind_commit(tested, commit, self.ws.commit_tree(path, commit)):
-                self.log(f'  the tree of {commit[:12]} is not the one tested: commit not bound')
+                changed = changed_by_tests(tested)
+                self.log(f'  the tree of {commit[:12]} is not the one tested: commit not bound'
+                         + (f' (the tests changed {len(changed)} files)' if changed else ''))
         except GitHubError as exc:
             self.log(f'  verification record on #{tested.number} not updated: {exc}')
+
+    def _generated(self, path, since, tested):
+        """The files of the commit just made in ``path`` after commit ``since`` to point out
+        (#627, ``generated_files``): those that look generated, the binary ones, and those the
+        passing test ``tested`` changed. They stay in the commit; the log names how many."""
+        files = generated_files(self.ws.changed_files(path, since=since),
+                                changed_by_tests(tested), self.ws.binary_files(path, since))
+        if files:
+            self.log(f'  {len(files)} generated files or files changed by the tests in the '
+                     'commit, pointed out')
+        return files
 
     def _ledger_event(self, number, event, register=None, **fields):
         """An event of its own, or with ``register`` a section of that fix register (#355)."""
