@@ -6,15 +6,21 @@ for it, would see the ``__pycache__/`` of the tests in the PR. devloop does not 
 since a tracked file may be wanted: it points them out, in the PR or in the fix record, so that
 whoever reviews the change sees them."""
 
+import json
+
 # A path under one of these directories, or with one of these suffixes, looks generated:
 # cache and bytecode of Python.
 GENERATED_DIRS = frozenset({'__pycache__'})
 GENERATED_SUFFIXES = ('.pyc', '.pyo')
-# At most this many files, and at most this many characters of their paths, listed in a text
-# and kept in its marker or record alike: the others are only counted, so that a commit full of
-# caches does not take the body beyond the limit of a GitHub text (``markdown.MAX_BODY``).
+# At most this many files listed in a text and kept in its marker or record alike, and at most
+# this many characters of the body spent on them (:func:`cost`): the others are only counted, so
+# that a commit full of caches does not take the body beyond the limit of a GitHub text
+# (``markdown.MAX_BODY``).
 MAX_LISTED = 30
-MAX_CHARS = 4000
+MAX_CHARS = 12000
+# The characters of an entry beyond its path, readable and in the marker, at most: the bullet,
+# the reasons and the JSON keys (R2-1).
+ENTRY_OVERHEAD = 150
 
 
 def looks_generated(name):
@@ -23,11 +29,20 @@ def looks_generated(name):
     return any(d in GENERATED_DIRS for d in dirs) or base.endswith(GENERATED_SUFFIXES)
 
 
+def cost(name):
+    """The characters the path ``name`` takes in a published body (R2-1): its readable line,
+    and its form in the marker, where ``json.dumps`` escapes every character outside ASCII (up to
+    12 characters for one outside the basic plane) and Base64 turns 3 bytes into 4; plus
+    ``ENTRY_OVERHEAD``."""
+    return len(name) + 4 * -(-len(json.dumps(name)) // 3) + ENTRY_OVERHEAD
+
+
 def capped(paths):
-    """The first of ``paths`` within ``MAX_LISTED`` and ``MAX_CHARS``: those a record keeps."""
+    """The first of ``paths`` within ``MAX_LISTED`` and, by :func:`cost`, ``MAX_CHARS``: those a
+    record keeps."""
     kept, size = [], 0
     for name in paths:
-        size += len(name)
+        size += cost(name)
         if len(kept) == MAX_LISTED or size > MAX_CHARS:
             break
         kept.append(name)

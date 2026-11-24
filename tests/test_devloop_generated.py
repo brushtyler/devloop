@@ -15,8 +15,9 @@ from pathlib import Path
 
 from devloop import markdown
 from devloop.dispatcher import Dispatcher
-from devloop.generated import (MAX_CHARS, MAX_LISTED, capped, generated_files,
-                               generated_record, looks_generated, render_generated)
+from devloop.generated import (ENTRY_OVERHEAD, MAX_CHARS, MAX_LISTED, capped, cost,
+                               generated_files, generated_record, looks_generated,
+                               render_generated)
 from devloop.ledger import Ledger
 from devloop.workspace import Workspace
 from test_devloop import (CFG, FakeRunner, FakeWS, finding, fixed, implemented, norm, pr,
@@ -66,6 +67,9 @@ class GeneratedFilesTests(unittest.TestCase):
 # Many caches with long paths, as a test suite can create (#627, R1-2).
 MANY = [f'pkg/subpackage/component_{i:04}/__pycache__/module_{i:04}.cpython-312.pyc'
         for i in range(600)]
+# Valid paths (each component within 200 bytes) whose characters the marker escapes in 12
+# characters each (R2-1): within MAX_CHARS by their length, far beyond it once serialized.
+WIDE = [('😀' * 50 + '/') * 2 + '😀' * 28 + f'/{i:02}.pyc' for i in range(30)]
 
 
 class LimitTests(unittest.TestCase):
@@ -76,9 +80,16 @@ class LimitTests(unittest.TestCase):
         self.assertEqual(capped(['a', 'b']), ['a', 'b'])
         self.assertEqual(len(capped(MANY)), MAX_LISTED)
         long = ['x' * 1500] * 5
-        self.assertEqual(capped(long), long[:2])  # the third goes beyond MAX_CHARS
-        self.assertLessEqual(sum(map(len, capped(long))), MAX_CHARS)
+        self.assertEqual(capped(long), long[:3])  # the fourth goes beyond MAX_CHARS
+        self.assertLessEqual(sum(map(cost, capped(long))), MAX_CHARS)
         self.assertEqual(capped(['y' * (MAX_CHARS + 1)]), [])
+
+    def test_the_cost_counts_the_marker_form_of_a_path(self):
+        # R2-1: json.dumps escapes a character outside the basic plane in 12, Base64 adds 1/3.
+        self.assertEqual(cost('a.pyc'), 5 + 12 + ENTRY_OVERHEAD)
+        self.assertEqual(cost('😀'), 1 + 4 * 5 + ENTRY_OVERHEAD)  # '"\\ud83d\\ude00"': 14
+        self.assertLess(len(capped(WIDE)), len(WIDE))
+        self.assertLessEqual(sum(map(cost, capped(WIDE))), MAX_CHARS)
 
     def test_the_marker_keeps_the_listed_files_and_counts_the_others(self):
         self.assertEqual(generated_record([]), {})
@@ -134,6 +145,31 @@ class LimitTests(unittest.TestCase):
                                       changed_by_tests=[PYC])
         self.assertNotIn('changed_by_tests_omitted', few.record)
         self.assertNotIn('e altri', gh.thread[7][-1]['body'])
+
+    def test_paths_outside_ascii_fit_github_too(self):
+        # R2-1: 30 such paths took the PR body to 68161 characters and the fix to 66369.
+        gh = LedgerGH()
+        d = Dispatcher(CFG, gh, TreeWS(trees=('t1', 't2'), by_tests=WIDE, files=['x.py'] + WIDE),
+                       FakeRunner(implemented()), log=lambda _: None, ledger=Ledger(gh))
+        d._do_implement(7)
+        (created,) = gh.created
+        self.assertLess(len(created['body']), 20000)
+        kept = len(capped(sorted(WIDE)))
+        record = markdown.read_marker(created['body'], 'pr')
+        self.assertEqual([f['path'] for f in record['generated_files']], sorted(WIDE)[:kept])
+        self.assertEqual(record['generated_omitted'], len(WIDE) - kept)
+        (check,) = gh.records(7, 'verification')
+        self.assertEqual(check['changed_by_tests_omitted'], len(WIDE) - kept)
+        (comment,) = [c['body'] for c in gh.thread[7]
+                      if '**File modificati dal test**' in c['body']]
+        self.assertLess(len(comment), 20000)
+        self.assertIn(f'- … e altri {len(WIDE) - kept}', comment)
+        fix = {'summary': 's', 'responses': [], 'head_sha': 'a' * 40,
+               'generated_files': generated_files(WIDE)}
+        body = markdown.render_fix(fix, 'h', 1)
+        self.assertLess(len(body), 20000)
+        self.assertEqual(markdown.read_marker(body, 'fix')['generated_omitted'],
+                         len(WIDE) - kept)
 
 
 class CommitNotBoundTests(unittest.TestCase):

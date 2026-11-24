@@ -548,9 +548,12 @@ since a tracked file may be wanted; it points them out:
   only: no receipt nor approval depends on it, and the commit is pushed as it is. A sync is not
   checked: its commit is the merge of the base.
 - **Within the limit of a GitHub text.** The section, the marker and `changed_by_tests` keep the
-  same files: at most 30, and at most 4000 characters of their paths. The others are counted, in
-  the text (`… e altri N`) and in the record (`generated_omitted`, `changed_by_tests_omitted`),
-  so that a commit or a test full of caches does not take the body beyond the limit.
+  same files: at most 30, and at most 12000 characters of the body spent on them. A path counts
+  as it is published: its readable line and its form in the marker, where JSON escapes every
+  character outside ASCII and Base64 adds a third, so a path of emoji costs far more than its
+  length. The others are counted, in the text (`… e altri N`) and in the record
+  (`generated_omitted`, `changed_by_tests_omitted`), so that a commit or a test full of caches
+  does not take the body beyond the limit.
 
 Whether such a file belongs in the change is for the review; a project that does not want its
 bytecode tracked removes it and ignores it in `.gitignore`.
