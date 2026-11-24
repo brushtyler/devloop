@@ -48,6 +48,9 @@ ci_log_format = "run-tests"
 [tests.dir_modules]
 # Any file under devloop/ selects tests/test_devloop*.py.
 "devloop/" = "test_devloop"
+# tests/test_ops.py checks ops/ and the runbooks of the roles too (#615).
+"ops/" = "test_ops"
+"docs/devloop/roles/" = "test_ops"
 
 [review_policy]
 # Directory prefixes (ending in "/") or files, relative to the repository root. The code that
