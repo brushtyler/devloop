@@ -2842,10 +2842,10 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
 
     def _generated(self, path, since, tested):
         """The files of the commit just made in ``path`` after commit ``since`` to point out
-        (#627, ``generated_files``): those that look generated and those the passing test
-        ``tested`` changed. They stay in the commit; the log names how many."""
+        (#627, ``generated_files``): those that look generated, the binary ones, and those the
+        passing test ``tested`` changed. They stay in the commit; the log names how many."""
         files = generated_files(self.ws.changed_files(path, since=since),
-                                changed_by_tests(tested))
+                                changed_by_tests(tested), self.ws.binary_files(path, since))
         if files:
             self.log(f'  {len(files)} generated files or files changed by the tests in the '
                      'commit, pointed out')

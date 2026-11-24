@@ -26,7 +26,7 @@ from .context import (_cli_state_refused, _failure_text, _format_conflicts, _for
                       docs_diff_section, docs_map_section, docs_review_section, format_ci_summary,
                       format_fix_requests, format_operator_comments, format_operator_decisions,
                       format_previous_rounds, owner_assessments, prompt_values)
-from .generated import render_generated
+from .generated import generated_record, render_generated
 from .github import GitHubError, GitHubUncertain, LogUnreadable, job_id
 from .hoststep import format_step, render_step
 from .hoststep import latest as latest_host_step
@@ -272,7 +272,7 @@ class ActionsMixin:
             meta['host_step'] = step
         if generated:
             # Pointed out, not left out (#627): a tracked file may be wanted. Informative only.
-            meta['generated_files'] = generated
+            meta.update(generated_record(generated))
         body = publishable(self.runner.header(used) + '\n' + result['pr_body'].strip()
                            + (('\n\n' + render_step(step)) if step else '')
                            + (('\n\n' + render_generated(generated)) if generated else '')

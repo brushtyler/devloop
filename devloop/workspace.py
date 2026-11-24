@@ -621,6 +621,19 @@ class Workspace:
         out = self._git('diff', '--name-only', '-z', '--no-renames', span, cwd=path)
         return [name for name in out.split('\0') if name]
 
+    def binary_files(self, path, since):
+        """The paths added or changed since commit ``since`` whose content git sees as binary
+        (#627): ``-`` for the lines of ``--numstat``. Deleted files are not among them."""
+        out = self._git('diff', '--numstat', '-z', '--no-renames', '--diff-filter=d',
+                        f'{since}..HEAD', cwd=path)
+        found = []
+        for line in out.split('\0'):
+            added, _, rest = line.partition('\t')
+            deleted, _, name = rest.partition('\t')
+            if name and added == '-' and deleted == '-':
+                found.append(name)
+        return found
+
     def worktree_changes(self, path):
         """Every path in which the content of ``path`` now differs from its merge base with
         ``origin/<base>`` (#169): the branch's commits, the index, unstaged changes and new files

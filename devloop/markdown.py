@@ -22,7 +22,7 @@ from .acceptance import render_map
 from .authorization import AUTHORIZE_COMMAND, PRIORITIES
 from .authorization import OUTCOMES as AUTHORIZE_OUTCOMES
 from .config import INSTALL_ROOT
-from .generated import render_generated
+from .generated import generated_record, render_generated
 from .github import GitHubError
 from .hoststep import render_step
 from .journal import ATTEMPT_ID, PHASES, STORY_ID
@@ -855,7 +855,7 @@ def render_fix(fix, head, round_no):
     if fix.get('generated_files'):
         # The generated files of the fix's commit, pointed out (#627): informative only.
         parts += ['', render_generated(fix['generated_files'])]
-        payload['generated_files'] = fix['generated_files']
+        payload.update(generated_record(fix['generated_files']))
     if fix.get('conclave') is not None:
         # The conclave decision whose resolution the fix had (#142).
         parts += ['', f'La correzione ha seguito la risoluzione del conclave registrata nel '

@@ -15,8 +15,8 @@ from pathlib import Path
 
 from devloop import markdown
 from devloop.dispatcher import Dispatcher
-from devloop.generated import (MAX_LISTED, generated_files, looks_generated,
-                               render_generated)
+from devloop.generated import (MAX_CHARS, MAX_LISTED, capped, generated_files,
+                               generated_record, looks_generated, render_generated)
 from devloop.ledger import Ledger
 from devloop.workspace import Workspace
 from test_devloop import (CFG, FakeRunner, FakeWS, finding, fixed, implemented, norm, pr,
@@ -43,6 +43,10 @@ class GeneratedFilesTests(unittest.TestCase):
             [{'path': 'data.bin', 'reasons': ['tests']},
              {'path': PYC, 'reasons': ['generated', 'tests']}])
         self.assertEqual(generated_files(['x.py', 'docs/a.md']), [])
+        # A binary of the commit is pointed out even when no test of the dispatcher changed it.
+        self.assertEqual(generated_files(['x.py', 'img.png', PYC], binary=['img.png', PYC]),
+                         [{'path': 'img.png', 'reasons': ['binary']},
+                          {'path': PYC, 'reasons': ['generated', 'binary']}])
 
     def test_the_section_lists_them_and_says_they_stay(self):
         self.assertEqual(render_generated([]), '')
@@ -51,10 +55,85 @@ class GeneratedFilesTests(unittest.TestCase):
         self.assertIn('devloop non li esclude', text)
         self.assertIn('- `data.bin` (modificato dai test locali)', text)
         self.assertIn(f'- `{PYC}` (cache o bytecode)', text)
+        self.assertIn('- `img.png` (binario)', render_generated(
+            generated_files(['img.png'], binary=['img.png'])))
         many = generated_files([f'a/{i:02}.pyc' for i in range(MAX_LISTED + 2)])
         text = render_generated(many)
         self.assertEqual(text.count('\n- `'), MAX_LISTED)
         self.assertIn('- … e altri 2', text)
+
+
+# Many caches with long paths, as a test suite can create (#627, R1-2).
+MANY = [f'pkg/subpackage/component_{i:04}/__pycache__/module_{i:04}.cpython-312.pyc'
+        for i in range(600)]
+
+
+class LimitTests(unittest.TestCase):
+    """The lists of files stay within a bound in the texts and in their markers alike: a commit
+    or a test full of caches must not take a body beyond the limit of GitHub."""
+
+    def test_capped_keeps_the_first_within_count_and_characters(self):
+        self.assertEqual(capped(['a', 'b']), ['a', 'b'])
+        self.assertEqual(len(capped(MANY)), MAX_LISTED)
+        long = ['x' * 1500] * 5
+        self.assertEqual(capped(long), long[:2])  # the third goes beyond MAX_CHARS
+        self.assertLessEqual(sum(map(len, capped(long))), MAX_CHARS)
+        self.assertEqual(capped(['y' * (MAX_CHARS + 1)]), [])
+
+    def test_the_marker_keeps_the_listed_files_and_counts_the_others(self):
+        self.assertEqual(generated_record([]), {})
+        few = generated_files([PYC])
+        self.assertEqual(generated_record(few), {'generated_files': few})
+        files = generated_files(MANY)
+        record = generated_record(files)
+        self.assertEqual(record['generated_files'], files[:MAX_LISTED])
+        self.assertEqual(record['generated_omitted'], len(MANY) - MAX_LISTED)
+        text = render_generated(files)
+        self.assertEqual(text.count('\n- `'), MAX_LISTED)
+        self.assertIn(f'- … e altri {len(MANY) - MAX_LISTED}', text)
+
+    def test_the_pr_body_fits_github(self):
+        gh = LedgerGH()
+        d = Dispatcher(CFG, gh, TreeWS(trees=('t1', 't2'), by_tests=MANY, files=['x.py'] + MANY),
+                       FakeRunner(implemented()), log=lambda _: None, ledger=Ledger(gh))
+        d._do_implement(7)
+        (created,) = gh.created
+        self.assertLess(len(created['body']), 20000)
+        record = markdown.read_marker(created['body'], 'pr')
+        self.assertEqual(record['generated_files'],
+                         [{'path': name, 'reasons': ['generated', 'tests']}
+                          for name in sorted(MANY)[:MAX_LISTED]])
+        self.assertEqual(record['generated_omitted'], len(MANY) - MAX_LISTED)
+        self.assertIn(f'- … e altri {len(MANY) - MAX_LISTED}', created['body'])
+        # The verification of the implementation, with the files its test changed, fits too.
+        (check,) = gh.records(7, 'verification')
+        self.assertEqual(check['changed_by_tests_omitted'], len(MANY) - MAX_LISTED)
+
+    def test_the_fix_record_fits_github(self):
+        fix = {'summary': 's', 'responses': [], 'head_sha': 'a' * 40,
+               'generated_files': generated_files(MANY)}
+        body = markdown.render_fix(fix, 'h', 1)
+        self.assertLess(len(body), 20000)
+        record = markdown.read_marker(body, 'fix')
+        self.assertEqual(len(record['generated_files']), MAX_LISTED)
+        self.assertEqual(record['generated_omitted'], len(MANY) - MAX_LISTED)
+        self.assertIn(f'- … e altri {len(MANY) - MAX_LISTED}', body)
+
+    def test_the_verification_record_fits_github(self):
+        gh = LedgerGH()
+        entry = Ledger(gh).verification(7, kind='implement', attempt=1, command='t',
+                                        passed=True, duration_ms=1, tree_before='a',
+                                        tree_after='b', changed_by_tests=MANY)
+        self.assertEqual(entry.record['changed_by_tests'], MANY[:MAX_LISTED])
+        self.assertEqual(entry.record['changed_by_tests_omitted'], len(MANY) - MAX_LISTED)
+        body = gh.thread[7][-1]['body']
+        self.assertLess(len(body), 20000)
+        self.assertIn(f'- … e altri {len(MANY) - MAX_LISTED}', body)
+        few = Ledger(gh).verification(7, kind='implement', attempt=1, command='t', passed=True,
+                                      duration_ms=1, tree_before='a', tree_after='b',
+                                      changed_by_tests=[PYC])
+        self.assertNotIn('changed_by_tests_omitted', few.record)
+        self.assertNotIn('e altri', gh.thread[7][-1]['body'])
 
 
 class CommitNotBoundTests(unittest.TestCase):
@@ -115,6 +194,33 @@ class CommitNotBoundTests(unittest.TestCase):
         check, _ = self.run_and_commit('mkdir -p t/__pycache__ && printf b > t/__pycache__/a.pyc')
         self.assertEqual(check['changed_by_tests'], ['t/__pycache__/a.pyc'])
         self.assertIsNone(check['commit'])
+
+    def test_a_binary_regenerated_during_the_turn_is_pointed_out(self):
+        # A tracked binary the agent's own tests regenerated before the dispatcher's check
+        # (R1-1): the check changes nothing and the commit is bound, the binary is in it.
+        (self.root / 'data.bin').write_bytes(b'\0old')
+        self.git('add', '-A')
+        self.git('commit', '-q', '-m', 'binary')
+        (self.root / 'data.bin').write_bytes(b'\0new')
+        check, commit = self.run_and_commit('true')
+        self.assertNotIn('changed_by_tests', check)
+        self.assertEqual(check['commit'], commit)
+        self.assertEqual(self.d._generated(self.root, 'HEAD~1', self.tested),
+                         [{'path': 'data.bin', 'reasons': ['binary']}])
+
+    def test_the_binary_files_of_a_commit(self):
+        (self.root / 'gone.bin').write_bytes(b'\0gone')
+        (self.root / 'kept.bin').write_bytes(b'\0kept')
+        self.git('add', '-A')
+        self.git('commit', '-q', '-m', 'binaries')
+        (self.root / 'gone.bin').unlink()  # a deleted binary is not pointed out
+        (self.root / 'kept.bin').write_bytes(b'\0changed')
+        (self.root / 'new.bin').write_bytes(b'\0new')
+        (self.root / 'pkg' / 'm.py').write_text('X = 3\n')  # text
+        self.git('add', '-A')
+        self.git('commit', '-q', '-m', 'change')
+        self.assertEqual(sorted(self.ws.binary_files(self.root, 'HEAD~1')),
+                         ['kept.bin', 'new.bin'])
 
     def test_a_test_that_changes_nothing_binds_the_commit(self):
         check, commit = self.run_and_commit('true')

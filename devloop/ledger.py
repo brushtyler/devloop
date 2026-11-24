@@ -47,6 +47,7 @@ from dataclasses import dataclass, field
 
 from .agents import TELEMETRY_FIELDS
 from .budget import observed
+from .generated import capped
 from .github import GitHubError
 from .journal import (FAILED, LEGACY, MAX_BYTES, NOT_DISPATCHED, RETURNED, JournalError,
                       TurnJournal)
@@ -473,7 +474,9 @@ class Ledger:
         """A test the dispatcher ran; with ``register``, a section of that fix register.
         ``retried``: the failed tests of the attempt that the command ran again alone (#598),
         unstable when it passed. ``changed_by_tests``: the files whose content the command
-        changed, from ``tree_before`` to ``tree_after`` (#627), recorded when there are any."""
+        changed, from ``tree_before`` to ``tree_after`` (#627), recorded when there are any:
+        those ``generated.capped`` keeps, and how many it left out in
+        ``changed_by_tests_omitted``."""
         record = {
             'type': 'verification', 'kind': kind, 'attempt': attempt, 'command': command,
             'outcome': 'pass' if passed else 'fail', 'duration_ms': duration_ms,
@@ -482,7 +485,12 @@ class Ledger:
         if retried is not None:
             record['retried'] = list(retried)
         if changed_by_tests:
-            record['changed_by_tests'] = list(changed_by_tests)
+            # At most what ``capped`` keeps, the others counted: a test that creates many caches
+            # must not take the comment beyond the limit of a GitHub text.
+            kept = capped(changed_by_tests)
+            record['changed_by_tests'] = kept
+            if len(kept) < len(changed_by_tests):
+                record['changed_by_tests_omitted'] = len(changed_by_tests) - len(kept)
         if register is None:
             return self._post(number, record)
         return self._section(number, record, None, register)
@@ -637,6 +645,8 @@ def _render_verification(r, title=None):
     if isinstance(r.get('changed_by_tests'), list):
         # #627: the test changed these files, so the tree after it is not the one before.
         files = ''.join(f'\n- `{str(f).replace("`", "")}`' for f in r['changed_by_tests'])
+        if isinstance(r.get('changed_by_tests_omitted'), int):
+            files += f'\n- … e altri {r["changed_by_tests_omitted"]}'
         parts += ['', '**File modificati dal test**: il loro contenuto dopo il test non è quello '
                       'di prima, e finisce nel commit che segue:' + files]
     return parts

@@ -540,11 +540,17 @@ since a tracked file may be wanted; it points them out:
   of … is not the one tested: commit not bound`, with how many files the tests changed).
 - **In the PR and in the fix record.** Among the files of the commit of an implementation or a
   fix, those that look generated (under a `__pycache__/` directory, or ending in `.pyc` or
-  `.pyo`) and those its passing local test changed go to a section `File generati nel commit` of
-  the PR body or of the fix comment, at most 30 listed, and to `generated_files` of the `pr` or
-  `fix` marker (`{path, reasons}`, `reasons` among `generated` and `tests`). Information only:
-  no receipt nor approval depends on it, and the commit is pushed as it is. A sync is not
+  `.pyo`), those git sees as binary (added or changed, not deleted: also a binary that the
+  agent's own tests regenerated during its turn, which the local test of the dispatcher no
+  longer changes) and those its passing local test changed go to a section `File generati nel
+  commit` of the PR body or of the fix comment, and to `generated_files` of the `pr` or `fix`
+  marker (`{path, reasons}`, `reasons` among `generated`, `binary` and `tests`). Information
+  only: no receipt nor approval depends on it, and the commit is pushed as it is. A sync is not
   checked: its commit is the merge of the base.
+- **Within the limit of a GitHub text.** The section, the marker and `changed_by_tests` keep the
+  same files: at most 30, and at most 4000 characters of their paths. The others are counted, in
+  the text (`… e altri N`) and in the record (`generated_omitted`, `changed_by_tests_omitted`),
+  so that a commit or a test full of caches does not take the body beyond the limit.
 
 Whether such a file belongs in the change is for the review; a project that does not want its
 bytecode tracked removes it and ignores it in `.gitignore`.
