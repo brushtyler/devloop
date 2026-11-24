@@ -456,12 +456,22 @@ class ConclaveMixin:
                 # on this tick or the next ones, stay distinct from it.
                 profile = self._profile(member['agent'], 'review', used)
                 if proposal:
-                    apply_proposal(record, raw, profile)
+                    apply_proposal(record, self._redacted_proposal(raw), profile)
                 else:
                     apply_vote(record, which, raw, record['hash'], profile)
         finally:
             self.ws.remove(name)
         return comment
+
+    def _redacted_proposal(self, raw):
+        """``raw``, the proposer's output, with the names of the parameters in place of the
+        host's values in its resolution (#620, ``redact.Redactor.redact_text``), before its
+        hash: the voters get, and the record carries, the very text the hash binds, which
+        the publication then leaves as it is. As it is without a redactor."""
+        redactor = getattr(self.identities, 'redactor', None)
+        if redactor is None or not isinstance(raw.get('resolution'), str):
+            return raw
+        return dict(raw, resolution=redactor.redact_text(raw['resolution']))
 
     def _conclave_allowed(self, record, member):
         """Which models ``member`` may contribute with (the ``allowed`` of ``_turn``): a model,

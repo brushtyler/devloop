@@ -19,7 +19,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from devloop import apps, ledger, markdown, redact
+from devloop import apps, conclave, ledger, markdown, policy, redact
+from devloop.github import GitHubError
 from helpers import ssdlc_project
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,6 +45,16 @@ MAP = {
 
 def redactor(**kw):
     return redact.Redactor.from_map(MAP, **kw)
+
+
+# R3-1, R4-2 (#620): a service called as a step, a user called as an agent.
+HOST = redact.Redactor(paths=[('DEVLOOP_HOME', '/srv/u-dl')], users=[('AGENT_USER', 'claude')],
+                       names=[('SERVICE_NAME', 'fix')])
+
+
+def profile(agent):
+    return {'identity': f'{agent}-agent[bot]', 'kind': agent, 'model': f'm-{agent}',
+            'effort': 'high', 'args': []}
 
 
 class RedactorTests(unittest.TestCase):
@@ -120,24 +131,144 @@ class RedactorTests(unittest.TestCase):
         self.assertEqual(json.loads(r.redact(record)),
                          {'tail': '$STATE_DIR/x', 'user': '<AGENT_USER>'})
 
-    def test_the_markers_stay_as_they_are(self):
-        # The text around a marker is redacted; the marker, its Base64 payload, is the very
-        # same line, and devloop reads the very record back (its redaction is #620).
-        r = redact.Redactor(paths=[('DEVLOOP_HOME', '/srv/u-dl')],
-                            users=[('AGENT_USER', 'claude')], names=[('SERVICE_NAME', 'fix')])
+    def test_the_free_texts_of_a_record_are_redacted(self):
+        # #620, R4-2: the free texts of a record are redacted whatever they hold, spaces or
+        # not, and read back from the marker published; the identifiers around them stay.
+        r = HOST
         record = {'type': 'event', 'event': 'host_tests', 'at': '2026-11-24T00:00:00Z',
                   'error': 'fix claude /srv/u-dl/x', 'sha': 'a' * 40}
-        body = ledger.render(record)
-        line = redact._MARKER.search(body).group(0)
-        published = r.redact(f'fix claude in /srv/u-dl/x\n{body}')
+        published = r.redact(f'fix claude in /srv/u-dl/x\n{ledger.render(record)}')
         self.assertTrue(published.startswith('$SERVICE_NAME <AGENT_USER> in $DEVLOOP_HOME/x\n'))
         self.assertIn('**error:** `$SERVICE_NAME <AGENT_USER> $DEVLOOP_HOME/x`', published)
-        self.assertIn(line, published)
-        self.assertNotIn('/srv/', published.replace(line, ''))
-        self.assertEqual(markdown.read_marker(published, 'ledger'), record)
+        self.assertEqual(markdown.read_marker(published, 'ledger'),
+                         dict(record, error='$SERVICE_NAME <AGENT_USER> $DEVLOOP_HOME/x'))
+        for error, clean in (('fix', '$SERVICE_NAME'), ('claude', '<AGENT_USER>'),
+                             ('/srv/u-dl/x:claude', '$DEVLOOP_HOME/x:<AGENT_USER>')):
+            with self.subTest(error=error):
+                read = markdown.read_marker(r.redact(ledger.render(dict(record, error=error))),
+                                            'ledger')
+                self.assertEqual(read, dict(record, error=clean))
+        # A turn, alone and as a section of a round's register: its kind and agent stay.
+        turn = {'type': 'turn', 'state': 'closed', 'kind': 'fix', 'agent': 'claude',
+                'identity': 'claude', 'started_at': 't', 'ended_at': 't', 'outcome': 'failure',
+                'error': 'claude', 'last_command': 'cat /srv/u-dl/x', 'telemetry': {}}
+        clean = dict(turn, error='<AGENT_USER>', last_command='cat $DEVLOOP_HOME/x')
+        self.assertEqual(markdown.read_marker(r.redact(ledger.render(turn)), 'ledger'), clean)
+        register = {'type': 'round', 'round': 1, 'records': [dict(turn, section=1)]}
+        self.assertEqual(markdown.read_marker(r.redact(ledger.render(register)), 'ledger'),
+                         dict(register, records=[dict(clean, section=1)]))
+
+    def test_the_identifiers_of_a_record_stay(self):
+        # R3-1: a service called as a step and a user called as an agent: the record keeps its
+        # step, agent and kind, and still holds; only its texts change.
+        r = HOST
+        record = conclave.new_record({'kind': 'blocked', 'comment': 5, 'agent': 'claude',
+                                      'step': 'fix'}, 'fix', ['claude', 'codex', 'agy'], 3,
+                                     'e' * 64, 'c' * 40, 'c' * 40, 'd' * 64)
+        conclave.apply_proposal(record, {'resolution': 'Usare $STATE_DIR.', 'reserved': False,
+                                         'reserved_reason': '', 'operator_question': '',
+                                         'options': []}, profile('claude'))
+        conclave.apply_vote(record, 0, {'vote': 'APPROVA', 'reason': 'fix ok, /srv/u-dl/x',
+                                        'reserved': False, 'reserved_reason': '',
+                                        'operator_question': '', 'options': []},
+                            record['hash'], profile('codex'))
+        conclave.missing(record, 1, 'claude: fix in /srv/u-dl/x')
+        record['outcome'] = conclave.outcome(record)
+        read = markdown.read_marker(r.redact(conclave.render(record)), 'conclave')
+        self.assertEqual(read['step'], 'fix')
+        self.assertEqual(read['block'], record['block'])
+        self.assertEqual([read['proposal']['agent'], *(v['agent'] for v in read['votes'])],
+                         ['claude', 'codex', 'agy'])
+        self.assertEqual(read['votes'][0]['reason'], '$SERVICE_NAME ok, $DEVLOOP_HOME/x')
+        self.assertEqual(read['votes'][1]['missing'],
+                         '<AGENT_USER>: $SERVICE_NAME in $DEVLOOP_HOME/x')
+        self.assertEqual(conclave.consistent(read), (True, ''))
+        # A notice of an agent that stopped: its reason, never its agent nor its step.
+        notice = {'event': 'blocked', 'class': 'blocked', 'critical': True, 'to': 'operator',
+                  'agent': 'claude', 'reason': 'fix', 'step': 'fix', 'head': 'a' * 40}
+        read = markdown.read_marker(r.redact(markdown.publishable('x', 'notice', notice)),
+                                    'notice')
+        self.assertEqual(read, dict(notice, reason='$SERVICE_NAME'))
+
+    def test_the_receipts_stay(self):
+        # R4-1: the arguments a receipt binds are compared by the policy: a service called as
+        # one of them leaves the receipt as it is, and the approval holds.
+        r = redact.Redactor(names=[('SERVICE_NAME', 'diff')], users=[('AGENT_USER', 'claude')])
+        receipt = {'pr': 1, 'base': 'b' * 40, 'head': 'a' * 40, 'policy': 'p' * 12, 'level': 1,
+                   'reviewers': ['codex'], 'reasons': [{'why': 'diff'}],
+                   'profiles': [{'identity': 'claude', 'kind': 'claude', 'model': 'm',
+                                 'effort': 'high', 'args': ['--allowedTools',
+                                                            'Bash(git diff *)']}]}
+        body = markdown.publishable('diff', 'policy', {'event': 'promoted', 'receipt': receipt},
+                                    records=[('merged', {'head': 'a' * 40, 'mode': 'auto',
+                                                         'level': 1, 'receipt': receipt})])
+        published = r.redact(body)
+        self.assertEqual(markdown.split_markers(published)[1], markdown.split_markers(body)[1])
+        read = markdown.read_marker(published, 'policy')['receipt']
+        self.assertEqual(policy.differences(read, receipt), [])
+        # A review: its texts change, its receipt and its identifiers do not.
+        review = {'verdict': 'approve', 'round': 1, 'head_sha': 'a' * 40, 'source': 'agent',
+                  'reviewer': 'claude', 'summary': 'git diff ok', 'human_reason': '',
+                  'note': '', 'checks_performed': ['git diff'], 'receipt': receipt,
+                  'blocking_findings': [], 'previous_findings': [],
+                  'non_blocking_findings': [{'id': 'R1-1', 'key': 'r1-claude-R1-1',
+                                             'file': 'diff', 'line': 0, 'title': 'diff',
+                                             'detail': 'diff', 'suggested_fix': '',
+                                             'evidence': 'claude'}]}
+        read = markdown.read_marker(r.redact(markdown.publishable('x', 'review', review)),
+                                    'review')
+        self.assertEqual(read, dict(
+            review, summary='git $SERVICE_NAME ok', checks_performed=['git $SERVICE_NAME'],
+            non_blocking_findings=[dict(review['non_blocking_findings'][0],
+                                        title='$SERVICE_NAME', detail='$SERVICE_NAME',
+                                        evidence='<AGENT_USER>')]))
+
+    def test_a_marker_with_nothing_to_replace_stays_the_same(self):
+        r = HOST
+        record = {'type': 'event', 'event': 'host_tests', 'at': 't', 'error': '$STATE_DIR'}
+        for body in (ledger.render(record),
+                     # A kind without free texts, whatever its fields hold.
+                     markdown.publishable('x', 'cycle', {'cycle': ['claude', '/srv/u-dl/x']}),
+                     # A payload that does not decode, or not to an object.
+                     'x\n\n<!-- devloop:ledger:v1 AAAA+fix+claude/AAA= -->\n',
+                     markdown.publishable('x', 'notice', ['/srv/u-dl/x'])):
+            with self.subTest(body=body):
+                lines = markdown.split_markers(body)[1]
+                self.assertEqual(markdown.split_markers(r.redact(body))[1], lines)
         # A name that a Base64 payload holds between its own '+' or '/' stays there too.
         payload = '<!-- devloop:ledger:v1 AAAA+fix+claude/AAA= -->'
         self.assertEqual(r.redact(f'claude {payload}'), f'<AGENT_USER> {payload}')
+        # A marker quoted in a free text is text: it does not hide a value of the host.
+        quoted = {'type': 'event', 'event': 'x', 'at': 't',
+                  'error': '<!-- devloop:x:v1 /srv/u-dl/x -->'}
+        self.assertEqual(markdown.read_marker(r.redact(ledger.render(quoted)), 'ledger')['error'],
+                         '<!-- devloop:x:v1 $DEVLOOP_HOME/x -->')
+
+    def test_a_text_bound_by_a_hash_is_never_rewritten(self):
+        # The proposal of a conclave is bound by its hash: a new one is redacted before it is
+        # hashed (``redact_text``), and its record then has nothing left to replace; one
+        # recorded with a value of the host is not published, its hashes untouched.
+        r = HOST
+        record = conclave.new_record({'kind': 'blocked', 'comment': 5, 'agent': 'claude',
+                                      'step': 'fix'}, 'fix', ['claude', 'codex', 'agy'], 3,
+                                     'e' * 64, 'c' * 40, 'c' * 40, 'd' * 64)
+        text = 'Rilanciare con /srv/u-dl/x.'
+        clean = r.redact_text(text)
+        self.assertEqual(clean, 'Rilanciare con $DEVLOOP_HOME/x.')
+        conclave.apply_proposal(record, {'resolution': clean, 'reserved': False,
+                                         'reserved_reason': '', 'operator_question': '',
+                                         'options': []}, profile('claude'))
+        body = conclave.render(record)
+        self.assertEqual(markdown.split_markers(r.redact(body))[1],
+                         markdown.split_markers(body)[1])
+        record['proposal']['resolution'] = text
+        record['hash'] = record['proposal']['hash'] = conclave.text_hash(text)
+        client = FakeClient()
+        with self.assertRaises(redact.BoundTextChanged) as raised:
+            redact.RedactingClient(client, r).edit_comment(9, conclave.render(record))
+        self.assertIsInstance(raised.exception, GitHubError)
+        self.assertNotIn('/srv/', str(raised.exception))
+        self.assertEqual(client.calls, [])
 
     def test_the_service_name_is_a_parameter(self):
         # R1-3: the name of the service, alone and in the name of its unit, unless it is the
