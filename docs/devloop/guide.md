@@ -2078,8 +2078,11 @@ The dispatcher plans it in the [merge lane](#the-merge-lane), as the supervisor'
   none of them was annulled with `/devloop veto` or has lapsed (the request of the issue, its
   text with the operator's decisions on it, is still the one each was taken on); and the latest
   review round, complete and approving `<sha>`, and the quorum's reviews of `<sha>` come after
-  the restart (a round greater than every round recorded on the PR before the decision; any
-  round when the decision restarted the implementation, which opens the PR). The coordinator
+  the restart (a round greater than every round recorded on the PR before the decision; when
+  the decision is on the issue, as for a restarted implementation, greater than every round
+  written by the latest time of its comment, when the dispatcher recorded the restart, so that
+  a PR closed before it and reopened does not count the approvals written before; a decision
+  whose time cannot be read refuses the merge). The coordinator
   also verifies that the resolution of the conclave stays within the authorized request of the
   issue, with the operator's decisions on it, and says so in the reason of its command; when it
   does not, or the doubt remains, it does not merge and brings the PR to the operator. The

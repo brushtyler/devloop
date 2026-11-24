@@ -819,7 +819,10 @@ class ConclaveMixin:
           text of the issue is still trusted (``_issue_context``);
         - the latest round and each review of the quorum come after the restart: their round
           is greater than every round recorded on the PR before the latest of those decisions
-          on its thread (any round, for a decision on the issue, whose restart opens the PR).
+          on its thread, and than every round written, or without a readable time, by the
+          latest time of a decision on the issue (its creation or its latest change, the
+          restart), so that a PR closed before the restart and reopened does not count the
+          approvals written before it.
 
         The check of the direction, that the resolution stays within the authorized request of
         the issue, is the coordinator's, written in the reason of its command."""
@@ -860,8 +863,26 @@ class ConclaveMixin:
                     'decisione del conclave che ha fatto ripartire il lavoro')
         cids = {cid for cid, _ in resumed}
         positions = [p for p, c in enumerate(thread) if comment_ref(c) in cids]
+        # A decision on the issue is not in the PR's conversation: its restart is the latest
+        # time of its comment (the dispatcher writes ``resumed`` in it as the work restarts),
+        # and a review written by then comes before it (a PR closed and reopened, #624).
+        times = [[_epoch(c.get(key)) for key in ('created_at', 'updated_at')
+                  if c.get(key) is not None]
+                 for c in issue['thread'] if comment_ref(c) in cids]
+        if any(not stamps or None in stamps for stamps in times):
+            return (f'l\'ora di una decisione del conclave della issue #{issue_number}, che ha '
+                    'fatto ripartire il lavoro, non è leggibile')
+        since = max((max(stamps) for stamps in times), default=None)
+
+        def earlier(position):
+            if positions and position < max(positions):
+                return True
+            if since is None:
+                return False
+            at = _epoch(thread[position].get('created_at'))
+            return at is None or at <= since
         before = max([r['round'] for p, r in self._marker_entries(pr, thread, 'review')
-                      if positions and p < max(positions)], default=0)
+                      if earlier(p)], default=0)
         if (not latest or latest[0]['round'] <= before
                 or any(r['round'] <= before for r in quorum.values())):
             return (f'nessun round di review completo dopo la ripartenza del lavoro (decisione '

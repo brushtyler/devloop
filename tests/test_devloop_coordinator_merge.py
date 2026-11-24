@@ -443,7 +443,8 @@ class ConclaveTests(Case):
                       d._operator_merge_reasons(pr))
 
     def test_a_restarted_implementation_and_the_pr_is_merged(self):
-        # The decision is on the issue: the PR was opened after the restart, every round counts.
+        # The decision is on the issue: the PR was opened after the restart, and its rounds,
+        # written after the decision, count.
         hash_ = self.request()
         d = self.make()
         self.gh.say_on(ISSUE, 'brushtyler', conclave_body(hash_, step='implement', head=None),
@@ -452,6 +453,44 @@ class ConclaveTests(Case):
                   if markdown.read_marker(c['body'], 'conclave')]
         self.merge()
         self.assertEqual(self.assert_merged(d)['conclave'], cid)
+
+    def restarted_on_the_issue(self, round_two=False, edited=None):
+        """PR #100, approved at ``NOW`` (10:00), and a unanimous decision on issue #7 written
+        at 10:01, that restarted its implementation (a PR closed and reopened), its comment
+        changed at ``edited``; with ``round_two``, a second round written at 10:02."""
+        hash_ = self.request()
+        d = self.make(before=[self.round_two()] if round_two else [])
+        if round_two:
+            (review,) = [c for c in self.gh.thread
+                         if (markdown.read_marker(c['body'], 'review') or {}).get('round') == 2]
+            review['created_at'] = '2026-11-21T10:02:00Z'
+        self.gh.say_on(ISSUE, 'brushtyler', conclave_body(hash_, step='implement', head=None),
+                       at='2026-11-21T10:01:00Z')
+        if edited is not None:
+            self.gh.others[ISSUE][-1]['updated_at'] = edited
+        return d
+
+    def test_approvals_before_a_restart_on_the_issue(self):
+        d = self.restarted_on_the_issue()
+        self.merge()
+        self.assert_refused(d, 'nessun round di review completo dopo la ripartenza del lavoro')
+
+    def test_a_round_after_a_restart_on_the_issue(self):
+        d = self.restarted_on_the_issue(round_two=True)
+        self.merge()
+        self.assert_merged(d)
+
+    def test_the_restart_on_the_issue_is_its_latest_change(self):
+        # The dispatcher writes ``resumed`` in the decision as the work restarts: a round
+        # written before that change does not count.
+        d = self.restarted_on_the_issue(round_two=True, edited='2026-11-21T10:05:00Z')
+        self.merge()
+        self.assert_refused(d, 'nessun round di review completo dopo la ripartenza del lavoro')
+
+    def test_a_restart_on_the_issue_without_a_readable_time(self):
+        d = self.restarted_on_the_issue(round_two=True, edited='ieri')
+        self.merge()
+        self.assert_refused(d, 'l\'ora di una decisione del conclave della issue #7')
 
     def test_no_round_after_the_restart(self):
         d = self.reviewed()
