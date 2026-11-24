@@ -81,8 +81,13 @@ sorveglia ciascuno e cosa fa all'avvio:
   un file temporaneo che comincia con `.`; il destinatario lo legge, poi lo sposta in `done/` o
   lo rimuove. La casella serve solo per gli avvisi, non per lo stato;
 - **la sorveglianza**: il supervisore segue il flusso continuo (`devloop watch` con il suo file di
-  stato), il coordinatore solo i suoi eventi e un controllo periodico, con la sveglia
-  `ops/host/coordinator-wait.sh` (passo 10);
+  stato), il coordinatore solo i suoi eventi e un controllo periodico, ciascuno con il risveglio
+  dei ruoli `ops/host/role-wait.sh --role supervisor|coordinator` (#602; per il coordinatore
+  anche `coordinator-wait.sh`, passo 10), che a ogni avvio scrive il battito del ruolo in
+  `heartbeat/` della casella;
+- **il watchdog dei ruoli** (#602): il timer `devloop-role-watchdog@<progetto>`, ogni 5 minuti,
+  controlla i battiti e dice nella casella e all'operatore quando un ruolo è fermo (passo 10,
+  "Watchdog dei ruoli");
 - **l'avvio**: ogni ruolo rilegge la sua casella, il diario (#76) e il riepilogo (#316), poi
   riprende a sorvegliare.
 
@@ -113,8 +118,16 @@ ops/
                              /home/<devloop> e di lettura sull'overlay, casella fra i ruoli,
                              key_dir 700, copia di root di check-host.sh e della sveglia,
                              sudoers in sola lettura
-    coordinator-wait.sh      la sveglia del coordinatore: esce sui suoi eventi, su un messaggio
-                             nella casella o alla fine del periodo
+    role-wait.sh             il risveglio di supervisore e coordinatore (--role): esce sui loro
+                             eventi, su un messaggio nella casella o alla fine del periodo, e
+                             a ogni avvio scrive il battito del ruolo
+    coordinator-wait.sh      involucro compatibile: role-wait.sh --role coordinator
+    role-watchdog.sh         il watchdog dei ruoli: dai battiti, i ruoli fermi nella casella e
+                             all'operatore
+    devloop-role-watchdog@.service, devloop-role-watchdog@.timer,
+    devloop-role-watchdog-failed@.service  unità template del watchdog, una istanza per
+                             progetto, ogni 5 minuti; -failed@ è il suo OnFailure=
+    role-watchdog-project.conf  drop-in di un progetto per le istanze del watchdog (segnaposto)
     devloop.service          unità systemd (con segnaposto @NOME@)
     devloop@.service         unità template, per più progetti sullo stesso host (PROJECT)
     devloop-project.conf     drop-in di un progetto per devloop@<progetto> (con segnaposto)
@@ -601,8 +614,13 @@ u:supervisor:r-- <state_dir>/config.local.toml` e `<state_dir>/project.toml`, #5
 dell'operatore sono di solito 600, e `scripts/supervisor-token.py` legge l'overlay), prepara la
 **casella fra supervisore e coordinatore** (il gruppo `devloop-roles` con dentro `supervisor`, e
 `/var/lib/devloop-coordination` con `to-coordinator/`, `to-supervisor/` e le loro `done/`, di
-root, del gruppo, 2770; [I quattro ruoli](#i-quattro-ruoli)), installa il sudoers minimale dopo
-averlo validato con `visudo -c`, clona il repository e prepara `key_dir` e `~/.claude` (700).
+root, del gruppo, 2770, e `heartbeat/` per i battiti dei ruoli, #602; [I quattro
+ruoli](#i-quattro-ruoli)), installa il sudoers minimale dopo averlo validato con `visudo -c`,
+installa la **copia di root del risveglio** `role-wait.sh` con `lib.sh` e i parametri in
+`SUPERVISOR_OPS_DIR` (`/usr/local/lib/devloop-supervisor`, 755 e 644, di root; con `PROJECT`,
+`-<progetto>`) e il **watchdog dei ruoli** (le unità template e, se il progetto ha anche il
+coordinatore, la sua istanza: passo 10, "Watchdog dei ruoli", #602), clona il repository e
+prepara `key_dir` e `~/.claude` (700).
 Con la sorgente a parte (`SOURCE_REPO`, [Un altro progetto](#un-altro-progetto)) il repository
 gestito non contiene `scripts/supervisor-token.py`: lo script clona anche la sorgente, come
 `supervisor`, in `SUPERVISOR_SOURCE_CLONE` (`/home/supervisor/devloop-source`; con `PROJECT`,
@@ -763,7 +781,8 @@ e la **lettura dell'overlay** con un'ACL, se manca (`setfacl -m u:coordinator:r-
 progetto no, `coordinator-token.py` non lo legge), lo mette nella **casella fra supervisore e
 coordinatore** (il gruppo `devloop-roles` e le directory di `/var/lib/devloop-coordination`, come
 `setup-supervisor.sh`, #543), installa la **copia di root** di
-`check-host.sh` e della sveglia `coordinator-wait.sh`, dei file che leggono
+`check-host.sh` e del risveglio `role-wait.sh` (con `coordinator-wait.sh`, #602), dei file che
+leggono
 (`lib.sh`, i sudoers, le unità e il file di `tmpfiles.d` di `ops/host/`) e dei parametri
 (`params.env`) in `COORDINATOR_OPS_DIR` (`/usr/local/lib/devloop-coordinator`, 755 e 644, di
 root), e il sudoers (`ops/host/sudoers-coordinator`, in `COORDINATOR_SUDOERS_FILE`,
@@ -806,26 +825,77 @@ sessioni o nelle cache delle CLI), senza `devloop apps` e senza scrivere nulla; 
 di stato. Delle CLI verifica che ci siano. Gira dalla directory `/` e con Python isolato, così
 nessun file della directory di chi lo lancia entra nelle verifiche.
 
-**La sveglia** (#543). Il coordinatore non segue il flusso continuo, che è del supervisore: la sua
-sessione avvia in background, come utente `coordinator`, la copia di root della sveglia, che usa i
-parametri della copia:
+**Il risveglio** (#543, #602). Il coordinatore non segue il flusso continuo, che è del
+supervisore: la sua sessione avvia in background, come utente `coordinator`, la copia di root del
+risveglio dei ruoli, che usa i parametri della copia (`coordinator-wait.sh`, la sveglia di prima,
+è lo stesso comando):
 
 ```bash
-bash /usr/local/lib/devloop-coordinator/host/coordinator-wait.sh                # 4 ore
-bash /usr/local/lib/devloop-coordinator/host/coordinator-wait.sh --period 3600  # un'ora
+bash /usr/local/lib/devloop-coordinator/host/role-wait.sh --role coordinator                # un'ora
+bash /usr/local/lib/devloop-coordinator/host/role-wait.sh --role coordinator --period 7200  # due ore
 ```
 
 Esce con 0 e una riga per motivo al primo di questi: un messaggio in `to-coordinator/` della
-casella (`casella:`, senza consumarlo), un evento del coordinatore su GitHub (`evento:`:
-`agent:needs-operator` aggiunta, "il merge spetta all'operatore", un commento sull'issue degli
+casella (`casella:`, subito, senza consumarlo), un evento del coordinatore su GitHub (`evento:`:
+`agent:needs-operator` aggiunta, `agent:needs-coordinator` aggiunta (#607), "il merge spetta
+all'operatore", un commento sull'issue degli
 allarmi `[run].alert_issue`, un errore del watch; gli altri eventi li salta), una riga nuova di
 `run.log` con un `Traceback`, un `ALERT:`, un `401` o il rifiuto dell'avvio (`log:`), il servizio
 non attivo (`servizio:`, una volta per cambio di stato), o la fine del periodo
-(`COORDINATOR_WAIT_PERIOD`, 14400 secondi, o `--period`; `periodo:`). Legge GitHub con il comando
-del sudoers, al più 300 secondi per giro, poi rilegge casella, log e servizio. Esce con 1 se il
-watch non riesce (il sudoers non è aggiornato, devloop non parte). Tiene il suo stato (le righe di
-`run.log` già viste, l'ultimo stato del servizio) in `~/.local/state/devloop-coordinator-wait/`
-del coordinatore.
+(`COORDINATOR_WAIT_PERIOD`, per default `ROLE_WAIT_PERIOD`, 3600 secondi, o `--period`;
+`periodo:`). Legge GitHub con il comando del sudoers, al più 300 secondi per giro, poi rilegge
+casella, log e servizio. Il giro gira in background e la casella si controlla ogni secondo anche
+durante il giro: un messaggio sveglia subito il ruolo, il giro finisce da sé e il risveglio
+successivo lo aspetta e ne legge le righe, senza avviarne un altro (serve `flock`, di
+util-linux). Esce con 1 se il watch non riesce (il sudoers non è aggiornato, devloop non parte).
+Tiene il suo stato (le righe di `run.log` già viste, l'ultimo stato del servizio, il giro in
+corso) in `~/.local/state/devloop-coordinator-wait/<progetto>/` del coordinatore (`_default`
+senza `PROJECT`).
+
+Il supervisore usa lo stesso script dalla sua copia di root, che `setup-supervisor.sh` installa in
+`SUPERVISOR_OPS_DIR` (`/usr/local/lib/devloop-supervisor`; con `PROJECT`,
+`/usr/local/lib/devloop-supervisor-<progetto>`): `bash
+/usr/local/lib/devloop-supervisor/host/role-wait.sh --role supervisor`. Per lui ogni evento di
+`devloop watch` è un risveglio (non la riga della base), con il suo file di stato
+(`watch-state.json`, il default di devloop) e il comando `watch` del suo sudoers; non legge
+`run.log`, che non è nel suo sudoers. Il suo stato sta in `~/.local/state/devloop-supervisor-wait/`.
+
+A ogni avvio lo script scrive il **battito** del ruolo, `COORDINATION_DIR/heartbeat/<ruolo>`:
+l'ora (secondi dall'epoca) e il periodo, 664 del gruppo dei ruoli. Un battito che non si scrive è
+un avviso su stderr, non ferma il risveglio. Il primo messaggio di `start-role.sh` dà a ciascun
+ruolo il comando di risveglio suo e dell'altro.
+
+**Watchdog dei ruoli** (#602; ADR 0002, seconda precisazione del 2026-11-23, punto 6). Un timer
+systemd per progetto, `devloop-role-watchdog@<progetto>.timer` (`_default` senza `PROJECT`, che
+non coincide con nessun progetto), avvia ogni 5 minuti
+`devloop-role-watchdog@<progetto>.service`, che esegue `role-watchdog.sh` dalla copia di root `WATCHDOG_OPS_DIR` (`/usr/local/lib/devloop-role-watchdog`; con `PROJECT`,
+`-<progetto>`) con i parametri del progetto copiati lì. Un ruolo è fermo se il suo battito manca o
+è più vecchio di due periodi (quello scritto nel battito):
+
+- supervisore fermo: un messaggio in `to-coordinator/`;
+- coordinatore fermo: un messaggio in `to-supervisor/` e un avviso all'operatore;
+- entrambi fermi: un avviso all'operatore e un messaggio in entrambe le caselle.
+
+Ogni avviso nomina il progetto, e lo stesso avviso non si ripete finché lo stato non cambia (lo
+stato sta in `/var/lib/devloop-role-watchdog/<progetto>`, `StateDirectory=`). Gli avvisi
+all'operatore useranno `devloop notify` del progetto (#593); finché non c'è, il watchdog scrive
+solo nelle caselle e nel journal (`journalctl -u devloop-role-watchdog@<progetto>`, le righe
+`avviso all'operatore:`). Il timer rileva e non agisce: non ha chiavi GitHub e non avvia né ferma
+nulla. Un controllo che fallisce (un battito che non si legge, un messaggio che non si scrive)
+attiva l'`OnFailure=`, `devloop-role-watchdog-failed@<progetto>.service`, che lo scrive una volta
+in entrambe le caselle.
+
+L'unità gira come `WATCHDOG_USER` (`role-watchdog`; con `PROJECT`, `role-watchdog-<progetto>`), un
+utente di sistema senza home né shell, **uno per progetto**, che **non** è nel gruppo dei ruoli:
+entra solo nella casella del suo progetto, con le ACL che mettono gli script di setup (`--x` su
+`COORDINATION_DIR` e `heartbeat/`, `-wx` su `to-supervisor/` e `to-coordinator/`), e scrive solo
+lì (`ReadWritePaths=`, con `ProtectSystem=strict`). Così le istanze di due progetti sullo stesso
+host non leggono la casella dell'altro. `setup-supervisor.sh` e `setup-coordinator.sh`
+installano le tre unità template in `SYSTEMD_DIR` (una volta per host) e, quando il progetto ha
+sia il supervisore sia il coordinatore, l'utente, le ACL, la copia di root, le drop-in delle due
+istanze (`ops/host/role-watchdog-project.conf`) e il timer abilitato e avviato (`systemctl enable
+--now`). `check-host.sh` verifica la copia del supervisore e, con il coordinatore del progetto,
+le unità, le drop-in, il timer abilitato, l'utente fuori dal gruppo e le sue ACL sulla casella.
 
 **App del coordinatore** (#549). Il coordinatore firma comandi, commenti e label con un'app sua,
 `<APP_PREFIX>coordinator`, che l'operatore crea come le altre (passo 2), dal manifest
@@ -1086,6 +1156,8 @@ progetto:
 | `SUPERVISOR_KEY_DIR` | `/home/supervisor/.ghapps-widget`: le chiavi dell'insieme di app del progetto |
 | `SUPERVISOR_CLONE` | `/home/supervisor/devloop-widget`: il clone del supervisore per il progetto |
 | `COORDINATOR_SUDOERS_FILE`, `COORDINATOR_OPS_DIR` | `/etc/sudoers.d/devloop-coordinator-widget`, `/usr/local/lib/devloop-coordinator-widget` |
+| `SUPERVISOR_OPS_DIR` | `/usr/local/lib/devloop-supervisor-widget`: la copia di root del risveglio del supervisore (#602) |
+| `WATCHDOG_USER`, `WATCHDOG_OPS_DIR` | `role-watchdog-widget`, `/usr/local/lib/devloop-role-watchdog-widget`: il watchdog dei ruoli del progetto, istanza `devloop-role-watchdog@widget`, che entra solo nella casella del progetto (#602) |
 | `SUPERVISOR_SOURCE_CLONE`, `COORDINATOR_SOURCE_CLONE` | con `SOURCE_REPO`, `/home/supervisor/devloop-source-widget` e `/home/coordinator/devloop-source-widget`: i clone della sorgente da cui i due ruoli coniano i token delle loro app (#571) |
 | `LAUNCHER_DIR` | `/usr/local/lib/devloop/widget`: l'avviatore del tag `SOURCE_REF` del progetto, che nessun altro progetto sovrascrive (#573) |
 

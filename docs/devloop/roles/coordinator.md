@@ -106,29 +106,48 @@ periodic check. Run the wake-up as a background command (for Claude Code, a Bash
 `run_in_background`), from the root copy that `setup-coordinator.sh` installs:
 
 ```bash
-bash /usr/local/lib/devloop-coordinator/host/coordinator-wait.sh --period 3600   # COORDINATOR_OPS_DIR
+bash /usr/local/lib/devloop-coordinator/host/role-wait.sh --role coordinator   # COORDINATOR_OPS_DIR
 ```
 
-`--period 3600` makes the periodic check hourly, as the [second precisazione of
+Its default period, one hour, makes the periodic check hourly, as the [second precisazione of
 2026-11-23](../../adr/0002-ruoli-e-responsabilita.md#seconda-precisazione-del-2026-11-23-modello-operativo-dei-ruoli-597)
-asks (point 2), where the default of the script is 4 hours. To look again after 15 minutes at a
+asks (point 2). To look again after 15 minutes at a
 message of yours to the supervisor (Tasks, "Stalled work in the queue"), start it with
 `--period 900`.
 
 On the host of this repository (`PROJECT=devloop`, #563) the copy is
 `/usr/local/lib/devloop-coordinator-devloop`: use the command of the first message of your
-session.
+session. `coordinator-wait.sh --period 3600`, the wake-up of before, is the same command.
 
 It ends at the first of: a message in `to-coordinator/` (`casella:`, which it reports without
-consuming it), an event of yours on GitHub (`evento:`: `agent:needs-operator` added, "il merge
-spetta all'operatore", a comment on the issue of the alarms `[run].alert_issue`, an error of the
-watch), a new line of `run.log` with a `Traceback`, an `ALERT:`, a `401` or the refusal of the
-start (`log:`), the service not active (`servizio:`), or the end of the period, 4 hours by
+consuming it, at once), an event of yours on GitHub (`evento:`: `agent:needs-operator` or
+`agent:needs-coordinator` added, "il merge spetta all'operatore", a comment on the issue of the
+alarms `[run].alert_issue`, an error of the watch), a new line of `run.log` with a `Traceback`, an
+`ALERT:`, a `401` or the refusal of the start (`log:`), the service not active (`servizio:`), or
+the end of the period, one hour by
 default (`periodo:`, `--period <seconds>`). Read its lines, act, then start it again. Exit 1
 (`errore:`) means it cannot read GitHub: tell the operator. It reads GitHub with
 `devloop-pinned watch` as devloop's user and a state file of its own,
 `coordinator-watch-state.json` of the `state_dir`: never run `devloop watch` with the
 supervisor's state file, whose events would be lost to the supervisor.
+
+Each start writes your heartbeat in `heartbeat/coordinator` of the mailbox: keep the wake-up
+running. A timer of the host, the watchdog of the roles, reads the heartbeats every 5 minutes
+(Stopped roles).
+
+## Stopped roles
+
+The watchdog of the roles (`devloop-role-watchdog@<project>`, ADR 0002, second precision of
+2026-11-23, point 6) sees a role as stopped when its heartbeat is missing or older than two of
+its periods. It only detects: it has no GitHub key and changes nothing.
+
+- When the supervisor is stopped, it leaves a message in `to-coordinator/` that names the
+  project. Check what the supervisor last did (the journal, `devloop status`) and tell the
+  operator on GitHub if it does not come back; you do not start its session.
+- When you were stopped too, the message is in both mailboxes and the operator was alerted: read
+  it at startup.
+- It warns again only when the state changes. If the watchdog itself fails, a message in both
+  mailboxes says so: check the host (`check-host.sh --read-only`) and tell the operator.
 
 ## GitHub
 
@@ -233,13 +252,31 @@ the mailbox.
   replaces the whole direction, and the priorities follow it.
   Dictate the order to the supervisor in the mailbox, or with the priority labels yourself (from
   #595).
-- **Authorize the work** with `/devloop authorize [priority:<p>]` on the issue (from #607; until
-  then, with a comment on the issue and a message to the supervisor), the issues the supervisor
-  opens included: it marks them `agent:needs-coordinator` (from #607);
-  you authorize, remove the label, and the supervisor puts them in the queue. An issue of the
-  supervisor with neither the label nor an authorization, found at the periodic check, you
-  report to the supervisor. The issues that change the powers of a role or the trust policy
-  (`trust_policy` other than `none` in the readiness check) stay the operator's.
+- **Authorize the work** (#607; [Authorization by the
+  coordinator](../guide.md#authorization-by-the-coordinator)). The issues the supervisor opens
+  wait for you in `agent:needs-coordinator`, which wakes you (`evento:`). Read the issue, title
+  and body, and decide; if you approve it, write a comment whose first line, after your
+  attribution header, is `/devloop authorize` or `/devloop authorize priority:<p>` (`high`,
+  `normal`, `low`, from the direction, see "Priorities and order of the work"), with the reason
+  on the next lines. The dispatcher records it, bound to the SHA-256 of the title and the body as
+  they are, and removes `agent:needs-coordinator`; then the supervisor puts the issue in the
+  queue. If you do not approve it, say why in a comment and leave the label; the decision to
+  close it or change it is the supervisor's, or the operator's.
+  - The authorization holds for the text you read: when the title or the body changes, it lapses,
+    and the supervisor's `agent:ready` no longer starts the issue, even if the text is restored
+    afterwards. Read the new text, and authorize again if it still holds. An implementation that
+    waited for the base branch and whose text changed meanwhile comes back to you in
+    `agent:needs-coordinator`, instead of starting again.
+  - You may authorize with the same command your issues and those of trusted users. A command of
+    any other identity is refused, and so is one on the issue of an untrusted author: such an
+    issue starts only with a trusted user's `agent:ready`.
+  - Your own `agent:ready` needs no authorization: use it only as the reserve of "Stalled work in
+    the queue".
+  - An issue of the supervisor with neither the label nor an authorization, found at the
+    periodic check, you report to the supervisor.
+  - The issues that change the powers of a role or the trust policy (`trust_policy` other than
+    `none` in the readiness check) stay the operator's: even authorized, such an issue goes to
+    `agent:needs-operator`, and only the operator's `agent:ready` admits it.
 - Verify the work of the supervisor: its decisions on the escalations, its grants within the
   caps, its delegated merges, its labels, the order in which it puts the work in the queue. When
   something does not convince you, ask it in the mailbox, and decide what is yours to decide;
@@ -369,7 +406,7 @@ the mailbox.
   `agent:needs-operator`: only the operator's `agent:ready` admits it.
 - The other delegated commands of the table of [The coordinator](../guide.md#the-coordinator)
   (`retry`, `accept-defaults`, `decide`, `rereview`, `recheck`, `fix`, `hold`, `release`,
-  `finding`), under
+  `finding`; and `authorize`, above), under
   its conditions, each with its reason.
 - Write the problems of the system as issues, each with its evidence.
 - Prepare for the operator the decisions that are theirs, and a periodic summary.

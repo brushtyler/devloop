@@ -139,6 +139,12 @@ class ActionsMixin:
 
     def _do_implement(self, number):
         cfg, lb = self.cfg, self.cfg.labels
+        # The supervisor's agent:ready admits only work the coordinator authorized for its
+        # current text (#607), at every start: a text changed after the snapshot voids it, and
+        # so does one changed while the implementation waited for the base branch (#459).
+        unauthorized = self._unauthorized_ready(number)
+        if unauthorized:
+            return self._stop_unauthorized(number, unauthorized)
         if cfg.preflight and preflight_state(self._preflight_view(number, ()))[0] != 'ready':
             # The text changed, or a new check was asked, after the snapshot.
             self.log('  the readiness check does not cover the current text; next tick')

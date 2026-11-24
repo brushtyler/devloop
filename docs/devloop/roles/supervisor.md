@@ -80,10 +80,43 @@ work in the queue itself.
 
 ## Watching
 
-You follow the continuous stream: `devloop watch` with your state file (the default of devloop,
-`watch-state.json` of the `state_dir`), the escalations, `run.log`, and your mailbox
-`to-supervisor/` at each wake-up. The coordinator does not share your watch: its wake-up has a
-state file of its own, so it never takes your events.
+You follow the continuous stream: every event of `devloop watch`, the escalations, `run.log`,
+and your mailbox `to-supervisor/`. Run the wake-up of the roles as a background command (for
+Claude Code, a Bash command with `run_in_background`), from the root copy that
+`setup-supervisor.sh` installs:
+
+```bash
+bash /usr/local/lib/devloop-supervisor/host/role-wait.sh --role supervisor   # SUPERVISOR_OPS_DIR
+```
+
+On the host of this repository (`PROJECT=devloop`) the copy is
+`/usr/local/lib/devloop-supervisor-devloop`: use the command of the first message of your
+session.
+
+It ends at the first of: a message in `to-supervisor/` (`casella:`, which it reports without
+consuming it, at once), any event of `devloop watch` (`evento:`), the service not active
+(`servizio:`), or the end of the period, one hour by default (`periodo:`, `--period <seconds>`).
+Read its lines, act, then start it again. Exit 1 (`errore:`) means it cannot read GitHub: tell
+the operator. It reads GitHub with `devloop-pinned watch` as devloop's user and your state file,
+the default of devloop, `watch-state.json` of the `state_dir`. The coordinator does not share
+your watch: its wake-up has a state file of its own, so it never takes your events.
+
+Each start writes your heartbeat in `heartbeat/supervisor` of the mailbox: keep the wake-up
+running. A timer of the host, the watchdog of the roles, reads the heartbeats every 5 minutes
+(Stopped roles).
+
+## Stopped roles
+
+The watchdog of the roles (`devloop-role-watchdog@<project>`, ADR 0002, second precision of
+2026-11-23, point 6) sees a role as stopped when its heartbeat is missing or older than two of
+its periods. It only detects: it has no GitHub key and changes nothing.
+
+- When the coordinator is stopped, it leaves a message in `to-supervisor/` that names the project
+  and alerts the operator. Tell the operator on GitHub (`agent:needs-operator` on the journal of
+  the project) if the coordinator does not come back; you do not start its session.
+- When you were stopped too, the message is in both mailboxes: read it at startup.
+- It warns again only when the state changes. If the watchdog itself fails, a message in both
+  mailboxes says so: tell the operator.
 
 ## Inputs
 
@@ -126,8 +159,13 @@ state file of its own, so it never takes your events.
   delegation, write to the coordinator in the mailbox (Channel with the coordinator).
 - **Put the work in the queue** (`agent:ready`, with the labels of [Labels from the
   supervisor](../guide.md#labels-from-the-supervisor)) only for the authorized issues: those
-  the coordinator authorized (`/devloop authorize`, from #607; until then, with a comment on the
-  issue or a message in your mailbox) or the operator. Follow the order and the priorities the
+  the coordinator authorized with `/devloop authorize` (#607; [Authorization by the
+  coordinator](../guide.md#authorization-by-the-coordinator)), whose record of the dispatcher
+  ("Lavoro autorizzato dal coordinatore") is on the issue, or those the operator queued. With
+  `[roles.coordinator]` devloop ignores your `agent:ready` on an issue without an authorization
+  valid for its current title and body, and writes it in the log: after a change of the text,
+  ask the coordinator for a new authorization (`agent:needs-coordinator` again). The priority of
+  the command is the coordinator's: follow it. Follow the order and the priorities the
   coordinator dictates; they are not yours to set. The coordinator draws them from the operator's
   direction: `priority:high` for what unblocks the first theme and for the critical operational
   problems, `priority:normal` for the work of the active themes, `priority:low` for the rest that
@@ -152,8 +190,12 @@ state file of its own, so it never takes your events.
 - The delegated merges, when the operator delegated them
   ([Delegated merge](../guide.md#delegated-merge)).
 - Analyse the runs, and open an issue for each problem you see, with its evidence, marked
-  `agent:needs-coordinator` (from #607): never put it in the queue yourself. The coordinator
-  authorizes it and removes the label, then you put it in the queue.
+  `agent:needs-coordinator` (#607), never `agent:ready`: the label wakes the coordinator. The
+  coordinator authorizes it with `/devloop authorize`, and the dispatcher records it and removes
+  the label; then you put it in the queue when it is time (dependencies, free slots,
+  conflicts). Never write `/devloop authorize` yourself: from your identity it is refused.
+  Even authorized, an issue the readiness check declares touching the trust policy goes to
+  `agent:needs-operator`: it is the operator's.
 - Pin and restart devloop when the procedures say so: never pin a merge that declares a step on
   the host before the operator says the step is done
   ([Step on the host](../guide.md#step-on-the-host)).

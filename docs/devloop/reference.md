@@ -476,7 +476,7 @@ keys, and the installation sets none. Every key is optional:
 |---|---|---|
 | `selection` | The installation's strategy, by name. The only one is `"python-unittest-modules"` | `local_tests = "changed"` is `"full"`: the project loses no test, only time. `ci_rerun_unrelated` is off |
 | `source_prefixes` | Parameter of the selection: name prefixes, letters, digits and `_` (ssdlc: none since ADR 0007, R1) | No such rule |
-| `[tests.dir_modules]` | Parameter of the selection: `"<directory>/" = "test_<prefix>"`, a relative directory and the prefix of test module names (ssdlc: `"devloop/" = "test_devloop"`) | No such rule |
+| `[tests.dir_modules]` | Parameter of the selection: `"<directory>/" = "test_<prefix>"`, a relative directory and the prefix of test module names. A directory has one prefix; several directories may share one (ssdlc: `"devloop/" = "test_devloop"`, and `"ops/"` and `"docs/devloop/roles/"` = `"test_ops"`, #615) | No such rule |
 | `ci_log_format` | The format of the CI logs, by name. The only one is `"run-tests"`, what `scripts/run-tests.py` prints | `ci_rerun_unrelated` is off, and the [summary of the CI](#summary-of-the-ci-in-the-prompts) has no suite lines: no job log is read |
 
 An unknown key or name, a parameter without `selection`, a prefix or a directory of another
@@ -491,7 +491,8 @@ worktree, are:
   `test_<name>*.py` (with the prefix `lib_`, `pkg/lib_impact.py` selects `test_lib_impact*.py`
   and `test_impact*.py`);
 - for any file under a directory of `[tests.dir_modules]`, the modules whose name starts with its
-  prefix (with ssdlc's, any file under `devloop/` selects `tests/test_devloop*.py`).
+  prefix (with ssdlc's, any file under `devloop/` selects `tests/test_devloop*.py`, and any file
+  under `ops/` or `docs/devloop/roles/` selects `tests/test_ops.py`, which checks them too).
 
 When no module is pertinent, for example when only documentation changed, and with `"none"`,
 no test runs locally and the PR goes on to the CI. `implement_test_retries` applies to the tests
@@ -1920,7 +1921,12 @@ model = "gpt-6.1-sol"
   a trusted user's `agent:ready` admits it, and without a readiness check only the trusted users'
   labels count on it ([Labels from the supervisor](guide.md#labels-from-the-supervisor)). Its
   `agent:ready` and priority labels count where the supervisor's do; its dependency and
-  implementer labels never. Its commands count only inside a **closed
+  implementer labels never. With the table, its `/devloop authorize` (#607) authorizes the work:
+  the supervisor's `agent:ready` admits an issue only while an authorization of the coordinator
+  holds for its current title and body, and the label `agent:needs-coordinator` (the field
+  `needs_coordinator` of `Labels` in `devloop/config.py`, created by `devloop setup` with the
+  other labels) asks for one ([Authorization by the coordinator](guide.md#authorization-by-the-coordinator)).
+  Its commands count only inside a **closed
   perimeter**, a constant of the code (`supervision.COORDINATOR_DELEGATED` and
   `COORDINATOR_RESERVED`) that no key widens; the guide lists it
   ([The coordinator](guide.md#the-coordinator)). A delegated command counts as a trusted user's,

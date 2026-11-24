@@ -34,6 +34,7 @@ LABEL_STYLE = {
     'needs_operator': ('b60205', 'devloop: serve una decisione dell\'operatore'),
     'merge_hold': ('5319e7', 'devloop: merge trattenuto dal supervisore o dall\'operatore'),
     'needs_supervisor': ('d876e3', 'devloop: escalation non critica, decide il supervisore'),
+    'needs_coordinator': ('c2e0c6', 'devloop: in attesa dell\'autorizzazione del coordinatore'),
 }
 
 

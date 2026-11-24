@@ -60,8 +60,9 @@ Where a method went, when it was not obvious:
   ``ensure_labels`` renames ``agent:needs-operator`` from its old name, and ``devloop status``
   reports when both names exist.
 - ``GitHub.last_labeler`` is not in any port: the dispatcher no longer calls it.
-- ``GitHub.open_issues``, ``comments_since``, ``issue_state`` and ``issue_author`` are not in
-  any port: only the ``watch`` command (``devloop/watch.py``) calls them, not the dispatcher.
+- ``GitHub.open_issues``, ``comments_since``, ``issue_state``, ``issue_author`` and
+  ``workflow_runs`` (#615) are not in any port: only the ``watch`` command
+  (``devloop/watch.py``) calls them, not the dispatcher.
 - ``GitHub.dated_comments``, ``search_prs`` and ``edit_issue_body`` are not in any port either:
   only the daily summary (``devloop/report.py``, #256) calls them, with ``issue_history``.
 """

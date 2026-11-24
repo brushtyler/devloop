@@ -161,6 +161,33 @@ class RerunTests(unittest.TestCase):
         self.assertTrue(any('pertinent to the PR: test_impact_more.py' in line
                             for line in self.lines))
 
+    def test_a_test_ops_failure_is_pertinent_to_ops_and_the_runbooks(self):
+        # #615: with ssdlc's project file, tests/test_ops.py checks ops/ and the runbooks of the
+        # roles, so its failure on a PR that changes them is a round at once, without a re-run.
+        for path in ('ops/host/check-host.sh', 'docs/devloop/roles/coordinator.md'):
+            with self.subTest(path=path):
+                gh = CIGH()
+                gh.logs[(RUN, 1)] = suite_log('test_ops')
+                ws = FakeWS()
+                ws.diff = [{'path': path, 'links': []}]
+                d = self.make(gh, ws)
+                self.assertEqual(self.step(d), ['ci_failed'])
+                self.assertFalse(hasattr(self.gh, 'reruns'))
+                self.assertEqual(self.reruns(), [])
+                self.assertEqual(len(self.reviews()), 1)
+                self.assertEqual(self.gh.labels[100], {'agent:changes'})
+                self.assertTrue(any('pertinent to the PR: test_ops.py' in line
+                                    for line in self.lines))
+        # Elsewhere in docs/ the failure is still unrelated: one re-run, no round.
+        ws = FakeWS()
+        ws.diff = [{'path': 'docs/devloop/guide.md', 'links': []}]
+        gh = CIGH()
+        gh.logs[(RUN, 1)] = suite_log('test_ops')
+        d = self.make(gh, ws)
+        self.assertEqual(self.step(d), ['ci_failed'])
+        self.assertEqual(self.gh.reruns, [RUN])
+        self.assertEqual(self.reviews(), [])
+
     def test_a_changed_test_module_that_fails_is_pertinent(self):
         ws = FakeWS()
         ws.diff = [{'path': 'tests/test_devloop_parallel.py', 'links': []}]

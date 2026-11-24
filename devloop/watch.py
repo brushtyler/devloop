@@ -6,7 +6,8 @@ changed into lines ``HH:MM <type> #N <detail>`` (UTC):
 
 - labels added and removed, on issues and PRs;
 - a new head of a PR, and its CI turning ``pass`` or ``fail`` (``GitHub.checks``, as the
-  dispatcher reads it);
+  dispatcher reads it), never ``pass`` while a workflow run of the head, a re-run included, is
+  queued or running (#615);
 - reviews with a verdict: devloop's from the valid ``review`` record in the conversation, written
   by the identity that may write it, or in the body of the native review of an agent with its
   own app (#325), reported with its verdict and round; a trusted user's native ``APPROVED`` or
@@ -413,9 +414,20 @@ class Watcher:
                     elif r.get('login') in self.trust.users and r.get('state') in VERDICTS:
                         reviews.append([r['id'], r['login'], r['state']])
                 entry.update(title=clean(raw.get('title'), TITLE_LEN), head=head,
-                             ci=self.gh.checks(head)[0], reviews=reviews)
+                             ci=self._ci(head), reviews=reviews)
             prs[str(raw['number'])] = entry
         return prs
+
+    def _ci(self, head):
+        """The CI of ``head`` as the dispatcher reads it (``GitHub.checks``), except that
+        ``pass`` is ``pending`` while a workflow run of the head is queued or running (#615): a
+        re-run of failed jobs is queued before its new jobs show among the check runs, and the
+        checks of the head read meanwhile may all pass."""
+        ci = self.gh.checks(head)[0]
+        if ci == 'pass' and any(run.get('status') != 'completed'
+                                for run in self.gh.workflow_runs(head)):
+            return 'pending'
+        return ci
 
     def _native_record(self, review):
         """``<verdict> round <n>`` of a native review that is the ``review`` record of an agent

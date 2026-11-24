@@ -152,6 +152,8 @@ default_key_dirs() {
         return
     fi
     for other in "$SYSTEMD_DIR"/devloop*.service; do
+        # Le unità del watchdog dei ruoli (#602) non sono un'installazione.
+        case $(basename "$other") in devloop-role-watchdog*) continue ;; esac
         if [ -f "$other" ] && [ "$other" != "$UNIT_FILE" ]; then
             printf '%s\n' "$home/.ghapps-$PROJECT"
             return
@@ -302,6 +304,30 @@ check_sudoers() {
 step "sudoers del supervisore ($SUDOERS_FILE)"
 check_sudoers "$SUDOERS_FILE" sudoers-supervisor setup-supervisor.sh
 
+# check_root_files DIR SETUP MISSING FILE...: i FILE di ops/ e params.env nella copia di root DIR,
+# 644 di root e uguali al checkout e ai parametri; SETUP li installa. Un file che manca è un
+# errore con MISSING=fail, un avviso con MISSING=warn.
+check_root_files() {
+    local dir=$1 setup=$2 missing=$3 name copy source_file actual
+    shift 3
+    for name in "$@" params.env; do
+        copy=$dir/$name
+        [ "$name" = params.env ] && source_file=$PARAMS_FILE || source_file=$OPS_DIR/$name
+        if ! [ -f "$copy" ] || [ -L "$copy" ]; then
+            "$missing" "$copy non esiste ($setup)"
+            continue
+        fi
+        actual=$(stat -c '%a %U' "$copy")
+        [ "$actual" = '644 root' ] || fail "$copy è $actual, deve essere 644 root"
+        [ "$copy" -ef "$source_file" ] && continue
+        if cmp -s "$copy" "$source_file"; then
+            ok "$copy coincide con $source_file"
+        else
+            warn "$copy è diverso da $source_file: rieseguire $setup"
+        fi
+    done
+}
+
 # check_read_acl USER FILE SETUP: su FILE l'ACL di sola lettura user:USER:r--, che mette SETUP.
 check_read_acl() {
     local user=$1 file=$2 setup=$3 entry
@@ -349,21 +375,8 @@ fi
 # se l'overlay ne dichiara l'app ([apps.coordinator]) o il ruolo ([roles.coordinator]). Un utente
 # coordinator che l'host ha per un altro progetto non lo rende obbligatorio qui.
 OVERLAY_FILE="$STATE_PATH/config.local.toml"
-coordinator_declared() {
-    [ -f "$1" ] && python3 -I -B - "$1" <<'EOF'
-import sys, tomllib
-try:
-    with open(sys.argv[1], 'rb') as fh:
-        data = tomllib.load(fh)
-except (OSError, tomllib.TOMLDecodeError):
-    sys.exit(1)
-declared = any(isinstance(data.get(table), dict) and 'coordinator' in data[table]
-               for table in ('apps', 'roles'))
-sys.exit(0 if declared else 1)
-EOF
-}
 PROJECT_COORDINATOR=0
-coordinator_declared "$OVERLAY_FILE" && PROJECT_COORDINATOR=1
+overlay_declares_coordinator "$OVERLAY_FILE" && PROJECT_COORDINATOR=1
 roles=$SUPERVISOR_USER
 [ "$PROJECT_COORDINATOR" = 1 ] && user_exists "$COORDINATOR_USER" && roles="$roles $COORDINATOR_USER"
 for user in $roles; do
@@ -381,7 +394,7 @@ for user in "$DEVLOOP_USER" "$AGENT_USER"; do
 done
 for dir in "$COORDINATION_DIR" $(for box in $COORDINATION_BOXES; do
                                      printf '%s\n' "$COORDINATION_DIR/$box" "$COORDINATION_DIR/$box/done"
-                                 done); do
+                                 done) "$COORDINATION_DIR/$COORDINATION_HEARTBEAT"; do
     if [ -L "$dir" ] || ! [ -d "$dir" ]; then
         fail "$dir non esiste o non è una directory (setup-supervisor.sh)"
         continue
@@ -415,6 +428,18 @@ check_root_path() {
     done
     [ "$bad" = 1 ] || ok "$path e le directory sopra sono di root, non scrivibili da altri"
 }
+
+# Il risveglio del supervisore (#602): la copia di root di role-wait.sh che setup-supervisor.sh
+# installa. Senza, il supervisore non ha il suo risveglio né il battito: un avviso; una copia che
+# altri possono cambiare è un errore.
+step "Risveglio del supervisore: copia di root in $SUPERVISOR_OPS_DIR (#602)"
+if ! [ -d "$SUPERVISOR_OPS_DIR" ]; then
+    warn "$SUPERVISOR_OPS_DIR non esiste: il supervisore non ha role-wait.sh né il battito (setup-supervisor.sh)"
+else
+    check_root_path "$SUPERVISOR_OPS_DIR/host"
+    # shellcheck disable=SC2086  # nomi di file senza spazi
+    check_root_files "$SUPERVISOR_OPS_DIR" setup-supervisor.sh warn $OPS_SUPERVISOR_FILES
+fi
 
 # Il coordinatore (#530), facoltativo per progetto (#571): la key_dir della sua app e la lettura
 # dell'overlay, con il solo attraversamento della home di devloop (#549), il suo sudoers in sola
@@ -460,6 +485,61 @@ else
             warn "$copy è diverso da $source_file: rieseguire setup-coordinator.sh"
         fi
     done
+fi
+
+# Il watchdog dei ruoli (#602), quando il progetto ha sia il supervisore sia il coordinatore: le
+# unità template dell'host, le drop-in dell'istanza del progetto, il timer abilitato, l'utente,
+# fuori dal gruppo dei ruoli e con le sole ACL sulla casella del progetto, e la copia di root.
+step "Watchdog dei ruoli: $WATCHDOG_UNIT (#602)"
+if [ "$PROJECT_COORDINATOR" != 1 ] || ! user_exists "$COORDINATOR_USER"; then
+    ok "il progetto non ha il coordinatore: nessun watchdog dei ruoli"
+else
+    for unit in $OPS_WATCHDOG_UNITS; do
+        if ! [ -f "$SYSTEMD_DIR/$unit" ]; then
+            fail "$SYSTEMD_DIR/$unit non esiste (setup-supervisor.sh, setup-coordinator.sh)"
+        elif cmp -s "$SYSTEMD_DIR/$unit" <(render "$OPS_DIR/host/$unit"); then
+            ok "$SYSTEMD_DIR/$unit coincide con ops/host/$unit"
+        else
+            warn "$SYSTEMD_DIR/$unit è diverso da ops/host/$unit"
+        fi
+    done
+    for dropin in "$WATCHDOG_DROPIN" "$WATCHDOG_FAILED_DROPIN"; do
+        if ! [ -f "$dropin" ]; then
+            fail "$dropin non esiste (setup-supervisor.sh, setup-coordinator.sh)"
+        elif cmp -s "$dropin" <(render "$OPS_DIR/host/role-watchdog-project.conf"); then
+            ok "$dropin coincide con ops/host/role-watchdog-project.conf"
+        else
+            warn "$dropin è diverso da ops/host/role-watchdog-project.conf con questi parametri"
+        fi
+    done
+    enabled=$(systemctl is-enabled "$WATCHDOG_UNIT.timer" 2>/dev/null)
+    if [ "$enabled" = enabled ]; then
+        ok "$WATCHDOG_UNIT.timer è abilitato"
+    else
+        fail "$WATCHDOG_UNIT.timer non è abilitato (${enabled:-sconosciuto}): setup-supervisor.sh o setup-coordinator.sh"
+    fi
+    if ! user_exists "$WATCHDOG_USER"; then
+        fail "l'utente $WATCHDOG_USER non esiste (setup-supervisor.sh, setup-coordinator.sh)"
+    else
+        ok "l'utente $WATCHDOG_USER esiste"
+        if in_group "$WATCHDOG_USER"; then
+            fail "$WATCHDOG_USER è nel gruppo $COORDINATION_GROUP: entra solo nella casella del suo progetto, con le ACL"
+        fi
+        while read -r dir perms; do
+            [ -d "$dir" ] || continue
+            entry=$(getfacl -p --omit-header "$dir" 2>/dev/null | grep "^user:$WATCHDOG_USER:" | head -n 1)
+            entry=${entry%%[[:space:]]*}
+            if [ "$entry" = "user:$WATCHDOG_USER:$perms" ]; then
+                ok "ACL $entry su $dir"
+            else
+                fail "su $dir serve l'ACL u:$WATCHDOG_USER:$perms, non '${entry:-nessuna}' (setup-supervisor.sh, setup-coordinator.sh)"
+            fi
+        done < <(watchdog_acls)
+    fi
+    check_root_path "$WATCHDOG_OPS_DIR/host"
+    # shellcheck disable=SC2086  # nomi di file senza spazi
+    check_root_files "$WATCHDOG_OPS_DIR" 'setup-supervisor.sh o setup-coordinator.sh' fail \
+        $OPS_WATCHDOG_FILES
 fi
 
 step "Utente degli agent $AGENT_USER (#415)"
