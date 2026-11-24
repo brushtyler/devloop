@@ -469,10 +469,11 @@ class Ledger:
             raise
 
     def verification(self, number, *, kind, attempt, command, passed, duration_ms, tree_before,
-                     tree_after, register=None, retried=None):
+                     tree_after, register=None, retried=None, changed_by_tests=None):
         """A test the dispatcher ran; with ``register``, a section of that fix register.
         ``retried``: the failed tests of the attempt that the command ran again alone (#598),
-        unstable when it passed."""
+        unstable when it passed. ``changed_by_tests``: the files whose content the command
+        changed, from ``tree_before`` to ``tree_after`` (#627), recorded when there are any."""
         record = {
             'type': 'verification', 'kind': kind, 'attempt': attempt, 'command': command,
             'outcome': 'pass' if passed else 'fail', 'duration_ms': duration_ms,
@@ -480,6 +481,8 @@ class Ledger:
             'at': self._now()}
         if retried is not None:
             record['retried'] = list(retried)
+        if changed_by_tests:
+            record['changed_by_tests'] = list(changed_by_tests)
         if register is None:
             return self._post(number, record)
         return self._section(number, record, None, register)
@@ -631,6 +634,11 @@ def _render_verification(r, title=None):
                        'rilanciati da soli. Il passo prosegue; il test va corretto:'
                        if r.get('outcome') == 'pass' else
                        '**Test rilanciati da soli**, falliscono ancora:') + cases]
+    if isinstance(r.get('changed_by_tests'), list):
+        # #627: the test changed these files, so the tree after it is not the one before.
+        files = ''.join(f'\n- `{str(f).replace("`", "")}`' for f in r['changed_by_tests'])
+        parts += ['', '**File modificati dal test**: il loro contenuto dopo il test non è quello '
+                      'di prima, e finisce nel commit che segue:' + files]
     return parts
 
 

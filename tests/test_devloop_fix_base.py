@@ -60,8 +60,9 @@ class FixBaseTests(Quorum):
         # The merge is the implementer's, as in a sync.
         self.assertEqual(self.ws.merge_authors, [self.ws.authors[0]])
         self.assertEqual(self.ws.authors[0], self.ws.authors[1])
-        # Protected paths: the merge against the base, the fix against the merge.
-        self.assertEqual(self.ws.spans, ['origin/main', SHA2])
+        # Protected paths: the merge against the base, the fix against the merge; then the
+        # files of the fix's own commit, for its generated files (#627).
+        self.assertEqual(self.ws.spans, ['origin/main', SHA2, SHA2])
         prompt = self.runner.calls[-1][3]
         self.assertIn('The branch already contains the latest `origin/main`', prompt)
         self.assertIn('Do not fetch,\nmerge or rebase', prompt)
@@ -152,7 +153,8 @@ class FixBaseTests(Quorum):
         self.changes_requested(fixed())
         self.d.tick()
         self.assertEqual(self.ws.merge_authors, [])  # no merge started
-        self.assertEqual(self.ws.spans, [SHA1])
+        # Protected paths, then the generated files of the fix's commit (#627).
+        self.assertEqual(self.ws.spans, [SHA1, SHA1])
         (commit,) = self.ws.commits
         self.assertIn('fix: review', commit)
         self.assertEqual(self.events, [])

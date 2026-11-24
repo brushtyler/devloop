@@ -134,13 +134,17 @@ class TreeWS(FakeWS):
     """FakeWS with tree hashes: ``trees`` are returned in order (then ``t1``), ``committed`` is
     the tree of every commit."""
 
-    def __init__(self, trees=(), committed='t1', **kw):
+    def __init__(self, trees=(), committed='t1', by_tests=('x.pyc',), **kw):
         super().__init__(**kw)
         self.trees = list(trees)
         self.committed = committed
+        self.by_tests = list(by_tests)  # the files that differ between two trees (#627)
 
     def tree(self, path):
         return self.trees.pop(0) if self.trees else 't1'
+
+    def tree_changes(self, path, old, new):
+        return list(self.by_tests)
 
     def commit_tree(self, path, commit):
         return self.committed

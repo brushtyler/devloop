@@ -880,6 +880,13 @@ class Workspace:
         """The tree of ``commit``."""
         return self._git('rev-parse', f'{commit}^{{tree}}', cwd=path).strip()
 
+    def tree_changes(self, path, old, new):
+        """The paths whose content differs between the trees ``old`` and ``new`` (#627): the
+        files a test command changed, given :meth:`tree` before and after it."""
+        out = self._git('diff-tree', '-r', '--name-only', '-z', '--no-renames', old, new,
+                        cwd=path)
+        return sorted(name for name in out.split('\0') if name)
+
     def commit_all(self, path, message, author=None):
         """Commit everything; ``author`` (``{name, email}``) is both author and committer."""
         self._git('add', '-A', cwd=path)
