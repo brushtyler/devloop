@@ -14,11 +14,13 @@ Its content comes **only** from the dispatcher's ledger records (#133) and from 
 never from text written by agents: no summary, no finding title, no error text. The final
 acceptance map is the one part an agent declared: the dispatcher recorded it in its markers, and
 the receipt keeps its test references and reasons as they are, shown only as inert code. A value
-that was not attested is ``None`` in the data and ``non riportato`` in the text, never 0.
-With the budget on (#393), a section of its own shows the state of the budget of the issue's
-story as the dispatcher's journal records it (``budget.view``), its dollars not attested as
-``non attestato``; with the budget off there is no such section, and the content is the one
-before #393.
+that was not attested is ``None`` in the data and ``not reported`` in the text (``non
+riportato`` in Italian), never 0. With the budget on (#393), a section of its own shows the
+state of the budget of the issue's story as the dispatcher's journal records it
+(``budget.view``), its dollars not attested as ``not attested``; with the budget off there is
+no such section, and the content is the one before #393. The readable text is in the
+project's ``language`` (#634, ``TEXTS``); the content, its digest and the records are the same
+in every language.
 
 Before the promotion the content is checked against the markers (:func:`contradictions`). A
 contradiction blocks the promotion; data that is simply missing, as in PRs started before #133,
@@ -33,14 +35,14 @@ import hashlib
 import json
 
 from .agents import TELEMETRY_FIELDS
-from .budget import NOT_ATTESTED, consumed_usd, usd
+from .budget import TEXTS as BUDGET_TEXTS
+from .i18n import ENGLISH, Catalog
 from .markdown import dispatcher_header, publishable, split_markers, with_record
 from .planning import counted_rounds
 from .policy import describe as describe_policy
 from .review import (AUTHORITIES, CI, CLOSING, FINDINGS_ONLY, finding_key, finding_state,
                      findings_only, owner_of)
 
-NOT_REPORTED = 'non riportato'
 # The class of the escalation of a receipt that contradicts the markers: critical.
 CONFLICT = 'receipt_conflict'
 STATES = ('current', 'superseded')
@@ -49,22 +51,252 @@ TOKENS = ('input_tokens', 'output_tokens', 'cache_read_input_tokens',
 # The turn fields a receipt keeps: no error text, which may quote what an agent wrote.
 TURN_FIELDS = ('kind', 'agent', 'identity', 'model', 'effort', 'fallback_for', 'model_real',
                'state', 'started_at', 'duration_ms', 'outcome')
-# Data a PR started before #133 or #134 may lack: declared, never reconstructed.
-MISSING_TEXT = {
-    'request': 'snapshot della richiesta (issue presa in carico prima di #133)',
-    'turns': 'turni degli agent (nessun record del registro: lavoro avviato prima di #133)',
-    'implement': 'turno dell\'implementazione (nessun record sull\'issue)',
-    'ci': 'esito della CI sul head approvato nel registro',
-    'acceptance_map': 'mappa di copertura dei criteri (PR aperta prima di #134)',
-    'criteria': 'criteri di accettazione (testo dell\'issue non verificabile)',
-}
-_VERDICT = {'approve': 'approvata', 'request_changes': 'modifiche richieste',
-            'needs_operator': 'decisione dell\'operatore',
-            'unproven': 'nessun finding bloccante con evidenza'}
-_CLOSED = {'resolved': 'risolto', 'withdrawn': 'ritirato'}
-_MAP_STATUS = {'covered': 'coperto', 'not_covered': 'non coperto'}
+# Data a PR started before #133 or #134 may lack: declared, never reconstructed. Each key has
+# its text in ``TEXTS``, as ``missing_<key>``.
+MISSING = ('request', 'turns', 'implement', 'ci', 'acceptance_map', 'criteria')
 # What a receipt keeps of the advisory review of its head (#369).
 ADVISORY_FIELDS = ('head', 'reviewer', 'outcome', 'opinion')
+
+# The texts of a receipt (#634), in the project's ``language`` (``i18n``); English for a
+# language without translation. The content, its digest and the ``receipt`` record never
+# change with the language: only the readable text does. The title (``title``) is recognised in
+# every language (``with_advisory``), so that a receipt published before a change of
+# ``language`` still takes the advisory review of its head.
+TEXTS = Catalog(
+    en={
+        'not_reported': 'not reported',
+        'missing_request': 'snapshot of the request (issue taken over before #133)',
+        'missing_turns': 'turns of the agents (no ledger record: work started before #133)',
+        'missing_implement': 'turn of the implementation (no record on the issue)',
+        'missing_ci': 'outcome of the CI on the approved head in the ledger',
+        'missing_acceptance_map': 'coverage map of the criteria (PR opened before #134)',
+        'missing_criteria': 'acceptance criteria (issue text not verifiable)',
+        'verdict_approve': 'approved',
+        'verdict_request_changes': 'changes requested',
+        'verdict_needs_operator': 'decision of the operator',
+        'verdict_unproven': 'no blocking finding with evidence',
+        'closed_resolved': 'resolved',
+        'closed_withdrawn': 'withdrawn',
+        'closed': 'closed',
+        'open': 'open',
+        'map_covered': 'covered',
+        'map_not_covered': 'not covered',
+        # Why a receipt contradicts the markers: each blocks the promotion.
+        'conflict_head': ('the approved commit (`{approved}`) and the head of the policy '
+                          'receipt (`{policy}`) do not match the promoted head (`{head}`)'),
+        'conflict_ci': ('the ledger reports the CI of the approved head `{head}` as `{state}`, '
+                        'but the promotion requires it passed or absent'),
+        'conflict_request': ('the snapshot of the request concerns issue #{request}, the marker '
+                             'of the PR issue #{issue}'),
+        'conflict_author': ('a `{kind}` turn of {at} is by `{agent}`, but the marker of the PR '
+                            'names `{implementer}` as implementer'),
+        'conflict_review': 'a review turn of {at} is by the implementer `{implementer}`',
+        'title': '## Receipt of PR #{pr}',
+        'intro': ('Promotion no. {promotion} to `agent:ready-to-merge`, bound to the approved '
+                  'commit {head}. The content comes only from the dispatcher\'s records and from '
+                  'the markers, never from text written by the agents; a value not attested is '
+                  '`{not_reported}`, never 0.'),
+        'missing': '> **Missing historical data**, declared and not reconstructed:',
+        'request': '### Request',
+        'totals': '### Totals',
+        'turns': '### Turns',
+        'events': '### CI and sync events',
+        'verifications': '### Verifications on the approved head',
+        'rounds': '### Rounds and verdicts',
+        'findings': '### Findings',
+        'policy': '### Policy',
+        'policy_level': 'Level **{level}**.',
+        'criteria': '### Acceptance criteria',
+        'advisory': '### Advisory review',
+        'budget': '### Budget of the story',
+        'request_none': 'Not recorded: the issue was taken over before #133.',
+        'request_issue': '- **Issue:** #{issue}',
+        'request_hash': '- **Hash of title and body (SHA-256):** {hash}',
+        'request_label': '- **Label `agent:ready` added by:** {by}, at {at}',
+        'request_comments': '- **Trusted comments given to the implementer:** {comments}',
+        'request_taken': '- **Taken over:** {at}',
+        'totals_rounds': '- **Rounds:** `{rounds}` (counted for the limit: `{counted}`)',
+        'totals_turns': '- **Turns:** `{turns}`',
+        'totals_turns_ms': '- **Summed duration of the turns (ms):** {ms}',
+        'totals_tokens': ('- **Known tokens:** input {input}, output {output}, cache read '
+                          '{cache_read}, cache creation {cache_creation}, reasoning (counted '
+                          'apart) {thinking}'),
+        'totals_cost': '- **Known cost (USD):** {cost}',
+        'totals_unreported': ('- **Turns with cost not reported:** `{cost}`; with tokens not '
+                              'reported: `{tokens}`'),
+        'totals_apart': 'Duration of the verifications, apart from that of the turns:',
+        'totals_local': '- **Local tests (ms):** {ms}',
+        'totals_ci': '- **CI checks on the approved head (s):** {s}',
+        'turns_none': 'No turn recorded.',
+        'turns_header': ('| # | Where | Step | Agent | Configured model | Real model | Start | '
+                         'Outcome | Duration (ms) | Tokens in/out | Cost (USD) |'),
+        'fallback': ' (fallback of {model})',
+        'events_none': 'No event recorded.',
+        'events_header': '| Event | Head | State | Round | Base | Previous head | When |',
+        'local_head': '**Local tests on the approved head** (`{head}`):',
+        'local_line': '- {kind}, attempt {attempt}: {outcome}, {ms} ms, at {at}',
+        'local_none': ('No local verification bound to this commit (verifications are bound to '
+                       'the commit created right after the test, if the tree is the same).'),
+        'local_all': 'Local verifications recorded in all: `{n}`.',
+        'ci_head': '**CI on the approved head:**',
+        'ci_none': ('Outcome {not_reported}: no `ci_round` event recorded for this commit and '
+                    'this round.'),
+        'ci_state': 'State {state}, round {round}, recorded at {at}.',
+        'ci_header': '| Check | Outcome | Duration (s) |',
+        'rounds_none': 'No review round (level 0).',
+        'rounds_header': '| Round | Head | Reviewer | Verdict |',
+        'rounds_approved': ' (approved, promoted)',
+        'findings_none': 'No blocking finding.',
+        'findings_header': '| Finding | State | Closed by |',
+        'findings_legacy': '{not_reported} (markers before #110)',
+        'findings_round': '`{by}`, in round {round}',
+        'map_none': 'Map {not_reported}: the PR records no coverage map.',
+        'map_empty': 'Empty map: no recognisable acceptance criterion in the issue.',
+        'map_intro': ('Criteria as the issue text states them; state, tests and reason as the '
+                      'latest map records them. Tests and reason are declared by the agent that '
+                      'wrote the map: they are shown as code, without interpreting them.'),
+        'map_header': ('| # | Criterion | State | Declared tests | Declared reason |'),
+        'budget_none': 'The issue belongs to no story of the journal: no budget envelope.',
+        'budget_intro': ('Story `{story}` (root #{issue}), state of the journal at {at}. '
+                         'Consumed: the turns with a confirmed outcome and the dollars observed; '
+                         'reserved: the turns without a confirmed outcome and the reserves not '
+                         'covered by an observed cost. A value no turn attests is '
+                         '`{not_attested}`, never 0.'),
+        'budget_header': '| Dimension | Consumed | Reserved | Available | Cap |',
+        'budget_turns': 'Turns',
+        'budget_turns_of': 'Turns `{name}`',
+        'budget_phase': 'Phase `{name}`',
+        'budget_gap': ' (turns without an attested value: {n})',
+        'budget_time': 'Time (s)',
+        'budget_deadline': 'Start of the story {started}, deadline {deadline}.',
+        'advisory_failed': 'The advisory review of {who} on commit {head} did not succeed.',
+        'advisory_done': ('Non-binding opinion of {who} on commit {head}: **{opinion}**. It '
+                          'counts neither for the quorum nor for the round limit, opens no '
+                          'finding and changes neither labels nor promotion: the text is in '
+                          'the GitHub review of type `COMMENT` "{title}".'),
+        'superseded': ('> **Receipt superseded** at {at}: {why}. It no longer holds for the '
+                       'merge; a new promotion writes a new receipt.'),
+    },
+    it={
+        'not_reported': 'non riportato',
+        'missing_request': 'snapshot della richiesta (issue presa in carico prima di #133)',
+        'missing_turns': ('turni degli agent (nessun record del registro: lavoro avviato prima '
+                          'di #133)'),
+        'missing_implement': 'turno dell\'implementazione (nessun record sull\'issue)',
+        'missing_ci': 'esito della CI sul head approvato nel registro',
+        'missing_acceptance_map': 'mappa di copertura dei criteri (PR aperta prima di #134)',
+        'missing_criteria': 'criteri di accettazione (testo dell\'issue non verificabile)',
+        'verdict_approve': 'approvata',
+        'verdict_request_changes': 'modifiche richieste',
+        'verdict_needs_operator': 'decisione dell\'operatore',
+        'verdict_unproven': 'nessun finding bloccante con evidenza',
+        'closed_resolved': 'risolto',
+        'closed_withdrawn': 'ritirato',
+        'closed': 'chiuso',
+        'open': 'aperto',
+        'map_covered': 'coperto',
+        'map_not_covered': 'non coperto',
+        'conflict_head': ('il commit approvato (`{approved}`) e il head della ricevuta di policy '
+                          '(`{policy}`) non coincidono con il head promosso (`{head}`)'),
+        'conflict_ci': ('il registro riporta la CI del head approvato `{head}` come `{state}`, '
+                        'ma la promozione la richiede passata o assente'),
+        'conflict_request': ('lo snapshot della richiesta riguarda l\'issue #{request}, il '
+                             'marker della PR l\'issue #{issue}'),
+        'conflict_author': ('un turno `{kind}` del {at} è di `{agent}`, ma il marker della PR '
+                            'indica come implementer `{implementer}`'),
+        'conflict_review': 'un turno di review del {at} è dell\'implementer `{implementer}`',
+        'title': '## Ricevuta della PR #{pr}',
+        'intro': ('Promozione n. {promotion} in `agent:ready-to-merge`, legata al commit '
+                  'approvato {head}. Il contenuto viene solo dai record del dispatcher e dai '
+                  'marker, mai da testo scritto dagli agent; un valore non attestato è '
+                  '`{not_reported}`, mai 0.'),
+        'missing': '> **Dati storici mancanti**, dichiarati e non ricostruiti:',
+        'request': '### Richiesta',
+        'totals': '### Totali',
+        'turns': '### Turni',
+        'events': '### Eventi della CI e di sync',
+        'verifications': '### Verifiche sul head approvato',
+        'rounds': '### Round e verdetti',
+        'findings': '### Finding',
+        'policy': '### Policy',
+        'policy_level': 'Livello **{level}**.',
+        'criteria': '### Criteri di accettazione',
+        'advisory': '### Review consultiva',
+        'budget': '### Budget della storia',
+        'request_none': 'Non registrato: l\'issue è stata presa in carico prima di #133.',
+        'request_issue': '- **Issue:** #{issue}',
+        'request_hash': '- **Hash di titolo e corpo (SHA-256):** {hash}',
+        'request_label': '- **Label `agent:ready` messa da:** {by}, il {at}',
+        'request_comments': '- **Commenti fidati dati all\'implementer:** {comments}',
+        'request_taken': '- **Presa in carico:** {at}',
+        'totals_rounds': '- **Round:** `{rounds}` (contano per il limite: `{counted}`)',
+        'totals_turns': '- **Turni:** `{turns}`',
+        'totals_turns_ms': '- **Durata sommata dei turni (ms):** {ms}',
+        'totals_tokens': ('- **Token noti:** input {input}, output {output}, cache in lettura '
+                          '{cache_read}, cache in creazione {cache_creation}, ragionamento '
+                          '(contato a parte) {thinking}'),
+        'totals_cost': '- **Costo noto (USD):** {cost}',
+        'totals_unreported': ('- **Turni con costo non riportato:** `{cost}`; con token non '
+                              'riportati: `{tokens}`'),
+        'totals_apart': 'Durata delle verifiche, separata da quella dei turni:',
+        'totals_local': '- **Test locali (ms):** {ms}',
+        'totals_ci': '- **Check della CI sul head approvato (s):** {s}',
+        'turns_none': 'Nessun turno registrato.',
+        'turns_header': ('| # | Dove | Passo | Agent | Modello configurato | Modello reale | '
+                         'Inizio | Esito | Durata (ms) | Token in/out | Costo (USD) |'),
+        'fallback': ' (fallback di {model})',
+        'events_none': 'Nessun evento registrato.',
+        'events_header': '| Evento | Head | Stato | Round | Base | Head precedente | Quando |',
+        'local_head': '**Test locali sul head approvato** (`{head}`):',
+        'local_line': '- {kind}, tentativo {attempt}: {outcome}, {ms} ms, il {at}',
+        'local_none': ('Nessuna verifica locale legata a questo commit (le verifiche si legano '
+                       'al commit creato subito dopo il test, se l\'albero è lo stesso).'),
+        'local_all': 'Verifiche locali registrate in tutto: `{n}`.',
+        'ci_head': '**CI sul head approvato:**',
+        'ci_none': ('Esito {not_reported}: nessun evento `ci_round` registrato per questo '
+                    'commit e questo round.'),
+        'ci_state': 'Stato {state}, round {round}, registrato il {at}.',
+        'ci_header': '| Check | Esito | Durata (s) |',
+        'rounds_none': 'Nessun round di review (livello 0).',
+        'rounds_header': '| Round | Head | Reviewer | Verdetto |',
+        'rounds_approved': ' (approvato, promosso)',
+        'findings_none': 'Nessun finding bloccante.',
+        'findings_header': '| Finding | Stato | Chiuso da |',
+        'findings_legacy': '{not_reported} (marker precedenti a #110)',
+        'findings_round': '`{by}`, nel round {round}',
+        'map_none': 'Mappa {not_reported}: la PR non registra una mappa di copertura.',
+        'map_empty': 'Mappa vuota: nessun criterio di accettazione riconoscibile nell\'issue.',
+        'map_intro': ('Criteri come li riporta il testo dell\'issue; stato, test e motivo come li '
+                      'registra l\'ultima mappa. Test e motivo sono dichiarati dall\'agent che ha '
+                      'scritto la mappa: sono riportati come codice, senza interpretarli.'),
+        'map_header': '| # | Criterio | Stato | Test dichiarati | Motivo dichiarato |',
+        'budget_none': ('L\'issue non appartiene a nessuna storia del journal: nessun envelope '
+                        'di budget.'),
+        'budget_intro': ('Storia `{story}` (radice #{issue}), stato del journal al {at}. '
+                         'Consumato: i turni con un esito confermato e i dollari osservati; '
+                         'prenotato: i turni senza esito confermato e le riserve non coperte da '
+                         'un costo osservato. Un valore che nessun turno attesta è '
+                         '`{not_attested}`, mai 0.'),
+        'budget_header': '| Dimensione | Consumato | Prenotato | Disponibile | Tetto |',
+        'budget_turns': 'Turni',
+        'budget_turns_of': 'Turni `{name}`',
+        'budget_phase': 'Fase `{name}`',
+        'budget_gap': ' (turni senza valore attestato: {n})',
+        'budget_time': 'Tempo (s)',
+        'budget_deadline': 'Inizio della storia {started}, scadenza {deadline}.',
+        'advisory_failed': 'La review consultiva di {who} sul commit {head} non è riuscita.',
+        'advisory_done': ('Parere non vincolante di {who} sul commit {head}: **{opinion}**. Non '
+                          'conta per il quorum né per il limite dei round, non apre finding e '
+                          'non cambia label né promozione: il testo è nella review GitHub di '
+                          'tipo `COMMENT` "{title}".'),
+        'superseded': ('> **Ricevuta superata** il {at}: {why}. Non vale più per il merge; una '
+                       'nuova promozione scrive una nuova ricevuta.'),
+    })
+
+
+def missing_text(key, language=ENGLISH):
+    """The text of ``key`` of ``MISSING``, a datum the receipt lacks, in ``language``."""
+    return TEXTS.texts(language)(f'missing_{key}')
 
 
 # Content -------------------------------------------------------------------
@@ -238,7 +470,7 @@ def build(*, pr, issue, head, promotion, policy, request, issue_records, pr_reco
 
 
 def missing(content):
-    """The data the receipt lacks and declares, as keys of ``MISSING_TEXT``: never a reason to
+    """The data the receipt lacks and declares, as keys of ``MISSING``: never a reason to
     block the promotion."""
     gaps = []
     if content['request'] is None:
@@ -257,9 +489,9 @@ def missing(content):
     return gaps
 
 
-def contradictions(content, *, implementer, approved_head):
-    """Where the receipt and the markers disagree, as Italian sentences: each blocks the
-    promotion. Missing data never counts here (:func:`missing`).
+def contradictions(content, *, implementer, approved_head, language=ENGLISH):
+    """Where the receipt and the markers disagree, as sentences in ``language`` (#634): each
+    blocks the promotion. Missing data never counts here (:func:`missing`).
 
     - the head of the policy receipt is not the approved head (the latest round's, or the
       level-0 one);
@@ -268,30 +500,27 @@ def contradictions(content, *, implementer, approved_head):
     - the request snapshot names another issue than the PR marker;
     - a fix or sync turn on the PR was run by another agent than the PR's implementer, or a
       review turn by the implementer itself."""
+    t = TEXTS.texts(language)
     found = []
     head = content['head']
     if approved_head != head or content['policy'].get('head') != head:
-        found.append(f'il commit approvato (`{str(approved_head)[:12]}`) e il head della '
-                     f'ricevuta di policy (`{str(content["policy"].get("head"))[:12]}`) non '
-                     f'coincidono con il head promosso (`{head[:12]}`)')
+        found.append(t('conflict_head', approved=str(approved_head)[:12],
+                       policy=str(content['policy'].get('head'))[:12], head=head[:12]))
     ci = content['verifications']['ci']
     if ci is not None and ci.get('state') not in ('pass', 'none'):
-        found.append(f'il registro riporta la CI del head approvato `{head[:12]}` come '
-                     f'`{ci.get("state")}`, ma la promozione la richiede passata o assente')
+        found.append(t('conflict_ci', head=head[:12], state=ci.get('state')))
     request = content['request']
     if request is not None and request.get('issue') not in (None, content['issue']):
-        found.append(f'lo snapshot della richiesta riguarda l\'issue #{request.get("issue")}, il '
-                     f'marker della PR l\'issue #{content["issue"]}')
+        found.append(t('conflict_request', request=request.get('issue'),
+                       issue=content['issue']))
     for turn in content['turns']:
         if turn['on'] != 'pr':
             continue
         if turn['kind'] in ('fix', 'sync') and turn['agent'] != implementer:
-            found.append(f'un turno `{turn["kind"]}` del {turn["started_at"]} è di '
-                         f'`{turn["agent"]}`, ma il marker della PR indica come implementer '
-                         f'`{implementer}`')
+            found.append(t('conflict_author', kind=turn['kind'], at=turn['started_at'],
+                           agent=turn['agent'], implementer=implementer))
         elif turn['kind'] == 'review' and turn['agent'] == implementer:
-            found.append(f'un turno di review del {turn["started_at"]} è dell\'implementer '
-                         f'`{implementer}`')
+            found.append(t('conflict_review', at=turn['started_at'], implementer=implementer))
     return found
 
 
@@ -310,12 +539,12 @@ def record(content):
 
 
 # Rendering -----------------------------------------------------------------
-def _v(value):
-    """A value as the receipt shows it: ``non riportato`` when it was not attested."""
+def _v(t, value):
+    """A value as the receipt shows it: ``not_reported`` of ``t`` when it was not attested."""
     if value is None:
-        return NOT_REPORTED
+        return t('not_reported')
     if isinstance(value, list):
-        return ', '.join(f'`{v}`' for v in value) if value else NOT_REPORTED
+        return ', '.join(f'`{v}`' for v in value) if value else t('not_reported')
     return f'`{value}`'
 
 
@@ -340,262 +569,287 @@ def _literal(value):
     return f'{fence}{pad}{text}{pad}{fence}'.replace('|', '\\|')
 
 
-def _sha(value):
-    return f'`{value[:12]}`' if isinstance(value, str) and value else NOT_REPORTED
+def _sha(t, value):
+    return f'`{value[:12]}`' if isinstance(value, str) and value else t('not_reported')
 
 
-def _cost(value):
-    return NOT_REPORTED if value is None else f'`{value:.4f}`'
+def _cost(t, value):
+    return t('not_reported') if value is None else f'`{value:.4f}`'
 
 
-def _request(request):
+def _known(t, prefix, value, default=None):
+    """The text of ``<prefix>_<value>`` in ``t``; when the catalogue does not know it,
+    ``default`` or the value as a table cell."""
+    key = f'{prefix}_{value}'
+    if key in TEXTS.tables[ENGLISH]:
+        return t(key)
+    return _cell(value) if default is None else default
+
+
+def _request(t, request):
     if request is None:
-        return ['Non registrato: l\'issue è stata presa in carico prima di #133.']
-    return [f'- **Issue:** #{request.get("issue")}',
-            f'- **Hash di titolo e corpo (SHA-256):** {_v(request.get("hash"))}',
-            f'- **Label `agent:ready` messa da:** {_v(request.get("labeled_by"))}, il '
-            f'{_v(request.get("labeled_at"))}',
-            f'- **Commenti fidati dati all\'implementer:** {_v(request.get("comments"))}',
-            f'- **Presa in carico:** {_v(request.get("taken_at"))}']
+        return [t('request_none')]
+    return [t('request_issue', issue=request.get('issue')),
+            t('request_hash', hash=_v(t, request.get('hash'))),
+            t('request_label', by=_v(t, request.get('labeled_by')),
+              at=_v(t, request.get('labeled_at'))),
+            t('request_comments', comments=_v(t, request.get('comments'))),
+            t('request_taken', at=_v(t, request.get('taken_at')))]
 
 
-def _totals(t):
-    tokens = t['tokens']
-    return [f'- **Round:** `{t["rounds"]}` (contano per il limite: `{t["counted_rounds"]}`)',
-            f'- **Turni:** `{t["turns"]}`',
-            f'- **Durata sommata dei turni (ms):** {_v(t["turns_ms"])}',
-            '- **Token noti:** input ' + _v(tokens['input_tokens']) + ', output '
-            + _v(tokens['output_tokens']) + ', cache in lettura '
-            + _v(tokens['cache_read_input_tokens']) + ', cache in creazione '
-            + _v(tokens['cache_creation_input_tokens']) + ', ragionamento (contato a parte) '
-            + _v(tokens['thinking_tokens']),
-            f'- **Costo noto (USD):** {_cost(t["cost_usd"])}',
-            f'- **Turni con costo non riportato:** `{t["cost_unreported"]}`; con token non '
-            f'riportati: `{t["tokens_unreported"]}`',
-            '', 'Durata delle verifiche, separata da quella dei turni:', '',
-            f'- **Test locali (ms):** {_v(t["verifications_ms"])}',
-            f'- **Check della CI sul head approvato (s):** {_v(t["ci_s"])}']
+def _totals(t, totals):
+    tokens = totals['tokens']
+    return [t('totals_rounds', rounds=totals['rounds'], counted=totals['counted_rounds']),
+            t('totals_turns', turns=totals['turns']),
+            t('totals_turns_ms', ms=_v(t, totals['turns_ms'])),
+            t('totals_tokens', input=_v(t, tokens['input_tokens']),
+              output=_v(t, tokens['output_tokens']),
+              cache_read=_v(t, tokens['cache_read_input_tokens']),
+              cache_creation=_v(t, tokens['cache_creation_input_tokens']),
+              thinking=_v(t, tokens['thinking_tokens'])),
+            t('totals_cost', cost=_cost(t, totals['cost_usd'])),
+            t('totals_unreported', cost=totals['cost_unreported'],
+              tokens=totals['tokens_unreported']),
+            '', t('totals_apart'), '',
+            t('totals_local', ms=_v(t, totals['verifications_ms'])),
+            t('totals_ci', s=_v(t, totals['ci_s']))]
 
 
-def _turns(turns):
+def _turns(t, turns):
     if not turns:
-        return ['Nessun turno registrato.']
-    lines = ['| # | Dove | Passo | Agent | Modello configurato | Modello reale | Inizio | Esito '
-             '| Durata (ms) | Token in/out | Costo (USD) |',
-             '|---|---|---|---|---|---|---|---|---|---|---|']
-    for i, t in enumerate(turns, 1):
-        model = _v(t['model']) + (f' (fallback di {_v(t["fallback_for"])})'
-                                  if t.get('fallback_for') else '')
-        outcome = t['outcome'] or (t['state'] if t['state'] != 'closed' else None)
-        tel = t['telemetry']
-        step = _v(t['kind']) + (' (finding-only)' if t.get('role') == FINDINGS_ONLY else '')
-        lines.append(f'| {i} | {t["on"]} | {step} | {_v(t["agent"])} | '
-                     f'{_cell(model)} | {_cell(_v(t["model_real"]))} | {_v(t["started_at"])} | '
-                     f'{_v(outcome)} | {_v(t["duration_ms"])} | '
-                     f'{_v(tel["input_tokens"])} / {_v(tel["output_tokens"])} | '
-                     f'{_cost(tel["cost_usd"])} |')
+        return [t('turns_none')]
+    lines = [t('turns_header'), '|---|---|---|---|---|---|---|---|---|---|---|']
+    for i, turn in enumerate(turns, 1):
+        model = _v(t, turn['model']) + (t('fallback', model=_v(t, turn['fallback_for']))
+                                        if turn.get('fallback_for') else '')
+        outcome = turn['outcome'] or (turn['state'] if turn['state'] != 'closed' else None)
+        tel = turn['telemetry']
+        step = _v(t, turn['kind']) + (' (finding-only)' if turn.get('role') == FINDINGS_ONLY
+                                      else '')
+        lines.append(f'| {i} | {turn["on"]} | {step} | {_v(t, turn["agent"])} | '
+                     f'{_cell(model)} | {_cell(_v(t, turn["model_real"]))} | '
+                     f'{_v(t, turn["started_at"])} | {_v(t, outcome)} | '
+                     f'{_v(t, turn["duration_ms"])} | '
+                     f'{_v(t, tel["input_tokens"])} / {_v(t, tel["output_tokens"])} | '
+                     f'{_cost(t, tel["cost_usd"])} |')
     return lines
 
 
-def _events(events):
+def _events(t, events):
     if not events:
-        return ['Nessun evento registrato.']
-    lines = ['| Evento | Head | Stato | Round | Base | Head precedente | Quando |',
-             '|---|---|---|---|---|---|---|']
+        return [t('events_none')]
+    lines = [t('events_header'), '|---|---|---|---|---|---|---|']
     for e in events:
-        lines.append(f'| {_v(e.get("event"))} | {_sha(e.get("head"))} | {_v(e.get("state"))} | '
-                     f'{_v(e.get("round"))} | {_sha(e.get("base"))} | '
-                     f'{_sha(e.get("previous_head"))} | {_v(e.get("at"))} |')
+        lines.append(f'| {_v(t, e.get("event"))} | {_sha(t, e.get("head"))} | '
+                     f'{_v(t, e.get("state"))} | {_v(t, e.get("round"))} | '
+                     f'{_sha(t, e.get("base"))} | {_sha(t, e.get("previous_head"))} | '
+                     f'{_v(t, e.get("at"))} |')
     return lines
 
 
-def _verifications(content):
+def _verifications(t, content):
     v, head = content['verifications'], content['head']
-    lines = [f'**Test locali sul head approvato** (`{head[:12]}`):', '']
+    lines = [t('local_head', head=head[:12]), '']
     if v['head']:
-        lines += [f'- {_v(x["kind"])}, tentativo {_v(x["attempt"])}: {_v(x["outcome"])}, '
-                  f'{_v(x["duration_ms"])} ms, il {_v(x["at"])}' for x in v['head']]
+        lines += [t('local_line', kind=_v(t, x['kind']), attempt=_v(t, x['attempt']),
+                    outcome=_v(t, x['outcome']), ms=_v(t, x['duration_ms']), at=_v(t, x['at']))
+                  for x in v['head']]
     else:
-        lines.append('Nessuna verifica locale legata a questo commit (le verifiche si legano '
-                     'al commit creato subito dopo il test, se l\'albero è lo stesso).')
-    lines += ['', f'Verifiche locali registrate in tutto: `{len(v["local"])}`.', '',
-              '**CI sul head approvato:**', '']
+        lines.append(t('local_none'))
+    lines += ['', t('local_all', n=len(v['local'])), '', t('ci_head'), '']
     ci = v['ci']
     if ci is None:
-        lines.append(f'Esito {NOT_REPORTED}: nessun evento `ci_round` registrato per questo '
-                     'commit e questo round.')
+        lines.append(t('ci_none', not_reported=t('not_reported')))
         return lines
-    lines.append(f'Stato {_v(ci.get("state"))}, round {_v(ci.get("round"))}, registrato il '
-                 f'{_v(ci.get("at"))}.')
+    lines.append(t('ci_state', state=_v(t, ci.get('state')), round=_v(t, ci.get('round')),
+                   at=_v(t, ci.get('at'))))
     if ci.get('checks'):
-        lines += ['', '| Check | Esito | Durata (s) |', '|---|---|---|']
-        lines += [f'| {_cell(c.get("name"))} | {_v(c.get("outcome"))} | '
-                  f'{_v(c.get("duration_s"))} |' for c in ci['checks']]
+        lines += ['', t('ci_header'), '|---|---|---|']
+        lines += [f'| {_cell(c.get("name"))} | {_v(t, c.get("outcome"))} | '
+                  f'{_v(t, c.get("duration_s"))} |' for c in ci['checks']]
     return lines
 
 
-def _rounds_text(rounds, approved):
+def _rounds_text(rounds, approved, language=ENGLISH):
+    t = TEXTS.texts(language)
     if not rounds:
-        return ['Nessun round di review (livello 0).']
-    lines = ['| Round | Head | Reviewer | Verdetto |', '|---|---|---|---|']
+        return [t('rounds_none')]
+    lines = [t('rounds_header'), '|---|---|---|---|']
     for r in rounds:
         for v in r['verdicts']:
-            mark = ' (approvato, promosso)' if r['round'] == approved else ''
+            mark = t('rounds_approved') if r['round'] == approved else ''
             # #416: a findings-only review, whose verdict does not count for the quorum.
-            who = _v(v['reviewer']) + (' (finding-only)' if v.get('role') == FINDINGS_ONLY else '')
-            lines.append(f'| {r["round"]}{mark} | {_sha(r["head"])} | {who} | '
-                         f'{_VERDICT.get(v["verdict"], _cell(v["verdict"]))} |')
+            who = _v(t, v['reviewer']) + (' (finding-only)' if v.get('role') == FINDINGS_ONLY
+                                          else '')
+            lines.append(f'| {r["round"]}{mark} | {_sha(t, r["head"])} | {who} | '
+                         f'{_known(t, "verdict", v["verdict"])} |')
     return lines
 
 
-def _findings_text(findings):
+def _findings_text(t, findings):
     if not findings:
-        return ['Nessun finding bloccante.']
-    lines = ['| Finding | Stato | Chiuso da |', '|---|---|---|']
+        return [t('findings_none')]
+    lines = [t('findings_header'), '|---|---|---|']
     for f in findings:
         if f['status'] == 'open':
-            state, who = 'aperto', '—'
+            state, who = t('open'), '—'
         else:
-            state = _CLOSED.get(f['status'], 'chiuso')
+            state = _known(t, 'closed', f['status'], t('closed'))
             if f['by'] is None:
-                who = f'{NOT_REPORTED} (marker precedenti a #110)'
+                who = t('findings_legacy', not_reported=t('not_reported'))
             elif f['by'] in (CI, *AUTHORITIES):
                 who = f'`{f["by"]}`' + (f' (`{f["author"]}`)' if f.get('author') else '')
             else:
-                who = f'`{f["by"]}`, nel round {f["round"]}'
+                who = t('findings_round', by=f['by'], round=f['round'])
         lines.append(f'| `{f["key"]}` | {state} | {who} |')
     return lines
 
 
-def _acceptance_text(acceptance):
+def _acceptance_text(t, acceptance):
     criteria, entries = acceptance['criteria'], acceptance['map']
     if entries is None:
-        return [f'Mappa {NOT_REPORTED}: la PR non registra una mappa di copertura.']
+        return [t('map_none', not_reported=t('not_reported'))]
     if not entries:
-        return ['Mappa vuota: nessun criterio di accettazione riconoscibile nell\'issue.']
-    lines = ['Criteri come li riporta il testo dell\'issue; stato, test e motivo come li '
-             'registra l\'ultima mappa. Test e motivo sono dichiarati dall\'agent che ha scritto '
-             'la mappa: sono riportati come codice, senza interpretarli.', '',
-             '| # | Criterio | Stato | Test dichiarati | Motivo dichiarato |', '|---|---|---|---|---|']
+        return [t('map_empty')]
+    lines = [t('map_intro'), '', t('map_header'), '|---|---|---|---|---|']
     for i, e in enumerate(entries, 1):
         text = (_cell(criteria[i - 1]) if criteria is not None and i <= len(criteria)
-                else NOT_REPORTED)
-        tests = '<br>'.join(f'{_literal(t["file"])}: {_literal(t["name"])}'
-                            for t in e['tests']) or '—'
-        lines.append(f'| {i} | {text} | {_MAP_STATUS.get(e["status"], _cell(e["status"]))} | '
+                else t('not_reported'))
+        tests = '<br>'.join(f'{_literal(test["file"])}: {_literal(test["name"])}'
+                            for test in e['tests']) or '—'
+        lines.append(f'| {i} | {text} | {_known(t, "map", e["status"])} | '
                      f'{tests} | {_literal(e["reason"])} |')
     return lines
 
 
-def render(content, marker=None):
+def render(content, marker=None, language=ENGLISH):
     """The comment of a receipt on its own: the dispatcher's header, every section, the
     ``receipt`` marker. A promotion carries it in its own comment instead (:func:`section`,
     #338); this form is the one of the receipts written before, and of a promotion too long for
-    one comment."""
-    return publishable(dispatcher_header() + '\n' + section(content), 'receipt',
+    one comment. ``language``: the project's (#634), of the readable text; the record is the
+    same in every language."""
+    return publishable(dispatcher_header() + '\n' + section(content, language), 'receipt',
                        marker or record(content))
 
 
-def section(content):
+def title(pr, language=ENGLISH):
+    """The title of the receipt of PR ``pr`` in ``language`` (#634)."""
+    return TEXTS.texts(language)('title', pr=pr)
+
+
+def titles(pr):
+    """The title of the receipt of PR ``pr`` in every language devloop has (#634): what
+    recognises a receipt published before a change of ``language``."""
+    return tuple(text.format(pr=pr) for text in TEXTS.variants('title'))
+
+
+def section(content, language=ENGLISH):
     """The readable text of a receipt, without header nor marker: its title and every
-    section."""
+    section, in ``language`` (#634)."""
+    t = TEXTS.texts(language)
     head, promotion = content['head'], content['promotion']
-    parts = [f'## Ricevuta della PR #{content["pr"]}', '',
-             f'Promozione n. {promotion} in `agent:ready-to-merge`, legata al commit approvato '
-             f'{_sha(head)}. Il contenuto viene solo dai record del dispatcher e dai marker, mai '
-             'da testo scritto dagli agent; un valore non attestato è `non riportato`, mai 0.']
+    parts = [title(content['pr'], language), '',
+             t('intro', promotion=promotion, head=_sha(t, head),
+               not_reported=t('not_reported'))]
     if content['missing']:
-        parts += ['', '> **Dati storici mancanti**, dichiarati e non ricostruiti:', '>']
-        parts += [f'> - {MISSING_TEXT[key]}' for key in content['missing']]
-    parts += ['', '### Richiesta', '', *_request(content['request']),
-              '', '### Totali', '', *_totals(content['totals']),
-              '', '### Turni', '', *_turns(content['turns']),
-              '', '### Eventi della CI e di sync', '', *_events(content['events']),
-              '', '### Verifiche sul head approvato', '', *_verifications(content),
-              '', '### Round e verdetti', '',
-              *_rounds_text(content['rounds'], content['approved_round']),
-              '', '### Finding', '', *_findings_text(content['findings']),
-              '', '### Policy', '', f'Livello **{content["policy"]["level"]}**.', '',
-              describe_policy(content['policy']),
-              '', '### Criteri di accettazione', '', *_acceptance_text(content['acceptance'])]
+        parts += ['', t('missing'), '>']
+        parts += [f'> - {t("missing_" + key)}' for key in content['missing']]
+    parts += ['', t('request'), '', *_request(t, content['request']),
+              '', t('totals'), '', *_totals(t, content['totals']),
+              '', t('turns'), '', *_turns(t, content['turns']),
+              '', t('events'), '', *_events(t, content['events']),
+              '', t('verifications'), '', *_verifications(t, content),
+              '', t('rounds'), '',
+              *_rounds_text(content['rounds'], content['approved_round'], language),
+              '', t('findings'), '', *_findings_text(t, content['findings']),
+              '', t('policy'), '', t('policy_level', level=content['policy']['level']), '',
+              describe_policy(content['policy'], language),
+              '', t('criteria'), '', *_acceptance_text(t, content['acceptance'])]
     if content.get('advisory') is not None:
-        parts += ['', '### Review consultiva', '', *_advisory_text(content['advisory'])]
+        parts += ['', t('advisory'), '', *_advisory_text(t, content['advisory'], language)]
     if content.get('budget') is not None:
-        parts += ['', '### Budget della storia', '', *_budget_text(content['budget'])]
+        parts += ['', t('budget'), '', *_budget_text(t, content['budget'], language)]
     return '\n'.join(parts)
 
 
-def _budget_text(found):
+def _budget_text(t, found, language=ENGLISH):
     """The state of the budget of the story (#393, ``budget.view``): consumed, reserved and
-    available per dimension; a value no turn attests is ``non attestato``, never 0."""
+    available per dimension; a value no turn attests is ``not_attested`` of the budget's texts
+    (``non attestato`` in Italian), never 0."""
     if found.get('story') is None:
-        return ['L\'issue non appartiene a nessuna storia del journal: nessun envelope di '
-                'budget.']
-    lines = [f'Storia `{found["story"]}` (radice #{found["issue"]}), stato del journal al '
-             f'{found["at"]}. Consumato: i turni con un esito confermato e i dollari osservati; '
-             'prenotato: i turni senza esito confermato e le riserve non coperte da un costo '
-             f'osservato. Un valore che nessun turno attesta è `{NOT_ATTESTED}`, mai 0.', '',
-             '| Dimensione | Consumato | Prenotato | Disponibile | Tetto |',
-             '|---|---|---|---|---|']
+        return [t('budget_none')]
+    b = BUDGET_TEXTS.texts(language)
+
+    def usd(value):
+        return b('not_attested') if value is None else f'{value:.2f} USD'
+
+    lines = [t('budget_intro', story=found['story'], issue=found['issue'], at=found['at'],
+               not_attested=b('not_attested')), '',
+             t('budget_header'), '|---|---|---|---|---|']
 
     def count(label, c):
         cap = '—' if c['cap'] is None else c['cap']
         available = '—' if c['available'] is None else c['available']
         return f'| {label} | {c["consumed"]} | {c["reserved"]} | {available} | {cap} |'
 
-    lines.append(count('Turni', found['turns']))
-    lines += [count(f'Turni `{name}`', c) for name, c in found['roles'].items()]
-    lines += [count(f'Fase `{name}`', c) for name, c in found['phases'].items()]
+    lines.append(count(t('budget_turns'), found['turns']))
+    lines += [count(t('budget_turns_of', name=name), c) for name, c in found['roles'].items()]
+    lines += [count(t('budget_phase', name=name), c) for name, c in found['phases'].items()]
     for kind, d in found['usd'].items():
-        gap = (f' (turni senza valore attestato: {d["unattested"]})' if d['unattested']
-               else '')
-        lines.append(f'| `{kind}` | {consumed_usd(d)}{gap} | {usd(d["reserved"])} | '
+        gap = t('budget_gap', n=d['unattested']) if d['unattested'] else ''
+        consumed = usd(d['consumed'])
+        if d['consumed'] is not None and d['unattested']:
+            consumed = b('at_least', value=consumed)
+        lines.append(f'| `{kind}` | {consumed}{gap} | {usd(d["reserved"])} | '
                      f'{usd(d["available"])} | {usd(d["cap"])} |')
-    t = found['time']
-    lines.append(f'| Tempo (s) | {t["consumed"]} | — | {t["available"]} | {t["cap"]} |')
-    lines += ['', f'Inizio della storia {t["started_at"]}, scadenza {t["deadline_at"]}.']
+    time_ = found['time']
+    lines.append(f'| {t("budget_time")} | {time_["consumed"]} | — | {time_["available"]} | '
+                 f'{time_["cap"]} |')
+    lines += ['', t('budget_deadline', started=time_['started_at'],
+                    deadline=time_['deadline_at'])]
     return lines
 
 
-def _advisory_text(advisory):
+def _advisory_text(t, advisory, language=ENGLISH):
     """The advisory review of the head (#369): who wrote it and its opinion, never its text."""
-    who, head = _v(advisory['reviewer']), _sha(advisory['head'])
+    # Imported here: the module of the advisory review imports this one.
+    from .dispatch_advisory import advisory_titles
+    who, head = _v(t, advisory['reviewer']), _sha(t, advisory['head'])
     if advisory['outcome'] != 'done':
-        return [f'La review consultiva di {who} sul commit {head} non è riuscita.']
-    return [f'Parere non vincolante di {who} sul commit {head}: **{advisory["opinion"]}**. '
-            'Non conta per il quorum né per il limite dei round, non apre finding e non '
-            'cambia label né promozione: il testo è nella review GitHub di tipo `COMMENT` '
-            '"Review consultiva: non conta per il quorum".']
+        return [t('advisory_failed', who=who, head=head)]
+    return [t('advisory_done', who=who, head=head, opinion=advisory['opinion'],
+              title=advisory_titles(language)['advisory_title'])]
 
 
-def with_advisory(body, content):
+def with_advisory(body, content, language=ENGLISH):
     """``body``, the comment of the current receipt of ``content``'s head, with its receipt
     rewritten from ``content``, which carries the advisory review of that head (#369): the
-    section and the ``receipt`` record, with digest and totals recomputed, while promotion,
-    policy and state stay. The text before the receipt's title and the other records of the
-    comment stay as they are. None when the comment has no such title."""
+    section, in ``language`` (#634), and the ``receipt`` record, with digest and totals
+    recomputed, while promotion, policy and state stay. The text before the receipt's title and
+    the other records of the comment stay as they are. The title is recognised in every
+    language devloop has (``titles``), so that a receipt published before a change of
+    ``language`` is rewritten too. None when the comment has no such title."""
     lines = split_markers(body)[0].splitlines()
-    title = f'## Ricevuta della PR #{content["pr"]}'
-    start = next((i for i, line in enumerate(lines) if line.strip() == title), None)
+    known = titles(content['pr'])
+    start = next((i for i, line in enumerate(lines) if line.strip() in known), None)
     if start is None:
         return None
     end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith('## ')),
                len(lines))
-    text = '\n'.join(lines[:start] + section(content).splitlines()
+    text = '\n'.join(lines[:start] + section(content, language).splitlines()
                      + [''] * (end < len(lines)) + lines[end:])
     return with_record(body, 'receipt', record(content), text=text)
 
 
-def superseded(body, marker, why, at):
+def superseded(body, marker, why, at, language=ENGLISH):
     """``body``, the comment of a current receipt with ``marker``, marked as superseded at
-    ``at`` because ``why``: a warning before its first title, and the marker with ``state:
-    superseded``. The other records of the comment, such as the ``policy`` record of the
-    promotion that carries the receipt (#338), stay as they are."""
+    ``at`` because ``why``: a warning before its first title, in ``language`` (#634), and the
+    marker with ``state: superseded``. The other records of the comment, such as the ``policy``
+    record of the promotion that carries the receipt (#338), stay as they are."""
     lines = split_markers(body)[0].splitlines()
-    title = next((i for i, line in enumerate(lines) if line.startswith('## ')), len(lines))
+    first = next((i for i, line in enumerate(lines) if line.startswith('## ')), len(lines))
     warning = ['> [!WARNING]',
-               f'> **Ricevuta superata** il {at}: {" ".join(why.split())}. Non vale più per il '
-               'merge; una nuova promozione scrive una nuova ricevuta.', '']
-    text = '\n'.join(lines[:title] + warning + lines[title:])
+               TEXTS.texts(language)('superseded', at=at, why=' '.join(why.split())), '']
+    text = '\n'.join(lines[:first] + warning + lines[first:])
     return with_record(body, 'receipt', dict(marker, state='superseded', superseded_at=at,
                                              reason=' '.join(why.split())), text=text)

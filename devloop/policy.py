@@ -43,6 +43,8 @@ import json
 import posixpath
 from dataclasses import dataclass
 
+from .i18n import ENGLISH, Catalog
+
 # Bumped when the meaning of a policy changes, so that receipts given under the old meaning no
 # longer match.
 POLICY_SCHEMA = 2  # 2: level 2 runs two independent reviewers (#111)
@@ -419,60 +421,108 @@ def differences(recorded, current):
     return [k for k in BINDING if recorded.get(k) != current.get(k)]
 
 
-def describe(receipt):
-    """Markdown lines explaining a receipt's level."""
-    lines = [f'- Livello effettivo: **{receipt["level"]}** (policy `{receipt["policy"][:12]}`, '
-             f'base `{receipt["base"][:12]}`, head `{receipt["head"][:12]}`).']
+# The texts of the description of a receipt (#634), in the project's ``language`` (``i18n``);
+# English for a language without translation. Labels, paths and modes are never translated.
+TEXTS = Catalog(
+    en={
+        'level': ('- Effective level: **{level}** (policy `{policy}`, base `{base}`, head '
+                  '`{head}`).'),
+        'label': '- Label `{label}` added by `{by}`.',
+        'paths': '- Sensitive paths in the diff: {paths}{more}.',
+        'more': ' and {n} more',
+        'previous': ('- Level {level} already required earlier on this PR: the level does not '
+                     'go down.'),
+        'none_zero': 'none (level 0)',
+        'none_independent': 'no independent agent',
+        'reviewers': '- Required reviewers: {reviewers}.',
+        SEQUENTIAL: 'starts only if the first approves',
+        PARALLEL_CANCEL: ('starts together with the first and is cancelled if the first does '
+                          'not approve'),
+        'second': '- Second reviewer: `{mode}` ({how}).',
+        'findings': '- Findings-only reviewer, which does not count for the quorum: {keys}.',
+        'zero': '- Label `{label}` added by `{by}` at `{at}`',
+        'zero_applied': ': level 0, the diff is entirely in the allowlist.',
+        'zero_level': 'the computed level is 2, and the label waives level 1 only',
+        'zero_refused': ('an earlier recomputation already excluded this label: going back to '
+                         'level 0 needs a new label of a trusted user'),
+        'zero_allowlist': 'the diff leaves the allowlist of level 0: {paths}{more}',
+        'zero_not_applied': ', not applied: {why}.',
+    },
+    it={
+        'level': ('- Livello effettivo: **{level}** (policy `{policy}`, base `{base}`, head '
+                  '`{head}`).'),
+        'label': '- Label `{label}` messa da `{by}`.',
+        'paths': '- Percorsi sensibili nel diff: {paths}{more}.',
+        'more': ' e altri {n}',
+        'previous': ('- Livello {level} già richiesto in precedenza su questa PR: il livello '
+                     'non scende.'),
+        'none_zero': 'nessuno (livello 0)',
+        'none_independent': 'nessun agent indipendente',
+        'reviewers': '- Reviewer richiesti: {reviewers}.',
+        SEQUENTIAL: 'parte solo se il primo approva',
+        PARALLEL_CANCEL: 'parte insieme al primo ed è annullato se il primo non approva',
+        'second': '- Secondo reviewer: `{mode}` ({how}).',
+        'findings': '- Reviewer di soli finding, che non conta per il quorum: {keys}.',
+        'zero': '- Label `{label}` messa da `{by}` il `{at}`',
+        'zero_applied': ': livello 0, il diff è interamente nell\'allowlist.',
+        'zero_level': 'il livello calcolato è 2, e la label deroga solo al livello 1',
+        'zero_refused': ('un ricalcolo precedente ha già escluso questa label: per tornare al '
+                         'livello 0 serve una nuova label di un utente fidato'),
+        'zero_allowlist': 'il diff esce dall\'allowlist del livello 0: {paths}{more}',
+        'zero_not_applied': ', non applicata: {why}.',
+    })
+
+
+def _listed(t, reason, key):
+    """The paths of ``reason`` under ``key`` as code, and how many more it counted."""
+    paths = reason.get(key) or []
+    more = (reason.get('count') or len(paths)) - len(paths)
+    return ', '.join(f'`{p}`' for p in paths), (t('more', n=more) if more > 0 else '')
+
+
+def describe(receipt, language=ENGLISH):
+    """Markdown lines explaining a receipt's level, in ``language`` (#634)."""
+    t = TEXTS.texts(language)
+    lines = [t('level', level=receipt['level'], policy=receipt['policy'][:12],
+               base=receipt['base'][:12], head=receipt['head'][:12])]
     for reason in receipt['reasons']:
         kind = reason.get('kind')
         if kind == 'label':
-            lines.append(f'- Label `{reason.get("label")}` messa da `{reason.get("by")}`.')
+            lines.append(t('label', label=reason.get('label'), by=reason.get('by')))
         elif kind == 'paths':
-            paths = reason.get('paths') or []
-            more = (reason.get('count') or len(paths)) - len(paths)
-            lines.append('- Percorsi sensibili nel diff: '
-                         + ', '.join(f'`{p}`' for p in paths)
-                         + (f' e altri {more}' if more > 0 else '') + '.')
+            paths, more = _listed(t, reason, 'paths')
+            lines.append(t('paths', paths=paths, more=more))
         elif kind == 'previous':
-            lines.append(f'- Livello {reason.get("level")} già richiesto in precedenza su questa '
-                         'PR: il livello non scende.')
+            lines.append(t('previous', level=reason.get('level')))
         elif kind == 'zero':
-            lines.append(_describe_zero(reason))
+            lines.append(_describe_zero(t, reason))
     reviewers = (', '.join(f'`{r}`' for r in receipt['reviewers'])
-                 or ('nessuno (livello 0)' if receipt['level'] == ZERO_LEVEL
-                     else 'nessun agent indipendente'))
-    lines.append(f'- Reviewer richiesti: {reviewers}.')
+                 or (t('none_zero') if receipt['level'] == ZERO_LEVEL
+                     else t('none_independent')))
+    lines.append(t('reviewers', reviewers=reviewers))
     mode = receipt.get('second_reviewer')
     if mode in (SEQUENTIAL, PARALLEL_CANCEL):
-        lines.append(f'- Secondo reviewer: `{mode}` ('
-                     + ('parte solo se il primo approva' if mode == SEQUENTIAL else
-                        'parte insieme al primo ed è annullato se il primo non approva')
-                     + ').')
+        lines.append(t('second', mode=mode, how=t(mode)))
     # The findings-only reviewer (#416): outside the binding fields, never required.
     findings = receipt.get('findings')
     if isinstance(findings, list) and findings:
-        lines.append('- Reviewer di soli finding, che non conta per il quorum: '
-                     + ', '.join(f'`{r}`' for r in findings) + '.')
+        lines.append(t('findings', keys=', '.join(f'`{r}`' for r in findings)))
     return '\n'.join(lines)
 
 
-_ZERO_WHY = {'level': 'il livello calcolato è 2, e la label deroga solo al livello 1',
-             'refused': 'un ricalcolo precedente ha già escluso questa label: per tornare al '
-                        'livello 0 serve una nuova label di un utente fidato'}
+# Why a level-0 label was not applied, by the ``why`` of its reason: keys of ``TEXTS``.
+_ZERO_WHY = {'level': 'zero_level', 'refused': 'zero_refused'}
 
 
-def _describe_zero(reason):
-    text = (f'- Label `{reason.get("label")}` messa da `{reason.get("by")}` il '
-            f'`{reason.get("at")}`')
+def _describe_zero(t, reason):
+    text = t('zero', label=reason.get('label'), by=reason.get('by'), at=reason.get('at'))
     if reason.get('applied'):
-        return text + ': livello 0, il diff è interamente nell\'allowlist.'
-    why = [_ZERO_WHY[w] for w in reason.get('why') or () if w in _ZERO_WHY]
+        return text + t('zero_applied')
+    why = [t(_ZERO_WHY[w]) for w in reason.get('why') or () if w in _ZERO_WHY]
     if 'allowlist' in (reason.get('why') or ()):
-        paths = reason.get('outside') or []
-        more = (reason.get('count') or len(paths)) - len(paths)
-        why.append('il diff esce dall\'allowlist del livello 0: '
-                   + ', '.join(f'`{p}`' for p in paths) + (f' e altri {more}' if more > 0 else ''))
-    return text + ', non applicata: ' + '; '.join(why) + '.'
+        paths, more = _listed(t, reason, 'outside')
+        why.append(t('zero_allowlist', paths=paths, more=more))
+    return text + t('zero_not_applied', why='; '.join(why))
 
 
 def check_states(expected, runs):

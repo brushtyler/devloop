@@ -1,8 +1,9 @@
-"""devloop: the language of the dispatcher's texts (#631, #632, #633). The project's
+"""devloop: the language of the dispatcher's texts (#631, #632, #633, #634). The project's
 ``language`` chooses Italian or English, English for a language without translation; the ledger
 writes its records in it, and so do the review, the fix, the readiness check, the advisory
-review, the conclave, the escalations and the answers to the commands on them, with the same
-markers, and the records already published stay recognised after a change of ``language``."""
+review, the conclave, the escalations and the answers to the commands on them, the promotions,
+the merges and the receipts, with the same markers, and the records already published stay
+recognised after a change of ``language``."""
 
 import dataclasses
 import unittest
@@ -944,6 +945,179 @@ class SupervisionLanguageTests(SupervisionCase):
                                      self.escalations(100))
         self.assertEqual(records['Italian'], records['English'])
         self.assertEqual(records['English'], records['French'])
+
+
+class MergeLanguageTests(unittest.TestCase):
+    """#634: promotions, merges and receipts in the project's language, English for a language
+    without translation; their records are the same in every language, and a receipt published
+    before a change of ``language`` is still recognised by its title."""
+
+    def test_the_catalogues_have_every_text_in_italian(self):
+        from devloop import context, dispatch_merge, policy, receipt
+        for catalog in (dispatch_merge.TEXTS, policy.TEXTS, receipt.TEXTS,
+                        context.BASES_TEXTS):
+            self.assertEqual(set(catalog.tables[ITALIAN]), set(catalog.tables[ENGLISH]))
+
+    def test_the_description_of_a_policy_receipt(self):
+        from devloop import policy
+        found = {'pr': 100, 'base': 'c' * 40, 'head': SHA1, 'policy': 'p' * 64, 'level': 2,
+                 'reviewers': [], 'second_reviewer': 'sequential',
+                 'reasons': [{'kind': 'label', 'label': 'reviews:2', 'by': 'brushtyler'},
+                             {'kind': 'paths', 'paths': ['devloop/x.py'], 'count': 3},
+                             {'kind': 'zero', 'label': 'reviews:0', 'by': 'brushtyler',
+                              'at': 't', 'applied': False, 'why': ['level', 'allowlist'],
+                              'outside': ['a.py'], 'count': 1}]}
+        expected = {
+            'Italian': ('- Livello effettivo: **2**', '- Label `reviews:2` messa da `brushtyler`.',
+                        '- Percorsi sensibili nel diff: `devloop/x.py` e altri 2.',
+                        'non applicata: il livello calcolato è 2',
+                        'il diff esce dall\'allowlist del livello 0: `a.py`',
+                        '- Reviewer richiesti: nessun agent indipendente.',
+                        '- Secondo reviewer: `sequential` (parte solo se il primo approva).'),
+            'English': ('- Effective level: **2**', '- Label `reviews:2` added by `brushtyler`.',
+                        '- Sensitive paths in the diff: `devloop/x.py` and 2 more.',
+                        'not applied: the computed level is 2',
+                        'the diff leaves the allowlist of level 0: `a.py`',
+                        '- Required reviewers: no independent agent.',
+                        '- Second reviewer: `sequential` (starts only if the first approves).'),
+        }
+        for language in ('Italian', 'English', 'French'):
+            with self.subTest(language=language):
+                text = policy.describe(found, language)
+                for phrase in expected.get(language, expected['English']):
+                    self.assertIn(phrase, text)
+        self.assertEqual(policy.describe(found), policy.describe(found, 'English'))
+
+    def test_the_receipt_its_record_and_its_supersession(self):
+        from devloop import receipt
+        from test_devloop_receipt import ReceiptContentTests
+        content = ReceiptContentTests().content(criteria=['A'], acceptance_map=[
+            {'criterion': 'A', 'tests': [], 'status': 'not_covered', 'reason': 'r'}])
+        expected = {
+            'Italian': ('## Ricevuta della PR #100', '### Richiesta', '### Round e verdetti',
+                        '| 1 | A | non coperto | — | `r` |', '- Livello effettivo: **1**',
+                        '> **Dati storici mancanti**', '> **Ricevuta superata** il t: nuovo '
+                        'head.', 'riguarda l\'issue #8'),
+            'English': ('## Receipt of PR #100', '### Request', '### Rounds and verdicts',
+                        '| 1 | A | not covered | — | `r` |', '- Effective level: **1**',
+                        '> **Missing historical data**', '> **Receipt superseded** at t: nuovo '
+                        'head.', 'concerns issue #8'),
+        }
+        markers = []
+        for language in ('Italian', 'English', 'French'):
+            with self.subTest(language=language):
+                phrases = expected.get(language, expected['English'])
+                body = receipt.render(content, language=language)
+                marked = receipt.superseded(body, markdown.read_marker(body, 'receipt'),
+                                            'nuovo head', 't', language)
+                (conflict,) = receipt.contradictions(
+                    ReceiptContentTests().content(request={'issue': 8}), implementer='x',
+                    approved_head=SHA1, language=language)
+                for phrase in phrases[:-1]:
+                    self.assertIn(phrase, marked)
+                self.assertIn(phrases[-1], conflict)
+                markers.append((markdown.read_marker(body, 'receipt'),
+                                markdown.read_marker(marked, 'receipt')))
+        # The content, its digest and the record are the same in every language.
+        self.assertEqual(markers[0], markers[1])
+        self.assertEqual(markers[1], markers[2])
+        self.assertEqual(receipt.render(content), receipt.render(content, language='English'))
+
+    def test_a_receipt_published_before_a_change_of_language_takes_the_advisory_review(self):
+        from devloop import receipt
+        from test_devloop_receipt import ReceiptContentTests
+        before = ReceiptContentTests().content()
+        after = dict(before, advisory={'head': SHA1, 'reviewer': 'codex', 'outcome': 'done',
+                                       'opinion': 'ok'})
+        for old, new, title, section in (
+                ('Italian', 'English', '## Receipt of PR #100', '### Advisory review'),
+                ('English', 'Italian', '## Ricevuta della PR #100', '### Review consultiva')):
+            with self.subTest(old=old, new=new):
+                body = markdown.publishable('## Pronta per il merge\n\n'
+                                            + receipt.section(before, old), 'receipt',
+                                            receipt.record(before))
+                rewritten = receipt.with_advisory(body, after, new)
+                self.assertIsNotNone(rewritten)
+                self.assertIn(title, rewritten)
+                self.assertIn(section, rewritten)
+                # The old title is replaced, the text before it stays.
+                self.assertEqual([line for line in rewritten.splitlines()
+                                  if line.startswith('## ')], ['## Pronta per il merge', title])
+                self.assertEqual(markdown.read_marker(rewritten, 'receipt'),
+                                 receipt.record(after))
+        self.assertEqual(receipt.titles(100),
+                         ('## Receipt of PR #100', '## Ricevuta della PR #100'))
+        # A comment with no receipt title is not rewritten.
+        self.assertIsNone(receipt.with_advisory(
+            markdown.publishable('## Altro', 'receipt', receipt.record(before)), after))
+
+    def test_a_promotion_merged_by_devloop(self):
+        from test_devloop import raw_review
+        from test_devloop_receipt import STRICT, ReceiptGH
+        titles = {
+            'Italian': ('## Pronta per il merge', '## Ricevuta della PR #100',
+                        '## Mergiata da devloop', '## Risolta da una PR mergiata'),
+            'English': ('## Ready for merge', '## Receipt of PR #100', '## Merged by devloop',
+                        '## Resolved by a merged PR'),
+        }
+        class OpenIssueGH(ReceiptGH):
+            """The issue of the PR is open, and devloop closes it after the merge."""
+
+            def issue(self, number):
+                return dict(super().issue(number), state='OPEN', labels=[])
+
+            def close_issue(self, number):
+                pass
+
+        records = {}
+        for language in ('Italian', 'English', 'French'):
+            with self.subTest(language=language):
+                gh = OpenIssueGH()
+                gh.labels[100] = {'agent:review'}
+                d = Dispatcher(dataclasses.replace(STRICT, language=language), gh, FakeWS(),
+                               FakeRunner(*[raw_review()] * 3), log=lambda m: None,
+                               ledger=Ledger(gh))
+                d.tick()
+                self.assertEqual([a.kind for a in d.tick()], ['merge'])
+                expected = titles.get(language, titles['English'])
+                (promotion,) = [c for c in gh.thread[100]
+                                if markdown.read_marker(c['body'], 'merged')]
+                body = promotion['body']
+                self.assertEqual([body.index(t) for t in expected[:3]],
+                                 sorted(body.index(t) for t in expected[:3]))
+                self.assertTrue(any(expected[3] in b for n, b in gh.comments if n == 7))
+                records[language] = [markdown.read_marker(body, k)
+                                     for k in ('policy', 'receipt')]
+        self.assertEqual(records['Italian'], records['English'])
+        self.assertEqual(records['English'], records['French'])
+
+    def test_a_hold_and_a_revoked_readiness(self):
+        from test_devloop_merge import AUTO, Case
+        expected = {
+            'Italian': ('## Merge trattenuto', '`brushtyler` ha trattenuto il merge: aspetto',
+                        '## Approvazione revocata', 'Il commit `'),
+            'English': ('## Merge held', '`brushtyler` held the merge: aspetto',
+                        '## Approval revoked', 'Commit `'),
+        }
+        holds = {}
+        for language in ('Italian', 'English', 'French'):
+            with self.subTest(language=language):
+                case = Case()
+                d = case.make(dataclasses.replace(AUTO, language=language))
+                case.gh.say('brushtyler', '/devloop hold aspetto')
+                self.assertEqual([a.kind for a in d.tick()], ['hold'])
+                phrases = expected.get(language, expected['English'])
+                body = case.gh.comments[-1][1]
+                self.assertIn(phrases[0], body)
+                self.assertIn(phrases[1], body)
+                holds[language] = markdown.read_marker(body, 'hold')
+                # A new head revokes the readiness, in the same language.
+                case.gh.head = 'f' * 40
+                d.tick()
+                revoked = [b for _, b in case.gh.comments if phrases[2] in b]
+                self.assertTrue(revoked and phrases[3] in revoked[-1], language)
+        self.assertEqual({k: dict(v, comment=None) for k, v in holds.items()}['Italian'],
+                         dict(holds['English'], comment=None))
 
 
 if __name__ == '__main__':

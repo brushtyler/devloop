@@ -329,7 +329,8 @@ class FindingTests(unittest.TestCase):
         kept = receipt._turn(dict(turn, state='closed'), 'pr')
         self.assertEqual(kept['role'], FINDINGS_ONLY)
         self.assertNotIn('role', receipt._turn(dict(turn, role=None), 'pr'))
-        self.assertIn('`review` (finding-only)', '\n'.join(receipt._turns([kept])))
+        self.assertIn('`review` (finding-only)', '\n'.join(receipt._turns(receipt.TEXTS.texts('English'),
+                                                                        [kept])))
 
     def test_the_ledger_writes_the_role_of_its_turn(self):
         gh = FakeGH()

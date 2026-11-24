@@ -112,7 +112,7 @@ class ZeroLevelTests(unittest.TestCase):
             'kind': 'zero', 'level': 0, 'label': 'reviews:0', 'by': 'brushtyler', 'at': AT,
             'applied': True, 'why': [], 'outside': [], 'count': 0})
         self.assertTrue(policy.valid_receipt(result))
-        text = policy.describe(result)
+        text = policy.describe(result, 'Italian')
         self.assertIn('Label `reviews:0` messa da `brushtyler`', text)
         self.assertIn('nessuno (livello 0)', text)
 
@@ -433,7 +433,7 @@ class ZeroDispatcherTests(unittest.TestCase):
         second = records(self.gh, 'review')[-1]
         self.assertEqual(second['receipt']['level'], 1)
         self.assertEqual(zero_reason(second['receipt'])['why'], ['refused'])
-        self.assertIn('serve una nuova label', policy.describe(second['receipt']))
+        self.assertIn('serve una nuova label', policy.describe(second['receipt'], 'Italian'))
         self.assertEqual(len(self.runner.calls), 2)
         # Only a new label of the operator brings it back to level 0.
         self.gh.zero_events = GRANT + [

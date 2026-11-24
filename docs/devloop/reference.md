@@ -444,27 +444,43 @@ Today these texts follow it:
   budget envelope with the state of the story's budget, the extension of the envelope and why
   it is not granted, the turns that block a work (`uncertain_turn`), and the dispatcher's
   answer to a refused `/devloop reconcile` with its reason ("Reconciliation not applied",
-  "Riconciliazione non applicata"). `devloop status` still shows the budget in Italian.
+  "Riconciliazione non applicata"). `devloop status` still shows the budget in Italian;
+- promotions, merges and receipts (#634), the texts of `devloop/dispatch_merge.py`,
+  `devloop/policy.py` and `devloop/receipt.py`: the promotion ("Ready for merge", "Pronta per
+  il merge"), the [PR receipt](protocol.md#pr-receipt) ("Receipt of PR #N", "Ricevuta della PR
+  #N") with every section, `not reported` for a value nobody attested and the state of the
+  story's budget, the warning of a receipt superseded with the reasons devloop gives, the
+  description of the policy receipt and of its level, the base checks of an approval given on
+  an earlier base, the escalation of a level without enough reviewers and of a receipt that
+  contradicts the markers, level 0 refused or suspended, a readiness revoked or suspended, the
+  hold and the release, the merge and its section ("Merged by devloop", "Mergiata da devloop",
+  and those of the delegated merge and of the coordinator's reserved merge), a merge held by the
+  labels, the alarm of a step on the host, the issue a merge closed and the escalation of an
+  issue a merged PR already resolved, and the refusals and the traces of a `/devloop merge` of
+  the supervisor or of the coordinator.
 
 Only the text devloop composes changes, in the language of the moment it composes it. The
 values of the records stay as written, in every language: the opinions `ok`, `dubbi`,
 `contrario` and the votes `APPROVA`, `BLOCCA` of the agents' schemas, the texts of the agents
 (the reasons of a conclave vote, the gaps of a readiness check the agent lists) and the texts of
 a record already published, such as the note of an earlier review, the reason of an earlier
-recheck or of a conclave already recorded, are shown as recorded. The other texts of the
+recheck or of a conclave already recorded, are shown as recorded. The content of a receipt, its
+digest and its `receipt` record do not depend on the language. The other texts of the
 dispatcher (the reasons of the escalations composed elsewhere, such as a failed step or the
-round limit, merge and receipts among them, and the acceptance map and the step on the host
-that the comment of a fix repeats from the pull request) are still in Italian, until the parts
-of #628 that translate them.
+round limit, the approval found stale before a promotion or a merge, and the acceptance map and
+the step on the host that the comment of a fix repeats from the pull request) are still in
+Italian, until the parts of #628 that translate them.
 
 What devloop reads never changes with the language: the `devloop:<kind>:v1` markers and their
 fields, the `/devloop …` commands and the labels. A text that devloop recognises by its title or
 a phrase is recognised in every language it has, so that a change of `language` leaves the
 texts already published recognised: [`devloop watch`](guide.md#waking-the-supervising-agent) leaves out a
-ledger record whose title is `## devloop ledger` or `## Registro devloop`. The texts of the
-review, the fix, the readiness check, the advisory review and the conclave are read only through
-their markers, never by title or phrase: those published before a change of `language` keep
-counting as before.
+ledger record whose title is `## devloop ledger` or `## Registro devloop`, and the advisory
+review of a head (#369) rewrites the receipt of its promotion found under the title `## Receipt
+of PR #N` or `## Ricevuta della PR #N` (#634), in the language of the moment. The texts of the
+review, the fix, the readiness check, the advisory review, the conclave, the promotions, the
+merges and the receipts are otherwise read only through their markers, never by title or phrase:
+those published before a change of `language` keep counting as before.
 
 ### No background work in a turn
 
@@ -990,7 +1006,8 @@ It appears in three places, and nowhere with the budget off:
   disponibili 8); …`; an issue that belongs to no story gets `budget #<n>: ` followed by the
   reason its turns are refused (`SCOPE_REQUIRED`, #396). `status` reads the journal without the
   lock: a turn running in the dispatcher counts as reserved;
-- the [PR receipt](protocol.md#pr-receipt), in its section "Budget della storia", as a table;
+- the [PR receipt](protocol.md#pr-receipt), in its section "Budget of the story" ("Budget
+  della storia" in Italian, #634), as a table;
 - the escalation of a turn the envelope refuses, as the state at the refusal, in the project's
   [language](#language-of-the-texts) (#633): in English `not attested` and `at least` stand for
   `non attestato` and `almeno`.
@@ -1978,7 +1995,8 @@ lists `merger` with its installation and permissions; without the app it reports
 the ambient `gh` login. Each merge asks for a new token, limited to `contents=write` and
 `pull_requests=write`, when it runs; `--match-head-commit` binds it to the approved head as
 before, and the `merged` record carries in `merged_by` the app's login. The text of the
-"Mergiata da devloop" section, which the dispatcher adds to the comment of the promotion
+"Merged by devloop" section ("Mergiata da devloop" in Italian), which the dispatcher adds to the
+comment of the promotion
 ([record](protocol.md#merge-directives-and-record)), names the app that ran the merge; without
 the app, the local `gh` login.
 

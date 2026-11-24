@@ -1222,7 +1222,9 @@ added after the other checks stops the merge (#519,
 The commands count only from the identity of `[roles].supervisor` (the GitHub App of that agent,
 or with `[roles.supervisor]` as a table the role app of
 [The supervisor app](reference.md#the-supervisor-app)) and from `trusted_users`. The dispatcher applies a command with a dispatcher comment that carries
-a `hold` marker (event, author, reason, head, and in `comment` the id of the comment it applied),
+a `hold` marker (event, author, reason, head, and in `comment` the id of the comment it applied;
+the text, "Merge held" or "Merge released", is in the project's
+[language](reference.md#language-of-the-texts), #634),
 and that record spends the command it applied and every command written before it: a command
 written after it, even one that arrived while the record was being written, still waits to be
 applied. Among the commands that wait the latest wins. A command is applied before anything else

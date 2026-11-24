@@ -573,26 +573,50 @@ def _cli_state_refused(exc):
     return isinstance(exc, CliStateRefused) or isinstance(exc.__cause__, CliStateRefused)
 
 
-def _describe_bases(checks, branch):
-    """The base checks of ``_base_check`` as a Markdown list."""
+# The base checks of a promotion or of a stale approval (#634), in the project's ``language``.
+BASES_TEXTS = Catalog(
+    en={
+        'disjoint': '- {span}: no intermediate commit of `{branch}` touches files of the PR.',
+        'touched': '- {span}: the intermediate commits of `{branch}` touch files of the PR: '
+                   '{paths}.',
+        'conflict': ('- {span}: the intermediate commits of `{branch}` touch no file of the PR, '
+                     'but the PR does not merge without conflicts into the current base{files}: '
+                     'a synchronisation is needed.'),
+        'unverifiable': ('- {span}: the files touched by the intermediate commits could not be '
+                         'listed (for example `{branch}` was rewritten), or it could not be '
+                         'verified that the PR merges without conflicts into the current base: '
+                         'the non-interference is not proven.'),
+    },
+    it={
+        'disjoint': '- {span}: nessun commit intermedio di `{branch}` tocca file della PR.',
+        'touched': '- {span}: i commit intermedi di `{branch}` toccano file della PR: {paths}.',
+        'conflict': ('- {span}: i commit intermedi di `{branch}` non toccano file della PR, ma '
+                     'la PR non si unisce senza conflitti alla base corrente{files}: serve una '
+                     'sincronizzazione.'),
+        'unverifiable': ('- {span}: non è stato possibile elencare i file toccati dai commit '
+                         'intermedi (per esempio `{branch}` è stato riscritto), o verificare che '
+                         'la PR si unisca senza conflitti alla base corrente: la non '
+                         'interferenza non è dimostrata.'),
+    })
+
+
+def _describe_bases(checks, branch, language=ENGLISH):
+    """The base checks of ``_base_check`` as a Markdown list, in ``language`` (#634)."""
+    t = BASES_TEXTS.texts(language)
     lines = []
     for check in checks:
         span = f'`{check["from"][:12]}` → `{check["to"][:12]}`'
         if check['outcome'] == 'disjoint':
-            lines.append(f'- {span}: nessun commit intermedio di `{branch}` tocca file della PR.')
+            lines.append(t('disjoint', span=span, branch=branch))
         elif check['outcome'] == 'touched':
-            lines.append(f'- {span}: i commit intermedi di `{branch}` toccano file della PR: '
-                         + ', '.join(f'`{p}`' for p in check['paths']) + '.')
+            lines.append(t('touched', span=span, branch=branch,
+                           paths=', '.join(f'`{p}`' for p in check['paths'])))
         elif check['outcome'] == 'conflict':
             files = ', '.join(f'`{p}`' for p in check.get('paths') or [])
-            lines.append(f'- {span}: i commit intermedi di `{branch}` non toccano file della PR, '
-                         'ma la PR non si unisce senza conflitti alla base corrente'
-                         + (f' ({files})' if files else '') + ': serve una sincronizzazione.')
+            lines.append(t('conflict', span=span, branch=branch,
+                           files=f' ({files})' if files else ''))
         else:
-            lines.append(f'- {span}: non è stato possibile elencare i file toccati dai commit '
-                         f'intermedi (per esempio `{branch}` è stato riscritto), o verificare '
-                         'che la PR si unisca senza conflitti alla base corrente: la non '
-                         'interferenza non è dimostrata.')
+            lines.append(t('unverifiable', span=span, branch=branch))
     return '\n'.join(lines)
 
 

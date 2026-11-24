@@ -490,7 +490,8 @@ class ReceiptTests(unittest.TestCase):
                     closures=[], approved_round=None, criteria=None, acceptance_map=None)
         content = receipt.build(**args)
         self.assertNotIn('advisory', content)
-        self.assertNotIn('Review consultiva', receipt.section(content))
+        self.assertNotIn('Review consultiva', receipt.section(content, 'Italian'))
+        self.assertNotIn('Advisory review', receipt.section(content))
         self.assertEqual(receipt.digest(content),
                          receipt.digest(receipt.build(**args, advisory=None)))
 

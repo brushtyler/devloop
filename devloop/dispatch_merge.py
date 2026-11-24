@@ -12,6 +12,7 @@ readiness (``_do_revoke``), the
 merge commands and the merge (``_do_hold``, ``_do_merge``, ``_record_merge``) and the issues a
 merge resolved (``_close_merged_issue``, ``_do_merged_issue``). Since #338 one comment carries a
 promotion, its receipt and the merge that follows it. ``Dispatcher`` inherits the methods.
+Since #634 their texts are in the project's ``language`` (``TEXTS``); the records are not.
 """
 
 import itertools
@@ -27,7 +28,7 @@ from . import receipt as pr_receipt
 from .github import GitHubError
 from .hoststep import UNREADABLE as UNREADABLE_STEP
 from .hoststep import latest as latest_host_step
-from .i18n import ITALIAN
+from .i18n import Catalog
 from .journal import COORDINATOR_MERGE, DELEGATED_MERGE, JournalError
 from .ledger import collect as ledger_collect
 from .ledger import timestamp as ledger_timestamp
@@ -48,6 +49,551 @@ from .supervision import (ADR_DIR, MAX_COORDINATOR_MERGES, MAX_MERGE_BUDGET, MER
                           merge_arguments, rule_paths)
 from .workspace import WorkspaceError
 
+# The texts of promotions, merges and their refusals (#634), in the project's ``language``
+# (``i18n``); English for a language without translation. Markers, commands, labels and the
+# values of the records are never translated.
+TEXTS = Catalog(
+    en={
+        # Why a level has not enough reviewers (``_select``).
+        'select_unverifiable_one': (
+            'it cannot be verified that the reviewer is an agent other than the implementer of '
+            'the PR (`{implementer}`): the marker does not record its profile and its key is '
+            'not configured'),
+        'select_none_one': ('no configured reviewer is an agent other than the implementer of '
+                            'the PR (`{implementer}`)'),
+        'select_unverifiable': (
+            'it cannot be verified that the reviewers are independent of who wrote the code: '
+            'the PR, one of its fixes or a resolution of conflicts does not record the identity '
+            'and the tuple of the agent (markers before #111)'),
+        'select_pool': (
+            'the reviewer pool ({pool}) does not have enough: two reviewers count as distinct '
+            'only if they differ both in GitHub identity and in the tuple (kind, model, effort, '
+            'review_args), and none may have the identity or the model (kind, model, effort) of '
+            'the implementer or of who fixed the PR'),
+        'select_pool_provider': (
+            'the reviewer pool ({pool}) does not have enough: every reviewer must have a GitHub '
+            'identity and a tuple (kind, model, effort) other than those of who wrote the code '
+            'of the PR, two reviewers count as distinct only if they differ both in identity and '
+            'in the tuple (kind, model, effort, review_args), and at least one reviewer must be '
+            'of a provider other than that of every author (at level 1, the only one)'),
+        # The escalation of a level (``_escalate_level``).
+        'needed_one': 'one independent reviewer',
+        'needed_many': '{level} independent reviewers',
+        'level_title': 'Review of level {level}: the operator is needed',
+        'level_text': (
+            'The dispatcher\'s review policy requires level {level} for this PR, hence {needed}, '
+            'but {why}. devloop neither reviews nor promotes the PR: the review and the decision '
+            'on the merge are up to a person. The level stays acquired even if the label is '
+            'removed or the diff changes.'),
+        # The promotion (``_promote``, ``_promote_zero``).
+        'ready_title': 'Ready for merge',
+        'ready_text': ('Approval of commit `{head}` by {by} confirmed: the recomputed policy '
+                       'receipt matches the one of the review{but}.{revalidated}'),
+        'but_base': ', apart from the base',
+        'revalidated': ('\n\nThe approvals given on an earlier base still hold on the current '
+                        'base: the intermediate commits of `{branch}` touch no file of the PR.'
+                        '\n\n{bases}'),
+        'zero_ready_title': 'Ready for merge (level 0)',
+        'zero_ready_text': (
+            'Commit `{head}` needs no review: the label of level 0 was added by a trusted user, '
+            'the diff is entirely in the allowlist and every expected check ended with '
+            '`success`. The merge stays an action of the operator.'),
+        'zero_open_findings': (
+            'blocking findings remain open, which no review closes at level 0:\n\n{listed}\n\n'
+            'A trusted user can close them with `{command} <round/reviewer/ID> '
+            'resolved|withdrawn <reason>`'),
+        'zero_checks_failed': (
+            'not every expected check ended with `success` on the current head (a missing '
+            'check, `skipped`, `neutral` or `cancelled` is no success):\n\n{listed}'),
+        'zero_changes_requested': (
+            'a request for changes (`REQUEST_CHANGES`) by {who} still stands: it must be '
+            'dismissed or replaced by an approval of the same author'),
+        # A level 0 that no longer holds (``_zero_problem``).
+        'zero_head_moved': 'the head moved to `{head}`',
+        'zero_level_now': 'the policy receipt recomputed now assigns level {level}:\n\n{policy}',
+        'zero_checks_now': ('not every expected check ended with `success` on the most recent '
+                            'run of the head:\n\n{listed}'),
+        'zero_changes_now': 'a request for changes (`REQUEST_CHANGES`) by {who} still stands',
+        'zero_unverifiable': 'it could not be verified again',
+        'zero_labels_changed': 'the head or the level labels changed',
+        'refuse_zero_title': 'Level 0: the operator is needed',
+        'refuse_zero_text': (
+            'The review policy assigns level 0 to this PR, but {why}.\n\ndevloop does not '
+            'promote the PR. To resume: fix the cause, remove `{needs_operator}` and add '
+            '`{review}` again (level 0 is checked again), or remove the label `{zero}` too for '
+            'a review of level 1.'),
+        'untrusted_issue': 'issue text not verifiable: {reason}',
+        # The receipt that contradicts the markers (``_checked_receipt``).
+        'receipt_conflict': (
+            'The receipt of the PR, built from the records of the dispatcher\'s ledger and from '
+            'the markers, holds a contradiction for commit `{head}`: devloop does not promote '
+            'the PR.\n\n{problems}\n\nMissing historical data does not block: here the data is '
+            'there and does not match. Which record is right must be checked before adding '
+            '`{review}` again.'),
+        # Why a receipt is superseded (``_supersede_receipts``).
+        'supersede_promotion': 'promotion no. {promotion} replaces it',
+        'supersede_level': 'level {level} requires the operator',
+        'supersede_zero': 'level 0 no longer holds for the head',
+        'supersede_stale': ('the recomputed policy receipt no longer matches the one of the '
+                            'approval'),
+        'supersede_round': 'round {round} does not approve commit `{head}`',
+        'supersede_sync': 'the synchronisation moved the head to `{head}`',
+        'supersede_escalation': 'escalation `{cls}`: the PR moved to `{label}`',
+        # A readiness revoked (``_do_revoke``).
+        'zero_suspended': 'Level 0 suspended',
+        'zero_suspended_text': ('The PR was ready for merge at level 0 on commit `{head}`, but '
+                                '{why}{end}\n\nThe PR goes back to review and the level is '
+                                'recomputed'),
+        'zero_suspended_why': 'the head, the level labels or the CI changed',
+        'approval_suspended': 'Approval suspended',
+        'approval_suspended_text': (
+            'The approval of commit `{head}` does not hold for the coverage map of the '
+            'acceptance criteria (#134):\n\n{problems}\n\nThe PR goes back to review: a new '
+            'review, which counts as a round, records the blocking finding'),
+        'readiness_suspended': 'Readiness suspended',
+        'readiness_suspended_text': (
+            'The CI of the approved commit `{head}` is running again. The PR goes back to '
+            'review: the approval stays recorded and will be applied again without a new review '
+            'if the CI passes and the policy receipt still matches'),
+        'approval_revoked': 'Approval revoked',
+        'revoked_moved': ('Commit `{head}` is not the approved one (`{approved}`). The PR goes '
+                          'back to review'),
+        'revoked_none': 'No approved devloop review is on record. The PR goes back to review',
+        'released': ', and `{label}`, which the dispatcher had added for the merge, is removed',
+        # The hold and release commands (``_do_hold``).
+        'hold_title': 'Merge held',
+        'hold_text': ('`{by}` held the merge: {reason}\n\ndevloop does not merge the PR while '
+                      'it stays `{label}`; `{release}` allows it again.'),
+        'release_title': 'Merge released',
+        'release_text': ('`{by}` released the merge{reason}\n\ndevloop can merge the PR again '
+                         'when it is `{ready}` and the merge directives hold.'),
+        # The merge (``_do_merge``, ``_execute_merge``, ``_record_merge``).
+        'held_title': 'Merge not executed',
+        'held_text': (
+            'Right before the merge call devloop read the labels of the PR again, at {at} '
+            '(UTC), and they do not allow the merge: {labels}. It needs `{ready}`, without '
+            '`{needs_operator}`, `{hold}` or `{needs_supervisor}`. The PR is not merged.'),
+        'executor_app': 'with the app `{app}`',
+        'executor_gh': 'with the local `gh` login',
+        'merged_title': 'Merged by devloop',
+        'merged_text': (
+            'devloop decided the merge and executed it {executor}: commit `{head}` with a merge '
+            'commit, bound to that head (`--match-head-commit`), in mode `{mode}`, at level '
+            '{level}. Right before it checked the merge directives again: CI `pass`, '
+            '`MERGEABLE` and `CLEAN`, no open finding, no label `{needs_operator}` or `{hold}`, '
+            'and the conditions of the promotion with the recomputed policy receipt. It read '
+            'the labels of the PR again right before the merge call, at {at} (UTC). The branch '
+            'stays.'),
+        'merged_coordinator_title': 'Merged by devloop on the command of the coordinator',
+        'merged_coordinator_text': (
+            'The merge was up to the operator. The coordinator `{by}` asked for it with '
+            '`/devloop {command}` (comment {comment}, reserved merge of the coordinator, ADR '
+            '0002, #529); right before, devloop verified every condition of the reserved merge '
+            'and executed it {executor}: commit `{head}` with a merge commit, bound to that head '
+            '(`--match-head-commit`), at level {level}. It read the labels of the PR again '
+            'right before the merge call, at {at} (UTC), without `{hold}`. The branch stays.'
+            '\n\n**Reason of the coordinator:**\n\n{reason}'),
+        'merged_delegated_title': 'Merged by devloop on delegation of the supervisor',
+        'merged_delegated_text': (
+            'The merge was up to the operator. The supervisor `{by}` asked for it with '
+            '`/devloop {command}` (comment {comment}, delegation `[delegations] merge`, #486); '
+            'right before, devloop verified every condition of the delegation and executed it '
+            '{executor}: commit `{head}` with a merge commit, bound to that head '
+            '(`--match-head-commit`), at level {level}. It read the labels of the PR again '
+            'right before the merge call, at {at} (UTC), without `{hold}`. The branch stays.'
+            '\n\n**Reason of the supervisor:**\n\n{reason}'),
+        'recomputed': 'Policy receipt recomputed for the merge:',
+        # The alarm of a step on the host (``_comment_host_step``).
+        'host_title': 'Step on the host to do before the pin',
+        'host_held': ('devloop does not pin this commit nor the later ones automatically: the '
+                      'automatic pin resumes after a pin by hand (`devloop pin`) of a commit '
+                      'that contains the merge, to do after the step.'),
+        'host_off': 'The automatic pin is off: the pin by hand is to do after the step.',
+        'host_outside': ('PR #{pr} was merged outside devloop (merge `{merge}`{issue}) and '
+                         'declares'),
+        'host_merged': 'devloop merged PR #{pr} (head `{head}`{issue}), which declares',
+        'host_text': ('{what} a step on the host to do with the loop stopped before the pin of '
+                      'the new code:\n\n{step}\n\n{pinning}'),
+        # The issue a merge resolved (``_close_merged_issue``, ``_do_merged_issue``).
+        'closed_title': 'Resolved by a merged PR',
+        'closed_text': (
+            'devloop merged PR #{pr} (head `{head}`, merge commit {commit}) in mode `{mode}`, '
+            'and closes this issue as completed. With the merge of the merger app the closing '
+            'keywords of the PR have no effect, so the dispatcher closes it.'),
+        'not_read': 'not read',
+        'merged_issue': (
+            'The issue is open and has `{ready}`, but a devloop PR that resolves it was already '
+            'merged: {listed}. devloop neither checks nor implements it again, so as not to '
+            'duplicate the work. If it is resolved it should be closed; if more work is needed, '
+            'a new issue should be opened.'),
+        # The delegated merge and the reserved merge of the coordinator (``_delegated_merge``).
+        'merge_stays': ('The command is spent; the PR stays in `{label}`, and the merge is up '
+                        'to the operator.'),
+        'merge_refused': 'refused: {why}. {stays}',
+        'coordinator_off': ('the merge of the coordinator is off (`[roles.coordinator] '
+                            'max_merges_per_day` = 0)'),
+        'no_merger': ('the merge of the coordinator runs only with the merger app, and devloop '
+                      'does not have it (`[apps.merger]`)'),
+        'delegation_off': 'the delegation of the merge is off (`[delegations] merge`)',
+        'mode_not_auto': 'the merge mode is `{mode}`, not `auto` with a supervisor',
+        'syntax': ('the command is written as `/devloop merge <sha> <reason>`, with the full '
+                   'sha (40 characters) of the head of the PR and the reason'),
+        'not_operator_merge': ('the PR is not waiting for the merge of the operator '
+                               '(`operator_merge`): it is with the operator for another reason'),
+        'not_open': 'the PR is not open (`{state}`)',
+        'sha_not_head': ('the sha of the command (`{sha}`) is not the current head of the PR '
+                         '(`{head}`)'),
+        'labels_not_operator': ('the labels of the PR are no longer those of a merge of the '
+                                'operator: {labels}'),
+        'not_owned': ('`{label}` is no longer the dispatcher\'s label for the merge of the '
+                      'operator'),
+        'comment_gone': 'the comment of the command is no longer in the conversation',
+        'held_after': 'a `/devloop hold` written after the command cancelled it',
+        'owners_unknown': 'the owner of some findings cannot be reconstructed',
+        'stale_receipt': 'a policy record found the receipt of the approval stale',
+        'open_findings': 'blocking findings remain open: {keys}',
+        'not_approved': 'the sha `{sha}` is not the one the latest review round approved',
+        'not_clean': ('GitHub does not report the PR as `MERGEABLE` and `CLEAN` '
+                      '(`{mergeable}`, `{status}`)'),
+        'ci_not_green': 'the CI of the head is not green (`{ci}`)',
+        'acceptance': 'the coverage map of the acceptance criteria does not hold for the approval',
+        'receipt_unavailable': 'the policy receipt cannot be recomputed ({error})',
+        'pushed_head': 'the pushed head is `{head}`',
+        'trust_paths': 'the PR touches the trust rule or the delegations: {paths}',
+        'conclave_restart': ('the work of the PR restarted after the decision of the conclave '
+                             '{decision}: the merge stays human'),
+        'mode_outside_adr': ('the merge mode of the PR, outside `{adr}`, is `{mode}`, not '
+                             '`auto` (paths reserved to the operator or an override of the '
+                             'level)'),
+        'host_step': ('the PR declares a step on the host (`host_step`), which stays with the '
+                      'operator'),
+        'no_quorum': 'the PR has no quorum of reviewers for its level',
+        'uncovered': 'the change is not covered by a decision of the operator: {what}',
+        'missing_review': 'the review of {keys} on `{sha}` is missing',
+        'trust_declared': ('a reviewer of the quorum declares the trust policy touched '
+                           '(`trust_policy`)'),
+        'advisory_missing': 'the advisory review of `{sha}` is missing: `ok` or `dubbi` is needed',
+        'advisory_opinion': ('the advisory review of `{sha}` has the opinion `{opinion}`: `ok` '
+                             'or `dubbi` is needed'),
+        'advisory_none': ('the advisory review of `{sha}` has no opinion: `ok` or `dubbi` is '
+                          'needed'),
+        'approvals_stale': ('refused: the approvals no longer match the recomputed policy '
+                            'receipt, and the PR goes back to review.'),
+        'what_coordinator': 'merges of the coordinator',
+        'limit_coordinator': ('`[roles.coordinator] max_merges_per_day` = {cap}, at most '
+                              '{max}'),
+        'what_delegated': 'delegated merges',
+        'limit_delegated': ('`[delegations] max_merges_per_day` = {cap}, plus the extensions of '
+                            'today'),
+        'journal_unavailable': ('today\'s {what} cannot be verified: the turn journal is not '
+                                'available or not readable'),
+        'daily_cap': 'today\'s {what} already reached the daily maximum ({cap}: {limit})',
+        'labels_now': ('the labels of the PR, read again right before the merge call at {at} '
+                       '(UTC), are no longer those of a merge of the operator: {labels}'),
+        'merge_failed': 'the merge did not succeed ({error})',
+        'merge_not_run': 'the merge was not executed',
+        'approval_comment': '(comment {id})',
+        'with_approval': ('; decision of the operator: the `/devloop approve` {link} on issue '
+                          '#{issue}'),
+        'after_conclave': ('; work restarted after the unanimous decision of the conclave '
+                           '{decision}, approved after the restart'),
+        'merged_by_coordinator': (
+            'PR merged by the coordinator, commit `{head}`, with the conditions of the reserved '
+            'merge verified on that sha; opinion of the advisory review: `{opinion}`{approval}'
+            '{conclave}. Merges of the coordinator today: {daily} of {cap}.\n\n**Reason:**\n\n'
+            '{reason}'),
+        'merged_by_delegation': (
+            'PR merged on delegation, commit `{head}`, with the conditions of the delegation '
+            'verified on that sha; opinion of the advisory review: `{opinion}`. Delegated '
+            'merges today: {daily} of {cap}.\n\n**Reason:**\n\n{reason}'),
+        # The operator's decision a reserved merge needs (``_operator_approval``).
+        'approval_trust': 'a reviewer declared the trust policy touched',
+        'approval_adr': 'the diff touches `{adr}`',
+        'approval_and': ' and ',
+        'approval_no_issue': '{what}, and the PR does not name the issue it closes',
+        'approval_unreadable': '{what}, and issue #{issue} is not readable ({error})',
+        'approval_none': (
+            '{what}, and issue #{issue} that the PR closes has no valid `/devloop approve` of '
+            'the operator, written in person after the latest change of the text and before '
+            'devloop took it over'),
+        # The changes under docs/adr/ of a delegated merge (``_adr_problem``).
+        'adr_unreadable': 'the changes under `{adr}` are not readable ({error})',
+        'adr_not_text': 'the changes under `{adr}` are not all readable as text',
+        'adr_problems': ('under `{adr}` only added lines with the link to a decision of the '
+                         'operator are allowed: {problems}'),
+        'adr_untrusted': ('a block added in `{path}` quotes only comments that are not of a '
+                          'trusted user, or that cannot be read: {links}'),
+    },
+    it={
+        'select_unverifiable_one': (
+            'non è verificabile che il reviewer sia un agent diverso dall\'implementer della PR '
+            '(`{implementer}`): il marker non ne registra il profilo e la sua chiave non è '
+            'configurata'),
+        'select_none_one': ('nessun reviewer configurato è un agent diverso dall\'implementer '
+                            'della PR (`{implementer}`)'),
+        'select_unverifiable': (
+            'non è verificabile che i reviewer siano indipendenti da chi ha scritto il codice: '
+            'la PR, una sua correzione o una risoluzione di conflitti non registra identità e '
+            'tupla dell\'agent (marker precedenti a #111)'),
+        'select_pool': (
+            'il pool di reviewer ({pool}) non ne ha abbastanza: due reviewer contano come '
+            'distinti solo se differiscono sia per identità GitHub sia per la tupla (kind, '
+            'model, effort, review_args), e nessuno può avere l\'identità o il modello (kind, '
+            'model, effort) dell\'implementer o di chi ha corretto la PR'),
+        'select_pool_provider': (
+            'il pool di reviewer ({pool}) non ne ha abbastanza: ogni reviewer deve avere '
+            'un\'identità GitHub e una tupla (kind, model, effort) diverse da quelle di chi ha '
+            'scritto il codice della PR, due reviewer contano come distinti solo se '
+            'differiscono sia per identità sia per la tupla (kind, model, effort, review_args), '
+            'e almeno un reviewer deve essere di un fornitore diverso da quello di tutti gli '
+            'autori (al livello 1, l\'unico)'),
+        'needed_one': 'un reviewer indipendente',
+        'needed_many': '{level} reviewer indipendenti',
+        'level_title': 'Review di livello {level}: serve un intervento dell\'operatore',
+        'level_text': (
+            'La policy di review del dispatcher richiede per questa PR il livello {level}, '
+            'quindi {needed}, ma {why}. devloop non revisiona né promuove la PR: la review e la '
+            'decisione sul merge spettano a una persona. Il livello resta acquisito anche se la '
+            'label viene rimossa o il diff cambia.'),
+        'ready_title': 'Pronta per il merge',
+        'ready_text': ('Approvazione del commit `{head}` da parte di {by} confermata: la '
+                       'ricevuta di policy ricalcolata coincide con quella della review{but}.'
+                       '{revalidated}'),
+        'but_base': ', a parte la base',
+        'revalidated': ('\n\nLe approvazioni date su una base precedente restano valide sulla '
+                        'base corrente: i commit intermedi di `{branch}` non toccano file della '
+                        'PR.\n\n{bases}'),
+        'zero_ready_title': 'Pronta per il merge (livello 0)',
+        'zero_ready_text': (
+            'Il commit `{head}` non richiede review: la label di livello 0 è stata messa da un '
+            'utente fidato, il diff è interamente nell\'allowlist e tutti i controlli attesi si '
+            'sono conclusi con `success`. Il merge resta un\'azione dell\'operatore.'),
+        'zero_open_findings': (
+            'restano finding bloccanti aperti, che nessuna review chiude al livello 0:\n\n'
+            '{listed}\n\nUn utente fidato può chiuderli con `{command} <round/reviewer/ID> '
+            'resolved|withdrawn <motivazione>`'),
+        'zero_checks_failed': (
+            'non tutti i controlli attesi si sono conclusi con `success` sul head corrente (un '
+            'controllo mancante, `skipped`, `neutral` o `cancelled` non vale come successo):'
+            '\n\n{listed}'),
+        'zero_changes_requested': (
+            'una richiesta di modifiche (`REQUEST_CHANGES`) di {who} è ancora valida: va '
+            'dismessa o sostituita da un\'approvazione dello stesso autore'),
+        'zero_head_moved': 'il head è passato a `{head}`',
+        'zero_level_now': ('la ricevuta di policy ricalcolata ora assegna il livello {level}:'
+                           '\n\n{policy}'),
+        'zero_checks_now': ('non tutti i controlli attesi risultano conclusi con `success` '
+                            'sull\'esecuzione più recente del head:\n\n{listed}'),
+        'zero_changes_now': ('una richiesta di modifiche (`REQUEST_CHANGES`) di {who} è ancora '
+                             'valida'),
+        'zero_unverifiable': 'non è stato possibile verificarlo di nuovo',
+        'zero_labels_changed': 'il head o le label di livello sono cambiati',
+        'refuse_zero_title': 'Livello 0: serve un intervento dell\'operatore',
+        'refuse_zero_text': (
+            'La policy di review assegna a questa PR il livello 0, ma {why}.\n\ndevloop non '
+            'promuove la PR. Per riprendere: risolvere la causa, togliere `{needs_operator}` e '
+            'rimettere `{review}` (il livello 0 viene ricontrollato), oppure togliere anche la '
+            'label `{zero}` per una review di livello 1.'),
+        'untrusted_issue': 'testo dell\'issue non verificabile: {reason}',
+        'receipt_conflict': (
+            'La ricevuta della PR, costruita dai record del registro del dispatcher e dai '
+            'marker, contiene una contraddizione per il commit `{head}`: devloop non promuove '
+            'la PR.\n\n{problems}\n\nI dati storici mancanti non bloccano: qui i dati ci sono e '
+            'non coincidono. Va verificato quale record è corretto prima di rimettere '
+            '`{review}`.'),
+        'supersede_promotion': 'la promozione n. {promotion} la sostituisce',
+        'supersede_level': 'il livello {level} richiede l\'operatore',
+        'supersede_zero': 'il livello 0 non vale più per il head',
+        'supersede_stale': ('la ricevuta di policy ricalcolata non coincide più con quella '
+                            'dell\'approvazione'),
+        'supersede_round': 'il round {round} non approva il commit `{head}`',
+        'supersede_sync': 'la sincronizzazione ha portato il head a `{head}`',
+        'supersede_escalation': 'escalation `{cls}`: la PR è passata a `{label}`',
+        'zero_suspended': 'Livello 0 sospeso',
+        'zero_suspended_text': ('La PR era pronta per il merge al livello 0 sul commit `{head}`, '
+                                'ma {why}{end}\n\nLa PR torna in review e il livello viene '
+                                'ricalcolato'),
+        'zero_suspended_why': 'il head, le label di livello o la CI sono cambiati',
+        'approval_suspended': 'Approvazione sospesa',
+        'approval_suspended_text': (
+            'L\'approvazione del commit `{head}` non vale per la mappa di copertura dei criteri '
+            'di accettazione (#134):\n\n{problems}\n\nLa PR torna in review: una nuova review, '
+            'che conta come un round, registra il finding bloccante'),
+        'readiness_suspended': 'Readiness sospesa',
+        'readiness_suspended_text': (
+            'La CI del commit approvato `{head}` è di nuovo in corso. La PR torna in review: '
+            'l\'approvazione resta registrata e verrà riapplicata senza una nuova review se la '
+            'CI passa e la ricevuta di policy coincide ancora'),
+        'approval_revoked': 'Approvazione revocata',
+        'revoked_moved': ('Il commit `{head}` non è quello approvato (`{approved}`). La PR torna '
+                          'in review'),
+        'revoked_none': 'Non risulta una review devloop approvata. La PR torna in review',
+        'released': ', e `{label}`, che il dispatcher aveva messo per il merge, è tolta',
+        'hold_title': 'Merge trattenuto',
+        'hold_text': ('`{by}` ha trattenuto il merge: {reason}\n\ndevloop non mergia la PR '
+                      'finché resta `{label}`; `{release}` lo permette di nuovo.'),
+        'release_title': 'Merge rilasciato',
+        'release_text': ('`{by}` ha rilasciato il merge{reason}\n\ndevloop può di nuovo '
+                         'mergiare la PR quando è `{ready}` e valgono le direttive di merge.'),
+        'held_title': 'Merge non eseguito',
+        'held_text': (
+            'Subito prima della chiamata di merge devloop ha riletto le label della PR, alle '
+            '{at} (UTC), e non permettono il merge: {labels}. Serve `{ready}`, senza '
+            '`{needs_operator}`, `{hold}` né `{needs_supervisor}`. La PR non è mergiata.'),
+        'executor_app': 'con l\'app `{app}`',
+        'executor_gh': 'con il login `gh` locale',
+        'merged_title': 'Mergiata da devloop',
+        'merged_text': (
+            'devloop ha deciso il merge e l\'ha eseguito {executor}: commit `{head}` con un '
+            'merge commit, legato a quel head (`--match-head-commit`), in modalità `{mode}`, al '
+            'livello {level}. Subito prima ha ricontrollato le direttive di merge: CI `pass`, '
+            '`MERGEABLE` e `CLEAN`, nessun finding aperto, nessuna label `{needs_operator}` o '
+            '`{hold}`, e le condizioni della promozione con la ricevuta di policy ricalcolata. '
+            'Le label della PR le ha rilette subito prima della chiamata di merge, alle {at} '
+            '(UTC). Il branch resta.'),
+        'merged_coordinator_title': 'Mergiata da devloop su comando del coordinatore',
+        'merged_coordinator_text': (
+            'Il merge spettava all\'operatore. Il coordinatore `{by}` l\'ha chiesto con '
+            '`/devloop {command}` (commento {comment}, merge riservato del coordinatore, ADR '
+            '0002, #529); devloop ha verificato subito prima tutte le condizioni del merge '
+            'riservato e l\'ha eseguito {executor}: commit `{head}` con un merge commit, legato '
+            'a quel head (`--match-head-commit`), al livello {level}. Le label della PR le ha '
+            'rilette subito prima della chiamata di merge, alle {at} (UTC), senza `{hold}`. Il '
+            'branch resta.\n\n**Motivo del coordinatore:**\n\n{reason}'),
+        'merged_delegated_title': 'Mergiata da devloop su delega del supervisore',
+        'merged_delegated_text': (
+            'Il merge spettava all\'operatore. Il supervisore `{by}` l\'ha chiesto con '
+            '`/devloop {command}` (commento {comment}, delega `[delegations] merge`, #486); '
+            'devloop ha verificato subito prima tutte le condizioni della delega e l\'ha '
+            'eseguito {executor}: commit `{head}` con un merge commit, legato a quel head '
+            '(`--match-head-commit`), al livello {level}. Le label della PR le ha rilette '
+            'subito prima della chiamata di merge, alle {at} (UTC), senza `{hold}`. Il branch '
+            'resta.\n\n**Motivo del supervisore:**\n\n{reason}'),
+        'recomputed': 'Ricevuta di policy ricalcolata per il merge:',
+        'host_title': 'Passo sull\'host da fare prima del pin',
+        'host_held': ('devloop non fa il pin automatico di questo commit né dei successivi: il '
+                      'pin automatico riprende dopo un pin a mano (`devloop pin`) di un commit '
+                      'che contiene il merge, da fare dopo il passo.'),
+        'host_off': 'Il pin automatico è spento: il pin a mano va fatto dopo il passo.',
+        'host_outside': ('La PR #{pr} è stata mergiata fuori da devloop (merge `{merge}`'
+                         '{issue}) e dichiara'),
+        'host_merged': 'devloop ha mergiato la PR #{pr} (head `{head}`{issue}), che dichiara',
+        'host_text': ('{what} un passo sull\'host da fare a loop fermo prima del pin del nuovo '
+                      'codice:\n\n{step}\n\n{pinning}'),
+        'closed_title': 'Risolta da una PR mergiata',
+        'closed_text': (
+            'devloop ha mergiato la PR #{pr} (head `{head}`, merge commit {commit}) in modalità '
+            '`{mode}`, e chiude questa issue come completata. Con il merge dell\'app merger le '
+            'parole chiave di chiusura della PR non hanno effetto, quindi la chiude il '
+            'dispatcher.'),
+        'not_read': 'non letto',
+        'merged_issue': (
+            'L\'issue è aperta e ha `{ready}`, ma è già stata mergiata una PR devloop che la '
+            'risolve: {listed}. devloop non la controlla né la implementa di nuovo, per non '
+            'duplicare il lavoro. Se è risolta va chiusa; se serve altro lavoro, va aperta una '
+            'nuova issue.'),
+        'merge_stays': ('Il comando è speso; la PR resta in `{label}`, e il merge spetta '
+                        'all\'operatore.'),
+        'merge_refused': 'rifiutato: {why}. {stays}',
+        'coordinator_off': ('il merge del coordinatore è spento (`[roles.coordinator] '
+                            'max_merges_per_day` = 0)'),
+        'no_merger': ('il merge del coordinatore si esegue solo con l\'app merger, e devloop '
+                      'non ce l\'ha (`[apps.merger]`)'),
+        'delegation_off': 'la delega del merge è spenta (`[delegations] merge`)',
+        'mode_not_auto': 'la modalità di merge è `{mode}`, non `auto` con un supervisore',
+        'syntax': ('il comando va scritto come `/devloop merge <sha> <motivo>`, con lo sha '
+                   'completo (40 caratteri) dell\'head della PR e il motivo'),
+        'not_operator_merge': ('la PR non aspetta il merge dell\'operatore (`operator_merge`): è '
+                               'all\'operatore per un\'altra ragione'),
+        'not_open': 'la PR non è aperta (`{state}`)',
+        'sha_not_head': ('lo sha del comando (`{sha}`) non è l\'head attuale della PR '
+                         '(`{head}`)'),
+        'labels_not_operator': ('le label della PR non sono più quelle di un merge '
+                                'dell\'operatore: {labels}'),
+        'not_owned': ('`{label}` non è più la label del dispatcher per il merge '
+                      'dell\'operatore'),
+        'comment_gone': 'il commento del comando non è più nella conversazione',
+        'held_after': 'un `/devloop hold` scritto dopo il comando lo ha annullato',
+        'owners_unknown': 'il proprietario di alcuni finding non è ricostruibile',
+        'stale_receipt': ('un record di policy ha trovato superata la ricevuta '
+                          'dell\'approvazione'),
+        'open_findings': 'restano finding bloccanti aperti: {keys}',
+        'not_approved': 'lo sha `{sha}` non è quello approvato dall\'ultimo round di review',
+        'not_clean': ('GitHub non riporta la PR come `MERGEABLE` e `CLEAN` (`{mergeable}`, '
+                      '`{status}`)'),
+        'ci_not_green': 'la CI dell\'head non è verde (`{ci}`)',
+        'acceptance': ('la mappa di copertura dei criteri di accettazione non vale per '
+                       'l\'approvazione'),
+        'receipt_unavailable': 'la ricevuta di policy non è ricalcolabile ({error})',
+        'pushed_head': 'l\'head pubblicato è `{head}`',
+        'trust_paths': 'la PR tocca la regola di fiducia o le deleghe: {paths}',
+        'conclave_restart': ('il lavoro della PR è ripartito dopo la decisione del conclave '
+                             '{decision}: il merge resta umano'),
+        'mode_outside_adr': ('la modalità di merge della PR, fuori da `{adr}`, è `{mode}`, non '
+                             '`auto` (percorsi riservati all\'operatore o un override del '
+                             'livello)'),
+        'host_step': ('la PR dichiara un passo sull\'host (`host_step`), che resta '
+                      'all\'operatore'),
+        'no_quorum': 'la PR non ha un quorum di reviewer per il suo livello',
+        'uncovered': 'la modifica non risulta coperta da una decisione dell\'operatore: {what}',
+        'missing_review': 'manca la review di {keys} su `{sha}`',
+        'trust_declared': ('un reviewer del quorum dichiara toccata la policy di fiducia '
+                           '(`trust_policy`)'),
+        'advisory_missing': 'la review consultiva di `{sha}` manca: serve `ok` o `dubbi`',
+        'advisory_opinion': ('la review consultiva di `{sha}` ha parere `{opinion}`: serve `ok` '
+                             'o `dubbi`'),
+        'advisory_none': 'la review consultiva di `{sha}` non ha un parere: serve `ok` o `dubbi`',
+        'approvals_stale': ('rifiutato: le approvazioni non corrispondono più alla ricevuta di '
+                            'policy ricalcolata, e la PR torna in review.'),
+        'what_coordinator': 'i merge del coordinatore',
+        'limit_coordinator': ('`[roles.coordinator] max_merges_per_day` = {cap}, al massimo '
+                              '{max}'),
+        'what_delegated': 'i merge delegati',
+        'limit_delegated': ('`[delegations] max_merges_per_day` = {cap}, più le estensioni di '
+                            'oggi'),
+        'journal_unavailable': ('{what} di oggi non sono verificabili: il journal dei turni non '
+                                'è disponibile o non è leggibile'),
+        'daily_cap': 'oggi {what} hanno già raggiunto il massimo giornaliero ({cap}: {limit})',
+        'labels_now': ('le label della PR, rilette subito prima della chiamata di merge alle '
+                       '{at} (UTC), non sono più quelle di un merge dell\'operatore: {labels}'),
+        'merge_failed': 'il merge non è riuscito ({error})',
+        'merge_not_run': 'il merge non è stato eseguito',
+        'approval_comment': '(commento {id})',
+        'with_approval': ('; decisione dell\'operatore: il `/devloop approve` {link} sulla issue '
+                          '#{issue}'),
+        'after_conclave': ('; lavoro ripartito dopo la decisione unanime del conclave '
+                           '{decision}, approvato dopo la ripartenza'),
+        'merged_by_coordinator': (
+            'PR mergiata dal coordinatore, commit `{head}`, con le condizioni del merge '
+            'riservato verificate su quello sha; parere della review consultiva: `{opinion}`'
+            '{approval}{conclave}. Merge del coordinatore di oggi: {daily} di {cap}.\n\n'
+            '**Motivo:**\n\n{reason}'),
+        'merged_by_delegation': (
+            'PR mergiata su delega, commit `{head}`, con le condizioni della delega verificate '
+            'su quello sha; parere della review consultiva: `{opinion}`. Merge delegati di oggi: '
+            '{daily} di {cap}.\n\n**Motivo:**\n\n{reason}'),
+        'approval_trust': 'un reviewer ha dichiarato toccata la policy di fiducia',
+        'approval_adr': 'il diff tocca `{adr}`',
+        'approval_and': ' e ',
+        'approval_no_issue': '{what}, e la PR non nomina la issue che chiude',
+        'approval_unreadable': '{what}, e la issue #{issue} non è leggibile ({error})',
+        'approval_none': (
+            '{what}, e la issue #{issue} che la PR chiude non ha un `/devloop approve` valido '
+            'dell\'operatore, scritto di persona dopo l\'ultima modifica del testo e prima che '
+            'devloop la prendesse in carico'),
+        'adr_unreadable': 'le modifiche sotto `{adr}` non sono leggibili ({error})',
+        'adr_not_text': 'le modifiche sotto `{adr}` non sono tutte leggibili come testo',
+        'adr_problems': ('sotto `{adr}` sono ammesse solo righe aggiunte con il link a una '
+                         'decisione dell\'operatore: {problems}'),
+        'adr_untrusted': ('un blocco aggiunto in `{path}` cita solo commenti che non sono di un '
+                          'utente fidato, o che non si leggono: {links}'),
+    })
+
+
+def _quoted(text):
+    """``text`` as a Markdown quote, line by line."""
+    return '\n'.join(f'> {line}'.rstrip() for line in text.splitlines())
+
 
 class MergeHeld(Exception):
     """The labels of the PR, read again just before the merge call (#519), hold the merge:
@@ -65,6 +611,14 @@ class MergeMixin:
     # The alarm of a hold of the auto-pin goes out once (#473): the merge worker and the tick
     # may both try it, the tick when the merge's own alarm has not gone out yet.
     _host_alert_lock = threading.Lock()
+
+    def _merge_texts(self):
+        """The texts of promotions and merges (``TEXTS``) in the project's language (#634)."""
+        return TEXTS.texts(self.cfg.language)
+
+    def _describe_receipt(self, receipt):
+        """``policy.describe`` of ``receipt`` in the project's language (#634)."""
+        return describe_receipt(receipt, self.cfg.language)
 
     def _approval_current(self, pr, review, blind=False):
         """Re-read head and CI just before promoting: approval holds only for the reviewed commit
@@ -201,7 +755,7 @@ class MergeMixin:
         by ``_select_by_provider`` instead; ``fresh`` and ``reviews`` matter only there."""
         if self.cfg.review_policy.provider_quorum:
             return self._select_by_provider(pr, level, fresh, reviews)
-        cfg, implementer = self.cfg, pr.meta['implementer']
+        cfg, implementer, t = self.cfg, pr.meta['implementer'], self._merge_texts()
 
         def eligible(key, authors):
             return (key in cfg.agents and not cfg.signs_for_role(key)
@@ -209,30 +763,21 @@ class MergeMixin:
         if level == 1:
             authors = self._implementer_agents(pr)
             if not authors:
-                return [], (f'non è verificabile che il reviewer sia un agent diverso '
-                            f'dall\'implementer della PR (`{implementer}`): il marker non ne '
-                            'registra il profilo e la sua chiave non è configurata')
+                return [], t('select_unverifiable_one', implementer=implementer)
             for key in (pr.meta['reviewer'], *cfg.pool()):
                 if eligible(key, authors):
                     return [key], ''
-            return [], (f'nessun reviewer configurato è un agent diverso dall\'implementer della '
-                        f'PR (`{implementer}`)')
+            return [], t('select_none_one', implementer=implementer)
         authors = self._authors(pr)
         if authors is None:
-            return [], ('non è verificabile che i reviewer siano indipendenti da chi ha scritto '
-                        'il codice: la PR, una sua correzione o una risoluzione di conflitti '
-                        'non registra identità e tupla dell\'agent (marker precedenti a #111)')
+            return [], t('select_unverifiable')
         candidates = [(key, self._profile(key, 'review')) for key in cfg.pool()
                       if eligible(key, authors)]
         candidates = [(key, p) for key, p in candidates if all(independent(p, a) for a in authors)]
         for group in itertools.combinations(candidates, level):
             if all(distinct(a[1], b[1]) for a, b in itertools.combinations(group, 2)):
                 return [key for key, _ in group], ''
-        pool = ', '.join(f'`{key}`' for key in cfg.pool())
-        return [], (f'il pool di reviewer ({pool}) non ne ha abbastanza: due reviewer contano '
-                    'come distinti solo se differiscono sia per identità GitHub sia per la tupla '
-                    '(kind, model, effort, review_args), e nessuno può avere l\'identità o il '
-                    'modello (kind, model, effort) dell\'implementer o di chi ha corretto la PR')
+        return [], t('select_pool', pool=', '.join(f'`{key}`' for key in cfg.pool()))
 
     def _select_by_provider(self, pr, level, fresh, reviews=None):
         """``(reviewers, problem)`` with the reviewer rules of ADR 0005, P5-5 (#409), at both
@@ -261,12 +806,10 @@ class MergeMixin:
         the next valid reviewer of the pool takes its place; then the configuration order.
         When every valid group has such a reviewer, the first is kept, as before: its turn
         fails as ``tool_failure``."""
-        cfg = self.cfg
+        cfg, t = self.cfg, self._merge_texts()
         authors = self._authors(pr)
         if authors is None:
-            return [], ('non è verificabile che i reviewer siano indipendenti da chi ha scritto '
-                        'il codice: la PR, una sua correzione o una risoluzione di conflitti '
-                        'non registra identità e tupla dell\'agent (marker precedenti a #111)')
+            return [], t('select_unverifiable')
         keys = (pr.meta['reviewer'], *cfg.pool()) if level == 1 else cfg.pool()
         candidates = {}
         for key in dict.fromkeys(keys):
@@ -286,13 +829,8 @@ class MergeMixin:
             return kept, ''
         groups = [list(g) for g in itertools.combinations(candidates, level) if valid(g)]
         if not groups:
-            pool = ', '.join(f'`{key}`' for key in cfg.pool())
-            return [], (f'il pool di reviewer ({pool}) non ne ha abbastanza: ogni reviewer deve '
-                        'avere un\'identità GitHub e una tupla (kind, model, effort) diverse da '
-                        'quelle di chi ha scritto il codice della PR, due reviewer contano come '
-                        'distinti solo se differiscono sia per identità sia per la tupla (kind, '
-                        'model, effort, review_args), e almeno un reviewer deve essere di un '
-                        'fornitore diverso da quello di tutti gli autori (al livello 1, l\'unico)')
+            return [], t('select_pool_provider',
+                         pool=', '.join(f'`{key}`' for key in cfg.pool()))
         # The owners of open findings who may review: only they close their findings.
         owners = {f['owner'] for f in open_findings(pr.reviews, pr.closures)} & set(candidates)
         out = {key for key in candidates if self._unavailable_reviewer(key)}
@@ -366,7 +904,7 @@ class MergeMixin:
         if cls:
             payload['class'] = cls
         self._publish_policy(pr, dispatcher_header() + f'\n## {title}\n\n{text.strip()}\n\n'
-                             + describe_receipt(receipt), payload, prepared)
+                             + self._describe_receipt(receipt), payload, prepared)
 
     def _publish_policy(self, pr, text, payload, prepared=None):
         """Write the ``policy`` record ``payload`` with ``text``. With ``prepared``, the receipt
@@ -380,35 +918,32 @@ class MergeMixin:
             self.gh.comment(pr.number, publishable(text, 'policy', payload))
             return
         content, thread = prepared
-        self._supersede_receipts(pr.number,
-                                 f'la promozione n. {content["promotion"]} la sostituisce',
-                                 thread, strict=True)
-        body = publishable(text.rstrip() + '\n\n' + pr_receipt.section(content), 'policy',
-                           payload, records=[('receipt', pr_receipt.record(content))])
+        language = self.cfg.language
+        self._supersede_receipts(pr.number, self._merge_texts()(
+            'supersede_promotion', promotion=content['promotion']), thread, strict=True)
+        body = publishable(text.rstrip() + '\n\n' + pr_receipt.section(content, language),
+                           'policy', payload, records=[('receipt', pr_receipt.record(content))])
         if len(body) <= MAX_BODY:
             self.gh.comment(pr.number, body)
         else:
             self.log('  promotion and receipt too long for one comment: written apart')
             self.gh.comment(pr.number, publishable(text, 'policy', payload))
-            self.gh.comment(pr.number, pr_receipt.render(content))
+            self.gh.comment(pr.number, pr_receipt.render(content, language=language))
         self.log(f'  receipt of promotion {content["promotion"]} written')
 
     def _escalate_level(self, pr, receipt):
         """Not enough independent reviewers for the level: no review, no promotion, the
         operator decides."""
-        lb, level = self.cfg.labels, receipt['level']
-        needed = 'un reviewer indipendente' if level == 1 else f'{level} reviewer indipendenti'
+        lb, level, t = self.cfg.labels, receipt['level'], self._merge_texts()
+        needed = t('needed_one') if level == 1 else t('needed_many', level=level)
         self._policy_comment(
-            pr, f'Review di livello {level}: serve un intervento dell\'operatore',
-            f'La policy di review del dispatcher richiede per questa PR il livello {level}, '
-            f'quindi {needed}, ma {self._select(pr, level)[1]}. devloop non revisiona né '
-            'promuove la PR: la review e la decisione sul merge spettano a una persona. Il '
-            'livello resta acquisito anche se la label viene rimossa o il diff cambia.',
+            pr, t('level_title', level=level),
+            t('level_text', level=level, needed=needed, why=self._select(pr, level)[1]),
             receipt, 'level', cls='review_level')
         self.gh.edit_labels(pr.number, add=[lb.needs_operator],
                             remove=[lb.review, lb.changes, lb.ready_to_merge])
         if lb.ready_to_merge in pr.labels:
-            self._supersede_receipts(pr.number, f'il livello {level} richiede l\'operatore')
+            self._supersede_receipts(pr.number, t('supersede_level', level=level))
 
     def _promote(self, pr, records, reviews=None):
         """Promote a round whose approvals reach the quorum: every reviewer the receipt
@@ -430,15 +965,13 @@ class MergeMixin:
         if not coherent:
             return None
         by = ', '.join(f'`{key}`' for key in current['reviewers'])
-        branch = self.cfg.base_branch
-        revalidated = (f'\n\nLe approvazioni date su una base precedente restano valide sulla '
-                       f'base corrente: i commit intermedi di `{branch}` non toccano file della '
-                       'PR.\n\n' + _describe_bases(bases, branch)) if bases else ''
+        branch, t = self.cfg.base_branch, self._merge_texts()
+        revalidated = t('revalidated', branch=branch, bases=_describe_bases(
+            bases, branch, self.cfg.language)) if bases else ''
         self._policy_comment(
-            pr, 'Pronta per il merge',
-            f'Approvazione del commit `{records[0]["head_sha"][:12]}` da parte di {by} '
-            'confermata: la ricevuta di policy ricalcolata coincide con quella della review'
-            + (', a parte la base' if bases else '') + '.' + revalidated,
+            pr, t('ready_title'),
+            t('ready_text', head=records[0]['head_sha'][:12], by=by,
+              but=t('but_base') if bases else '', revalidated=revalidated),
             current, 'promoted', bases, prepared=prepared)
         self.gh.edit_labels(pr.number, add=[lb.ready_to_merge], remove=[lb.review, lb.changes])
         return None
@@ -448,14 +981,12 @@ class MergeMixin:
         head is still the receipt's, every expected check run succeeded on it and no trusted
         user's native request for changes stands. Running checks are waited for; anything else
         goes to a human. The merge stays the operator's."""
-        lb = self.cfg.labels
+        lb, t = self.cfg.labels, self._merge_texts()
         left = open_findings(pr.reviews, pr.closures)
         if left:
-            return self._refuse_zero(pr, receipt, 'restano finding bloccanti aperti, che nessuna '
-                                     'review chiude al livello 0:\n\n' + '\n'.join(
-                                         f'- `{f["key"]}` ({f["title"]})' for f in left)
-                                     + f'\n\nUn utente fidato può chiuderli con `{FINDING_COMMAND} '
-                                     '<round/reviewer/ID> resolved|withdrawn <motivazione>`')
+            return self._refuse_zero(pr, receipt, t(
+                'zero_open_findings', command=FINDING_COMMAND,
+                listed='\n'.join(f'- `{f["key"]}` ({f["title"]})' for f in left)))
         head = self.gh.pr_head(pr.number)
         if head != receipt['head']:
             self.log(f'  not promoted: head moved to {head[:12]}')
@@ -472,25 +1003,18 @@ class MergeMixin:
             self.log('  not promoted: expected checks still running')
             return
         if outcome != 'success':
-            return self._refuse_zero(pr, receipt, 'non tutti i controlli attesi si sono conclusi '
-                                     'con `success` sul head corrente (un controllo mancante, '
-                                     '`skipped`, `neutral` o `cancelled` non vale come '
-                                     'successo):\n\n' + listed, states)
+            return self._refuse_zero(pr, receipt, t('zero_checks_failed', listed=listed), states)
         blocking = changes_requested(self.gh.pr_reviews(pr.number), self.cfg.trusted_users)
         if blocking:
-            return self._refuse_zero(pr, receipt, 'una richiesta di modifiche (`REQUEST_CHANGES`) '
-                                     'di ' + ', '.join(f'`{who}`' for who in blocking)
-                                     + ' è ancora valida: va dismessa o sostituita da '
-                                     'un\'approvazione dello stesso autore', states)
+            return self._refuse_zero(pr, receipt, t(
+                'zero_changes_requested', who=', '.join(f'`{who}`' for who in blocking)), states)
         coherent, prepared = self._checked_receipt(pr, receipt, head, None, pr.reviews)
         if not coherent:
             return None
         self._publish_policy(
-            pr, dispatcher_header() + '\n## Pronta per il merge (livello 0)\n\n'
-            f'Il commit `{head[:12]}` non richiede review: la label di livello 0 è stata messa da '
-            'un utente fidato, il diff è interamente nell\'allowlist e tutti i controlli attesi '
-            'si sono conclusi con `success`. Il merge resta un\'azione dell\'operatore.\n\n'
-            + listed + '\n\n' + describe_receipt(receipt),
+            pr, dispatcher_header() + f'\n## {t("zero_ready_title")}\n\n'
+            + t('zero_ready_text', head=head[:12]) + '\n\n'
+            + listed + '\n\n' + self._describe_receipt(receipt),
             {'event': 'promoted', 'receipt': receipt, 'checks': states}, prepared)
         self.gh.edit_labels(pr.number, add=[lb.ready_to_merge], remove=[lb.review, lb.changes])
         return None
@@ -510,19 +1034,16 @@ class MergeMixin:
         content = self._receipt_content(pr, current, pr.promotions + 1, approved_round, reviews,
                                         thread, self._advisory_record(thread, current['head']))
         problems = pr_receipt.contradictions(content, implementer=pr.meta['implementer'],
-                                             approved_head=approved_head)
+                                             approved_head=approved_head,
+                                             language=self.cfg.language)
         if problems:
             lb = self.cfg.labels
             self.log(f'  not promoted: the receipt contradicts the markers ({len(problems)})')
             self._escalate(
-                pr.number, 'La ricevuta della PR, costruita dai record del registro del '
-                f'dispatcher e dai marker, contiene una contraddizione per il commit '
-                f'`{approved_head[:12]}`: devloop non promuove la PR.\n\n'
-                + '\n'.join(f'- {p}' for p in problems)
-                + '\n\nI dati storici mancanti non bloccano: qui i dati ci sono e non '
-                'coincidono. Va verificato quale record è corretto prima di rimettere '
-                f'`{lb.review}`.', remove=[lb.review, lb.changes, lb.ready_to_merge],
-                cls=RECEIPT_CONFLICT)
+                pr.number, self._merge_texts()(
+                    'receipt_conflict', head=approved_head[:12], review=lb.review,
+                    problems='\n'.join(f'- {p}' for p in problems)),
+                remove=[lb.review, lb.changes, lb.ready_to_merge], cls=RECEIPT_CONFLICT)
             return False, None
         return True, (content, thread)
 
@@ -567,7 +1088,7 @@ class MergeMixin:
                 if comment.get('id') is None:
                     raise GitHubError(f'receipt on #{number}: comment id unknown, not edited')
                 self.gh.edit_comment(comment['id'], pr_receipt.superseded(
-                    comment['body'], record, why, at))
+                    comment['body'], record, why, at, self.cfg.language))
                 self.log(f'  receipt of promotion {record["promotion"]} marked superseded')
         except GitHubError as exc:
             if strict:
@@ -580,27 +1101,25 @@ class MergeMixin:
         allowlist), its expected check runs must still have succeeded on the head, and no
         trusted user's native request for changes may stand. What cannot be verified does not
         hold."""
+        t = self._merge_texts()
         try:
             receipt = self._receipt(pr)
             if receipt['head'] != pr.head_sha:
-                return f'il head è passato a `{receipt["head"][:12]}`'
+                return t('zero_head_moved', head=receipt['head'][:12])
             if receipt['level'] != ZERO_LEVEL:
-                return ('la ricevuta di policy ricalcolata ora assegna il livello '
-                        f'{receipt["level"]}:\n\n' + describe_receipt(receipt))
+                return t('zero_level_now', level=receipt['level'],
+                         policy=self._describe_receipt(receipt))
             states = check_states(self.cfg.review_policy.zero_checks,
                                   self.gh.check_runs(pr.head_sha))
             if check_outcome(states) != 'success':
-                return ('non tutti i controlli attesi risultano conclusi con `success` '
-                        'sull\'esecuzione più recente del head:\n\n'
-                        + '\n'.join(f'- `{s["name"]}` (app {s["app_id"]}): `{s["state"]}`'
-                                    for s in states))
+                return t('zero_checks_now', listed='\n'.join(
+                    f'- `{s["name"]}` (app {s["app_id"]}): `{s["state"]}`' for s in states))
             blocking = changes_requested(self.gh.pr_reviews(pr.number), self.cfg.trusted_users)
             if blocking:
-                return ('una richiesta di modifiche (`REQUEST_CHANGES`) di '
-                        + ', '.join(f'`{who}`' for who in blocking) + ' è ancora valida')
+                return t('zero_changes_now', who=', '.join(f'`{who}`' for who in blocking))
         except (GitHubError, WorkspaceError) as exc:
             self.log(f'  level 0 of #{pr.number} not verifiable: {exc}')
-            return 'non è stato possibile verificarlo di nuovo'
+            return t('zero_unverifiable')
         return ''
 
     def _acceptance_problems(self, pr):
@@ -618,68 +1137,56 @@ class MergeMixin:
         history = self.gh.issue_history(pr.issue)
         reason = self._untrusted_change(history)
         if reason:
-            return [f'testo dell\'issue non verificabile: {reason}']
-        # The titles go into texts of the merge, still in Italian until #628 translates them.
+            return [self._merge_texts()('untrusted_issue', reason=reason)]
+        # The titles go into texts of the merge, in the project's language (#634).
         found = acceptance_findings(acceptance_criteria(history['body']),
-                                    latest_map(pr.meta, pr.fixes), language=ITALIAN)
+                                    latest_map(pr.meta, pr.fixes), language=self.cfg.language)
         return [f['title'] for f in found]
 
     def _refuse_zero(self, pr, receipt, why, states=()):
         """Level 0 holds but the head cannot be promoted: the operator decides."""
-        lb = self.cfg.labels
+        lb, t = self.cfg.labels, self._merge_texts()
         self.gh.comment(pr.number, publishable(
-            dispatcher_header() + '\n## Livello 0: serve un intervento dell\'operatore\n\n'
-            f'La policy di review assegna a questa PR il livello 0, ma {why.strip()}.\n\n'
-            'devloop non promuove la PR. Per riprendere: risolvere la causa, togliere '
-            f'`{lb.needs_operator}` e rimettere `{lb.review}` (il livello 0 viene ricontrollato), '
-            f'oppure togliere anche la label `{self.cfg.review_policy.zero_label}` per una review '
-            'di livello 1.\n\n' + describe_receipt(receipt),
+            dispatcher_header() + f'\n## {t("refuse_zero_title")}\n\n'
+            + t('refuse_zero_text', why=why.strip(), needs_operator=lb.needs_operator,
+                review=lb.review, zero=self.cfg.review_policy.zero_label)
+            + '\n\n' + self._describe_receipt(receipt),
             'policy', {'event': 'level', 'receipt': receipt, 'checks': list(states),
                        'class': 'level_zero'}))
         self.gh.edit_labels(pr.number, add=[lb.needs_operator],
                             remove=[lb.review, lb.changes, lb.ready_to_merge])
         if lb.ready_to_merge in pr.labels:
-            self._supersede_receipts(pr.number, 'il livello 0 non vale più per il head')
+            self._supersede_receipts(pr.number, t('supersede_zero'))
 
     # Actions -------------------------------------------------------------
     def _do_revoke(self, pr):
-        lb = self.cfg.labels
+        lb, t = self.cfg.labels, self._merge_texts()
         latest = current_round(pr.reviews)
         complete = latest and not pending_reviewers(latest)
         approved = (latest[0]['head_sha'] if complete and round_verdict(latest) == 'approve'
                     else None)
         if pr.zero_head is not None:
-            title = 'Livello 0 sospeso'
-            why = (pr.zero_problem.strip() if pr.zero_problem
-                   else 'il head, le label di livello o la CI sono cambiati')
+            title = t('zero_suspended')
+            why = pr.zero_problem.strip() if pr.zero_problem else t('zero_suspended_why')
             # A list ends its own paragraph; a sentence needs its full stop.
             end = '' if why.splitlines()[-1].startswith('- ') else '.'
-            reason = (f'La PR era pronta per il merge al livello 0 sul commit '
-                      f'`{pr.zero_head[:12]}`, ma {why}{end}\n\nLa PR torna in review e il '
-                      'livello viene ricalcolato')
+            reason = t('zero_suspended_text', head=pr.zero_head[:12], why=why, end=end)
         elif approved == pr.head_sha and pr.acceptance:
-            title = 'Approvazione sospesa'
-            reason = (f'L\'approvazione del commit `{approved[:12]}` non vale per la mappa di '
-                      'copertura dei criteri di accettazione (#134):\n\n'
-                      + '\n'.join(f'- {problem}' for problem in pr.acceptance)
-                      + '\n\nLa PR torna in review: una nuova review, che conta come un round, '
-                      'registra il finding bloccante')
+            title = t('approval_suspended')
+            reason = t('approval_suspended_text', head=approved[:12],
+                       problems='\n'.join(f'- {problem}' for problem in pr.acceptance))
         elif approved == pr.head_sha:
-            title = 'Readiness sospesa'
-            reason = (f'La CI del commit approvato `{approved[:12]}` è di nuovo in corso. La PR '
-                      'torna in review: l\'approvazione resta registrata e verrà riapplicata '
-                      'senza una nuova review se la CI passa e la ricevuta di policy coincide '
-                      'ancora')
+            title = t('readiness_suspended')
+            reason = t('readiness_suspended_text', head=approved[:12])
         elif approved:
-            title = 'Approvazione revocata'
-            reason = (f'Il commit `{pr.head_sha[:12]}` non è quello approvato (`{approved[:12]}`). '
-                      'La PR torna in review')
+            title = t('approval_revoked')
+            reason = t('revoked_moved', head=pr.head_sha[:12], approved=approved[:12])
         else:
-            title = 'Approvazione revocata'
-            reason = 'Non risulta una review devloop approvata. La PR torna in review'
+            title = t('approval_revoked')
+            reason = t('revoked_none')
         released = self._released(pr)
         if released:
-            reason += f', e `{lb.needs_operator}`, che il dispatcher aveva messo per il merge, è tolta'
+            reason += t('released', label=lb.needs_operator)
         self.gh.comment(pr.number,
                         publishable(dispatcher_header() + f'\n## {title}\n\n' + reason + '.'))
         self.gh.edit_labels(pr.number, add=[lb.review], remove=[lb.ready_to_merge, *released])
@@ -690,20 +1197,18 @@ class MergeMixin:
         """Apply a hold or release command (#172): add or remove ``agent:merge-hold``, then
         record who asked and why in a dispatcher ``hold`` record, which spends the command.
         Label first: if the record is lost, the next tick applies the same command again."""
-        lb, command = self.cfg.labels, pr.hold
+        lb, command, t = self.cfg.labels, pr.hold, self._merge_texts()
         reason = ' '.join(command['reason'].split())
         if command['event'] == 'hold':
             self.gh.edit_labels(pr.number, add=[lb.merge_hold])
-            title = 'Merge trattenuto'
-            text = (f'`{command["by"]}` ha trattenuto il merge: {reason}\n\ndevloop non mergia '
-                    f'la PR finché resta `{lb.merge_hold}`; `{RELEASE_COMMAND}` lo permette di '
-                    'nuovo.')
+            title = t('hold_title')
+            text = t('hold_text', by=command['by'], reason=reason, label=lb.merge_hold,
+                     release=RELEASE_COMMAND)
         else:
             self.gh.edit_labels(pr.number, remove=[lb.merge_hold])
-            title = 'Merge rilasciato'
-            text = (f'`{command["by"]}` ha rilasciato il merge' + (f': {reason}' if reason else '.')
-                    + f'\n\ndevloop può di nuovo mergiare la PR quando è `{lb.ready_to_merge}` e '
-                    'valgono le direttive di merge.')
+            title = t('release_title')
+            text = t('release_text', by=command['by'], ready=lb.ready_to_merge,
+                     reason=f': {reason}' if reason else '.')
         self.gh.comment(pr.number, publishable(dispatcher_header() + f'\n## {title}\n\n{text}',
                                                'hold', dict(command, head=pr.head_sha)))
         self.log(f'  {command["event"]} by {command["by"]}')
@@ -789,7 +1294,7 @@ class MergeMixin:
             problem = self._zero_problem(pr)
             if not problem and not (pr.zero_head == head and rp.zero_label in labels
                                     and rp.label not in labels):
-                problem = 'il head o le label di livello sono cambiati'
+                problem = self._merge_texts()('zero_labels_changed')
             if problem:
                 pr.zero_problem = problem
                 return self._do_revoke(pr)
@@ -807,13 +1312,13 @@ class MergeMixin:
             self._execute_merge(pr, thread, head, current, mode, paths, bases)
         except MergeHeld as held:
             skip(str(held))
+            t = self._merge_texts()
             self.gh.comment(pr.number, publishable(
-                dispatcher_header() + '\n## Merge non eseguito\n\n'
-                f'Subito prima della chiamata di merge devloop ha riletto le label della PR, alle '
-                f'{held.at} (UTC), e non permettono il merge: '
-                + ', '.join(f'`{n}`' for n in sorted(held.labels)) + '. '
-                f'Serve `{lb.ready_to_merge}`, senza `{lb.needs_operator}`, `{lb.merge_hold}` né '
-                f'`{lb.needs_supervisor}`. La PR non è mergiata.'))
+                dispatcher_header() + f'\n## {t("held_title")}\n\n' + t(
+                    'held_text', at=held.at,
+                    labels=', '.join(f'`{n}`' for n in sorted(held.labels)),
+                    ready=lb.ready_to_merge, needs_operator=lb.needs_operator,
+                    hold=lb.merge_hold, needs_supervisor=lb.needs_supervisor)))
         return None
 
     def _labels_hold_merge(self, labels, delegated=False):
@@ -903,47 +1408,20 @@ class MergeMixin:
         if delegation is not None:
             payload['delegation'] = dict(delegation)
         # The comment names who wrote to the base (#323): the dispatcher only decides the merge.
-        executor = (f'con l\'app `{merged_by.removesuffix("[bot]")}`' if merged_by
-                    else 'con il login `gh` locale')
+        t = self._merge_texts()
+        executor = (t('executor_app', app=merged_by.removesuffix('[bot]')) if merged_by
+                    else t('executor_gh'))
+        common = {'executor': executor, 'head': head[:12], 'level': current['level'],
+                  'at': labels_at, 'hold': lb.merge_hold}
         if delegation is None:
-            section = (
-                '## Mergiata da devloop\n\n'
-                f'devloop ha deciso il merge e l\'ha eseguito {executor}: commit `{head[:12]}` '
-                'con un merge commit, legato a quel '
-                f'head (`--match-head-commit`), in modalità `{mode}`, al livello '
-                f'{current["level"]}. Subito prima ha ricontrollato le direttive di merge: CI '
-                '`pass`, `MERGEABLE` e `CLEAN`, nessun finding aperto, nessuna label '
-                f'`{lb.needs_operator}` o `{lb.merge_hold}`, e le condizioni della promozione con '
-                'la ricevuta di policy ricalcolata. Le label della PR le ha rilette subito prima '
-                f'della chiamata di merge, alle {labels_at} (UTC). Il branch resta.')
-        elif delegation.get('role') == COORDINATOR:
-            section = (
-                '## Mergiata da devloop su comando del coordinatore\n\n'
-                f'Il merge spettava all\'operatore. Il coordinatore `{delegation["by"]}` l\'ha '
-                f'chiesto con `/devloop {delegation["command"]}` (commento '
-                f'{delegation["comment"]}, merge riservato del coordinatore, ADR 0002, #529); '
-                'devloop ha verificato subito prima tutte le condizioni del merge riservato e '
-                f'l\'ha eseguito {executor}: commit `{head[:12]}` con un merge commit, legato a '
-                f'quel head (`--match-head-commit`), al livello {current["level"]}. Le label '
-                'della PR le ha rilette subito prima della chiamata di merge, alle '
-                f'{labels_at} (UTC), senza `{lb.merge_hold}`. Il branch resta.\n\n'
-                '**Motivo del coordinatore:**\n\n'
-                + '\n'.join(f'> {line}'.rstrip()
-                            for line in delegation['reason'].splitlines()))
+            section = (f'## {t("merged_title")}\n\n'
+                       + t('merged_text', mode=mode, needs_operator=lb.needs_operator, **common))
         else:
-            section = (
-                '## Mergiata da devloop su delega del supervisore\n\n'
-                f'Il merge spettava all\'operatore. Il supervisore `{delegation["by"]}` l\'ha '
-                f'chiesto con `/devloop {delegation["command"]}` (commento '
-                f'{delegation["comment"]}, delega `[delegations] merge`, #486); devloop ha '
-                'verificato subito prima tutte le condizioni della delega e l\'ha eseguito '
-                f'{executor}: commit `{head[:12]}` con un merge commit, legato a quel head '
-                f'(`--match-head-commit`), al livello {current["level"]}. Le label della PR le '
-                f'ha rilette subito prima della chiamata di merge, alle {labels_at} (UTC), senza '
-                f'`{lb.merge_hold}`. Il branch resta.\n\n'
-                '**Motivo del supervisore:**\n\n'
-                + '\n'.join(f'> {line}'.rstrip()
-                            for line in delegation['reason'].splitlines()))
+            kind = 'coordinator' if delegation.get('role') == COORDINATOR else 'delegated'
+            section = (f'## {t(f"merged_{kind}_title")}\n\n'
+                       + t(f'merged_{kind}_text', by=delegation['by'],
+                           command=delegation['command'], comment=delegation['comment'],
+                           reason=_quoted(delegation['reason']), **common))
         try:
             self._record_merge(pr, thread, head, current, section, payload)
         except GitHubError as exc:
@@ -1112,23 +1590,17 @@ class MergeMixin:
         if not issue:
             self.log('  no [run].alert_issue is configured: no alert for the step on the host')
             return True
-        if holding:
-            pinning = ('devloop non fa il pin automatico di questo commit né dei successivi: '
-                       'il pin automatico riprende dopo un pin a mano (`devloop pin`) di un '
-                       'commit che contiene il merge, da fare dopo il passo.')
-        else:
-            pinning = 'Il pin automatico è spento: il pin a mano va fatto dopo il passo.'
+        t = self._merge_texts()
+        pinning = t('host_held') if holding else t('host_off')
         issue_ref = f', issue #{number}' if isinstance(number, int) else ''
         if outside:
-            what = (f'La PR #{pr.number} è stata mergiata fuori da devloop (merge '
-                    f'`{(merge or "")[:12]}`{issue_ref}) e dichiara')
+            what = t('host_outside', pr=pr.number, merge=(merge or '')[:12], issue=issue_ref)
         else:
-            what = (f'devloop ha mergiato la PR #{pr.number} (head `{head[:12]}`{issue_ref}), '
-                    'che dichiara')
+            what = t('host_merged', pr=pr.number, head=head[:12], issue=issue_ref)
         body = publishable(
-            dispatcher_header() + '\n## Passo sull\'host da fare prima del pin\n\n' + what
-            + ' un passo sull\'host da fare a loop fermo prima del pin del nuovo codice:\n\n'
-            + '\n'.join('> ' + line for line in step.splitlines()) + '\n\n' + pinning)
+            dispatcher_header() + f'\n## {t("host_title")}\n\n' + t(
+                'host_text', what=what, pinning=pinning,
+                step='\n'.join('> ' + line for line in step.splitlines())))
         try:
             self.gh.comment(issue, body)
         except Exception as exc:  # its class, never its output
@@ -1162,7 +1634,8 @@ class MergeMixin:
         from the promotion's, and the ``merged`` record follows its other records. Without such
         a comment, when the edited one would not fit GitHub or when the edit fails, the record
         is a comment of its own, as before #338."""
-        alone = dispatcher_header() + '\n' + section + '\n\n' + describe_receipt(receipt)
+        policy = self._describe_receipt(receipt)
+        alone = dispatcher_header() + '\n' + section + '\n\n' + policy
         promoted = self._dispatcher_records(thread, 'policy', 'promoted')
         if promoted:
             position, record = promoted[-1]
@@ -1172,9 +1645,8 @@ class MergeMixin:
             if (comment.get('id') is not None and record['receipt']['head'] == head
                     and (carried is None or carried['state'] == 'current')):
                 text = split_markers(body)[0] + '\n\n' + section
-                if describe_receipt(receipt) != describe_receipt(record['receipt']):
-                    text += '\n\nRicevuta di policy ricalcolata per il merge:\n\n' \
-                            + describe_receipt(receipt)
+                if policy != self._describe_receipt(record['receipt']):
+                    text += f'\n\n{self._merge_texts()("recomputed")}\n\n{policy}'
                 edited = with_record(body, 'merged', payload, text=text)
                 try:
                     if len(edited) <= MAX_BODY:
@@ -1209,12 +1681,11 @@ class MergeMixin:
                 commit = (self.gh.pr_state(pr.number).get('mergeCommit') or {}).get('oid')
             except GitHubError as exc:
                 self.log(f'  merge commit of #{pr.number} not read: {exc}')
+            t = self._merge_texts()
             self.gh.comment(number, publishable(
-                dispatcher_header() + '\n## Risolta da una PR mergiata\n\n'
-                f'devloop ha mergiato la PR #{pr.number} (head `{head[:12]}`, merge commit '
-                + (f'`{commit[:12]}`' if commit else 'non letto') + f') in modalità `{mode}`, e '
-                'chiude questa issue come completata. Con il merge dell\'app merger le parole '
-                'chiave di chiusura della PR non hanno effetto, quindi la chiude il dispatcher.',
+                dispatcher_header() + f'\n## {t("closed_title")}\n\n' + t(
+                    'closed_text', pr=pr.number, head=head[:12], mode=mode,
+                    commit=f'`{commit[:12]}`' if commit else t('not_read')),
                 'closed', {'pr': pr.number, 'head': head, 'merge_commit': commit, 'mode': mode}))
             self.gh.close_issue(number)
             if lb.ready in label_names(issue.get('labels') or []):
@@ -1238,10 +1709,7 @@ class MergeMixin:
             return
         listed = ', '.join(f'#{m["number"]}' + (f' (merge commit `{m["merge_commit"][:12]}`)'
                                                 if m['merge_commit'] else '') for m in merged)
-        reason = (f'L\'issue è aperta e ha `{lb.ready}`, ma è già stata mergiata una PR devloop '
-                  f'che la risolve: {listed}. devloop non la controlla né la implementa di nuovo, '
-                  'per non duplicare il lavoro. Se è risolta va chiusa; se serve altro lavoro, '
-                  'va aperta una nuova issue.')
+        reason = self._merge_texts()('merged_issue', ready=lb.ready, listed=listed)
         supervised, why = self._supervised(number, MERGED_ISSUE, 'implement')
         # From a refused retry the issue is in agent:needs-supervisor: it leaves it only for
         # the operator.
@@ -1364,118 +1832,103 @@ class MergeMixin:
         No decision of the operator on the PR itself is needed (#624): the coordinator merges
         the reserved PRs that meet every condition."""
         cfg, lb, rules = self.cfg, self.cfg.labels, self.cfg.delegations
+        t = self._merge_texts()
         by = command['by']
         coordinator = self._is_coordinator(by)
-        stays = (f'Il comando è speso; la PR resta in `{lb.needs_operator}`, e il merge spetta '
-                 'all\'operatore.')
+        stays = t('merge_stays', label=lb.needs_operator)
 
         def refuse(why):
-            return trace('refused', f'rifiutato: {why}. {stays}')
+            return trace('refused', t('merge_refused', why=why, stays=stays))
 
         if coordinator:
             if cfg.coordinator.max_merges_per_day < 1:
-                return refuse('il merge del coordinatore è spento (`[roles.coordinator] '
-                              'max_merges_per_day` = 0)')
+                return refuse(t('coordinator_off'))
             if not self._app_login(MERGER):
                 # Executed by the merger's app (ADR 0002), never with the ambient gh login.
-                return refuse('il merge del coordinatore si esegue solo con l\'app merger, e '
-                              'devloop non ce l\'ha (`[apps.merger]`)')
+                return refuse(t('no_merger'))
         elif not rules.merge:
-            return refuse('la delega del merge è spenta (`[delegations] merge`)')
+            return refuse(t('delegation_off'))
         elif cfg.merge.mode != 'auto' or not cfg.supervisor:
-            return refuse(f'la modalità di merge è `{cfg.merge.mode}`, non `auto` con un '
-                          'supervisore')
+            return refuse(t('mode_not_auto', mode=cfg.merge.mode))
         args = merge_arguments(command['reason'])
         if args is None:
-            return refuse('il comando va scritto come `/devloop merge <sha> <motivo>`, con lo sha '
-                          'completo (40 caratteri) dell\'head della PR e il motivo')
+            return refuse(t('syntax'))
         sha, reason = args
         anchor = command['anchor']
         if anchor.get('kind') != 'notice' or anchor['record'].get('event') != 'operator_merge':
-            return refuse('la PR non aspetta il merge dell\'operatore (`operator_merge`): è '
-                          'all\'operatore per un\'altra ragione')
+            return refuse(t('not_operator_merge'))
         fresh = self.gh.pr_state(number)
         labels = label_names(fresh.get('labels') or [])
         head = fresh.get('headRefOid') or ''
         if fresh.get('state') != 'OPEN':
-            return refuse(f'la PR non è aperta (`{fresh.get("state")}`)')
+            return refuse(t('not_open', state=fresh.get('state')))
         if sha != head:
-            return refuse(f'lo sha del comando (`{sha[:12]}`) non è l\'head attuale della PR '
-                          f'(`{head[:12]}`)')
+            return refuse(t('sha_not_head', sha=sha[:12], head=head[:12]))
         if self._labels_hold_merge(labels, delegated=True):
-            return refuse('le label della PR non sono più quelle di un merge dell\'operatore: '
-                          + ', '.join(f'`{n}`' for n in sorted(labels)))
+            return refuse(t('labels_not_operator',
+                            labels=', '.join(f'`{n}`' for n in sorted(labels))))
         pr = self._fresh_pr(target, labels, fresh, comments)
         if not pr.operator_owned:
-            return refuse(f'`{lb.needs_operator}` non è più la label del dispatcher per il merge '
-                          'dell\'operatore')
+            return refuse(t('not_owned', label=lb.needs_operator))
         position = next((i for i, c in enumerate(comments) if c.get('id') == command['comment']),
                         None)
         if position is None:
-            return refuse('il commento del comando non è più nella conversazione')
+            return refuse(t('comment_gone'))
         held = [c for c in comments[position + 1:]
                 if not carries_record(c.get('body') or '')
                 and (merge_command(c.get('body')) or ('',))[0] == 'hold'
                 and (self._may_hold((c.get('author') or {}).get('login'))
                      or self._coordinator_may((c.get('author') or {}).get('login'), 'hold'))]
         if held:
-            return refuse('un `/devloop hold` scritto dopo il comando lo ha annullato')
+            return refuse(t('held_after'))
         if pr.finding_problems:
-            return refuse('il proprietario di alcuni finding non è ricostruibile')
+            return refuse(t('owners_unknown'))
         if pr.stale_receipt:
-            return refuse('un record di policy ha trovato superata la ricevuta dell\'approvazione')
+            return refuse(t('stale_receipt'))
         left = open_findings(pr.reviews, pr.closures)
         if left:
-            return refuse('restano finding bloccanti aperti: '
-                          + ', '.join(f'`{f["key"]}`' for f in left))
+            return refuse(t('open_findings', keys=', '.join(f'`{f["key"]}`' for f in left)))
         latest = current_round(pr.reviews)
         if not (latest and not pending_reviewers(latest) and round_verdict(latest) == 'approve'
                 and all(r['head_sha'] == sha for r in latest)):
-            return refuse(f'lo sha `{sha[:12]}` non è quello approvato dall\'ultimo round di '
-                          'review')
+            return refuse(t('not_approved', sha=sha[:12]))
         if (fresh.get('mergeable'), fresh.get('mergeStateStatus')) != ('MERGEABLE', 'CLEAN'):
-            return refuse('GitHub non riporta la PR come `MERGEABLE` e `CLEAN` ('
-                          f'`{fresh.get("mergeable")}`, `{fresh.get("mergeStateStatus")}`)')
+            return refuse(t('not_clean', mergeable=fresh.get('mergeable'),
+                            status=fresh.get('mergeStateStatus')))
         ci, _ = self._read_ci(head)
         if ci != 'pass':
-            return refuse(f'la CI dell\'head non è verde (`{ci}`)')
+            return refuse(t('ci_not_green', ci=ci))
         if self._acceptance_problems(pr):
-            return refuse('la mappa di copertura dei criteri di accettazione non vale per '
-                          'l\'approvazione')
+            return refuse(t('acceptance'))
         try:
             current, paths = self._receipt_and_paths(pr)
         except (GitHubError, WorkspaceError) as exc:
-            return refuse(f'la ricevuta di policy non è ricalcolabile ({exc})')
+            return refuse(t('receipt_unavailable', error=exc))
         if current['head'] != head:
-            return refuse(f'l\'head pubblicato è `{current["head"][:12]}`')
+            return refuse(t('pushed_head', head=current['head'][:12]))
         touched = [] if coordinator else rule_paths(paths, rules.merge_trust_paths)
         if touched:
-            return refuse('la PR tocca la regola di fiducia o le deleghe: '
-                          + ', '.join(f'`{p}`' for p in touched[:MAX_LISTED_PATHS]))
+            return refuse(t('trust_paths', paths=', '.join(
+                f'`{p}`' for p in touched[:MAX_LISTED_PATHS])))
         unblocked = self._human_merge(pr)
         if unblocked is not None and not coordinator:
-            return refuse(f'il lavoro della PR è ripartito dopo la decisione del conclave '
-                          f'{unblocked}: il merge resta umano')
+            return refuse(t('conclave_restart', decision=unblocked))
         adr = adr_paths(paths)
         mode = cfg.merge.mode_for(current['level'], [p for p in paths if p not in adr])
         if mode != 'auto' and not coordinator:
-            return refuse(f'la modalità di merge della PR, fuori da `{ADR_DIR}`, è `{mode}`, non '
-                          '`auto` (percorsi riservati all\'operatore o un override del livello)')
+            return refuse(t('mode_outside_adr', adr=ADR_DIR, mode=mode))
         if latest_host_step(pr.meta, pr.fixes) and not coordinator:
-            return refuse('la PR dichiara un passo sull\'host (`host_step`), che resta '
-                          'all\'operatore')
+            return refuse(t('host_step'))
         if current['level'] == ZERO_LEVEL or len(current['reviewers']) < current['level']:
-            return refuse('la PR non ha un quorum di reviewer per il suo livello')
+            return refuse(t('no_quorum'))
         quorum = self._quorum_records(pr.reviews, current['reviewers'], sha)
         missing = [k for k in current['reviewers'] if k not in quorum]
         uncovered = [k for k, r in quorum.items()
                      if r.get('operator_reason') not in (None, 'none', DECISION)]
         if missing or uncovered or (trust_policy_parts(pr.reviews) and not coordinator):
-            return refuse('la modifica non risulta coperta da una decisione dell\'operatore: '
-                          + ('manca la review di ' + ', '.join(f'`{k}`' for k in missing)
-                             + f' su `{sha[:12]}`' if missing else
-                             'un reviewer del quorum dichiara toccata la policy di fiducia '
-                             '(`trust_policy`)'))
+            return refuse(t('uncovered', what=t(
+                'missing_review', keys=', '.join(f'`{k}`' for k in missing), sha=sha[:12])
+                if missing else t('trust_declared')))
         if unblocked is not None:
             # The coordinator's merge after a unanimous conclave decision (#624).
             problem = self._conclave_merge_problem(pr, comments, latest, quorum)
@@ -1484,9 +1937,9 @@ class MergeMixin:
         advisory = self._advisory_record(comments, sha)
         opinion = (advisory or {}).get('opinion')
         if opinion not in MERGE_OPINIONS:
-            return refuse(f'la review consultiva di `{sha[:12]}` ' + (
-                'manca' if advisory is None else f'ha parere `{opinion}`'
-                if opinion else 'non ha un parere') + ': serve `ok` o `dubbi`')
+            return refuse(t('advisory_missing', sha=sha[:12]) if advisory is None
+                          else t('advisory_opinion', sha=sha[:12], opinion=opinion) if opinion
+                          else t('advisory_none', sha=sha[:12]))
         approval = None
         if coordinator:
             # The operator's decision, for the trust policy and the ADRs (#529).
@@ -1501,22 +1954,19 @@ class MergeMixin:
                 return refuse(problem)
         bases = self._approvals_match(pr, latest, current, paths, step='merge')
         if bases is None:
-            return trace('refused', 'rifiutato: le approvazioni non corrispondono più alla '
-                         'ricevuta di policy ricalcolata, e la PR torna in review.')
+            return trace('refused', t('approvals_stale'))
         journal = getattr(self.ledger, 'journal', None)
         day = ledger_timestamp(self.clock)[:10]
         if coordinator:
             # A cap of its own, with no extension (#529).
             cap, event, what = (cfg.coordinator.max_merges_per_day, COORDINATOR_MERGE,
-                                'i merge del coordinatore')
-            limit = (f'`[roles.coordinator] max_merges_per_day` = {cap}, al massimo '
-                     f'{MAX_COORDINATOR_MERGES}')
+                                t('what_coordinator'))
+            limit = t('limit_coordinator', cap=cap, max=MAX_COORDINATOR_MERGES)
         else:
             extensions = self._merge_budget_extensions(day)
             cap = rules.max_merges_per_day + sum(e['n'] for e in extensions)
-            event, what = DELEGATED_MERGE, 'i merge delegati'
-            limit = (f'`[delegations] max_merges_per_day` = {rules.max_merges_per_day}, più le '
-                     'estensioni di oggi')
+            event, what = DELEGATED_MERGE, t('what_delegated')
+            limit = t('limit_delegated', cap=rules.max_merges_per_day)
         try:
             daily = (None if journal is None else
                      journal.delegated_merge(number, command['comment'], by, head, cap, event))
@@ -1524,11 +1974,9 @@ class MergeMixin:
             self.log(f'  the {event.replace("_", " ")} cannot be recorded: {exc}')
             journal = None
         if journal is None:
-            return refuse(f'{what} di oggi non sono verificabili: il journal dei turni '
-                          'non è disponibile o non è leggibile')
+            return refuse(t('journal_unavailable', what=what))
         if daily is None:
-            return refuse(f'oggi {what} hanno già raggiunto il massimo giornaliero '
-                          f'({cap}: {limit})')
+            return refuse(t('daily_cap', what=what, cap=cap, limit=limit))
         delegation = {'command': MERGE, 'by': by, 'comment': command['comment'],
                       'reason': reason}
         if coordinator:
@@ -1538,37 +1986,31 @@ class MergeMixin:
                                          delegation)
         except MergeHeld as held:
             self.log(f'  not merged: {held}')
-            return refuse(f'le label della PR, rilette subito prima della chiamata di merge alle '
-                          f'{held.at} (UTC), non sono più quelle di un merge dell\'operatore: '
-                          + ', '.join(f'`{n}`' for n in sorted(held.labels)))
+            return refuse(t('labels_now', at=held.at,
+                            labels=', '.join(f'`{n}`' for n in sorted(held.labels))))
         except GitHubError as exc:
-            return refuse(f'il merge non è riuscito ({exc})')
+            return refuse(t('merge_failed', error=exc))
         if not merged:
-            return refuse('il merge non è stato eseguito')
+            return refuse(t('merge_not_run'))
         figures = {'head': head, 'daily': daily, 'daily_cap': cap,
                    'daily_left': cap - daily, 'opinion': opinion}
-        quoted = '\n'.join(f'> {line}'.rstrip() for line in reason.splitlines())
+        quoted = _quoted(reason)
         if coordinator:
             if approval is not None:
                 figures['approval'] = approval.get('id')
             if unblocked is not None:
                 figures['conclave'] = unblocked
-            trace('merged', f'PR mergiata dal coordinatore, commit `{head[:12]}`, con le '
-                  'condizioni del merge riservato verificate su quello sha; parere della review '
-                  f'consultiva: `{opinion}`' + (
-                      '; decisione dell\'operatore: il `/devloop approve` '
-                      + (comment_link(approval) or f'(commento {approval.get("id")})')
-                      + f' sulla issue #{pr.meta["issue"]}'
-                      if approval is not None else '')
-                  + (f'; lavoro ripartito dopo la decisione unanime del conclave {unblocked}, '
-                     'approvato dopo la ripartenza' if unblocked is not None else '')
-                  + f'. Merge del coordinatore di oggi: {daily} di {cap}.\n\n**Motivo:**\n\n'
-                  + quoted, **figures)
+            decided = t('with_approval', issue=pr.meta['issue'], link=(
+                comment_link(approval) or t('approval_comment', id=approval.get('id')))
+                ) if approval is not None else ''
+            restarted = (t('after_conclave', decision=unblocked) if unblocked is not None
+                         else '')
+            trace('merged', t('merged_by_coordinator', head=head[:12], opinion=opinion,
+                              approval=decided, conclave=restarted, daily=daily, cap=cap,
+                              reason=quoted), **figures)
             return None
-        trace('merged', f'PR mergiata su delega, commit `{head[:12]}`, con le condizioni della '
-              f'delega verificate su quello sha; parere della review consultiva: `{opinion}`. '
-              f'Merge delegati di oggi: {daily} di {cap}.\n\n**Motivo:**\n\n' + quoted,
-              **figures)
+        trace('merged', t('merged_by_delegation', head=head[:12], opinion=opinion, daily=daily,
+                          cap=cap, reason=quoted), **figures)
         return None
 
     def _operator_approval(self, pr, trust, adr):
@@ -1578,22 +2020,21 @@ class MergeMixin:
         the issue the PR closes (``_issue_decisions``, read now with the API, as a review reads
         it), and '' for ``problem``; or why there is none, and None. What cannot be read
         refuses it."""
-        what = ' e '.join(part for part in (
-            'un reviewer ha dichiarato toccata la policy di fiducia' if trust else '',
-            f'il diff tocca `{ADR_DIR}`' if adr else '') if part)
+        t = self._merge_texts()
+        what = t('approval_and').join(part for part in (
+            t('approval_trust') if trust else '',
+            t('approval_adr', adr=ADR_DIR) if adr else '') if part)
         issue = pr.meta.get('issue') if pr.meta else None
         if not isinstance(issue, int) or isinstance(issue, bool):
-            return f'{what}, e la PR non nomina la issue che chiude', None
+            return t('approval_no_issue', what=what), None
         try:
             history = self.gh.issue_history(issue)
             comments = self.gh.issue_comments(issue)
         except GitHubError as exc:
-            return f'{what}, e la issue #{issue} non è leggibile ({exc})', None
+            return t('approval_unreadable', what=what, issue=issue, error=exc), None
         decisions = self._issue_decisions(comments, history, taken=True)
         if not decisions:
-            return (f'{what}, e la issue #{issue} che la PR chiude non ha un `/devloop approve` '
-                    'valido dell\'operatore, scritto di persona dopo l\'ultima modifica del '
-                    'testo e prima che devloop la prendesse in carico'), None
+            return t('approval_none', what=what, issue=issue), None
         return '', decisions[-1]
 
     def _adr_problem(self, current, adr):
@@ -1602,23 +2043,23 @@ class MergeMixin:
         lines, as plain text, each block of them with the link to a comment of this repository
         whose author is in ``trusted_users``, read now with the API. What cannot be read
         refuses it."""
+        t = self._merge_texts()
         try:
             files = self.ws.diff_blocks(current['base'], current['head'], ADR_DIR)
         except WorkspaceError as exc:
-            return f'le modifiche sotto `{ADR_DIR}` non sono leggibili ({exc})'
+            return t('adr_unreadable', adr=ADR_DIR, error=exc)
         seen = {entry['path'] for entry in files}
         if any(p not in seen for p in adr):
-            return f'le modifiche sotto `{ADR_DIR}` non sono tutte leggibili come testo'
+            return t('adr_not_text', adr=ADR_DIR)
         # A link under a former name of the repository (``repo_aliases``, #540) is checked as
         # any other: its comment read by id among those of its issue in ``repo``.
         problems, blocks = adr_problems(files, self.cfg.repo, self.cfg.repo_aliases)
         if problems:
-            return (f'sotto `{ADR_DIR}` sono ammesse solo righe aggiunte con il link a una '
-                    'decisione dell\'operatore: ' + '; '.join(problems[:MAX_LISTED_PATHS]))
+            return t('adr_problems', adr=ADR_DIR,
+                     problems='; '.join(problems[:MAX_LISTED_PATHS]))
         read = {}
         for path, links in blocks:
             if not any(self._trusted_comment(n, c, read) for n, c in links):
-                return (f'un blocco aggiunto in `{path}` cita solo commenti che non sono di un '
-                        'utente fidato, o che non si leggono: ' + ', '.join(
-                            f'#{n} ({c})' for n, c in links[:MAX_LISTED_PATHS]))
+                return t('adr_untrusted', path=path, links=', '.join(
+                    f'#{n} ({c})' for n, c in links[:MAX_LISTED_PATHS]))
         return ''
