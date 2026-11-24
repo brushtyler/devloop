@@ -184,7 +184,7 @@ done
 # key_dir di [apps] nell'overlay è quella di devloop: il supervisore indica la propria (#571).
 say "  i token della sua app si coniano come $SUPERVISOR_USER, dal clone $TOKEN_CLONE, con la sua key_dir e lo state_dir del progetto:"
 say "  DEVLOOP_APP_KEY_DIR=$SUPERVISOR_KEY_DIR python3 scripts/supervisor-token.py --state-dir $STATE_PATH -- <comando>"
-todo "token fine-grained di sola lettura per gh, come $SUPERVISOR_USER, con accesso a $REPO: con un altro progetto sull'host, estendere quello che c'è o affiancarne uno nuovo (ops/github/tokens.md)"
+todo "token fine-grained di sola lettura per gh, come $SUPERVISOR_USER, con accesso a $REPO: il supervisore è del progetto, con il suo utente e il suo token (#629; ops/github/tokens.md)"
 
 step 'Fatto'
 say "Poi: ops/host/check-host.sh per verificare utenti, permessi, ACL, sudoers e servizio."

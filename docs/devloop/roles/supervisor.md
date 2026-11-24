@@ -13,8 +13,9 @@ devloop does not know it, and the part applies only as far as the commands that 
 ## Who you are
 
 An agent, run continuously, as the system user of the supervisor (`supervisor` in
-`ops/params.env`), from its own clone of the repository. devloop does not run you: you watch it
-continuously.
+`ops/params.env`; with `PROJECT`, `supervisor-<project>`), from its own clone of the repository.
+devloop does not run you: you watch it continuously. You serve one project only, the one of your
+repository (Other projects).
 
 - **You decide**: the non-critical escalations and the delegated merges; which authorized issue
   to put in the queue, in the order the coordinator dictates; when to stop the queue on purpose,
@@ -51,7 +52,8 @@ Two ways, each for its use:
   `/var/lib/devloop-coordination`; with `PROJECT`, `/var/lib/devloop-coordination-<project>`,
   on the host of this repository `/var/lib/devloop-coordination-devloop` since #563; the first
   message of your session gives the values of your installation, which win over the examples
-  here), shared by you and the coordinator through the group `devloop-roles`. `to-coordinator/` holds
+  here), shared by you and the coordinator of your project through the group `devloop-roles`
+  (with `PROJECT`, `devloop-roles-<project>`). `to-coordinator/` holds
   your messages to the coordinator, `to-supervisor/` its messages to you. One file per message,
   plain text, with a unique name (UTC date and time and a random suffix), published with an
   atomic rename from a temporary file whose name starts with `.`:
@@ -77,6 +79,22 @@ escalations on GitHub stay as they are.
 Move each message of the coordinator to `done/` as soon as you read it: one left in
 `to-supervisor/` after 15 minutes tells the coordinator that you do not answer, and it puts the
 work in the queue itself.
+
+## Other projects
+
+You serve only the project of your repository, the one the first message of your session names,
+also when the host serves other projects ([ADR 0002, precisazione of
+2026-11-24](../../adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-24-ruoli-per-progetto-629),
+#629). You have no channel with the roles of other projects, on this host or elsewhere: you
+never read or write the mailbox of another project, and you never write to its supervisor or its
+coordinator. That holds for the roles of devloop's own repository too.
+
+A project uses another one as anyone would: it opens an issue on its repository and follows its
+releases. When a project that devloop serves shows you a defect of devloop itself (the engine),
+do not write to the roles of devloop's repository and do not open the issue there: report it to
+the operator through the summary of your coordinator, with a message in `to-coordinator/` that
+gives the public links that show the defect (issues, pull requests, runs of the CI) and what you
+saw. The operator decides whether to open an issue on devloop's repository.
 
 ## Watching
 
@@ -239,3 +257,5 @@ its periods. It only detects: it has no GitHub key and changes nothing.
   `--allow-host-details`, logged, is only for a case the operator asked for.
 - Never run on the host anything outside the sudoers above, and never a step on the host: those
   are the agent of the host's, launched by the operator ([host runbook](host.md)).
+- Never write to the roles of another project, devloop's repository included, nor read or write
+  its mailbox: a defect of devloop goes to the operator (Other projects).

@@ -2060,28 +2060,51 @@ class DryRunTests(OpsTestCase):
                 self.assertNotIn('check-host.sh --read-only', done.stdout)
         self.assertEqual(self.mutating_calls(), [])
 
-    def test_the_sudoers_of_the_coordinator_gives_no_role_on_the_host(self):
-        # #530: one coordinator per host, like the supervisor: its sudoers, of this project or of
-        # another, does not make its devloop user another installation's.
+    def test_the_sudoers_of_the_coordinator_gives_the_role_of_its_project(self):
+        # #629: the coordinator is the project's, like the supervisor: the sudoers of the
+        # coordinator of another project makes its user that project's coordinator, and its
+        # devloop user that project's devloop user. This installation's own sudoers does not.
         sudoers = self.tmp / 'sudoers.d'
         sudoers.mkdir()
         for name, user in (('devloop-coordinator', 'opsdry-nouser'),
                            ('devloop-coordinator-gadget', 'devloop-gadget')):
             (sudoers / name).write_text(f'Defaults>{user} always_set_home\n\n'
                                         f'coordinator ALL=({user}) NOPASSWD: \\\n'
+                                        '    /usr/bin/true\n\n'
+                                        'coordinator ALL=(root) NOPASSWD: \\\n'
                                         '    /usr/bin/true\n')
         params = self.params(DEVLOOP_USER='opsdry-nouser', COORDINATOR_USER='coordinator',
                              COORDINATOR_OPS_DIR=self.root_copy())
-        for script in ('host/setup-devloop.sh', 'host/setup-coordinator.sh'):
+        for script in ('host/setup-devloop.sh', 'host/setup-coordinator.sh',
+                       'host/check-host.sh'):
             with self.subTest(script=script):
                 done = self.run_script(script, '--dry-run', '--params', str(params))
-                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-        # A sudoers of a supervisor with the same rule still gives the role (R1-1).
+                self.assertNotEqual(done.returncode, 0)
+                self.assertIn("COORDINATOR_USER 'coordinator' è già l'utente coordinator di "
+                              "un'altra installazione di devloop dell'host "
+                              f"({sudoers}/devloop-coordinator-gadget): ogni progetto ha i suoi "
+                              'utenti (supervisore e coordinatore sono per progetto, #629: '
+                              'ops/host/migrate.md, "Utenti dei ruoli per progetto")', done.stderr)
+        # A coordinator of its own is accepted; the devloop user of the other project is not.
+        params = self.params(DEVLOOP_USER='opsdry-nouser', COORDINATOR_USER='coordinator-x',
+                             COORDINATOR_OPS_DIR=self.root_copy())
+        done = self.run_script('host/setup-coordinator.sh', '--dry-run', '--params', str(params))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        params = self.params(DEVLOOP_USER='devloop-gadget', COORDINATOR_USER='coordinator-x',
+                             COORDINATOR_OPS_DIR=self.root_copy())
+        done = self.run_script('host/setup-devloop.sh', '--dry-run', '--params', str(params))
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("DEVLOOP_USER 'devloop-gadget' è già l'utente devloop di un'altra "
+                      f"installazione di devloop dell'host ({sudoers}/devloop-coordinator-gadget)",
+                      done.stderr)
+        # A sudoers of a supervisor with the same rule gives the role of supervisor (R1-1).
         (sudoers / 'devloop-supervisor-gadget').write_text(
-            'coordinator ALL=(devloop-gadget) NOPASSWD: \\\n    /usr/bin/true\n')
+            'coordinator-x ALL=(devloop-gadget) NOPASSWD: \\\n    /usr/bin/true\n')
+        params = self.params(DEVLOOP_USER='opsdry-nouser', COORDINATOR_USER='coordinator-x',
+                             COORDINATOR_OPS_DIR=self.root_copy())
         done = self.run_script('host/setup-coordinator.sh', '--dry-run', '--params', str(params))
         self.assertNotEqual(done.returncode, 0)
-        self.assertIn("COORDINATOR_USER 'coordinator' è già l'utente supervisor di un'altra "
+        self.assertIn("COORDINATOR_USER 'coordinator-x' è già l'utente supervisor di un'altra "
                       'installazione', done.stderr)
         self.assertEqual(self.mutating_calls(), [])
 
@@ -3090,6 +3113,42 @@ esac''')
                          {'LAUNCHER': '/usr/local/lib/devloop/devloop-pinned'})
         self.assertEqual(self.mutating_calls(), [])
 
+    def test_the_roles_of_a_project_have_the_users_of_its_name(self):
+        # #629 (R1, choice (b)): with PROJECT, supervisor and coordinator are users of the
+        # project, with their homes, key_dirs and clone, and the mailbox has a group of the
+        # project; two projects never share them. Without PROJECT, the names of before.
+        names = ('SUPERVISOR_USER', 'COORDINATOR_USER', 'SUPERVISOR_HOME', 'COORDINATOR_HOME',
+                 'COORDINATION_GROUP', 'SUPERVISOR_KEY_DIR', 'COORDINATOR_KEY_DIR',
+                 'SUPERVISOR_CLONE')
+        unset = dict.fromkeys(('SUPERVISOR_HOME', 'COORDINATOR_USER', 'COORDINATOR_HOME',
+                               'COORDINATION_GROUP'), '')
+        resolved = {}
+        for project in ('widget', 'gadget'):
+            resolved[project] = self.resolved(
+                self.project_params(PROJECT=project, REPO=f'acme/{project}', **unset), *names)
+            self.assertEqual(resolved[project], {
+                'SUPERVISOR_USER': f'supervisor-{project}',
+                'COORDINATOR_USER': f'coordinator-{project}',
+                'SUPERVISOR_HOME': f'/home/supervisor-{project}',
+                'COORDINATOR_HOME': f'/home/coordinator-{project}',
+                'COORDINATION_GROUP': f'devloop-roles-{project}',
+                'SUPERVISOR_KEY_DIR': f'/home/supervisor-{project}/.ghapps-{project}',
+                'COORDINATOR_KEY_DIR': f'/home/coordinator-{project}/.ghapps-{project}',
+                'SUPERVISOR_CLONE': f'/home/supervisor-{project}/devloop-{project}'})
+        for name in names:
+            self.assertNotEqual(resolved['widget'][name], resolved['gadget'][name], name)
+        plain = self.resolved(self.params(**unset), 'SUPERVISOR_USER', 'COORDINATOR_USER',
+                              'COORDINATION_GROUP')
+        self.assertEqual(plain, {'SUPERVISOR_USER': 'supervisor',
+                                 'COORDINATOR_USER': 'coordinator',
+                                 'COORDINATION_GROUP': 'devloop-roles'})
+        # The example of the parameters writes none of them: the defaults decide.
+        example = (OPS / 'params.env.example').read_text()
+        for name in ('SUPERVISOR_USER', 'SUPERVISOR_HOME', 'COORDINATOR_USER',
+                     'COORDINATION_GROUP'):
+            self.assertNotRegex(example, rf'(?m)^{name}=')
+        self.assertEqual(self.mutating_calls(), [])
+
     def test_a_project_installs_the_template_and_the_drop_in_of_its_instance(self):
         params = self.project_params()
         before = self.tree()
@@ -3121,7 +3180,8 @@ esac''')
         out = done.stdout
         self.assertIn(f'scriverebbe {self.tmp}/sudoers.d/devloop-supervisor-widget (mode 440',
                       out)
-        self.assertIn('    | supervisor ALL=(devloop-widget) NOPASSWD:', out)
+        # #629: the supervisor of the project, with its user.
+        self.assertIn('    | supervisor-widget ALL=(devloop-widget) NOPASSWD:', out)
         self.assertIn('    /usr/bin/systemctl restart devloop@widget, \\\n', out)
         self.assertIn('    /usr/bin/systemctl status devloop@widget *\n', out)
         self.assertIn(f'{self.home}/supervisor/.ghapps-widget', out)
@@ -3187,7 +3247,7 @@ esac''')
 
     def test_the_users_of_a_project_are_of_no_other_installation_of_the_host(self):
         # R1-1: the scripts refuse a user that another installation of the host already has,
-        # in the same role or in another; the supervisor alone is the same in every project.
+        # in the same role or in another; since #629 the supervisor too is the project's.
         self.other_project()
         for script in ('host/setup-devloop.sh', 'host/setup-supervisor.sh',
                        'host/setup-agent-user.sh'):
@@ -3209,8 +3269,14 @@ esac''')
                  "AGENT_USER 'devloop-widget-agent' è già l'utente devloop"),
                 ({'supervisor_line': 'devloop-widget-agent ALL=(devloop-gadget) NOPASSWD: \\'},
                  "AGENT_USER 'devloop-widget-agent' è già l'utente supervisor"),
-                ({'supervisor_line': 'supervisor ALL=(supervisor) NOPASSWD: \\'},
-                 "SUPERVISOR_USER 'supervisor' è già l'utente devloop")):
+                ({'supervisor_line': 'supervisor-gadget ALL=(supervisor-widget) NOPASSWD: \\'},
+                 "SUPERVISOR_USER 'supervisor-widget' è già l'utente devloop"),
+                # #629: the supervisor of another project is not this project's.
+                ({'supervisor_line': 'supervisor-widget ALL=(devloop-gadget) NOPASSWD: \\'},
+                 "SUPERVISOR_USER 'supervisor-widget' è già l'utente supervisor di un'altra "
+                 "installazione di devloop dell'host "
+                 f"({sudoers}/devloop-supervisor-gadget): ogni progetto ha i suoi utenti "
+                 '(supervisore e coordinatore sono per progetto, #629')):
             with self.subTest(**kwargs):
                 self.other_project(**kwargs)
                 for script in ('host/setup-devloop.sh', 'host/check-host.sh'):
@@ -3264,7 +3330,7 @@ esac''')
         params = self.project_params(COORDINATOR_OPS_DIR=copy, **source)
         sup, coord = self.home / 'supervisor', self.home / 'coordinator'
         for script, user, home, name in (
-                ('host/setup-supervisor.sh', 'supervisor', sup, 'supervisor-token.py'),
+                ('host/setup-supervisor.sh', 'supervisor-widget', sup, 'supervisor-token.py'),
                 ('host/setup-coordinator.sh', FAKE_COORDINATOR, coord, 'coordinator-token.py')):
             with self.subTest(script=script):
                 done = self.run_script(script, '--dry-run', '--params', str(params))
@@ -3278,7 +3344,7 @@ esac''')
                               '+refs/tags/v1.2.0:refs/tags/v1.2.0\n', out)
                 self.assertIn(f'{git} -C {clone} checkout --quiet --detach refs/tags/v1.2.0\n',
                               out)
-                self.assertIn(f'dal clone {clone}' if user == 'supervisor'
+                self.assertIn(f'dal clone {clone}' if user == 'supervisor-widget'
                               else f'dal suo clone ({clone})', out)
                 self.assertIn(f'  DEVLOOP_APP_KEY_DIR={home}/.ghapps-widget python3 '
                               f'scripts/{name} --state-dir /var/lib/devloop/widget -- <comando>\n',
@@ -4661,6 +4727,46 @@ exec "$@"''')
         self.assertIn(f'  ERRORE: {FAKE_AGENT} è nel gruppo {FAKE_AGENT}: deve restarne fuori\n',
                       out)
         self.assertNotIn(f'{ME} è nel gruppo {FAKE_AGENT}', out)
+        self.assertNotIn('non è un ruolo di questo progetto', out)
+        # #629: a member of the group that is no role of this project, for example the
+        # supervisor of another project, is an error; the project's roles are not.
+        # A user whose primary group is the mailbox's is no member in getent group, and is one
+        # all the same (R1-1).
+        self.shim('getent', f'''if [ "$1" = passwd ] && [ $# -eq 1 ]; then
+    echo "{FAKE_SUPERVISOR}:x:1001:1001::/h/s:/bin/sh"
+    echo "coordinator-gadget:x:1003:34567::/h/c:/bin/sh"
+    echo "unrelated:x:1004:1004::/h/u:/bin/sh"
+    exit 0
+fi
+[ "$1" = group ] && [ $# -eq 2 ] || exit 2
+case "$2" in
+    {FAKE_AGENT}) echo "$2:x:34567:{FAKE_SUPERVISOR},supervisor-gadget,{FAKE_COORDINATOR}" ;;
+    opsdry-nogroup) exit 2 ;;
+    *) echo "$2:x:1000:" ;;
+esac''')
+        done = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params))
+        errors = [line for line in done.stdout.splitlines()
+                  if 'non è un ruolo di questo progetto' in line]
+        self.assertEqual(errors, [
+            f'  ERRORE: {user} è nel gruppo {FAKE_AGENT}, ma non è un ruolo di questo '
+            'progetto: la casella è solo del supervisore e del coordinatore del progetto '
+            f'(gpasswd -d {user} {FAKE_AGENT}, o un altro gruppo primario; ops/host/migrate.md, '
+            '"Utenti dei ruoli per progetto")'
+            for user in ('supervisor-gadget', 'coordinator-gadget')])
+        # Without --verbose the names of the foreign users stay out of the output (R1-2): they
+        # are no parameters of the project, and the filter would not replace them (#583).
+        done = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params),
+                               redacted=True)
+        for name in ('supervisor-gadget', 'coordinator-gadget'):
+            self.assertNotIn(name, done.stdout + done.stderr)
+        errors = [line for line in done.stdout.splitlines()
+                  if 'non è un ruolo di questo progetto' in line]
+        self.assertEqual(len(errors), 2, done.stdout)
+        for line in errors:
+            self.assertTrue(line.startswith('  ERRORE: un utente che non è un ruolo di questo '
+                                            'progetto è nel gruppo '), line)
+            self.assertIn('(il nome e il comando con --verbose; ops/host/migrate.md, "Utenti '
+                          'dei ruoli per progetto")', line)
         params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=FAKE_SUPERVISOR,
                              AGENT_USER=FAKE_AGENT, COORDINATION_GROUP='opsdry-nogroup')
         done = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params))
@@ -5633,6 +5739,8 @@ class RoleWatchdogTests(OpsTestCase):
 ROLE_RUNBOOKS = {role: ROOT / 'docs' / 'devloop' / 'roles' / f'{role}.md'
                  for role in ('supervisor', 'coordinator', 'host')}
 FAKE_OPERATOR = 'opsdry-operator'
+# The supervisor of a second project of the same host (#629).
+FAKE_SUPERVISOR_2 = 'opsdry-supervisor-2'
 # The longest command the fake tmux accepts (#621): tmux 3.6 takes 15,000 bytes, not 16,500.
 TMUX_COMMAND_LIMIT = 15000
 # The fake of a CLI: its name, the user it runs as (the fake sudo says it), its PATH and its
@@ -5658,9 +5766,10 @@ class StartRoleTests(OpsTestCase):
 
     def setUp(self):
         super().setUp()
-        self.fake_host('classic sudo', users=(FAKE_SUPERVISOR, FAKE_COORDINATOR, FAKE_OPERATOR))
-        # sudo -u USER -H -- CMD runs CMD, saying the user; tmux has no session, unless the test
-        # says so, and runs the command of new-session in the directory of -c.
+        self.fake_host('classic sudo', users=(FAKE_SUPERVISOR, FAKE_COORDINATOR, FAKE_OPERATOR,
+                                              FAKE_SUPERVISOR_2))
+        # sudo -u USER -H -- CMD runs CMD, saying the user; tmux has only the sessions the test
+        # names (OPS_TEST_SESSION), and runs the command of new-session in the directory of -c.
         self.shim('sudo', '''echo "sudo $1 $2 $3 $4 $5 $6 $7 $8 $9 ${10}" >> "$OPS_TEST_CALLS"
 [ "$1" = -u ] || exit 97
 user=$2; shift 2
@@ -5675,7 +5784,9 @@ size=0
 for arg in "$@"; do size=$((size + ${#arg} + 1)); done
 [ "$size" -le @LIMIT@ ] || { echo 'command too long' >&2; exit 1; }
 case $1 in
-    has-session) [ -n "${OPS_TEST_SESSION:-}" ] && exit 0; exit 1 ;;
+    has-session)
+        case " ${OPS_TEST_SESSION:-} " in *" ${3#=} "*) exit 0 ;; esac
+        exit 1 ;;
     new-session)
         echo "$size" >> "$OPS_TEST_CALLS.tmux-size"
         shift
@@ -5721,7 +5832,8 @@ echo "$2:x:1000:"''')
                                        SUPERVISOR_CLONE=str(self.clone),
                                        STATE_DIR=str(self.state))
 
-    def start(self, *args, sudo_user=None, session=False):
+    def start(self, *args, sudo_user=None, session=''):
+        """start-role.sh with ``args``; ``session``, the names of the sessions tmux has."""
         env = dict(os.environ, PATH=f'{self.bin}:{os.environ.get("PATH", "/usr/bin:/bin")}',
                    OPS_TEST_CALLS=str(self.calls), OPS_OS_RELEASE=str(self.release),
                    OPS_ARCH='aarch64', LC_ALL='C.UTF-8')
@@ -5730,7 +5842,7 @@ echo "$2:x:1000:"''')
         if sudo_user is not None:
             env['SUDO_USER'] = sudo_user
         if session:
-            env['OPS_TEST_SESSION'] = '1'
+            env['OPS_TEST_SESSION'] = session
         return subprocess.run([BASH, str(self.checkout / 'ops/host/start-role.sh'), '--params',
                                str(self.params_file), *args], capture_output=True, text=True,
                               env=env, stdin=subprocess.DEVNULL, timeout=120)
@@ -5740,10 +5852,16 @@ echo "$2:x:1000:"''')
         name, user, path, *args = (directory / 'cli-args').read_text().split('\0')[:-1]
         return name, user, path, args
 
-    def assert_prompt(self, prompt, role):
+    # #629: the rule of the roles of a project, in the first message of supervisor and
+    # coordinator, after the repository.
+    SCOPE = (' You serve only this project: you have no channel with the roles of other projects, '
+             'on this host or elsewhere.')
+
+    def assert_prompt(self, prompt, role, repo='brushtyler/devloop'):
+        scope = '' if role == 'host' else self.SCOPE
         self.assertTrue(prompt.startswith(f'You hold the role "{role}" of devloop for '
-                                          'brushtyler/devloop. Your instructions are the runbook '
-                                          f'below (docs/devloop/roles/{role}.md'), prompt[:200])
+                                          f'{repo}.{scope} Your instructions are the runbook '
+                                          f'below (docs/devloop/roles/{role}.md'), prompt[:300])
         self.assertTrue(prompt.endswith(ROLE_RUNBOOKS[role].read_text().rstrip('\n')))
 
     def launches(self):
@@ -5903,7 +6021,8 @@ echo "$2:x:1000:"''')
             with self.subTest(role=role):
                 done = self.start(role)
                 self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-                self.assertIn(f'tmux new-session -d -s devloop-{role} -c {directory} env',
+                # #629: with PROJECT=devloop too, the session has the name of the project.
+                self.assertIn(f'tmux new-session -d -s devloop-{role}-devloop -c {directory} env',
                               [c.rstrip() for c in self.mutating_calls()])
                 channel = self.cli_args(directory)[3][-1].split('\n\n')[1]
                 for value in (f'the state_dir of devloop is {state};',
@@ -6008,13 +6127,13 @@ echo "$2:x:1000:"''')
     def test_the_first_message_is_the_one_of_before(self):
         # #621: the text the CLI gets is the one the script built before, when it was the last
         # argument of tmux: the header, the values of the installation and the runbook, with no
-        # trailing newline.
+        # trailing newline. #629: the header says that the role serves only this project.
         done = self.start('supervisor')
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         prompt = self.cli_args(self.clone)[3][-1]
         header, channel = prompt.split('\n\n')[:2]
         self.assertEqual(header, 'You hold the role "supervisor" of devloop for '
-                         'brushtyler/devloop. Your instructions are the runbook below '
+                         f'brushtyler/devloop.{self.SCOPE} Your instructions are the runbook below '
                          f'(docs/devloop/roles/supervisor.md of the checkout {self.checkout}, '
                          'started by ops/host/start-role.sh): follow it for the whole session.')
         self.assertEqual(prompt, f'{header}\n\n{channel}\n\n'
@@ -6082,7 +6201,122 @@ exit 1''')
                      says='SUPERVISOR_USER')
 
     def test_an_existing_session_is_not_started_again(self):
-        self.refused('supervisor', session=True, says='la sessione devloop-supervisor')
+        self.refused('supervisor', session='devloop-supervisor',
+                     says=f'la sessione devloop-supervisor di {FAKE_SUPERVISOR} esiste già: '
+                     f'sudo -u {FAKE_SUPERVISOR} -H tmux attach -t devloop-supervisor')
+        # Another name is another session: without PROJECT, the name of before.
+        done = self.start('supervisor', session='devloop-supervisor-widget')
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn(f'tmux new-session -d -s devloop-supervisor -c {self.clone} env',
+                      [c.rstrip() for c in self.mutating_calls()])
+
+    def project(self, project, user, home):
+        """The parameters of the project ``project`` of the host, with its supervisor ``user``
+        in ``home`` (#629): its clone, its state_dir with the overlay, the fake CLIs."""
+        clone = home / f'devloop-{project}'
+        clone.mkdir(parents=True, exist_ok=True)
+        for cli in ('claude', 'codex', 'agy'):
+            path = home / '.local' / 'bin' / cli
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(FAKE_CLI)
+            path.chmod(0o755)
+        state = self.tmp / f'state-{project}'
+        state.mkdir(exist_ok=True)
+        (state / 'config.local.toml').write_text(self.OVERLAY)
+        self.params_file = self.params(PROJECT=project, REPO=f'acme/{project}',
+                                       SUPERVISOR_USER=user, SUPERVISOR_HOME=str(home),
+                                       STATE_DIR=str(state))
+        return clone
+
+    def test_two_projects_start_the_sessions_of_the_same_role_on_one_host(self):
+        # #629: the sessions of the same role of two projects of the host have distinct names,
+        # devloop-<role>-<project>, each with the user of the role of its project and a first
+        # message that names its repository and says that the role serves only that project.
+        homes = {'widget': (FAKE_SUPERVISOR, self.home / 'supervisor-widget'),
+                 'gadget': (FAKE_SUPERVISOR_2, self.home / 'supervisor-gadget')}
+        for project, (user, home) in homes.items():
+            with self.subTest(project=project):
+                clone = self.project(project, user, home)
+                # The session of the other project is there: it does not stop this one.
+                other = 'gadget' if project == 'widget' else 'widget'
+                done = self.start('supervisor', session=f'devloop-supervisor-{other}')
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                calls = [c.rstrip() for c in self.mutating_calls()]
+                self.assertIn(f'sudo -u {user} -H -- tmux has-session -t '
+                              f'=devloop-supervisor-{project}', calls)
+                self.assertIn(f'tmux new-session -d -s devloop-supervisor-{project} -c {clone} '
+                              'env', calls)
+                self.assertIn(f'sudo -u {user} -H tmux attach -t devloop-supervisor-{project}',
+                              done.stdout)
+                name, as_user, _, args = self.cli_args(clone)
+                self.assertEqual((name, as_user), ('claude', user))
+                self.assert_prompt(args[-1], 'supervisor', repo=f'acme/{project}')
+        sessions = [c.split(' -s ')[1].split()[0] for c in self.launches()]
+        self.assertEqual(sessions, ['devloop-supervisor-widget', 'devloop-supervisor-gadget'])
+
+    def test_with_project_the_session_of_before_is_not_started_again(self):
+        # #629: with PROJECT, a session of the role user with the name of before (devloop-<role>,
+        # started before #629) is the same role: the script stops and says how to close it.
+        self.project('widget', FAKE_SUPERVISOR, self.home / 'supervisor-widget')
+        self.refused('supervisor', session='devloop-supervisor',
+                     says=f'la sessione devloop-supervisor di {FAKE_SUPERVISOR}, con il nome di '
+                     'prima di #629, esiste già: chiuderla prima (sudo -u '
+                     f'{FAKE_SUPERVISOR} -H tmux kill-session -t =devloop-supervisor)')
+        self.refused('supervisor', session='devloop-supervisor-widget',
+                     says='la sessione devloop-supervisor-widget di '
+                     f'{FAKE_SUPERVISOR} esiste già')
+        # A dry run names the session it would start.
+        done = self.start('--dry-run', 'supervisor')
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn('==> Sessione tmux devloop-supervisor-widget', done.stdout)
+
+    def test_the_migration_prepares_the_clone_of_the_coordinator_without_source_repo(self):
+        # #629, R1-3: without SOURCE_REPO, setup-coordinator.sh does not clone the managed
+        # repository; the migration clones it in the coordinator's new home, as the new user,
+        # and start-role.sh then starts the coordinator's session there.
+        self.project('widget', FAKE_SUPERVISOR, self.home / 'supervisor-widget')
+        home = self.home / 'coordinator-widget'
+        for cli in ('claude', 'codex', 'agy'):
+            path = home / '.local' / 'bin' / cli
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(FAKE_CLI)
+            path.chmod(0o755)
+        self.params_file.write_text(self.params_file.read_text()
+                                    + f'COORDINATOR_HOME={home}\n')
+        clone = home / 'widget'
+        self.refused('coordinator', says=f'manca il clone del coordinatore {clone}')
+        # The commands of the procedure: leggi of step 1, the clone of step 4.
+        migrate = RootStepsGuideTests().section('## Utenti dei ruoli per progetto (#629)')
+        commands = RootStepsGuideTests.commands(migrate, inline=False)
+        leggi = [c for c in commands if c.startswith('leggi() {')]
+        block = [c for c in commands if 'git clone' in c or c.startswith('repo=$(leggi')
+                 or 'clone pronto' in c]
+        self.assertEqual((len(leggi), len(block)), (1, 3), block)
+        # The fake git records the clone and makes its .git (mkdir is a fake of the tests).
+        self.shim('git', '[ "$1" = clone ] || exit 2\necho "git $* as $OPS_TEST_AS" '
+                         '>> "$OPS_TEST_CALLS"\n'
+                         'python3 -c "import os, sys; os.makedirs(sys.argv[1])" "$3/.git"')
+        script = '\n'.join([f'ops={shlex.quote(str(self.checkout / "ops"))}',
+                            f'params={shlex.quote(str(self.params_file))}', *leggi, *block])
+        env = dict(os.environ, PATH=f'{self.bin}:{os.environ.get("PATH", "/usr/bin:/bin")}',
+                   OPS_TEST_CALLS=str(self.calls), LC_ALL='C.UTF-8')
+        env.pop('OPS_TEST_AS', None)
+        done = subprocess.run([BASH, '-c', script], capture_output=True, text=True, env=env,
+                              stdin=subprocess.DEVNULL, timeout=120)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(done.stdout, 'clone pronto\n')
+        self.assertIn(f'git clone https://github.com/acme/widget.git {clone} as '
+                      f'{FAKE_COORDINATOR}', self.mutating_calls())
+        done = self.start('coordinator')
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn(f'tmux new-session -d -s devloop-coordinator-widget -c {clone} env',
+                      [c.rstrip() for c in self.mutating_calls()])
+        # Run again, the clone is there: nothing is cloned twice.
+        calls = len(self.mutating_calls())
+        done = subprocess.run([BASH, '-c', script], capture_output=True, text=True, env=env,
+                              stdin=subprocess.DEVNULL, timeout=120)
+        self.assertEqual(done.stdout, 'clone pronto\n', done.stderr)
+        self.assertEqual(len(self.mutating_calls()), calls)
 
 
 class RoleRunbookTests(unittest.TestCase):
@@ -6467,6 +6701,117 @@ class RoleRunbookTests(unittest.TestCase):
                        'Never ask the operator for a decision and never give them a command'):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, prohibitions)
+
+    def test_the_roles_serve_one_project_and_have_no_channel_with_other_projects(self):
+        # #629: the rule of the operator of 2026-11-24 in ADR 0002, cited by ADR 0006, the
+        # runbooks of the roles and the ops guide; the procedure for a host whose roles are
+        # shared between projects.
+        adr = ' '.join((ROOT / 'docs/adr/0002-ruoli-e-responsabilita.md').read_text().split())
+        anchor = 'precisazione-del-2026-11-24-ruoli-per-progetto-629'
+        section = adr.split(' ### Precisazione del 2026-11-24: ruoli per progetto (#629) ')[1]
+        section = section.split(' ## ')[0]
+        for phrase in ('https://github.com/brushtyler/devloop/issues/629#issuecomment-7138340811',
+                       '**Supervisore e coordinatore sono per progetto.**',
+                       '**Nessun canale fra i ruoli di progetti diversi**',
+                       '**Un progetto usa un altro progetto come farebbe chiunque**',
+                       '**Lo sviluppo a cavallo di più repository**',
+                       '**Un utente di sistema per ruolo e per progetto** (R1, scelta (b))',
+                       f'(../../ops/host/migrate.md#utenti-dei-ruoli-per-progetto-629)'):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, section)
+        self.assertIn(f'(#{anchor})', adr.split(' ## Contesto ')[0])
+        adr6 = (ROOT / 'docs/adr/0006-devloop-su-altri-repository.md').read_text()
+        self.assertIn(f'(0002-ruoli-e-responsabilita.md#{anchor})',
+                      adr6.split('### 3.8 Più progetti sullo stesso host')[1].split('\n### ')[0])
+        link = f'(../../adr/0002-ruoli-e-responsabilita.md#{anchor})'
+        for role in ('supervisor', 'coordinator'):
+            text = ' '.join(ROLE_RUNBOOKS[role].read_text().split())
+            with self.subTest(role=role):
+                other = self.part(text, 'Other projects')
+                for phrase in (link, 'You have no channel with the roles of other projects',
+                               'never read or write the mailbox of another project',
+                               "the roles of devloop's", 'a defect of devloop itself',
+                               'the public links that show',
+                               "The operator decides whether to open an issue on devloop's "
+                               'repository'):
+                    self.assertIn(phrase, other)
+                self.assertIn('Never write to the roles of another project',
+                              self.part(text, 'Prohibitions'))
+                self.assertIn(f'with `PROJECT`, `{role}-<project>`', self.part(text, 'Who you are'))
+        self.assertIn('report it to the operator in your summary',
+                      self.part(' '.join(ROLE_RUNBOOKS['coordinator'].read_text().split()),
+                                'Other projects'))
+        host = ' '.join(ROLE_RUNBOOKS['host'].read_text().split())
+        other = self.part(host, 'Other projects')
+        for phrase in (link, 'report it to the operator', "never to the roles of devloop's "
+                       'repository', 'A note of yours in the mailbox of a project other than the '
+                       "one you are working for is written only on the operator's explicit "
+                       'request'):
+            self.assertIn(phrase, other)
+        self.assertIn('Never write in the mailbox of another project without the operator\'s '
+                      'explicit request', self.part(host, 'Prohibitions'))
+        readme = (OPS / 'README.md').read_text()
+        self.assertIn(f'(../docs/adr/0002-ruoli-e-responsabilita.md#{anchor})', readme)
+        self.assertIn('(host/migrate.md#utenti-dei-ruoli-per-progetto-629)', readme)
+        self.assertIn('sudo -u supervisor-widget -H tmux attach -t devloop-supervisor-widget',
+                      readme)
+        # The procedure: the projects that move first, the keys moved, the ACLs of the shared
+        # users removed, the logins of the operator, the check and the sessions.
+        migrate = RootStepsGuideTests().section('## Utenti dei ruoli per progetto (#629)')
+        commands = RootStepsGuideTests.commands(migrate, inline=False)
+        steps = ['cp -p "$params" "$copie/params.env"', 'sed -i -E',
+                 'systemctl stop "devloop-role-watchdog@$progetto.timer"',
+                 'sudo bash <checkout>/ops/host/setup-supervisor.sh --params "$params" --dry-run',
+                 'sudo bash <checkout>/ops/host/setup-coordinator.sh --params "$params"',
+                 'chgrp -R', 'mv -n -t "$nuova"', 'setfacl -x',
+                 'sudo bash <checkout>/ops/host/check-host.sh --params "$params" --no-apps']
+        at = -1
+        for step in steps:
+            with self.subTest(step=step):
+                found = [i for i, c in enumerate(commands) if i > at and step in c]
+                self.assertTrue(found, commands)
+                at = found[0]
+        flat = ' '.join(migrate.split())
+        for phrase in ('**prima i progetti che si separano**', '**Login e token, dell\'operatore**',
+                       '`COORDINATION_GROUP=devloop-roles`', '`devloop-supervisor-devloop`',
+                       '**Rollback**'):
+            self.assertIn(phrase, flat)
+        # R1-3: without SOURCE_REPO the coordinator's clone, in the new home, after its setup
+        # (StartRoleTests runs it).
+        clone = [i for i, c in enumerate(commands) if 'git clone' in c]
+        setup = commands.index('sudo bash <checkout>/ops/host/setup-coordinator.sh --params '
+                               '"$params"')
+        self.assertEqual(len(clone), 1)
+        self.assertGreater(clone[0], setup)
+        # The old clones are removed only once the rollback is no longer needed (R1-4).
+        removal = [i for i, c in enumerate(commands) if c.startswith('rm -rf')]
+        rollback = migrate.index('**Rollback**')
+        self.assertTrue(removal)
+        self.assertLess(migrate.index('10. **Pulizia'), rollback)
+        # R1-4: the scripts of this version refuse the shared users even with the parameters
+        # of before (DryRunTests, test_the_sudoers_of_the_coordinator_gives_the_role_of_its_
+        # project): the rollback first goes back to the scripts of before, then restores keys,
+        # ACLs and parameters and runs those scripts.
+        back = RootStepsGuideTests.commands(migrate[rollback:], inline=False)
+        steps = ['tmux kill-session -t "=devloop-supervisor-$progetto"',
+                 "versione=$(git -C <checkout> rev-parse 'origin/main^{/^Merge pull request #641 }^1')",
+                 'git -C <checkout> checkout --detach "$versione"',
+                 'mv -n -t "$vecchia"', 'setfacl -x "u:$nsup"',
+                 'cp -p "$copie/params.env" "$params"',
+                 'sudo bash <checkout>/ops/host/setup-supervisor.sh --params "$params"',
+                 'sudo bash <checkout>/ops/host/setup-coordinator.sh --params "$params"',
+                 'chgrp -R "$(prima COORDINATION_GROUP)"']
+        at = -1
+        for step in steps:
+            with self.subTest(rollback=step):
+                found = [i for i, c in enumerate(back) if i > at and step in c]
+                self.assertTrue(found, back)
+                at = found[0]
+        # The values of this version are read before the checkout of the version of before.
+        self.assertLess(max(i for i, c in enumerate(back) if c.startswith(('nsup=', 'nsupkd='))),
+                        min(i for i, c in enumerate(back) if 'checkout --detach' in c))
+        self.assertIn('per **tutti i progetti dell\'host** passati da questa sezione, compreso '
+                      'quello che resta', ' '.join(migrate[rollback:].split()))
 
     def test_the_documents_cite_the_runbooks(self):
         readme = (OPS / 'README.md').read_text()

@@ -13,8 +13,10 @@ devloop does not know it, and the part applies only as far as the commands that 
 ## Who you are
 
 An agent, run periodically and on the alarms, not always on, as the system user of the
-coordinator (`coordinator` in `ops/params.env`). devloop does not run you. You are
-**responsible for the operations** of devloop, so that they go on while the operator is away.
+coordinator (`coordinator` in `ops/params.env`; with `PROJECT`, `coordinator-<project>`).
+devloop does not run you. You are **responsible for the operations** of devloop, so that they go
+on while the operator is away, for one project only, the one of your repository (Other
+projects).
 
 - **You decide**: how to solve the critical operational problems; the priorities and the order of
   the work, translating the operator's direction (`[direction] issue`, from #604); how to unblock
@@ -63,8 +65,8 @@ Two ways, each for its use:
   with `PROJECT`, `/var/lib/devloop-coordination-<project>`, on the host of this repository
   `/var/lib/devloop-coordination-devloop` since #563; the first message of your session gives
   the values of your installation, which win over the examples here), shared by you and the
-  supervisor
-  through the group `devloop-roles`. `to-supervisor/` holds your messages to the supervisor,
+  supervisor of your project through the group `devloop-roles` (with `PROJECT`,
+  `devloop-roles-<project>`). `to-supervisor/` holds your messages to the supervisor,
   `to-coordinator/` its messages to you. One file per message, plain text, with a unique name
   (UTC date and time and a random suffix), published with an atomic rename from a temporary file
   whose name starts with `.`:
@@ -99,6 +101,23 @@ The operator's directives of 2026-11-24 (#603):
   and `/devloop accept-defaults` apply only when the gaps are all `default_available`
   ([Escalations to the supervisor](../guide.md#escalations-to-the-supervisor)); for a decision of
   the operator, a plain comment.
+
+## Other projects
+
+You are the coordinator of the project of your repository, the one the first message of your
+session names, not of every project of the host: the coordinator of devloop's repository too is
+the coordinator of that project only ([ADR 0002, precisazione of
+2026-11-24](../../adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-24-ruoli-per-progetto-629),
+#629). You have no channel with the roles of other projects, on this host or elsewhere: you
+never read or write the mailbox of another project, and you never write to its supervisor or its
+coordinator, nor take their messages, alerts or summaries as yours.
+
+A project uses another one as anyone would: it opens an issue on its repository and follows its
+releases. When a project that devloop serves shows you, or your supervisor, a defect of devloop
+itself (the engine), do not write to the roles of devloop's repository and do not open the issue
+there: report it to the operator in your summary, with the public links that show it (issues,
+pull requests, runs of the CI) and what you saw. The operator decides whether to open an issue
+on devloop's repository.
 
 ## Watching
 
@@ -457,6 +476,8 @@ the mailbox.
   outside the sudoers.
 - Never run a step on the host: that is the agent of the host's, launched by the operator
   ([host runbook](host.md)).
+- Never write to the roles of another project, devloop's repository included, nor read or write
+  its mailbox: a defect of devloop goes to the operator, in your summary (Other projects).
 - Never read or write GitHub with the operator's `gh` login, with a personal token or with the
   supervisor's app, never push.
 - Never print a token, never export one in an assignment.
