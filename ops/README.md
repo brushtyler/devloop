@@ -58,7 +58,10 @@ sudo -u supervisor -H tmux attach -t devloop-supervisor   # per entrare nella se
   `agy --model <modello> -i <runbook>`. Il primo messaggio non passa dalla riga di comando di
   tmux, che rifiuta un comando oltre circa 16 KB (#621): lo script lo scrive in un file nuovo
   nella home dell'utente del ruolo (`~/.devloop-start-role-<ruolo>.XXXXXX`, suo, con modo 600) e
-  la sessione lo legge, lo rimuove e lo passa alla CLI. Il runbook può avere qualunque lunghezza.
+  la sessione lo legge, lo rimuove e lo passa alla CLI. Il limite di tmux non conta più; resta
+  quello del kernel per un argomento (128 KiB con pagine di 4 KiB), l'unico modo in cui le CLI
+  ricevono il primo messaggio di una sessione interattiva: oltre, lo script si ferma prima di
+  avviare e lo dice.
 - La sessione si chiama `devloop-<ruolo>`; se esiste già, lo script si ferma e dice come
   entrarci. Serve `tmux` sull'host (`apt-get install tmux`).
 - Per supervisore e coordinatore, prima del runbook, lo script passa i valori dell'installazione

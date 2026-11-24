@@ -19,7 +19,8 @@
 # Non legge segreti: legge i parametri, la configurazione e il runbook, e avvia tmux. Scrive un
 # solo file: il primo messaggio della sessione, nella home dell'utente del ruolo, suo e con modo
 # 600 (mktemp), che la sessione legge e rimuove prima di avviare la CLI (#621). Il primo messaggio
-# non passa dalla riga di comando di tmux, che rifiuta un comando oltre circa 16 KB. Va lanciato
+# non passa dalla riga di comando di tmux, che rifiuta un comando oltre circa 16 KB; resta il
+# limite del kernel per un argomento (128 KiB), che lo script controlla prima di avviare. Va lanciato
 # dall'operatore, da un suo checkout aggiornato del branch principale.
 
 OPS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -206,6 +207,16 @@ fi
 PROMPT="You hold the role \"$ROLE\" of devloop for $REPO. Your instructions are the runbook below ($RUNBOOK of the checkout $ROOT_DIR, started by ops/host/start-role.sh): follow it for the whole session.
 
 $CHANNEL$(<"$ROOT_DIR/$RUNBOOK")"
+
+# Il primo messaggio arriva alla CLI come un solo argomento, l'unico modo in cui le tre CLI
+# ricevono il primo messaggio di una sessione interattiva: il kernel non accetta un argomento oltre
+# MAX_ARG_STRLEN (32 pagine, 128 KiB con pagine di 4 KiB), terminatore compreso. Oltre, la CLI non
+# partirebbe e la sessione si chiuderebbe subito: lo script si ferma prima, e lo dice.
+PAGE_SIZE=$(getconf PAGESIZE 2>/dev/null) || PAGE_SIZE=4096
+[[ $PAGE_SIZE =~ ^[0-9]+$ ]] || PAGE_SIZE=4096
+PROMPT_BYTES=$(printf '%s' "$PROMPT" | wc -c)
+[ "$PROMPT_BYTES" -lt $((32 * PAGE_SIZE)) ] \
+    || die "il primo messaggio della sessione ($PROMPT_BYTES byte, con $RUNBOOK) supera il limite del kernel per un argomento ($((32 * PAGE_SIZE - 1)) byte): la CLI non partirebbe. Accorciare il runbook"
 
 # La riga di comando della CLI, interattiva, con il modello: il primo messaggio la segue, come
 # ultimo argomento, e lo aggiunge la sessione leggendolo dal suo file.

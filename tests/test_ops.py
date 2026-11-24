@@ -5825,6 +5825,29 @@ echo "$2:x:1000:"''')
                 self.assertFalse(Path(path).exists())
                 self.assertEqual(list(home.glob('.devloop-start-role-*')), [])
 
+    def test_the_first_message_up_to_the_limit_of_the_kernel(self):
+        # #621: the CLIs get the first message of an interactive session only as an argument, and
+        # the kernel refuses an argument over MAX_ARG_STRLEN (32 pages). Just under it, the
+        # session starts with the whole text; over it (a runbook of 256 KiB), the script stops
+        # before writing the file and starting tmux, instead of a session that closes at once.
+        limit = 32 * os.sysconf('SC_PAGE_SIZE')
+        runbook = self.checkout / 'docs/devloop/roles/supervisor.md'
+        line = 'Riga del runbook, abbastanza lunga da riempirlo in fretta.\n'
+        runbook.write_text(line * ((limit - 4096) // len(line)))
+        done = self.start('supervisor')
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        prompt = self.cli_args(self.clone)[3][-1]
+        self.assertGreater(len(prompt.encode()), limit - 8192)
+        self.assertTrue(prompt.endswith('\n\n' + runbook.read_text().rstrip('\n')))
+        self.assertLess(int(Path(f'{self.calls}.tmux-size').read_text().split()[-1]), 2048)
+        (self.clone / 'cli-args').unlink()
+        self.calls.unlink()
+        runbook.write_text(line * (256 * 1024 // len(line) + 1))
+        self.assertGreaterEqual(len(runbook.read_bytes()), 256 * 1024)
+        self.refused('supervisor', says='supera il limite del kernel per un argomento '
+                     f'({limit - 1} byte): la CLI non partirebbe. Accorciare il runbook')
+        self.assertEqual(list((self.home / 'supervisor').glob('.devloop-start-role-*')), [])
+
     def test_the_first_message_is_the_one_of_before(self):
         # #621: the text the CLI gets is the one the script built before, when it was the last
         # argument of tmux: the header, the values of the installation and the runbook, with no
