@@ -1,6 +1,6 @@
 # ADR 0002: ruoli e responsabilità, e modalità di merge `off`, `strict` e `auto`
 
-- **Stato:** approvato dall'operatore con il merge di PR #189 (2026-11-17), e implementato: le modalità di merge con #172 (PR #188) e lo smistamento delle escalation con #182 (PR #198). La modalità `auto` è attiva dal 2026-11-17. La decisione dell'operatore del 2026-11-22 su #524 (modello a quattro ruoli e nuovo principio 4) è scritta come [precisazione](#precisazione-del-2026-11-22-modello-a-quattro-ruoli-524-527) e nel principio 4, con #527. La decisione dell'operatore del 2026-11-23 sui compiti del coordinatore è scritta come [precisazione](#precisazione-del-2026-11-23-compiti-del-coordinatore-594), con #594. Il resto del documento è il registro della decisione, scritto prima delle implementazioni: le frasi su "oggi" descrivono lo stato del 2026-11-16.
+- **Stato:** approvato dall'operatore con il merge di PR #189 (2026-11-17), e implementato: le modalità di merge con #172 (PR #188) e lo smistamento delle escalation con #182 (PR #198). La modalità `auto` è attiva dal 2026-11-17. La decisione dell'operatore del 2026-11-22 su #524 (modello a quattro ruoli e nuovo principio 4) è scritta come [precisazione](#precisazione-del-2026-11-22-modello-a-quattro-ruoli-524-527) e nel principio 4, con #527. La decisione dell'operatore del 2026-11-23 sui compiti del coordinatore è scritta come [precisazione](#precisazione-del-2026-11-23-compiti-del-coordinatore-594), con #594. La seconda decisione dell'operatore del 2026-11-23, sul modello operativo dei ruoli in assenza dell'operatore, è scritta come [seconda precisazione](#seconda-precisazione-del-2026-11-23-modello-operativo-dei-ruoli-597), con #597. Il resto del documento è il registro della decisione, scritto prima delle implementazioni: le frasi su "oggi" descrivono lo stato del 2026-11-16.
 - **Fase:** design (#175).
 - **Data:** 2026-11-16.
 
@@ -27,9 +27,9 @@
 
 | Ruolo | Attore oggi | Fa | Non fa |
 |---|---|---|---|
-| **Operatore** | `brushtyler` | Prende le decisioni riservate e la direzione strategica: ADR, `AGENTS.md`, configurazione, `trusted_users` e chiavi, i tetti (`merge-budget`, budget), il merge contro un verdetto negativo dei reviewer; risolve le escalation critiche (`agent:needs-operator`); approva gli ADR; assegna i ruoli; può sempre mergiare, bloccare o riprendere un'attività | — |
-| **Coordinatore** (facoltativo, `[roles.coordinator]`) | l'agent di `[roles.coordinator]`, con l'app `coordinator` | Responsabile dell'operatività: decide come risolvere i problemi operativi critici, detta le priorità e l'ordine del lavoro, sblocca il processo quando si ferma; verifica il lavoro del supervisore; mergia le PR riservate con la decisione dell'operatore; prepara le decisioni per l'operatore. Agisce con il perimetro chiuso di comandi delle precisazioni del [2026-11-22](#precisazione-del-2026-11-22-modello-a-quattro-ruoli-524-527) e del [2026-11-23](#precisazione-del-2026-11-23-compiti-del-coordinatore-594). Delega dell'operatore, revocabile | Le decisioni riservate; il lavoro che cambia i poteri di un ruolo o la politica di fiducia |
-| **Supervisore** | Claude Code (`claude-agent`) | Sorveglia devloop (watch); analizza le RUN; apre issue per problemi e miglioramenti; mette in lavorazione (`agent:ready`, priorità) le issue di autori fidati, seguendo le priorità del coordinatore; in modalità `auto` trattiene o mette in sequenza i merge e decide le escalation non critiche; fa escalation all'operatore | Implementare, fare review, cambiare configurazione, policy, budget o credenziali; mergiare: lo fa il dispatcher |
+| **Operatore** | `brushtyler` | Prende le decisioni riservate e la direzione strategica: ADR, `AGENTS.md`, configurazione, `trusted_users` e chiavi, i tetti (`merge-budget`, budget), il merge contro un verdetto negativo dei reviewer; scrive la direzione del progetto nell'issue di `[direction]` (dalla [seconda precisazione del 2026-11-23](#seconda-precisazione-del-2026-11-23-modello-operativo-dei-ruoli-597)); risolve le escalation critiche (`agent:needs-operator`); approva gli ADR; assegna i ruoli; può sempre mergiare, bloccare o riprendere un'attività | — |
+| **Coordinatore** (facoltativo, `[roles.coordinator]`) | l'agent di `[roles.coordinator]`, con l'app `coordinator` | Responsabile dell'operatività: decide come risolvere i problemi operativi critici, detta le priorità e l'ordine del lavoro, sblocca il processo quando si ferma; autorizza il lavoro (`/devloop authorize`) e traduce la direzione dell'operatore in priorità; verifica il lavoro del supervisore e, se il supervisore non risponde, mette in lavorazione direttamente; in assenza dell'operatore gestisce i finding aperti e le escalation per mancanza di reviewer indipendenti, vota al posto di un membro indisponibile del conclave e trattiene il merge delle PR con un passo sull'host; mergia le PR riservate con la decisione dell'operatore; prepara le decisioni per l'operatore. Agisce con il perimetro chiuso di comandi delle precisazioni del [2026-11-22](#precisazione-del-2026-11-22-modello-a-quattro-ruoli-524-527) e del 2026-11-23 ([prima](#precisazione-del-2026-11-23-compiti-del-coordinatore-594) e [seconda](#seconda-precisazione-del-2026-11-23-modello-operativo-dei-ruoli-597)). Delega dell'operatore, revocabile | Le decisioni riservate; il lavoro che cambia i poteri di un ruolo o la politica di fiducia; approvare con meno reviewer del livello o sostituire un reviewer; il merge contro un verdetto negativo |
+| **Supervisore** | Claude Code (`claude-agent`) | Sorveglia devloop (watch); analizza le RUN; apre issue per problemi e miglioramenti, e le segnala al coordinatore (`agent:needs-coordinator`); mette in lavorazione (`agent:ready`, priorità) solo le issue autorizzate di autori fidati, nell'ordine dettato dal coordinatore; scrive nel diario ogni fermo voluto della coda; in modalità `auto` trattiene o mette in sequenza i merge e decide le escalation non critiche; fa escalation all'operatore | Implementare, fare review, cambiare configurazione, policy, budget o credenziali; autorizzare da solo le issue che apre; mergiare: lo fa il dispatcher |
 | **Dispatcher** | devloop (`dispatcher`) | Esegue le fasi: preflight, implement, review, fix, sync, round sulla CI, promozione, merge (modalità `strict` o `auto`), pin (se attivo), ciclo continuo (se attivo); scrive i marker; fa escalation | Le decisioni riservate; mergiare con il merge disattivato |
 | **Preflight** | Codex (`codex-agent`) | Controlla la prontezza di un'issue in sola lettura | Scrivere su GitHub: lo fa il dispatcher |
 | **Implementer** | Claude (`claude-agent`) | Implementa e corregge nel worktree | Pubblicare, pushare, mergiare |
@@ -90,9 +90,9 @@ Decisione dell'operatore presa dopo l'approvazione di questo ADR, con il [`/devl
 | Ruolo | Chi | Privilegi | Legge | Fa |
 |---|---|---|---|---|
 | **Operatore** | la persona | tutti | — | direzione strategica e decisioni di persona (`/devloop approve`, decisioni riservate di questo ADR, ADR, `AGENTS.md`, configurazione, `trusted_users` e chiavi, i tetti (`merge-budget` e budget), il merge contro un verdetto negativo dei reviewer, credenziali, login delle CLI, GitHub App, abbonamenti); lancia l'agent dell'host; può sempre mergiare, bloccare o riprendere |
-| **Coordinatore** | agent, periodico (a intervalli e sugli allarmi), non sempre acceso | la sua GitHub App; sull'host solo **lettura** (sudoers con comandi di lettura per log, stato, versioni e permessi) | i riepiloghi di devloop (`report`, #316), il ledger, i record del dispatcher, le azioni del supervisore, gli allarmi, le metriche (quote, round, fallimenti) | responsabile dell'operatività (dalla [precisazione del 2026-11-23](#precisazione-del-2026-11-23-compiti-del-coordinatore-594)): decide come risolvere i problemi operativi critici, detta le priorità e l'ordine del lavoro, sblocca il processo quando si ferma; verifica che il supervisore faccia quanto previsto; individua i problemi di sistema che rallentano il supervisore o devloop e li scrive come issue; mergia le PR riservate che la delega del merge (#509) non copre, dopo il quorum e con la decisione dell'operatore; prepara all'operatore le decisioni e un riepilogo periodico; chiede all'operatore un intervento dell'agent dell'host, con il riferimento alla procedura |
-| **Supervisore** | agent, continuo | la sua GitHub App | issue e PR di autori fidati, escalation, log dei turni | messa in lavorazione e ordine della coda, seguendo le priorità del coordinatore; escalation non critiche; analisi delle RUN e issue sui problemi che vede; merge delegati (#509) |
-| **Agent dell'host** | agent **occasionale**, lanciato dall'operatore, **fuori dal ciclo** di devloop | `sudo` sull'host; **nessuna** scrittura su GitHub | **solo** procedure e script già su `main` (`ops/host/`, `ops/host/migrate.md`, `docs/devloop/quickstart.md`) e l'istruzione dell'operatore, **mai** testo di issue, PR o output degli agent | installazione di devloop per un progetto, avvio dei servizi, aggiornamenti e migrazioni (pin dopo un passo sull'host, nuove versioni delle CLI). Riporta l'esito all'operatore, e lo registra l'operatore o il coordinatore |
+| **Coordinatore** | agent, periodico (a intervalli e sugli allarmi), non sempre acceso | la sua GitHub App; sull'host solo **lettura** (sudoers con comandi di lettura per log, stato, versioni e permessi) | i riepiloghi di devloop (`report`, #316), il ledger, i record del dispatcher, le azioni del supervisore, gli allarmi, le metriche (quote, round, fallimenti); la direzione dell'operatore (`[direction] issue`) e la casella del suo ruolo | responsabile dell'operatività (dalla [precisazione del 2026-11-23](#precisazione-del-2026-11-23-compiti-del-coordinatore-594)): decide come risolvere i problemi operativi critici, detta le priorità e l'ordine del lavoro, sblocca il processo quando si ferma; autorizza il lavoro e, in assenza dell'operatore, decide quanto previsto dalla [seconda precisazione del 2026-11-23](#seconda-precisazione-del-2026-11-23-modello-operativo-dei-ruoli-597); verifica che il supervisore faccia quanto previsto; individua i problemi di sistema che rallentano il supervisore o devloop e li scrive come issue; mergia le PR riservate che la delega del merge (#509) non copre, dopo il quorum e con la decisione dell'operatore; prepara all'operatore le decisioni e un riepilogo periodico; chiede all'operatore un intervento dell'agent dell'host, con il riferimento alla procedura |
+| **Supervisore** | agent, continuo | la sua GitHub App | issue e PR di autori fidati, escalation, log dei turni | messa in lavorazione e ordine della coda delle sole issue autorizzate, seguendo le priorità del coordinatore; segnala al coordinatore le issue che apre (`agent:needs-coordinator`); escalation non critiche; analisi delle RUN e issue sui problemi che vede; merge delegati (#509) |
+| **Agent dell'host** | agent **occasionale**, lanciato dall'operatore, **fuori dal ciclo** di devloop, mai automatico | `sudo` sull'host; **nessuna** scrittura su GitHub | **solo** procedure e script già su `main` (`ops/host/`, `ops/host/migrate.md`, `docs/devloop/quickstart.md`) e l'istruzione dell'operatore, **mai** testo di issue, PR o output degli agent | installazione di devloop per un progetto, avvio dei servizi, aggiornamenti e migrazioni (pin dopo un passo sull'host, nuove versioni delle CLI). Riporta l'esito all'operatore, e lo registra l'operatore o il coordinatore |
 
 Durante il ciclo di sviluppo di un progetto (issue → PR → review → merge) l'agent dell'host non serve: interviene solo all'avvio e negli aggiornamenti o migrazioni dell'installazione. Il dispatcher, il preflight, l'implementer e i reviewer restano come nella tabella dei ruoli sopra.
 
@@ -130,9 +130,71 @@ Decisione dell'operatore presa dopo l'approvazione di questo ADR e registrata qu
 3. **Perimetro del coordinatore.** Il perimetro chiuso dei comandi della precisazione del 2026-11-22 si estende a `capacity` e `grant-budget`, entro i tetti delle deleghe, e alle etichette di priorità (#595). I due comandi passano dall'elenco dei riservati all'operatore di persona a quello dei delegati al coordinatore; gli altri riservati (`approve`, `merge-budget`, `reconcile`, ogni modifica di `trusted_users` e delle chiavi di fiducia) restano dell'operatore.
 4. **L'operatore si occupa della direzione strategica**: ADR, `AGENTS.md`, configurazione, `trusted_users` e chiavi, i tetti (`merge-budget`, budget), il merge contro un verdetto negativo dei reviewer.
 
-**Fuori da questa precisazione.** Le parti del modello ancora in discussione (conclave con voto sostitutivo, risveglio del supervisore, passi sull'host in assenza dell'operatore) non sono decise qui.
+**Fuori da questa precisazione.** Le parti del modello ancora in discussione (conclave con voto sostitutivo, risveglio del supervisore, passi sull'host in assenza dell'operatore) non sono decise qui: le decide la [seconda precisazione del 2026-11-23](#seconda-precisazione-del-2026-11-23-modello-operativo-dei-ruoli-597).
 
 **Attuazione.** Questa precisazione non cambia il codice. Finché l'estensione del perimetro non è implementata in devloop, il dispatcher continua a rifiutare `capacity` e `grant-budget` dall'identità del coordinatore come riservati all'operatore (`COORDINATOR_RESERVED` in `devloop/supervision.py`); le etichette di priorità del coordinatore sono in #595.
+
+### Seconda precisazione del 2026-11-23: modello operativo dei ruoli (#597)
+
+Decisione dell'operatore presa dopo l'approvazione di questo ADR e registrata qui con il [`/devloop approve` su #597](https://github.com/brushtyler/devloop/issues/597#issuecomment-7118311348) (ripetuto dopo il [primo](https://github.com/brushtyler/devloop/issues/597#issuecomment-7117832752)). Il testo approvato è il corpo di #597 di quel momento. Precisa come lavorano i ruoli quando l'operatore è assente, la tabella dei ruoli e la tabella dei quattro ruoli; il resto dell'ADR, comprese le decisioni riservate e i tetti, non cambia.
+
+**Motivo.** L'operatore deve potersi assentare con la certezza che l'operatività continui. La sua presenza serve per la direzione strategica (ADR, `AGENTS.md`) e per i tetti, come stabilito nella [prima precisazione del 2026-11-23](#precisazione-del-2026-11-23-compiti-del-coordinatore-594).
+
+**Le decisioni.**
+
+1. **Autorizzazione e messa in lavorazione.**
+   - Il coordinatore autorizza il lavoro con `/devloop authorize [priority:<p>]` sull'issue. Il supervisore mette in lavorazione (`agent:ready`) solo issue autorizzate, nell'ordine dettato dal coordinatore.
+   - Le issue aperte dal supervisore partono solo con l'autorizzazione del coordinatore: chi propone un lavoro non lo autorizza da solo. Il supervisore le segnala con la label `agent:needs-coordinator`, che sveglia il coordinatore come oggi lo sveglia `agent:needs-operator`. Il coordinatore autorizza, toglie la label, e il supervisore mette in lavorazione. Un'issue del supervisore senza label e senza autorizzazione, trovata al controllo periodico, viene segnalata al supervisore.
+   - Restano all'operatore le issue che cambiano i poteri di un ruolo o la politica di fiducia (`trust_policy` diverso da `none` nel controllo di prontezza), come in #595.
+2. **Lavoro fermo.**
+   - Al controllo periodico (ogni ora), se il coordinatore trova issue autorizzate pronte, con slot liberi, che restano ferme, chiede al supervisore nella casella il perché.
+   - Una ragione valida del supervisore si rispetta. Se contrasta con le priorità, decide il coordinatore e lo scrive nel diario.
+   - Se il messaggio non è letto entro 15 minuti (resta fuori da `done/`), o il supervisore risulta fermo (punto 6), il coordinatore mette in lavorazione direttamente, avvisa l'operatore, cerca la causa e la corregge. Può aprire e autorizzare le issue che servono.
+   - Il supervisore scrive nel diario, subito, ogni volta che ferma volutamente la coda.
+3. **Decisioni dei reviewer in assenza dell'operatore.**
+   - Conclave attivo (`conclave` nella configurazione, a cura dell'operatore). Se un membro è indisponibile, il terzo voto è del coordinatore, registrato come voto sostitutivo con il suo modello. Il perimetro riservato del conclave resta com'è.
+   - I finding aperti che oggi chiude solo l'operatore (`open_findings`) li gestisce il coordinatore, con il motivo nel diario. Restano all'operatore quelli sulla politica di fiducia.
+   - Le escalation per mancanza di reviewer indipendenti (`review_level`) le gestisce il coordinatore. Quando i reviewer indipendenti tornano disponibili, riprende la review con le label (togliere `agent:needs-operator`, mettere `agent:review`): è già fra i suoi comandi delegati. Non approva mai con meno reviewer del livello e non sostituisce un reviewer. Un'indisponibilità lunga va nel riepilogo per l'operatore.
+   - Il merge contro un verdetto negativo resta solo dell'operatore.
+4. **Slot parcheggiati.**
+   - Il coordinatore evita di riempire `max_parked_prs`. In assenza dell'operatore non mette in coda le issue che prevedibilmente finiranno a lui (`docs/adr/`, `AGENTS.md`, politica di fiducia, passi sull'host).
+   - Quando gli slot parcheggiati arrivano a limite − 1, alza a `high` il lavoro indipendente.
+   - Se serve, alza `max_parked_prs` con `/devloop capacity`, entro i tetti (#595).
+5. **Passi sull'host in assenza dell'operatore.**
+   - Le issue con un passo sull'host prevedibile non vanno in coda.
+   - Le altre partono, e il coordinatore trattiene il merge (`/devloop hold`) fino al ritorno dell'operatore.
+   - Nessun agent dell'host automatico: dare root a un agent senza una persona è una decisione di direzione, da un ADR a parte se mai servirà.
+6. **Risveglio e controllo dei ruoli.**
+   - Uno script di risveglio unico per i due ruoli (`role-wait.sh --role supervisor|coordinator`, generalizzazione di `coordinator-wait.sh`). Sveglia sulla casella del ruolo, sugli eventi di devloop (tutti per il supervisore, filtrati per il coordinatore), sul servizio fermo e alla fine del periodo (1 ora per entrambi). Usa solo i comandi già nei sudoers dei ruoli.
+   - A ogni avvio lo script scrive il battito del ruolo nella casella fra i ruoli (`COORDINATION_DIR`).
+   - Un timer systemd (`role-watchdog`), indipendente dagli agent, controlla i battiti:
+     - supervisore fermo da più di 2 periodi → messaggio al coordinatore;
+     - coordinatore fermo → messaggio al supervisore e avviso all'operatore;
+     - tutti e due fermi → avviso all'operatore.
+
+     Il timer rileva e non agisce: non ha chiavi GitHub. Gli avvisi all'operatore passano da `devloop notify` (#593). Finché la #593 non c'è, il timer scrive solo nelle caselle.
+7. **Direzione strategica per progetto.**
+   - `[direction] issue` nell'overlay, come `[report] issue`: l'issue in cui l'operatore scrive la direzione (temi in ordine, temi in pausa, vincoli). Contano solo i commenti di `trusted_users`, e l'ultimo vale.
+   - Il coordinatore la traduce in priorità:
+     - `high`: ciò che sblocca il primo tema, e i problemi operativi critici;
+     - `normal`: il lavoro dei temi attivi;
+     - `low`: il resto utile;
+     - non in coda: i temi in pausa e le proposte fuori tema, segnalate all'operatore nel riepilogo.
+   - Un'etichetta di priorità messa dall'operatore su un'issue vince.
+   - La direzione non entra nei prompt di implementer e reviewer. Senza `[direction]` le priorità restano alle etichette dell'operatore.
+
+**Piano delle issue di attuazione**, da aprire dopo il merge di questa precisazione, citandone questa sezione su `main`:
+
+1. `/devloop authorize`, label `agent:needs-coordinator` e il suo risveglio, autorizzazione obbligatoria sulle issue del supervisore (codice, guida, runbook).
+2. Voto sostitutivo del coordinatore nel conclave (codice, guida).
+3. `open_findings` fra i comandi del coordinatore (codice, guida).
+4. `role-wait.sh`, battiti e timer `role-watchdog` (`ops/`, `check-host.sh`, `start-role.sh`, runbook). Gli avvisi all'operatore dipendono da #593.
+5. `[direction] issue` (codice, guida, guida rapida, runbook).
+6. Runbook di coordinatore e supervisore per i punti 2, 3 (`review_level`), 4 e 5 (solo documenti).
+
+L'issue 4 è indipendente dalle altre. La 1 viene dopo #595, che tocca lo stesso codice.
+
+**Attuazione.** Questa precisazione non cambia il codice. Finché le issue del piano non sono implementate, devloop si comporta come prima: il dispatcher non conosce `/devloop authorize` né `agent:needs-coordinator`, rifiuta dall'identità del coordinatore i comandi che non sono nel suo perimetro chiuso, e le escalation `open_findings` e `review_level` restano all'operatore.
 
 ## Piano
 
