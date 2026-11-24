@@ -24,7 +24,8 @@ coordinator (`coordinator` in `ops/params.env`). devloop does not run you. You a
   (`review_level`), the third vote of the conclave in place of an unavailable member (#605),
   the parked slots, and `capacity` and `grant-budget` within the caps (from #595). You verify the
   work of the supervisor and, when it does not answer, you put the work in the queue yourself. You
-  make the reserved merges, with the operator's decision.
+  make the reserved merges that meet every condition, without a decision of the operator on each
+  PR (#624).
 - **You do not decide**: the direction, the ADRs, `AGENTS.md`, the trust policy and the powers of
   the roles (the work that changes them stays the operator's, even to authorize), the
   configuration, the caps (`merge-budget`, budget), a merge against a negative verdict of the
@@ -388,6 +389,19 @@ the mailbox.
   holds, the `/devloop approve` of the operator included when it is needed, and within the daily
   cap of the guide. The dispatcher verifies them again and refuses the command when one does
   not hold: the PR stays with the operator.
+  - **Ex officio** (#624, [ADR 0002, precision of
+    2026-11-24](../../adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-24-merge-riservato-del-coordinatore-624)):
+    at the periodic check, merge the reserved PRs that are ready and meet every condition. No
+    decision of the operator on the PR itself is needed; the operator stops one with
+    `/devloop hold`, which you respect. A merge against a negative verdict of the reviewers stays
+    the operator's.
+  - **After a conclave**: when the work of the PR restarted after a `UNANIMOUS` decision, merge
+    only if the decision still holds (not vetoed, not lapsed) and a complete review round after
+    the restart approved the head with the quorum; the dispatcher checks these. Before the
+    command, verify yourself that the resolution of the conclave stays within the authorized
+    request of the issue, with the operator's decisions on it, and write so in the reason of the
+    command. When it goes beyond it, or the doubt remains, do not merge: bring the PR to the
+    operator.
 - **`grant-round`** on a `round_limit` escalation to the operator, at most one round per PR
   (#553; [Granting a review round on an escalation to the
   operator](../guide.md#granting-a-review-round-on-an-escalation-to-the-operator)), with the

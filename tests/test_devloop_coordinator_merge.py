@@ -22,7 +22,7 @@ import dataclasses
 import unittest
 
 import test_devloop_delegated_merge as delegated
-from devloop import apps, config, markdown, report, supervision
+from devloop import apps, conclave, config, markdown, report, supervision
 from devloop.config import ConfigError, DelegationPolicy, MergePolicy
 from devloop.journal import COORDINATOR_MERGE, DELEGATED_MERGE, JournalError
 from devloop.planning import Action
@@ -371,6 +371,157 @@ class RefusalTests(Case):
         self.assertIn('vale solo su una PR pronta il cui merge spetta all\'operatore',
                       case.answer('merge'))
         self.assertEqual(case.gh.labels[100], {SUPER})
+
+
+def _profile(i):
+    return {'identity': f'app-{i}', 'kind': 'k', 'model': f'model-{i}', 'effort': 'high',
+            'args': []}
+
+
+def conclave_body(issue_hash, step='review', head=SHA1, round_no=1, resumed=True):
+    """The dispatcher's record of a ``UNANIMOUS`` conclave decision on issue #7 (#142), taken on
+    the request whose hash is ``issue_hash``, whose work restarted (``resumed``): on a review
+    block of round ``round_no``, or on a stopped ``implement`` or ``fix``."""
+    block = ({'kind': 'review', 'round': round_no, 'reviewer': REV_NAME, 'head': head}
+             if step == 'review' else
+             {'kind': 'blocked', 'comment': 7000000001, 'agent': 'claude', 'step': step})
+    record = conclave.new_record(block, step, ['claude', 'codex', 'agy'], ISSUE, issue_hash,
+                                 SHA1, head, 'd' * 64)
+    conclave.apply_proposal(record, {'reserved': False, 'resolution': 'Usare il formato JSON.',
+                                     'reserved_reason': '', 'operator_question': '',
+                                     'options': []}, _profile(0))
+    for index in (0, 1):
+        conclave.apply_vote(record, index, {'vote': conclave.APPROVE, 'reason': 'Coerente.',
+                                            'reserved': False, 'reserved_reason': '',
+                                            'operator_question': '', 'options': []},
+                            record['hash'], _profile(index + 1))
+    record['outcome'] = conclave.outcome(record)
+    if resumed:
+        record['resumed'] = {'evidence': None}
+    return conclave.render(record)
+
+
+class ConclaveTests(Case):
+    """#624: after a conclave restarted the work, the coordinator's reserved merge only, when
+    the decision was unanimous and still holds and a complete round after the restart approved
+    the head."""
+
+    def request(self):
+        """The hash of the request of issue #7 as the dispatcher reads it now."""
+        return self.make()._issue_context(ISSUE)[0]['request']
+
+    def reviewed(self, *after, issue_hash=None, cfg=COORD):
+        """PR #100 whose review block of round 1 a unanimous conclave restarted, then ``after``,
+        before the ``operator_merge``."""
+        decision = conclave_body(issue_hash or self.request())
+        return self.make(cfg, before=[decision, *after])
+
+    def round_two(self):
+        return review_body(bound(norm(raw_review(), round_no=2), ('x.py',)))
+
+    def test_a_round_after_the_restart_and_the_pr_is_merged(self):
+        for cfg in (COORD, COORD_AUTO):
+            with self.subTest(mode=cfg.merge.mode):
+                d = self.reviewed(self.round_two(), cfg=cfg)
+                (cid,) = [c['id'] for c in self.gh.thread
+                          if markdown.read_marker(c['body'], 'conclave')]
+                self.assertEqual(d._human_merge(d.snapshot().prs[0]), cid)
+                self.merge()
+                decision = self.assert_merged(d)
+                self.assertEqual(decision['conclave'], cid)
+                self.assertIn(f'decisione unanime del conclave {cid}', self.text())
+
+    def test_devloop_alone_never_merges_it(self):
+        # Merge mode "auto" would merge this PR: after the restart it is the operator's, and
+        # the final check of devloop's own merge refuses it too.
+        d = self.reviewed(self.round_two(), cfg=COORD_AUTO)
+        (pr,) = d.snapshot().prs
+        self.assertEqual(pr.merge_mode, 'off')
+        d._do_merge(dataclasses.replace(pr, merge_mode='auto'))
+        self.assertEqual(self.gh.merged, [])
+        self.assertIn('o il coordinatore con il suo merge riservato',
+                      d._operator_merge_reasons(pr))
+
+    def test_a_restarted_implementation_and_the_pr_is_merged(self):
+        # The decision is on the issue: the PR was opened after the restart, and its rounds,
+        # written after the decision, count.
+        hash_ = self.request()
+        d = self.make()
+        self.gh.say_on(ISSUE, 'brushtyler', conclave_body(hash_, step='implement', head=None),
+                       at='2026-11-20T10:45:00Z')
+        (cid,) = [c['id'] for c in self.gh.others[ISSUE]
+                  if markdown.read_marker(c['body'], 'conclave')]
+        self.merge()
+        self.assertEqual(self.assert_merged(d)['conclave'], cid)
+
+    def restarted_on_the_issue(self, round_two=False, edited=None):
+        """PR #100, approved at ``NOW`` (10:00), and a unanimous decision on issue #7 written
+        at 10:01, that restarted its implementation (a PR closed and reopened), its comment
+        changed at ``edited``; with ``round_two``, a second round written at 10:02."""
+        hash_ = self.request()
+        d = self.make(before=[self.round_two()] if round_two else [])
+        if round_two:
+            (review,) = [c for c in self.gh.thread
+                         if (markdown.read_marker(c['body'], 'review') or {}).get('round') == 2]
+            review['created_at'] = '2026-11-21T10:02:00Z'
+        self.gh.say_on(ISSUE, 'brushtyler', conclave_body(hash_, step='implement', head=None),
+                       at='2026-11-21T10:01:00Z')
+        if edited is not None:
+            self.gh.others[ISSUE][-1]['updated_at'] = edited
+        return d
+
+    def test_approvals_before_a_restart_on_the_issue(self):
+        d = self.restarted_on_the_issue()
+        self.merge()
+        self.assert_refused(d, 'nessun round di review completo dopo la ripartenza del lavoro')
+
+    def test_a_round_after_a_restart_on_the_issue(self):
+        d = self.restarted_on_the_issue(round_two=True)
+        self.merge()
+        self.assert_merged(d)
+
+    def test_the_restart_on_the_issue_is_its_latest_change(self):
+        # The dispatcher writes ``resumed`` in the decision as the work restarts: a round
+        # written before that change does not count.
+        d = self.restarted_on_the_issue(round_two=True, edited='2026-11-21T10:05:00Z')
+        self.merge()
+        self.assert_refused(d, 'nessun round di review completo dopo la ripartenza del lavoro')
+
+    def test_a_restart_on_the_issue_without_a_readable_time(self):
+        d = self.restarted_on_the_issue(round_two=True, edited='ieri')
+        self.merge()
+        self.assert_refused(d, 'l\'ora di una decisione del conclave della issue #7')
+
+    def test_no_round_after_the_restart(self):
+        d = self.reviewed()
+        self.merge()
+        self.assert_refused(d, 'nessun round di review completo dopo la ripartenza del lavoro')
+
+    def test_a_vetoed_decision(self):
+        d = self.reviewed(self.round_two())
+        self.command('/devloop veto La direzione non è quella dell\'issue.', login='brushtyler')
+        self.merge()
+        self.assert_refused(d, '`brushtyler` ha annullato con `/devloop veto`')
+
+    def test_a_lapsed_decision(self):
+        d = self.reviewed(self.round_two(), issue_hash='e' * 64)
+        self.merge()
+        self.assert_refused(d, 'è decaduta: la richiesta della issue #7 è cambiata')
+
+    def test_a_later_unanimous_decision_not_restarted(self):
+        d = self.reviewed(self.round_two())
+        request = d._issue_context(ISSUE)[0]['request']
+        self.gh.say('brushtyler', conclave_body(request, round_no=2, resumed=False))
+        self.merge()
+        self.assert_refused(d, 'non è più l\'ultima decisione unanime')
+
+    def test_the_supervisors_delegation_still_refuses_it(self):
+        cfg = dataclasses.replace(COORD_AUTO, delegations=DelegationPolicy(merge=True))
+        d = self.reviewed(self.round_two(), cfg=cfg)
+        super(Case, self).merge(SHA1, REASON, SUPERVISOR_LOGIN)
+        delegated.Case.apply(self, d)
+        self.assertEqual(self.gh.merged, [])
+        self.assertIn('il merge resta umano', self.text())
 
 
 class CapTests(Case):

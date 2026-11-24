@@ -1352,7 +1352,15 @@ class MergeMixin:
           ``operator_reason`` ``none`` or ``decision`` on ``sha``, as above;
         - the daily cap is its own, ``[roles.coordinator] max_merges_per_day`` (at most
           ``MAX_COORDINATOR_MERGES``), with no extension, recorded in the turn journal as a
-          ``coordinator_merge`` (``TurnJournal.delegated_merge``)."""
+          ``coordinator_merge`` (``TurnJournal.delegated_merge``);
+        - work restarted after a conclave refuses nothing by itself (#624, ADR 0002, precision
+          of 2026-11-24): the decision that restarted it must be ``UNANIMOUS`` and still
+          valid, not vetoed nor lapsed, and a complete round after the restart must have
+          approved ``sha`` with the quorum (``_conclave_merge_problem``). devloop's own merge
+          of such a PR stays excluded (``_do_merge``).
+
+        No decision of the operator on the PR itself is needed (#624): the coordinator merges
+        the reserved PRs that meet every condition."""
         cfg, lb, rules = self.cfg, self.cfg.labels, self.cfg.delegations
         by = command['by']
         coordinator = self._is_coordinator(by)
@@ -1443,7 +1451,7 @@ class MergeMixin:
             return refuse('la PR tocca la regola di fiducia o le deleghe: '
                           + ', '.join(f'`{p}`' for p in touched[:MAX_LISTED_PATHS]))
         unblocked = self._human_merge(pr)
-        if unblocked is not None:
+        if unblocked is not None and not coordinator:
             return refuse(f'il lavoro della PR è ripartito dopo la decisione del conclave '
                           f'{unblocked}: il merge resta umano')
         adr = adr_paths(paths)
@@ -1466,6 +1474,11 @@ class MergeMixin:
                              + f' su `{sha[:12]}`' if missing else
                              'un reviewer del quorum dichiara toccata la policy di fiducia '
                              '(`trust_policy`)'))
+        if unblocked is not None:
+            # The coordinator's merge after a unanimous conclave decision (#624).
+            problem = self._conclave_merge_problem(pr, comments, latest, quorum)
+            if problem:
+                return refuse(problem)
         advisory = self._advisory_record(comments, sha)
         opinion = (advisory or {}).get('opinion')
         if opinion not in MERGE_OPINIONS:
@@ -1536,6 +1549,8 @@ class MergeMixin:
         if coordinator:
             if approval is not None:
                 figures['approval'] = approval.get('id')
+            if unblocked is not None:
+                figures['conclave'] = unblocked
             trace('merged', f'PR mergiata dal coordinatore, commit `{head[:12]}`, con le '
                   'condizioni del merge riservato verificate su quello sha; parere della review '
                   f'consultiva: `{opinion}`' + (
@@ -1543,6 +1558,8 @@ class MergeMixin:
                       + (comment_link(approval) or f'(commento {approval.get("id")})')
                       + f' sulla issue #{pr.meta["issue"]}'
                       if approval is not None else '')
+                  + (f'; lavoro ripartito dopo la decisione unanime del conclave {unblocked}, '
+                     'approvato dopo la ripartenza' if unblocked is not None else '')
                   + f'. Merge del coordinatore di oggi: {daily} di {cap}.\n\n**Motivo:**\n\n'
                   + quoted, **figures)
             return None

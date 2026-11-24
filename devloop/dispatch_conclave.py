@@ -793,12 +793,101 @@ class ConclaveMixin:
         the record stays ``resumed`` even when its resolution later lapses (a new text, a new
         head) or a trusted user vetoes it, so that devloop never merges the PR itself, whatever
         ``[merge]`` says: the snapshot plans it as mode ``off``, ``_operator_merge_reasons``
-        tells why, and ``_do_merge`` checks it again just before a merge."""
+        tells why, and ``_do_merge`` checks it again just before a merge. The coordinator's
+        reserved merge is the only merge of such a PR that does not need the operator's hand
+        (#624, ``_conclave_merge_problem``)."""
         threads = (self.gh.issue_comments(pr.issue), self.gh.pr_comments(pr.number))
         found = [cid for comments in threads for cid, record in self._conclave_records(comments)
                  if record.get('resumed') is not None
                  and isinstance(cid, int) and not isinstance(cid, bool)]
         return max(found) if found else None
+
+    def _conclave_merge_problem(self, pr, thread, latest, quorum):
+        """Why the coordinator's reserved merge of ``pr``, whose work restarted after a conclave
+        (``_human_merge``), may not go ahead (#624, ADR 0002, precision of 2026-11-24), in
+        Italian, or ''. ``thread``: the PR's conversation read now (``_pr_thread``);
+        ``latest``: the latest review round, complete and approving the head to merge;
+        ``quorum``: the latest review of that head of each reviewer of the quorum. Every
+        condition is read now, and what cannot be read refuses it:
+
+        - every decision that restarted work of the PR or of its issue is a ``UNANIMOUS``
+          record that holds together (``consistent``), of this issue, and the latest of them
+          is the latest unanimous decision (``_conclave_decision``);
+        - no trusted user vetoed one of them (``/devloop veto`` written after it, on either
+          thread);
+        - none of them lapsed: the issue's request is still the one each was taken on, and the
+          text of the issue is still trusted (``_issue_context``);
+        - the latest round and each review of the quorum come after the restart: their round
+          is greater than every round recorded on the PR before the latest of those decisions
+          on its thread, and than every round written, or without a readable time, by the
+          latest time of a decision on the issue (its creation or its latest change, the
+          restart), so that a PR closed before the restart and reopened does not count the
+          approvals written before it.
+
+        The check of the direction, that the resolution stays within the authorized request of
+        the issue, is the coordinator's, written in the reason of its command."""
+        issue_number = pr.issue
+        try:
+            issue, _ = self._issue_context(issue_number)
+            pr_comments = self.gh.pr_comments(pr.number)
+        except UntrustedChange as exc:
+            return f'il testo della issue #{issue_number} non è più fidato ({_short(exc)})'
+        except GitHubError as exc:
+            return (f'le decisioni del conclave della issue #{issue_number} non sono leggibili '
+                    f'({_short(exc)})')
+        resumed = [(cid, record) for comments in (issue['thread'], pr_comments)
+                   for cid, record in self._conclave_records(comments)
+                   if record.get('resumed') is not None
+                   and isinstance(cid, int) and not isinstance(cid, bool)]
+        if not resumed:
+            return 'la decisione del conclave che ha fatto ripartire il lavoro non si legge più'
+        last = max(cid for cid, _ in resumed)
+        for cid, record in resumed:
+            if not (record['outcome'] == UNANIMOUS and consistent(record)[0]
+                    and record['issue'] == issue_number):
+                return (f'la decisione del conclave {cid}, che ha fatto ripartire il lavoro, non '
+                        'è una decisione `UNANIMOUS` valida di questa issue')
+            if record['issue_hash'] != issue['request']:
+                return (f'la decisione del conclave {cid} è decaduta: la richiesta della issue '
+                        f'#{issue_number} è cambiata dopo la decisione')
+        decision = self._conclave_decision(issue_number, issue['thread'], pr_comments)
+        if decision is None or decision['comment'] != last:
+            return (f'la decisione del conclave {last}, che ha fatto ripartire il lavoro, non è '
+                    'più l\'ultima decisione unanime sulla issue e sulla PR')
+        first = min(cid for cid, _ in resumed)
+        vetoes = sorted(v for comments in (issue['thread'], pr_comments)
+                        for v in self._veto_commands(comments, issue_number) if v[0] > first)
+        if vetoes:
+            ident, login, _ = vetoes[0]
+            return (f'`{login}` ha annullato con `{VETO_COMMAND}` (commento {ident}) una '
+                    'decisione del conclave che ha fatto ripartire il lavoro')
+        cids = {cid for cid, _ in resumed}
+        positions = [p for p, c in enumerate(thread) if comment_ref(c) in cids]
+        # A decision on the issue is not in the PR's conversation: its restart is the latest
+        # time of its comment (the dispatcher writes ``resumed`` in it as the work restarts),
+        # and a review written by then comes before it (a PR closed and reopened, #624).
+        times = [[_epoch(c.get(key)) for key in ('created_at', 'updated_at')
+                  if c.get(key) is not None]
+                 for c in issue['thread'] if comment_ref(c) in cids]
+        if any(not stamps or None in stamps for stamps in times):
+            return (f'l\'ora di una decisione del conclave della issue #{issue_number}, che ha '
+                    'fatto ripartire il lavoro, non è leggibile')
+        since = max((max(stamps) for stamps in times), default=None)
+
+        def earlier(position):
+            if positions and position < max(positions):
+                return True
+            if since is None:
+                return False
+            at = _epoch(thread[position].get('created_at'))
+            return at is None or at <= since
+        before = max([r['round'] for p, r in self._marker_entries(pr, thread, 'review')
+                      if earlier(p)], default=0)
+        if (not latest or latest[0]['round'] <= before
+                or any(r['round'] <= before for r in quorum.values())):
+            return (f'nessun round di review completo dopo la ripartenza del lavoro (decisione '
+                    f'del conclave {last}) ha approvato l\'head con il quorum del livello')
+        return ''
 
     def _conclave_pr_state(self, pr, comments):
         """What the conclave decisions of a PR devloop works on change in the snapshot (#142),

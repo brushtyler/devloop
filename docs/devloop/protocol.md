@@ -655,7 +655,9 @@ the same figures go in a ledger `event` `delegation_grant` with the `delegation`
 the same records, with `role: coordinator`, under the title "Merge riservato del coordinatore":
 `merged` carries the coordinator's own daily figures (`daily`, `daily_cap`, `daily_left`), after
 a `coordinator_merge` event in the turn journal, and, when the trust policy or `docs/adr/` asked
-for one, the id of the operator's `/devloop approve` that covered it (`approval`). The record is
+for one, the id of the operator's `/devloop approve` that covered it (`approval`), and, for a PR
+whose work restarted after a unanimous conclave decision (#624), the id of the comment of that
+decision (`conclave`). The record is
 written before the labels change, so a
 lost label change never runs a retry twice. A command that does not apply (#321) gets the same
 record, `refused`, with the reason and how to resume in the comment: it spends the command, which
