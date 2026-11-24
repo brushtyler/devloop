@@ -2,8 +2,8 @@
 """Run a command as the coordinator's GitHub App, with a token limited to the permissions it needs.
 
 Usage:
-    python3 scripts/coordinator-token.py [--state-dir DIR] [--perm NAME=LEVEL ...] -- \\
-        <command> [args...]
+    python3 scripts/coordinator-token.py [--state-dir DIR] [--perm NAME=LEVEL ...] \\
+        [--allow-host-details] -- <command> [args...]
 
 Examples:
     DEVLOOP_APP_KEY_DIR=/home/coordinator/.ghapps python3 scripts/coordinator-token.py \\
@@ -34,6 +34,14 @@ The command also gets GH_REPO set to the project's ``repo`` (#571): the token is
 there, and ``gh`` would otherwise pick the repository of the current directory's clone, the
 source of devloop for a project with the source apart (SOURCE_REPO). A GH_REPO of the caller
 naming another repository is refused before any key is read.
+
+Before any key is read, the text the command publishes (``--body``, ``--title``,
+``--body-file``, their short forms, standard input with ``-``; for ``gh api``, ``--input`` and the
+fields, a file read with ``-F key=@file`` and standard input with ``key=@-`` included) is checked
+(#583, ``devloop.redact``): one
+that still holds an absolute path of the host (under /home/, /etc/, /var/lib/, /usr/local/lib/,
+/run/, /root/) or the name of a key file is refused. --allow-host-details publishes it anyway;
+each use is written on standard error and in the system log (syslog, devloop-publication).
 """
 
 import os
@@ -48,6 +56,7 @@ if str(REPO_ROOT) not in sys.path:
 from devloop.apps import COORDINATOR, AppAuth, find_key  # noqa: E402
 from devloop.config import (DEFAULT_CONFIG, ConfigError, apply_overlay, parse_config,  # noqa: E402
                             read_toml)
+from devloop.redact import allow_option, publication_check  # noqa: E402
 
 DEFAULT = {'issues': 'write', 'pull_requests': 'write'}
 # The permissions of ops/github/apps/coordinator.json, none above its level.
@@ -120,7 +129,10 @@ def project_repo(repo):
 
 
 def main(argv):
+    allow, argv = allow_option(argv)
     state, permissions, command = parse(argv)
+    # The last check before publishing (#583): no path of the host nor key file in the text.
+    stdin = publication_check('coordinator-token', command, allow)
     cfg = load_config(state)
     repo = project_repo(cfg.repo)
     configured = cfg.apps.get(COORDINATOR)
@@ -133,6 +145,8 @@ def main(argv):
     env['GH_TOKEN'] = app.token(permissions)
     # gh acts on the project's repository, not on the origin of the current clone (#571).
     env['GH_REPO'] = repo
+    if stdin is not None:  # the body read from standard input for the check, passed on
+        return subprocess.run(command, env=env, input=stdin, text=True).returncode
     return subprocess.run(command, env=env).returncode
 
 

@@ -14,7 +14,9 @@ PRs and writes the records of fixes and syncs with it. The dispatcher maps each 
 the app it declares (``Config.app_of``) before asking for a client here.
 
 Tokens stay in this process: they reach ``gh`` and ``git`` through the environment of a single
-command and are never given to the agent CLIs. Only the standard library and the ``openssl``
+command and are never given to the agent CLIs. With a ``redactor`` (#583, ``redact.Redactor``),
+the text of every write of a client passes through it before the outbox and GitHub: the names of
+the parameters in place of the host's paths and users. Only the standard library and the ``openssl``
 binary are used (RS256 is not in the standard library).
 """
 
@@ -32,6 +34,7 @@ from pathlib import Path
 
 from .github import GitHub, GitHubError
 from .ports import Backend
+from .redact import RedactingClient
 
 API = 'https://api.github.com'
 DISPATCHER = 'dispatcher'
@@ -273,6 +276,9 @@ class Identities:
     # requests through it, and their reviews and pull requests tell an uncertain outcome apart
     # (``GitHub.uncertain_publications``), the clients created before it included.
     _outbox = None
+    # The redactor of the published texts (#583, ``redact.runtime``), set by devloop at the
+    # start: the writes of every client pass through it, before the outbox.
+    redactor = None
 
     @property
     def outbox(self):
@@ -299,11 +305,14 @@ class Identities:
     def github(self, actor, permissions=None) -> Backend:
         """The client ``actor`` acts with: the ports, on GitHub, holding only ``permissions``;
         with an outbox, its ``comment``, ``edit_comment``, ``submit_review`` and ``create_pr``
-        pass through it (#385)."""
+        pass through it (#385). With a ``redactor`` (#583), the text of those writes passes
+        through it first: the outbox records and reconciles the very body published."""
         client = self.direct(actor, permissions)
-        if self.outbox is None:
-            return client
-        return self.outbox.client(client, actor, permissions)
+        if self.outbox is not None:
+            client = self.outbox.client(client, actor, permissions)
+        if self.redactor is not None:
+            client = RedactingClient(client, self.redactor)
+        return client
 
     def direct(self, actor, permissions=None) -> Backend:
         """The client of ``actor`` as ``github`` returns it, without the outbox."""

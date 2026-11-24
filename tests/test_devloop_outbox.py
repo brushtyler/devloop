@@ -23,6 +23,7 @@ from devloop.journal import JOURNAL, JournalError, TurnJournal
 from devloop.ledger import Ledger
 from devloop.outbox import (DROPPED, FAILED, IN_FLIGHT_SECONDS, SENT, UNCERTAIN, Outbox,
                             OutboxClient, for_identities)
+from devloop.redact import RedactingClient
 from devloop.planning import Snapshot
 from helpers.devloop_fakes import FIRST_COMMENT_ID, SHA1, ActingAs, FakeGH, FakeIdentities
 from helpers.ssdlc_project import data as load_data
@@ -1155,7 +1156,9 @@ class WiringTests(unittest.TestCase):
                     _, _, d = devloop_main.build(args)
                 box = d.identities.outbox
                 self.assertIs(box is not None, expected)
-                self.assertIs(isinstance(d.gh, OutboxClient), expected)
+                # The texts are redacted before the outbox (#583): its client is inside.
+                self.assertIsInstance(d.gh, RedactingClient)
+                self.assertIs(isinstance(d.gh._client, OutboxClient), expected)
                 self.assertIs(d.ledger.gh, d.gh)
                 if expected:
                     self.assertIs(box.journal, d.ledger.journal)

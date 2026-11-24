@@ -685,7 +685,15 @@ Poi, a mano:
 ```bash
 sudo bash ops/host/check-host.sh             # esce con 1 se trova errori
 sudo bash ops/host/check-host.sh --no-apps   # senza interrogare GitHub
+sudo bash ops/host/check-host.sh --verbose   # con i percorsi reali, per la diagnosi locale
 ```
+
+Senza `--verbose` l'output, errori dei comandi compresi, nomina i parametri (`$STATE_DIR`,
+`$DEVLOOP_KEY_DIR`, `$AGENT_HOME`, …), il ruolo dell'app al posto del nome di un file di chiave
+(`<chiave dell'app dispatcher>`), il servizio non di default come `$SERVICE_NAME` e gli utenti
+non di default come `<AGENT_USER>`, al posto dei valori dell'host (#583): è l'output che si può
+citare in un testo pubblico. Un errore nel caricamento dei parametri resta generico. Con
+`--verbose` resta sull'host.
 
 Verifica gli utenti; `key_dir`, `~/.claude` e `~/.codex` con mode 700 e il proprietario giusto;
 ogni chiave `*.pem` con mode 600 e del suo utente, una chiave per app attesa e, nella `key_dir`

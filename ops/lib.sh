@@ -390,6 +390,97 @@ ops_devloop_keys() {
     fi
 }
 
+# I testi pubblicati nominano i parametri, non i percorsi dell'host (#583). I parametri che hanno
+# per valore un percorso, sostituiti dal più lungo (STATE_DIR è STATE_PATH, lo state_dir risolto),
+# e quelli che sono nomi di utenti dei ruoli, sostituiti solo da soli e solo se non sono i default
+# documentati (OPS_PUBLIC_USERS, come PUBLIC_USERS di devloop/redact.py).
+OPS_REDACT_PATHS='STATE_DIR DEVLOOP_KEY_DIR SUPERVISOR_KEY_DIR COORDINATOR_KEY_DIR DEVLOOP_HOME AGENT_HOME SUPERVISOR_HOME COORDINATOR_HOME COORDINATION_DIR COORDINATOR_OPS_DIR SUPERVISOR_OPS_DIR WATCHDOG_OPS_DIR LAUNCHER_DIR REPO_LOCK_DIR SYSTEMD_DIR SUDOERS_FILE AGENT_SUDOERS_FILE COORDINATOR_SUDOERS_FILE TMPFILES_FILE'
+OPS_REDACT_USERS='DEVLOOP_USER AGENT_USER SUPERVISOR_USER COORDINATOR_USER WATCHDOG_USER'
+# Gli altri nomi dell'installazione, sostituiti da soli e nei nomi dei percorsi e delle unità
+# ($SYSTEMD_DIR/$SERVICE_NAME.service), alle condizioni degli utenti.
+OPS_REDACT_NAMES='SERVICE_NAME'
+# La mappa delle sostituzioni che setup-devloop.sh scrive nello state_dir e devloop legge
+# all'avvio (MAP_FILE di devloop/redact.py).
+OPS_REDACT_FILE=redactions.json
+
+# ops_redactions: la mappa delle sostituzioni dei parametri risolti (ops_load_params), in JSON:
+# {"paths": {NOME: percorso}, "users": {NOME: utente}, "names": {NOME: valore}, "app_prefix":
+# APP_PREFIX}. Nessuna chiave letta: solo i valori dei parametri.
+ops_redactions() {
+    local name value
+    local -a args=("$APP_PREFIX")
+    for name in $OPS_REDACT_PATHS; do
+        value=${!name:-}
+        [ "$name" = STATE_DIR ] && value=$STATE_PATH
+        args+=("path:$name=$value")
+    done
+    for name in $OPS_REDACT_USERS; do
+        args+=("user:$name=${!name:-}")
+    done
+    for name in $OPS_REDACT_NAMES; do
+        args+=("name:$name=${!name:-}")
+    done
+    python3 -I -B - "${args[@]}" <<'EOF'
+import json, sys
+data = {'paths': {}, 'users': {}, 'names': {}, 'app_prefix': sys.argv[1]}
+for arg in sys.argv[2:]:
+    kind, _, rest = arg.partition(':')
+    name, _, value = rest.partition('=')
+    if value:
+        data[{'path': 'paths', 'user': 'users', 'name': 'names'}[kind]][name] = value
+print(json.dumps(data, indent=2))
+EOF
+}
+
+# ops_redact_filter MAP: copia lo standard input sull'output, una riga alla volta, con i nomi dei
+# parametri della mappa MAP (ops_redactions) al posto dei valori dell'host: i percorsi dal più
+# lungo e fino alla fine di un nome ($STATE_DIR/worktrees/...), i file di chiave come ruolo
+# dell'app (<chiave dell'app dispatcher>), gli altri nomi ($SERVICE_NAME, anche nel nome
+# dell'unità), gli utenti da soli (<DEVLOOP_USER>). La stessa regola
+# di devloop/redact.py, qui perché la copia di root del coordinatore ha solo i file di ops/.
+ops_redact_filter() {
+    python3 -I -B -u -c '
+import json, re, sys
+data = json.loads(sys.argv[1])
+prefix = data.get("app_prefix") or ""
+public = {"devloop", "devloop-agent", "supervisor", "coordinator", "role-watchdog", "root"}
+paths = {}
+for name, value in data.get("paths", {}).items():
+    value = value.rstrip("/")
+    if value.startswith("/") and value.count("/") >= 2 and value not in paths:
+        paths[value] = name
+users = {}
+for name, value in data.get("users", {}).items():
+    if len(value) >= 3 and value not in public and value not in users:
+        users[value] = name
+names = {}
+for name, value in data.get("names", {}).items():
+    if len(value) >= 3 and value not in public and re.fullmatch(r"[A-Za-z0-9_@-]+", value) \
+            and value not in names:
+        names[value] = name
+def alt(values):
+    return "|".join(re.escape(v) for v in sorted(values, key=lambda v: (-len(v), v)))
+path_re = re.compile(r"(?<![\w.-])(" + alt(paths) + r")(?![\w.-])") if paths else None
+user_re = re.compile(r"(?<![\w./-])(" + alt(users) + r")(?![\w/-])") if users else None
+name_re = re.compile(r"(?<![\w.@-])(" + alt(names) + r")(?![\w@-])") if names else None
+key_re = re.compile(r"(?<![\w.-])([A-Za-z0-9][A-Za-z0-9-]*)\.\d{4}-\d{2}-\d{2}\.private-key\.pem\b")
+def key(m):
+    slug = m.group(1)
+    return ("<chiave dell\x27app %s>" % slug[len(prefix):]) if prefix and slug.startswith(prefix) \
+        and len(slug) > len(prefix) else "<chiave di un\x27app>"
+sys.stdin.reconfigure(errors="replace")
+for line in sys.stdin:
+    if path_re:
+        line = path_re.sub(lambda m: "$" + paths[m.group(1)], line)
+    line = key_re.sub(key, line)
+    if name_re:
+        line = name_re.sub(lambda m: "$" + names[m.group(1)], line)
+    if user_re:
+        line = user_re.sub(lambda m: "<%s>" % users[m.group(1)], line)
+    sys.stdout.write(line)
+' "$1"
+}
+
 say() { printf '%s\n' "$*"; }
 step() { printf '\n==> %s\n' "$*"; }
 ok() { printf '  ok: %s\n' "$*"; }

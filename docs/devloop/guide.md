@@ -1090,6 +1090,11 @@ modules, one at a time, on the base commit of the branch, in a disposable worktr
   `python-unittest-modules`): the failure stays the implementer's, as before:
   `implement_test_retries` more attempts, then `tests_failed`.
 
+The output of the tests that these escalations and records quote names the parameters of the
+host, not its paths (#583): `$STATE_DIR/worktrees/issue-570/...`, `$AGENT_HOME/...`,
+`<AGENT_USER>`, as every visible text devloop publishes; the markers of the records stay as
+they are ([Host details in the published texts](reference.md#host-details-in-the-published-texts)).
+
 ### Red CI on `main`
 
 With `[run].alert_issue`, at each tick (not in a dry run) devloop reads the checks of the current

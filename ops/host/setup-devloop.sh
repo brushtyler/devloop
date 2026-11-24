@@ -155,6 +155,10 @@ for line in "${overlay_lines[@]}"; do
         todo "scrivere $line in $STATE/config.local.toml"
     fi
 done
+# La mappa delle sostituzioni dei testi pubblicati (#583): i parametri risolti, nessuna chiave
+# letta. devloop la legge all'avvio e nomina i parametri ($STATE_DIR, $AGENT_HOME, ...) al posto
+# dei percorsi dell'host in ciò che pubblica; si riscrive a ogni esecuzione, come i parametri.
+put_file "$STATE/$OPS_REDACT_FILE" 600 "$DEVLOOP_USER" "$(ops_redactions)" || true
 
 step 'Directory private (700)'
 ensure_dir "$DEVLOOP_KEY_DIR" 700 "$DEVLOOP_USER"
