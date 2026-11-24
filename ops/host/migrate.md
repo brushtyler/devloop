@@ -2307,7 +2307,8 @@ Il coordinatore lo esegue dalla sua copia di root, che `setup-coordinator.sh` ag
 
 Il passo si fa con l'agent dell'host, come root, **a loop fermo**, dal checkout dell'operatore
 aggiornato, prima del pin a mano del commit del #583. Si rifà, con gli stessi comandi, ogni volta
-che cambia un parametro di `params.env` che nomina un percorso o un utente: la mappa si
+che cambia un parametro di `params.env` che nomina un percorso, un utente o il servizio
+(`SERVICE_NAME`): la mappa si
 riscrive solo se è diversa.
 
 1. **Il checkout dell'operatore e il loop fermo:**

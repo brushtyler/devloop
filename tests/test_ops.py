@@ -4054,18 +4054,71 @@ exec "$@"''')
         # The same lines, in the same order: only the values change.
         self.assertEqual(len(done.stdout.splitlines()), len(verbose.stdout.splitlines()))
 
+    def test_the_service_name_is_a_parameter_unless_verbose(self):
+        # #583, R1-3: a service name that is not the default is an installation's detail too,
+        # alone and in the name of its unit.
+        self.fake_host('classic sudo', users=(FAKE_AGENT, FAKE_SUPERVISOR))
+        unit = self.tmp / 'systemd/private-loop-example.service'
+        (self.tmp / 'systemd/devloop.service').rename(unit)
+        params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=FAKE_SUPERVISOR,
+                             AGENT_USER=FAKE_AGENT, SERVICE_NAME='private-loop-example')
+        done = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params),
+                               redacted=True)
+        out = done.stdout + done.stderr
+        self.assertNotIn('private-loop-example', out)
+        self.assertIn('==> Servizio $SERVICE_NAME\n', done.stdout)
+        self.assertIn('$SYSTEMD_DIR/$SERVICE_NAME.service', out)
+        self.assertIn('$SERVICE_NAME è attivo', out)
+        verbose = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params))
+        self.assertIn('==> Servizio private-loop-example\n', verbose.stdout)
+        self.assertIn(str(unit), verbose.stdout)
+
+    def test_an_error_of_the_parameters_shows_no_value_unless_verbose(self):
+        # #583, R1-4: the parameters fail before the map exists: a generic message, the detail
+        # with --verbose.
+        missing = self.tmp / 'example-private-installation/missing-params.env'
+        invalid = self.params(AGENT_PATH=f"'{self.home}/agent bin'")
+        for params, detail in ((missing, str(missing)), (invalid, str(self.home))):
+            with self.subTest(params=params.name):
+                done = self.run_script('host/check-host.sh', '--dry-run', '--params',
+                                       str(params), redacted=True)
+                self.assertEqual(done.returncode, 1)
+                self.assertNotIn(detail, done.stdout + done.stderr)
+                self.assertIn('i parametri non si caricano o non sono validi: il dettaglio, con '
+                              "i valori dell'host, con --verbose", done.stderr)
+                verbose = self.run_script('host/check-host.sh', '--dry-run', '--params',
+                                          str(params))
+                self.assertEqual(verbose.returncode, 1)
+                self.assertIn(detail, verbose.stderr)
+        # What bash writes while it loads valid parameters reaches the output, redacted, with
+        # $PARAMS_FILE in place of their file.
+        self.fake_host('classic sudo', users=(FAKE_AGENT, FAKE_SUPERVISOR))
+        params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=FAKE_SUPERVISOR,
+                             AGENT_USER=FAKE_AGENT)
+        with params.open('a') as fh:
+            fh.write('not-a-command-of-the-tests\n')
+        done = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params),
+                               redacted=True)
+        self.assertIn('$PARAMS_FILE: line ', done.stderr)
+        self.assertIn('not-a-command-of-the-tests', done.stderr)
+        self.assertNotIn(str(params), done.stdout + done.stderr)
+        self.assertIn('==> Esito\n', done.stdout)
+
     def test_the_filter_of_ops_and_the_redactor_of_devloop_agree(self):
         # #583: check-host.sh runs from the root copy of the coordinator, which has only the
         # files of ops/: its filter repeats the rule of devloop/redact.py, on the same map.
         self.fake_host('classic sudo', users=(FAKE_AGENT, FAKE_SUPERVISOR))
         params = self.params(DEVLOOP_USER='dl-widget', SUPERVISOR_USER=FAKE_SUPERVISOR,
-                             AGENT_USER=FAKE_AGENT, STATE_DIR=str(self.home / 'devloop/state'))
+                             AGENT_USER=FAKE_AGENT, STATE_DIR=str(self.home / 'devloop/state'),
+                             SERVICE_NAME='loop-widget', SYSTEMD_DIR=str(self.tmp / 'systemd'))
         data = self.redactions(params)
         self.assertEqual(json.loads(data)['paths']['STATE_DIR'], str(self.home / 'devloop/state'))
+        self.assertEqual(json.loads(data)['names'], {'SERVICE_NAME': 'loop-widget'})
         text = (f'File "{self.home}/devloop/state/worktrees/issue-570/x.py", line 3\n'
                 f'{self.home}/devloop/.ghapps/{PREFIX}implementer.2026-01-02.private-key.pem\n'
                 f'sudo -u {FAKE_AGENT} ls {self.home}/agent {self.home}/agent-x devloop\n'
-                f'{self.home}/supervisor/.ghapps/x and dl-widget, not dl-widget-2\n')
+                f'{self.home}/supervisor/.ghapps/x and dl-widget, not dl-widget-2\n'
+                f'{self.tmp}/systemd/loop-widget.service: loop-widget, not loop-widget-2\n')
         lib = shlex.quote(str(OPS / 'lib.sh'))
         done = subprocess.run([BASH, '-c', f'. {lib}; ops_redact_filter "$1"', '_', data],
                               input=text, capture_output=True, text=True, timeout=60)
@@ -4076,7 +4129,8 @@ exec "$@"''')
             'File "$STATE_DIR/worktrees/issue-570/x.py", line 3',
             "$DEVLOOP_KEY_DIR/<chiave dell'app implementer>",
             f'sudo -u <AGENT_USER> ls $AGENT_HOME {self.home}/agent-x devloop',
-            '$SUPERVISOR_KEY_DIR/x and <DEVLOOP_USER>, not dl-widget-2'])
+            '$SUPERVISOR_KEY_DIR/x and <DEVLOOP_USER>, not dl-widget-2',
+            '$SYSTEMD_DIR/$SERVICE_NAME.service: $SERVICE_NAME, not loop-widget-2'])
 
     def test_the_coordinator_is_checked_when_it_is_installed(self):
         # #530: absent, a line; present, its sudoers and the root copy, equal to this checkout.

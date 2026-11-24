@@ -383,13 +383,16 @@ ops_devloop_keys() {
 # documentati (OPS_PUBLIC_USERS, come PUBLIC_USERS di devloop/redact.py).
 OPS_REDACT_PATHS='STATE_DIR DEVLOOP_KEY_DIR SUPERVISOR_KEY_DIR COORDINATOR_KEY_DIR DEVLOOP_HOME AGENT_HOME SUPERVISOR_HOME COORDINATOR_HOME COORDINATION_DIR COORDINATOR_OPS_DIR LAUNCHER_DIR REPO_LOCK_DIR SYSTEMD_DIR SUDOERS_FILE AGENT_SUDOERS_FILE COORDINATOR_SUDOERS_FILE TMPFILES_FILE'
 OPS_REDACT_USERS='DEVLOOP_USER AGENT_USER SUPERVISOR_USER COORDINATOR_USER'
+# Gli altri nomi dell'installazione, sostituiti da soli e nei nomi dei percorsi e delle unità
+# ($SYSTEMD_DIR/$SERVICE_NAME.service), alle condizioni degli utenti.
+OPS_REDACT_NAMES='SERVICE_NAME'
 # La mappa delle sostituzioni che setup-devloop.sh scrive nello state_dir e devloop legge
 # all'avvio (MAP_FILE di devloop/redact.py).
 OPS_REDACT_FILE=redactions.json
 
 # ops_redactions: la mappa delle sostituzioni dei parametri risolti (ops_load_params), in JSON:
-# {"paths": {NOME: percorso}, "users": {NOME: utente}, "app_prefix": APP_PREFIX}. Nessuna chiave
-# letta: solo i valori dei parametri.
+# {"paths": {NOME: percorso}, "users": {NOME: utente}, "names": {NOME: valore}, "app_prefix":
+# APP_PREFIX}. Nessuna chiave letta: solo i valori dei parametri.
 ops_redactions() {
     local name value
     local -a args=("$APP_PREFIX")
@@ -401,14 +404,17 @@ ops_redactions() {
     for name in $OPS_REDACT_USERS; do
         args+=("user:$name=${!name:-}")
     done
+    for name in $OPS_REDACT_NAMES; do
+        args+=("name:$name=${!name:-}")
+    done
     python3 -I -B - "${args[@]}" <<'EOF'
 import json, sys
-data = {'paths': {}, 'users': {}, 'app_prefix': sys.argv[1]}
+data = {'paths': {}, 'users': {}, 'names': {}, 'app_prefix': sys.argv[1]}
 for arg in sys.argv[2:]:
     kind, _, rest = arg.partition(':')
     name, _, value = rest.partition('=')
     if value:
-        data['paths' if kind == 'path' else 'users'][name] = value
+        data[{'path': 'paths', 'user': 'users', 'name': 'names'}[kind]][name] = value
 print(json.dumps(data, indent=2))
 EOF
 }
@@ -416,7 +422,8 @@ EOF
 # ops_redact_filter MAP: copia lo standard input sull'output, una riga alla volta, con i nomi dei
 # parametri della mappa MAP (ops_redactions) al posto dei valori dell'host: i percorsi dal più
 # lungo e fino alla fine di un nome ($STATE_DIR/worktrees/...), i file di chiave come ruolo
-# dell'app (<chiave dell'app dispatcher>), gli utenti da soli (<DEVLOOP_USER>). La stessa regola
+# dell'app (<chiave dell'app dispatcher>), gli altri nomi ($SERVICE_NAME, anche nel nome
+# dell'unità), gli utenti da soli (<DEVLOOP_USER>). La stessa regola
 # di devloop/redact.py, qui perché la copia di root del coordinatore ha solo i file di ops/.
 ops_redact_filter() {
     python3 -I -B -u -c '
@@ -433,10 +440,16 @@ users = {}
 for name, value in data.get("users", {}).items():
     if len(value) >= 3 and value not in public and value not in users:
         users[value] = name
+names = {}
+for name, value in data.get("names", {}).items():
+    if len(value) >= 3 and value not in public and re.fullmatch(r"[A-Za-z0-9_@-]+", value) \
+            and value not in names:
+        names[value] = name
 def alt(values):
     return "|".join(re.escape(v) for v in sorted(values, key=lambda v: (-len(v), v)))
 path_re = re.compile(r"(?<![\w.-])(" + alt(paths) + r")(?![\w.-])") if paths else None
 user_re = re.compile(r"(?<![\w./-])(" + alt(users) + r")(?![\w/-])") if users else None
+name_re = re.compile(r"(?<![\w.@-])(" + alt(names) + r")(?![\w@-])") if names else None
 key_re = re.compile(r"(?<![\w.-])([A-Za-z0-9][A-Za-z0-9-]*)\.\d{4}-\d{2}-\d{2}\.private-key\.pem\b")
 def key(m):
     slug = m.group(1)
@@ -447,6 +460,8 @@ for line in sys.stdin:
     if path_re:
         line = path_re.sub(lambda m: "$" + paths[m.group(1)], line)
     line = key_re.sub(key, line)
+    if name_re:
+        line = name_re.sub(lambda m: "$" + names[m.group(1)], line)
     if user_re:
         line = user_re.sub(lambda m: "<%s>" % users[m.group(1)], line)
     sys.stdout.write(line)

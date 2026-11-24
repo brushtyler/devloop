@@ -19,7 +19,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from devloop import apps, redact
+from devloop import apps, conclave, ledger, markdown, redact
 from helpers import ssdlc_project
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -118,6 +118,66 @@ class RedactorTests(unittest.TestCase):
         record = json.dumps({'tail': '/srv/u-dl/clone/.state/x', 'user': 'u-ag'})
         self.assertEqual(json.loads(r.redact(record)),
                          {'tail': '$STATE_DIR/x', 'user': '<AGENT_USER>'})
+
+    def test_the_records_of_the_markers_are_redacted(self):
+        # The markers are Base64 that anyone decodes (R1-1): their texts are redacted too, and
+        # devloop reads the record back; keys, numbers and identifiers stay as they are.
+        r = redactor()
+        record = {'type': 'event', 'event': 'host_tests', 'at': '2026-11-24T00:00:00Z',
+                  'error': 'see /srv/u-dl/clone/.state/run.log (sudo -u u-ag)',
+                  'lines': ['/srv/u-sv/.keys-widget/x', 3, None], 'sha': 'a' * 40}
+        body = ledger.render(record)
+        self.assertIn('/srv/u-dl/clone/.state', markdown.read_marker(body, 'ledger')['error'])
+        published = r.redact(body)
+        self.assertEqual(markdown.read_marker(published, 'ledger'), dict(
+            record, error='see $STATE_DIR/run.log (sudo -u <AGENT_USER>)',
+            lines=['$SUPERVISOR_KEY_DIR/x', 3, None]))
+        self.assertNotIn('/srv/', published)
+        self.assertTrue(markdown.carries_record(published))
+        # Twice is once, and a marker with nothing to redact is the very same line.
+        self.assertEqual(r.redact(published), published)
+        clean = ledger.render(dict(record, error='none', lines=[]))
+        self.assertEqual(r.redact(clean), clean)
+        # A story marker after it, and a marker that does not decode, stay where they are.
+        broken = '<!-- devloop:ledger:v1 AAAA -->'
+        self.assertEqual(r.redact(f'u-ag\n{broken}\n'), f'<AGENT_USER>\n{broken}\n')
+
+    def test_a_conclave_record_stays_bound_to_its_redacted_text(self):
+        # The hash of a conclave binds the text of its proposal: it follows the redacted text,
+        # and the votes given on it too, so the record read back still holds together.
+        r = redactor()
+        record = conclave.new_record({'kind': 'blocked', 'comment': 5, 'agent': 'claude',
+                                      'step': 'fix'}, 'fix', ['claude', 'codex', 'agy'], 7,
+                                     'h' * 64, 'a' * 40, 'a' * 40, conclave.text_hash(''))
+        conclave.apply_proposal(record, {
+            'reserved': False, 'resolution': 'Spostare /srv/u-dl/clone/.state/x.',
+            'reserved_reason': '', 'operator_question': '', 'options': []})
+        conclave.apply_vote(record, 0, {'vote': 'APPROVA', 'reason': 'ok', 'reserved': False,
+                                        'reserved_reason': '', 'operator_question': '',
+                                        'options': []}, record['hash'])
+        back = markdown.read_marker(r.redact(conclave.render(record)), 'conclave')
+        self.assertEqual(back['proposal']['resolution'], 'Spostare $STATE_DIR/x.')
+        bound = conclave.text_hash('Spostare $STATE_DIR/x.')
+        self.assertEqual((back['hash'], back['proposal']['hash']), (bound, bound))
+        self.assertEqual(back['votes'][0]['proposal_hash'], bound)
+        self.assertEqual(back['issue_hash'], 'h' * 64)
+
+    def test_the_service_name_is_a_parameter(self):
+        # R1-3: the name of the service, alone and in the name of its unit, unless it is the
+        # documented default.
+        r = redact.Redactor.from_map(dict(MAP, paths=dict(MAP['paths'],
+                                                          SYSTEMD_DIR='/etc/systemd/system'),
+                                          names={'SERVICE_NAME': 'private-loop'}))
+        self.assertEqual(
+            r.redact('Servizio private-loop: /etc/systemd/system/private-loop.service, '
+                     'private-loop@x.service, private-loop è attivo, private-loop-2'),
+            'Servizio $SERVICE_NAME: $SYSTEMD_DIR/$SERVICE_NAME.service, '
+            'private-loop@x.service, $SERVICE_NAME è attivo, private-loop-2')
+        project = redact.Redactor(names=[('SERVICE_NAME', 'devloop@widget')])
+        self.assertEqual(project.redact('devloop@widget.service.d devloop@.service'),
+                         '$SERVICE_NAME.service.d devloop@.service')
+        default = redact.Redactor(names=[('SERVICE_NAME', 'devloop')])
+        self.assertEqual(default.redact('devloop.service'), 'devloop.service')
 
 
 class RuntimeTests(unittest.TestCase):
@@ -320,14 +380,46 @@ class PublicationCheckTests(unittest.TestCase):
         self.assertEqual(bodies('gh', 'pr', 'comment', '1', f'--body-file={f}'), ['file /home/x'])
         self.assertEqual(bodies('gh', 'issue', 'comment', '1', '-F', f), ['file /home/x'])
         self.assertEqual(bodies('gh', 'issue', 'comment', '1', '-b', 'b'), ['b'])
-        self.assertEqual(bodies('gh', 'issue', 'create', '--body', 'b', '--title', 't'), ['b'])
+        self.assertEqual(bodies('gh', 'issue', 'create', '--body', 'b', '--title', 't'),
+                         ['b', 't'])
         self.assertEqual(bodies('gh', 'issue', 'comment', '1', '--body-file', '-'),
                          ['from stdin /home/x'])
         self.assertEqual(bodies('gh', 'api', '-X', 'POST', 'x', '--input', f), ['file /home/x'])
-        self.assertEqual(bodies('gh', 'api', 'x', '-F', 'body=@y', '-f', 'event=COMMENT'),
-                         ['body=@y', 'event=COMMENT'])
+        self.assertEqual(bodies('gh', 'api', 'x', '-F', 'n=1', '-f', 'event=COMMENT'),
+                         ['n=1', 'event=COMMENT'])
+        # R1-2: the fields of gh api read with @ a file, or standard input with @-; -f never.
+        self.assertEqual(bodies('gh', 'api', 'x', '-F', f'body=@{f}'), ['file /home/x'])
+        self.assertEqual(bodies('gh', 'api', 'x', f'--field=body=@{f}', f'-Fb=@{f}'),
+                         ['file /home/x', 'file /home/x'])
+        self.assertEqual(bodies('gh', 'api', 'x', '--field', 'body=@-'), ['from stdin /home/x'])
+        self.assertEqual(bodies('gh', 'api', 'x', '-f', f'body=@{f}'), [f'body=@{f}'])
+        self.assertEqual(bodies('gh', 'api', 'x', '-F', 'body=@missing'), [])
+        # Titles, and the short options with their value attached.
+        self.assertEqual(bodies('gh', 'issue', 'create', '-t', 't /home/x', '--title=u'),
+                         ['t /home/x', 'u'])
+        self.assertEqual(bodies('gh', 'issue', 'comment', '1', '-b/home/x', '-tT', f'-F{f}'),
+                         ['/home/x', 'T', 'file /home/x'])
+        # -t of gh api is its template, -f of gh pr create its --fill: no text.
+        self.assertEqual(bodies('gh', 'api', 'x', '-t', '/home/x'), [])
         self.assertEqual(bodies('gh', 'pr', 'create', '-f', '/home/x'), [])
         self.assertEqual(bodies('gh', 'run', 'view', '1', '--log-failed'), [])
+
+    def test_every_form_is_refused(self):
+        # R1-2: each form that publishes a detail of the host needs the option, standard input
+        # included, which is read once and passed on.
+        f = self.body('file /home/u-x/state\n')
+        for command in (['gh', 'api', 'repos/o/r/issues/1/comments', '-X', 'POST', '-F',
+                         f'body=@{f}'],
+                        ['gh', 'api', 'repos/o/r/issues/1/comments', '-F', 'body=@-'],
+                        ['gh', 'issue', 'create', '--title', 'on /home/u-x', '--body', 'ok'],
+                        ['gh', 'issue', 'comment', '1', '-b/home/u-x/state']):
+            with self.subTest(command=command):
+                with self.assertRaises(SystemExit):
+                    redact.publication_check('role-token', command, False,
+                                             stdin=lambda: 'piped /home/u-x/state')
+        piped = ['gh', 'api', 'x', '-F', 'body=@-']
+        self.assertEqual(redact.publication_check('role-token', piped, False,
+                                                  stdin=lambda: 'clean'), 'clean')
 
     def test_refused_unless_allowed_and_logged(self):
         command = ['gh', 'issue', 'comment', '1', '--body-file',
@@ -394,6 +486,41 @@ class TokenScriptTests(unittest.TestCase):
                 find.assert_not_called()
                 mint.assert_not_called()
                 run.assert_not_called()
+
+    def test_the_fields_of_gh_api_are_read(self):
+        # R1-2: a body that gh api loads from a file or from standard input is checked, and
+        # standard input, once read, reaches the command.
+        for name in ('supervisor-token', 'coordinator-token'):
+            module = script(name)
+            with self.subTest(script=name), \
+                    mock.patch.object(module, 'find_key') as find, \
+                    mock.patch.object(module.subprocess, 'run') as run:
+                with self.assertRaisesRegex(SystemExit, 'details of the host'):
+                    module.main(['--state-dir', str(self.state), '--', 'gh', 'api',
+                                 'repos/o/r/issues/1/comments', '-F', f'body=@{self.body}'])
+                with mock.patch('sys.stdin', io.StringIO('piped /home/u-dl/x')), \
+                        self.assertRaisesRegex(SystemExit, 'details of the host'):
+                    module.main(['--state-dir', str(self.state), '--', 'gh', 'api', 'x', '-F',
+                                 'body=@-'])
+                find.assert_not_called()
+                run.assert_not_called()
+            configured = SimpleNamespace(app_id=7, slug='acme-x')
+            cfg = SimpleNamespace(repo='brushtyler/ssdlc', app_key_dir=str(self.state),
+                                  apps={apps.SUPERVISOR: configured, apps.COORDINATOR: configured})
+            seen = {}
+
+            def fake_run(command, env, **kw):
+                seen.update(kw, command=command)
+                return SimpleNamespace(returncode=0)
+            with self.subTest(script=name, stdin='clean'), \
+                    mock.patch.object(module, 'load_config', return_value=cfg), \
+                    mock.patch.object(module, 'find_key', return_value=self.body), \
+                    mock.patch.object(module.AppAuth, 'token', return_value='t'), \
+                    mock.patch.object(module.subprocess, 'run', fake_run), \
+                    mock.patch('sys.stdin', io.StringIO('$STATE_DIR/run.log')):
+                command = ['gh', 'api', 'x', '-F', 'body=@-']
+                self.assertEqual(module.main(['--', *command]), 0)
+                self.assertEqual((seen['command'], seen['input']), (command, '$STATE_DIR/run.log'))
 
     def test_published_anyway_with_the_option_logged(self):
         for name in ('supervisor-token', 'coordinator-token'):

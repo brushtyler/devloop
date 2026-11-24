@@ -35,8 +35,10 @@ there, and ``gh`` would otherwise pick the repository of the current directory's
 source of devloop for a project with the source apart (SOURCE_REPO). A GH_REPO of the caller
 naming another repository is refused before any key is read.
 
-Before any key is read, the text the command publishes (``--body``, ``--body-file``, ``-F``,
-``--input`` of ``gh api``, standard input with ``-``) is checked (#583, ``devloop.redact``): one
+Before any key is read, the text the command publishes (``--body``, ``--title``,
+``--body-file``, their short forms, standard input with ``-``; for ``gh api``, ``--input`` and the
+fields, a file read with ``-F key=@file`` and standard input with ``key=@-`` included) is checked
+(#583, ``devloop.redact``): one
 that still holds an absolute path of the host (under /home/, /etc/, /var/lib/, /usr/local/lib/,
 /run/, /root/) or the name of a key file is refused. --allow-host-details publishes it anyway;
 each use is written on standard error and in the system log (syslog, devloop-publication).

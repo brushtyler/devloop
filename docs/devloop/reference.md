@@ -1538,6 +1538,7 @@ body published. It covers every text: the output of the tests in a `host_tests` 
 | the homes of the roles' users | `$DEVLOOP_HOME`, `$AGENT_HOME`, `$SUPERVISOR_HOME`, `$COORDINATOR_HOME` |
 | the other directories and files of ops | `$COORDINATION_DIR`, `$SUDOERS_FILE`, `$SYSTEMD_DIR`, ... |
 | a role's user, standing alone | `<DEVLOOP_USER>`, `<AGENT_USER>`, ... |
+| the name of the service, alone or in a path or a unit | `$SERVICE_NAME`, e.g. `$SYSTEMD_DIR/$SERVICE_NAME.service` |
 | a key file, `<slug>.<date>.private-key.pem` | the role of its app: `<chiave dell'app implementer>` |
 
 - The longest path is replaced first: the `state_dir` lies in devloop's home, and becomes
@@ -1546,7 +1547,14 @@ body published. It covers every text: the output of the tests in a `host_tests` 
   replaced. `$HOME` alone is never used: a traceback holds the homes of several users.
 - A user is replaced only standing alone (not inside a name or a path), and never when it is a
   documented default (`devloop`, `devloop-agent`, `supervisor`, `coordinator`), a common word of
-  devloop's own texts, a name shorter than three characters, or one of `trusted_users`.
+  devloop's own texts, a name shorter than three characters, or one of `trusted_users`. The
+  name of the service follows the same conditions (its default `devloop` stays), but is replaced
+  inside a path or the name of a unit too.
+- The records of the markers that end a body are Base64 that anyone decodes: their texts (an
+  error, a command, a finding) pass through the same substitutions, and the marker is encoded
+  again; keys, numbers, hashes and logins stay. A conclave record binds its proposal by its hash:
+  when the proposal's text changes, the hashes bound to it (of the record, of the proposal, of
+  its votes) follow the published text, so the record read back still holds together.
 - The values come from the map `redactions.json` in the `state_dir`, which
   `ops/host/setup-devloop.sh` writes from the resolved parameters (600, devloop's; it reads no
   key). The runtime values of the dispatcher prevail for its `state_dir` and its key_dir
@@ -1559,7 +1567,8 @@ body published. It covers every text: the output of the tests in a `host_tests` 
   paths are in the public documentation already: the substitution protects a host with values
   that are not the defaults.
 
-`ops/host/check-host.sh` applies the same rule to its output, unless `--verbose`, and the role
+`ops/host/check-host.sh` applies the same rule to its output, unless `--verbose`: an error while
+it loads the parameters, before the map exists, stays generic (the detail with `--verbose`). The role
 scripts that publish on their own refuse a text that still holds a path of the host
 ([The supervisor app](#the-supervisor-app), [The coordinator app](#the-coordinator-app)).
 
@@ -1900,8 +1909,10 @@ model = "claude-opus-5-5"
   supervisor sets `$DEVLOOP_APP_KEY_DIR` to its own. Without `--perm` the token gets `issues=write` and
   `pull_requests=write`; only `issues` and `pull_requests` (read or write) and `metadata=read`
   may be asked for. The token reaches the command through `GH_TOKEN` only, and is never printed.
-  Before any key is read, the text the command publishes (`--body`, `--body-file` or `-F`,
-  standard input with `-`, `--input` and the fields of `gh api`) is checked (#583): one that
+  Before any key is read, the text the command publishes (`--body`/`-b`, `--title`/`-t`,
+  `--body-file`/`-F`, standard input with `-`; for `gh api`, `--input` and the fields of
+  `-f`/`-F`, the content of a file read with `-F key=@file` and standard input with `key=@-`;
+  long options with `=`, short ones with their value attached) is checked (#583): one that
   still holds an absolute path of the host (under `/home/`, `/etc/`, `/var/lib/`,
   `/usr/local/lib/`, `/run/`, `/root/`) or the name of a key file is refused, with the
   [names of the parameters](#host-details-in-the-published-texts) to put in their place.

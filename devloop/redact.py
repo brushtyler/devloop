@@ -16,7 +16,17 @@ the names of the parameters of ``ops/params.env`` in their place:
   common words of devloop's own texts), at least ``MIN_USER`` characters long, and not one of
   the GitHub logins of ``keep`` (the trusted users, whose names the records carry);
 - the name of a key file (``<slug>.<date>.private-key.pem``) as the role of its app, never the
-  slug nor the date: ``<chiave dell'app implementer>``.
+  slug nor the date: ``<chiave dell'app implementer>``;
+- the other names of the installation (``names`` of the map: ``SERVICE_NAME``), as
+  ``$SERVICE_NAME``, standing alone or in a path or the name of a unit
+  (``$SYSTEMD_DIR/$SERVICE_NAME.service``), under the same conditions as a user's.
+
+The records of the markers that end a body (``markdown.publishable``) are encoded in Base64,
+and anyone decodes them: their texts (an error, a command, a finding) pass through the same
+substitutions before the marker is encoded again. Their keys stay as they are, and the other
+values (numbers, hashes, SHAs, logins) hold nothing to replace. A conclave record binds its
+proposal by its hash: when the text of the proposal changes, the hashes bound to it follow
+(``_rebind_conclave``).
 
 The map comes from ops (``ops/host/setup-devloop.sh`` writes ``MAP_FILE`` in the ``state_dir``
 from the resolved parameters, never reading a key) and devloop reads it at the start; the
@@ -30,12 +40,17 @@ absolute path of the host or the name of a key file is refused, unless the calle
 ``ALLOW_OPTION``, whose every use is logged (``publication_check``).
 """
 
+import base64
+import binascii
+import hashlib
 import json
 import os
 import pwd
 import re
 import sys
 from pathlib import Path
+
+from .markdown import marker
 
 # The map of the substitutions, in the state_dir, written by ops/host/setup-devloop.sh.
 MAP_FILE = 'redactions.json'
@@ -54,6 +69,12 @@ _BEFORE = r'(?<![\w.-])'
 # A user stands alone: not inside a name nor a path.
 _BEFORE_USER = r'(?<![\w./-])'
 _AFTER_USER = r'(?![\w/-])'
+# Another name of the installation (``SERVICE_NAME``): alone, or a name of a path or of a unit
+# (``/etc/systemd/system/<name>.service``), never a part of a longer name.
+_BEFORE_NAME = r'(?<![\w.@-])'
+_AFTER_NAME = r'(?![\w@-])'
+# A marker of a record (``markdown.marker``): its payload, JSON in Base64.
+_MARKER = re.compile(r'<!-- devloop:(?P<kind>[a-z]+):v1 (?P<payload>[A-Za-z0-9+/=]+) -->')
 
 # The check of the role scripts (#583): an absolute path under one of these prefixes, with at
 # least one name after it, or the name of a key file.
@@ -79,9 +100,10 @@ class Redactor:
     """The substitutions of one installation: ``paths``, pairs ``(name, path)``; ``users``,
     pairs ``(name, user)``; ``roles``, the slugs of the apps mapped to their roles, and
     ``prefix``, the ``APP_PREFIX`` of ops that tells the role of the other slugs; ``keep``, the
-    logins never replaced as users."""
+    logins never replaced as users; ``names``, pairs ``(name, value)`` of the other names of
+    the installation (``SERVICE_NAME``), under the conditions of the users."""
 
-    def __init__(self, paths=(), users=(), roles=None, keep=(), prefix=''):
+    def __init__(self, paths=(), users=(), roles=None, keep=(), prefix='', names=()):
         self.prefix = prefix if isinstance(prefix, str) else ''
         seen = {}
         for name, value in paths:
@@ -97,27 +119,76 @@ class Redactor:
                     and re.fullmatch(r'[a-z_][a-z0-9_-]*', user) and user not in named):
                 named[user] = name
         self.users = sorted(named.items(), key=lambda item: (-len(item[0]), item[0]))
+        others = {}
+        for name, value in names:
+            if (isinstance(value, str) and NAME.match(name or '') and len(value) >= MIN_USER
+                    and value not in PUBLIC_USERS and value.lower() not in kept
+                    and re.fullmatch(r'[A-Za-z0-9_@-]+', value) and value not in others):
+                others[value] = name
+        self.names = sorted(others.items(), key=lambda item: (-len(item[0]), item[0]))
         self.roles = dict(roles or {})
         self._path_re = (re.compile(_BEFORE + '(' + '|'.join(re.escape(p) for p, _ in self.paths)
                                     + ')' + _AFTER_PATH) if self.paths else None)
         self._user_re = (re.compile(_BEFORE_USER + '('
                                     + '|'.join(re.escape(u) for u, _ in self.users)
                                     + ')' + _AFTER_USER) if self.users else None)
+        self._name_re = (re.compile(_BEFORE_NAME + '('
+                                    + '|'.join(re.escape(n) for n, _ in self.names)
+                                    + ')' + _AFTER_NAME) if self.names else None)
 
     def redact(self, text):
         """``text`` with the names of the parameters in place of the host's values: the paths
-        first, longest first, then the key files, then the users standing alone. Anything else,
-        None included, is returned as it is."""
+        first, longest first, then the key files, then the other names, then the users standing
+        alone. The records of its markers too, decoded and encoded again (``_marker``). Anything
+        else, None included, is returned as it is."""
         if not isinstance(text, str) or not text:
+            return text
+        out, end = [], 0
+        for match in _MARKER.finditer(text):
+            out += [self._text(text[end:match.start()]), self._marker(match)]
+            end = match.end()
+        out.append(self._text(text[end:]))
+        return ''.join(out)
+
+    def _text(self, text):
+        """``redact`` of a text without markers."""
+        if not text:
             return text
         if self._path_re is not None:
             names = dict(self.paths)
             text = self._path_re.sub(lambda m: '$' + names[m.group(1)], text)
         text = KEY_FILE.sub(self._key, text)
+        if self._name_re is not None:
+            names = dict(self.names)
+            text = self._name_re.sub(lambda m: '$' + names[m.group(1)], text)
         if self._user_re is not None:
             users = dict(self.users)
             text = self._user_re.sub(lambda m: f'<{users[m.group(1)]}>', text)
         return text
+
+    def _marker(self, match):
+        """The marker of ``match`` with the texts of its record redacted, every string of its
+        payload, its keys excepted: the same marker when nothing changes or the payload does not
+        decode (no reader takes it)."""
+        try:
+            payload = json.loads(base64.b64decode(match.group('payload'), validate=True))
+        except (binascii.Error, ValueError):
+            return match.group(0)
+        redacted = self._value(payload)
+        if redacted == payload:
+            return match.group(0)
+        if match.group('kind') == 'conclave':
+            redacted = _rebind_conclave(payload, redacted)
+        return marker(match.group('kind'), redacted)
+
+    def _value(self, value):
+        if isinstance(value, str):
+            return self._text(value)
+        if isinstance(value, list):
+            return [self._value(item) for item in value]
+        if isinstance(value, dict):
+            return {key: self._value(item) for key, item in value.items()}
+        return value
 
     def _key(self, match):
         slug = match.group(1)
@@ -129,11 +200,42 @@ class Redactor:
     @classmethod
     def from_map(cls, data, roles=None, keep=()):
         """The redactor of a map as ``MAP_FILE`` holds it: ``{"paths": {NAME: path},
-        "users": {NAME: user}, "app_prefix": APP_PREFIX}``. Anything else in it is ignored."""
+        "users": {NAME: user}, "names": {NAME: value}, "app_prefix": APP_PREFIX}``. Anything
+        else in it is ignored."""
         data = data if isinstance(data, dict) else {}
         paths = data.get('paths') if isinstance(data.get('paths'), dict) else {}
         users = data.get('users') if isinstance(data.get('users'), dict) else {}
-        return cls(paths.items(), users.items(), roles, keep, data.get('app_prefix', ''))
+        names = data.get('names') if isinstance(data.get('names'), dict) else {}
+        return cls(paths.items(), users.items(), roles, keep, data.get('app_prefix', ''),
+                   names.items())
+
+
+def _text_hash(text):
+    """The hash that binds the text of a conclave proposal: ``conclave.text_hash``."""
+    return hashlib.sha256((text or '').encode('utf-8')).hexdigest()
+
+
+def _rebind_conclave(before, after):
+    """``after``, the redacted payload of the conclave record ``before``, with the hashes bound
+    to the text of its proposal (``hash`` of the record and of the proposal, ``proposal_hash``
+    of its votes) following the redacted text: the record still holds together
+    (``conclave.consistent``), and the voters get the very text bound. Only a hash that was the
+    one of the original text changes: a record that did not hold still does not."""
+    try:
+        old, new = before['proposal']['resolution'], after['proposal']['resolution']
+    except (KeyError, TypeError):
+        return after
+    if not isinstance(old, str) or not isinstance(new, str) or old == new:
+        return after
+    was, now = _text_hash(old), _text_hash(new)
+    if after.get('hash') == was:
+        after['hash'] = now
+    if after['proposal'].get('hash') == was:
+        after['proposal']['hash'] = now
+    for vote in after['votes'] if isinstance(after.get('votes'), list) else ():
+        if isinstance(vote, dict) and vote.get('proposal_hash') == was:
+            vote['proposal_hash'] = now
+    return after
 
 
 def read_map(path):
@@ -177,6 +279,7 @@ def runtime(cfg, state, log=None, uid=None):
                 'writes it)')
     paths = dict(data['paths']) if isinstance(data.get('paths'), dict) else {}
     users = dict(data['users']) if isinstance(data.get('users'), dict) else {}
+    names = dict(data['names']) if isinstance(data.get('names'), dict) else {}
     # The runtime values prevail over the map's, as given and resolved (a link on the way).
     key_dir = os.environ.get('DEVLOOP_APP_KEY_DIR') or getattr(cfg, 'app_key_dir', '') or ''
     pairs = []
@@ -199,7 +302,8 @@ def runtime(cfg, state, log=None, uid=None):
             paths.setdefault('AGENT_HOME', _home(agent))
     roles = {app.slug: actor for actor, app in (getattr(cfg, 'apps', None) or {}).items()}
     return Redactor(pairs + list(paths.items()), users.items(), roles,
-                    keep=getattr(cfg, 'trusted_users', ()), prefix=data.get('app_prefix', ''))
+                    keep=getattr(cfg, 'trusted_users', ()), prefix=data.get('app_prefix', ''),
+                    names=names.items())
 
 
 # The client that redacts ------------------------------------------------------
@@ -249,42 +353,56 @@ def host_details(text):
     return found
 
 
+# The options of ``gh`` that carry what a command publishes, as ``gh`` reads them: a text
+# (``text``), a file whose content is the text, ``-`` for standard input (``file``), or a field
+# of ``gh api`` (``field``: ``key=value``, whose value is read from a file with ``key=@file``
+# and from standard input with ``key=@-``). The long forms take their value after ``=`` too,
+# the short ones attached (``-bTEXT``).
+_API_OPTIONS = {'--field': 'field', '-F': 'field', '--raw-field': 'text', '-f': 'text',
+                '--input': 'file'}
+_OTHER_OPTIONS = {'--body': 'text', '-b': 'text', '--title': 'text', '-t': 'text',
+                  '--body-file': 'file', '-F': 'file', '--input': 'file'}
+
+
 def _bodies(command, stdin):
-    """The texts ``command`` (a ``gh`` command line) publishes: ``--body``/``-b`` and the
-    file of ``--body-file``/``-F`` (``-`` reads ``stdin``, a callable returning it), and the
-    file of ``--input`` of ``gh api``. ``-F`` of ``gh api`` is a field, checked as a text."""
+    """The texts ``command`` (a ``gh`` command line) publishes (``_API_OPTIONS`` for ``gh
+    api``, ``_OTHER_OPTIONS`` otherwise): the texts, titles and fields as given, the content of
+    the files they name, and standard input (``stdin``, a callable returning it) where they read
+    it."""
     api = len(command) > 1 and Path(command[0]).name == 'gh' and command[1] == 'api'
-    texts, files = [], []
+    options = _API_OPTIONS if api else _OTHER_OPTIONS
+    found = []  # (kind, value)
     i = 0
     while i < len(command):
         arg = command[i]
-        value = command[i + 1] if i + 1 < len(command) else None
-        for opt, kind in (('--body', 'text'), ('--body-file', 'file'), ('--input', 'file'),
-                          ('--field', 'text'), ('--raw-field', 'text')):
-            if arg.startswith(opt + '='):
-                (texts if kind == 'text' else files).append(arg[len(opt) + 1:])
-                break
-            if arg == opt and value is not None:
-                (texts if kind == 'text' else files).append(value)
-                i += 1
-                break
-        else:
-            if (arg == '-b' or (arg == '-f' and api)) and value is not None:
-                texts.append(value)
-                i += 1
-            elif arg == '-F' and value is not None:
-                (texts if api else files).append(value)
-                i += 1
-        i += 1
-    out = list(texts)
-    for name in files:
-        if name == '-':
-            out.append(stdin())
+        if arg in options:
+            if i + 1 < len(command):
+                found.append((options[arg], command[i + 1]))
+            i += 2
             continue
-        try:
-            out.append(Path(name).read_text(encoding='utf-8', errors='replace'))
-        except OSError:
-            continue  # gh says it: nothing published
+        if arg.startswith('--') and '=' in arg and arg.split('=', 1)[0] in options:
+            opt, value = arg.split('=', 1)
+            found.append((options[opt], value))
+        elif not arg.startswith('--') and len(arg) > 2 and arg[:2] in options:
+            found.append((options[arg[:2]], arg[2:]))
+        i += 1
+    out = []
+    for kind, value in found:
+        if kind == 'field':
+            key, sep, rest = value.partition('=')
+            if not (sep and rest.startswith('@')):
+                out.append(value)
+                continue
+            kind, value = 'file', rest[1:]
+        if kind == 'text':
+            out.append(value)
+        elif value == '-':
+            out.append(stdin())
+        else:
+            try:
+                out.append(Path(value).read_text(encoding='utf-8', errors='replace'))
+            except OSError:
+                continue  # gh says it: nothing published
     return out
 
 

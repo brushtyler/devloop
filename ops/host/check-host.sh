@@ -26,8 +26,9 @@
 # cache), niente `devloop apps`, nessuna scrittura; solo righe di stato.
 # --verbose: i percorsi reali dell'host, per la diagnosi locale. Senza, l'output (anche gli errori
 # dei comandi) nomina i parametri ($STATE_DIR, $DEVLOOP_KEY_DIR, $AGENT_HOME, ...), i ruoli delle
-# chiavi e gli utenti non di default (<AGENT_USER>) al posto dei valori, e si può citare come
-# evidenza in un testo pubblico (#583).
+# chiavi, il servizio ($SERVICE_NAME) e gli utenti non di default (<AGENT_USER>) al posto dei
+# valori, e si può citare come evidenza in un testo pubblico (#583). Un errore nel caricamento dei
+# parametri, prima che la mappa esista, resta generico: il dettaglio con --verbose.
 
 OPS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # shellcheck source=../lib.sh
@@ -59,16 +60,46 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-ops_load_params
+# Senza --verbose, nemmeno il caricamento dei parametri mostra i valori dell'host (#583): i suoi
+# errori nominano il file dei parametri e i valori rifiutati, prima che la mappa del filtro
+# esista. Il suo output si raccoglie; se i parametri non si caricano, resta un messaggio
+# generico e il dettaglio si vede con --verbose; altrimenti passa dal filtro, qui sotto.
+load_failed() {
+    local status=$?
+    rm -f "$LOAD_OUT"
+    [ "$status" = 0 ] || printf '%s: %s %s\n' "$(basename "$0")" \
+        'i parametri non si caricano o non sono validi: il dettaglio,' \
+        "con i valori dell'host, con --verbose (#583)" >&9
+    exit "$status"
+}
+if [ "$VERBOSE" = 0 ]; then
+    LOAD_OUT=$(mktemp) || die 'non riesce a creare un file temporaneo'
+    exec 9>&2
+    trap load_failed EXIT
+    ops_load_params >"$LOAD_OUT" 2>&1
+    trap - EXIT
+    exec 9>&-
+else
+    ops_load_params
+fi
 # Senza --verbose, l'output e gli errori passano dal filtro dei parametri (#583): nessun percorso
 # dell'host. Il filtro finisce di scrivere prima che lo script esca.
 if [ "$VERBOSE" = 0 ]; then
-    REDACT_MAP=$(ops_redactions) || die 'la mappa delle sostituzioni non si costruisce'
+    REDACT_MAP=$(ops_redactions 2>/dev/null) || {
+        rm -f "$LOAD_OUT"
+        die 'la mappa delle sostituzioni non si costruisce: il dettaglio con --verbose (#583)'
+    }
     exec > >(ops_redact_filter "$REDACT_MAP")
     REDACT_OUT=$!
     exec 2> >(ops_redact_filter "$REDACT_MAP" >&2)
     REDACT_ERR=$!
     trap 'status=$?; exec >&- 2>&-; wait "$REDACT_OUT" "$REDACT_ERR"; exit "$status"' EXIT
+    # Quel che il caricamento ha scritto (per esempio un avviso di bash sul file dei parametri),
+    # ora dal filtro, con $PARAMS_FILE al posto del file dei parametri, che la mappa non ha.
+    while IFS= read -r line || [ -n "$line" ]; do
+        printf '%s\n' "${line//"$PARAMS_FILE"/\$PARAMS_FILE}"
+    done <"$LOAD_OUT" >&2
+    rm -f "$LOAD_OUT"
 fi
 # Come root, anche dal sudoers del coordinatore: nessun file della directory di chi lo lancia
 # (per esempio un modulo che python importerebbe) entra nelle verifiche.
