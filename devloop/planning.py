@@ -10,6 +10,7 @@ these names: import them from here.
 
 from dataclasses import dataclass, field, replace
 
+from .budget import BUDGET
 from .config import IMPLEMENTER_LABEL
 from .policy import PARALLEL_CANCEL, SEQUENTIAL, receipt_of
 from .review import (CI, UNPROVEN, current_round, findings_only, flow_verdict, open_findings,
@@ -199,9 +200,10 @@ class Snapshot:
     working_issues: list  # issue numbers
     # Issues and PRs in agent:needs-supervisor with a supervisor command to apply (#182), or in
     # agent:needs-operator with a trusted user's command (#321): dicts ``{number, command, by,
-    # step, pr, anchor}`` (``_supervisor_view``), with ``refusal`` for a command only to answer;
-    # a retry of an issue's step has ``blocked_by`` too, its open blocks (#277), and waits
-    # while it is not empty.
+    # step, pr, anchor, coordinator}`` (``_supervisor_view``; ``coordinator``, whether the
+    # coordinator wrote it, #595), with ``refusal`` for a command only to answer; a command that
+    # runs an issue's step (``runs_issue_step``) has ``blocked_by`` too, its open blocks (#277),
+    # and waits while it is not empty.
     supervised: list = field(default_factory=list)
     # With ``conclave`` (#141), the issues and PRs in agent:needs-operator whose block still
     # needs its conclave: dicts ``{number, calls, reason}``, ``calls`` being the calls left
@@ -277,15 +279,18 @@ def _lanes(batch, issue_of):
 def runs_issue_step(item):
     """Whether the supervisor command ``item`` (``_supervisor_view``, with ``pr``) runs an
     issue's step when it applies, as the step itself would: a retry of an issue's step (#182),
-    or a ``grant-budget`` on an issue's ``budget_grantable`` escalation (#411), which runs the
-    step the envelope refused. It then waits while the issue is blocked (#277) and takes a free
-    PR slot. A command only to answer (#321), or the records of an extension that only
+    or a ``grant-budget`` on an issue's ``budget_grantable`` escalation (#411), or the
+    coordinator's (``coordinator``) on an issue's ``budget`` escalation to the operator (#595),
+    which runs the step the envelope refused. It then waits while the issue is blocked (#277)
+    and takes a free PR slot. A command only to answer (#321), a trusted user's ``grant-budget``
+    on a ``budget`` escalation, which is only answered, or the records of an extension that only
     complete its trace (``trace_only``), run nothing."""
     if item['pr'] or item.get('refusal') or item.get('trace_only') \
             or item.get('step') not in ISSUE_STEPS:
         return False
     if item['command'] == GRANT_BUDGET:
-        return (item.get('anchor') or {}).get('record', {}).get('class') == BUDGET_GRANTABLE
+        grade = (item.get('anchor') or {}).get('record', {}).get('class')
+        return grade == BUDGET_GRANTABLE or grade == BUDGET and bool(item.get('coordinator'))
     return item['command'] == RETRY
 
 

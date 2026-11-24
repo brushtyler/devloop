@@ -176,6 +176,19 @@ the mailbox.
   (#553; [Granting a review round on an escalation to the
   operator](../guide.md#granting-a-review-round-on-an-escalation-to-the-operator)), with the
   reason; a further round on the same PR is the operator's.
+- **`capacity`** on `[report] issue` (#595; [Temporary capacity
+  limits](../guide.md#temporary-capacity-limits)): `max_open_prs` or `max_parked_prs` for a
+  while, within the caps of the code and of `[delegations]`, in merge mode `auto`, each grant
+  counted in `max_grants_per_day`, with the analysis of the causes in the reason.
+- **`grant-budget`** (#595; [Extending the budget envelope](../guide.md#extending-the-budget-envelope)):
+  the one extension of a story's envelope, on a `budget_grantable` escalation to the supervisor
+  or a `budget` escalation to the operator, with the analysis of the causes in the reason; a
+  second extension of the same story is the operator's.
+- **Priorities and queue** (#595; [Labels from the supervisor](../guide.md#labels-from-the-supervisor)):
+  your `agent:ready` and your priority labels count on the issues of trusted users and of
+  devloop's apps, yours included; your dependency and implementer labels do not. An issue you
+  opened that the readiness check declares touching the trust policy goes to
+  `agent:needs-operator`: only the operator's `agent:ready` admits it.
 - The other delegated commands of the table of [The coordinator](../guide.md#the-coordinator)
   (`retry`, `accept-defaults`, `decide`, `rereview`, `recheck`, `fix`, `hold`, `release`), under
   its conditions, each with its reason.
@@ -194,9 +207,9 @@ the mailbox.
 
 ## Prohibitions
 
-- Never use a command outside the delegated perimeter: `approve`, `merge-budget`,
-  `grant-budget`, `capacity`, `reconcile` and the keys of trust are the operator's in person;
-  any other command not listed is refused.
+- Never use a command outside the delegated perimeter: `approve`, `merge-budget`, `reconcile`,
+  `trusted_users` and the keys of trust are the operator's in person; any other command not
+  listed is refused.
 - Never change the host: no `start`, `stop` or `restart` of the service, no `pin` or `tick`, no
   `watch` but the one of `coordinator-wait.sh`, no pager or shell as another user, nothing
   outside the sudoers.

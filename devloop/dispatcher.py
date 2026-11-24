@@ -95,7 +95,10 @@ with ``[roles.supervisor]`` as a table the role app ``[apps.supervisor]``, #408)
 ``agent:ready`` and the priority labels count also when the supervisor's app added them, but
 only on issues opened by a trusted user or by one of devloop's apps (``label_admitters``). On anyone else's issue only a
 trusted user's label counts. The issue text stays trusted only while no one outside
-``trusted_users`` edits it after the label.
+``trusted_users`` edits it after the label. With ``[roles.coordinator]`` (#528, #595) the
+coordinator's ``agent:ready`` and priority labels count on the same issues, and its app is one of
+devloop's: an issue it opened that the readiness check declares touching the trust policy waits
+for a trusted user's ``agent:ready`` (``_coordinator_gate``).
 
 Parallel actions (#176, ``max_parallel_actions`` above 1): the actions of a tick on different
 issues and PRs run at once, up to that many (``schedule``). Actions on the same number, or on a
@@ -201,7 +204,7 @@ from .dispatch_base import BaseMixin, MainAlerts
 from .dispatch_conclave import ConclaveMixin
 from .dispatch_merge import MergeMixin
 from .dispatch_preflight import PreflightMixin
-from .dispatch_supervision import SupervisionMixin, UntrustedChange
+from .dispatch_supervision import SupervisionMixin, UntrustedChange, budget_fields
 from .github import GitHubError, GitHubUncertain, author_login
 from .journal import (CLOSED, MERGED, RECONCILE_COMMAND, JournalError, TurnBlocked, blocked_text,
                       reconcile_command)
@@ -846,9 +849,12 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
 
     def _devloop_logins(self):
         """The logins of devloop's apps whose issues count as devloop's (#178, #182): the
-        agents', the dispatcher's and the supervisor's identity."""
+        agents', the dispatcher's, the supervisor's identity and, with ``[roles.coordinator]``,
+        the coordinator's (#595). A coordinator's issue that the readiness check declares
+        touching the trust policy still needs a trusted user's ``agent:ready``
+        (``_coordinator_gate``)."""
         return ({self._app_login(actor) for actor in (*self.cfg.agents, DISPATCHER)}
-                | {self._supervisor_login()}) - {None}
+                | {self._supervisor_login(), self._coordinator_login()}) - {None}
 
     def _may_hold(self, login):
         """Whether ``login`` may hold or release a merge (#172), or ask for a fix (#195): a
@@ -876,20 +882,27 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         user's."""
         return self._is_coordinator(login) and command in COORDINATOR_DELEGATED
 
-    def _admitters(self, author, ready=False):
-        """The logins whose ``agent:ready`` and priority labels count on an issue opened by
-        ``author`` (#178, ``label_admitters``): the supervisor's identity counts only when it
-        has one, and only on issues of trusted users or of devloop's apps. ``ready``: the
-        logins whose ``agent:ready`` counts, also the coordinator's identity on the same issues
-        (#528: the resume with the labels); its priority, dependency and implementer labels
-        never count."""
+    def _admitters(self, author, coordinator=False):
+        """The logins whose labels count on an issue opened by ``author`` (#178,
+        ``label_admitters``): the supervisor's identity counts only when it has one, and only
+        on issues of trusted users or of devloop's apps. ``coordinator``: the logins whose
+        ``agent:ready`` and priority labels count, also the coordinator's identity on the same
+        issues (#528: the resume with the labels; #595: its priorities); its dependency and
+        implementer labels never count.
+
+        On an issue the coordinator opened (#595) the labels of the supervisor and of the
+        coordinator count only with a readiness check, which says whether it touches the trust
+        policy (``_coordinator_gate``): without one only the trusted users' do (it fails
+        closed)."""
+        coordinator_login = self._coordinator_login()
+        if self._is_coordinator(author) and not self.cfg.preflight:
+            return set(self.cfg.trusted_users)
         supervisor = self._supervisor_login()
         admitters = (label_admitters(author, self.cfg.trusted_users, supervisor,
                                      self._devloop_logins())
                      if supervisor else set(self.cfg.trusted_users))
-        coordinator = self._coordinator_login()
-        if ready and coordinator:
-            admitters |= label_admitters(author, self.cfg.trusted_users, coordinator,
+        if coordinator and coordinator_login:
+            admitters |= label_admitters(author, self.cfg.trusted_users, coordinator_login,
                                          self._devloop_logins())
         return admitters
 
@@ -908,7 +921,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         """``untrusted_change`` of an issue, with the admitters of its author's
         ``agent:ready``."""
         return untrusted_change(history, self.cfg.labels.ready, self.cfg.trusted_users,
-                                self._admitters(history['author'], ready=True))
+                                self._admitters(history['author'], coordinator=True))
 
     # Supervision (#182) --------------------------------------------------------
     def _accepted(self, comment):
@@ -1242,10 +1255,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             admitted = ([e for e in events if e['label'] == lb.ready] or [{}])[-1]
             # Whose labels count depends on who opened the issue (#178).
             author = author_login(raw.get('author'))
-            admitters = self._admitters(author)
+            # The coordinator's agent:ready (#528) and priority labels (#595) count too.
+            admitters = self._admitters(author, coordinator=True)
             issue = {'number': raw['number'], 'title': raw['title'], 'labels': labels,
                      'labeler': admitted.get('by'), 'ready_at': admitted.get('at'),
-                     'admitted': admitted.get('by') in self._admitters(author, ready=True),
+                     'admitted': admitted.get('by') in admitters,
                      'priority': issue_priority(labels, events, admitters,
                                                 self.cfg.priority_labels)}
             if issue['admitted'] and not issue['labels'] & skip and issue['number'] not in pr_issues:
@@ -1393,10 +1407,13 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                          trace_only=not pending['resume'])
                     if pending else self._supervisor_view(number, comments, operator))
             if view is not None:
-                found.append(dict(view, number=number, pr=is_pr))
+                # ``coordinator``: the command is the coordinator's, whose grant-budget on a
+                # budget escalation to the operator runs the step (#595, ``runs_issue_step``).
+                found.append(dict(view, number=number, pr=is_pr,
+                                  coordinator=self._is_coordinator(view.get('by'))))
         # A retry of an issue's step, or an extension of the budget envelope that runs it
-        # (#411), waits while the issue is blocked (#277), as a ready issue does: ``blocked_by``
-        # holds its open blocks.
+        # (#411, #595), waits while the issue is blocked (#277), as a ready issue does:
+        # ``blocked_by`` holds its open blocks.
         retries = [item for item in found if runs_issue_step(item)]
         views = self._dependency_view([item['number'] for item in retries]) if retries else {}
         for item in retries:
@@ -2021,9 +2038,12 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                 # retry resumes it.
                 remove = [label for label in remove if label != lb.working]
             # A budget refusal on a PR records its head (#396): an advisory review waits only
-            # on the refusal of the head it would review (``_advisory_held``).
+            # on the refusal of the head it would review (``_advisory_held``). To the operator
+            # it records the story, the kind and the agent of the refused turn too, for the
+            # coordinator's extension of its envelope (#595, ``_operator_grant_budget``).
             extra = ({'category': exc.category,
-                      **({'head': pr.head_sha} if pr is not None else {})}
+                      **({'head': pr.head_sha} if pr is not None else {}),
+                      **({} if supervised else budget_fields(exc))}
                      if isinstance(exc, BudgetRefused)
                      else {'turns': [t['turn'] for t in exc.turns]}
                      if isinstance(exc, TurnBlocked) else None)
@@ -2050,7 +2070,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         # record a decision of the operator for the reviewers (#472), written before the takeover.
         issue = dict(self.gh.issue(number), title=history['title'], body=history['body'],
                      labeled=history['labeled'], admitters=self._admitters(history['author']),
-                     ready_admitters=self._admitters(history['author'], ready=True),
+                     ready_admitters=self._admitters(history['author'], coordinator=True),
                      accepted=accepted, request=self._request_hash(history, listed),
                      thread=listed, decisions=self._issue_decisions(listed, history, taken=True))
         return issue, _render_issue_comments(issue.get('comments') or [], self.cfg.trusted_users,
@@ -2585,21 +2605,36 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                                  self.cfg.tests)
         return (module_command(modules) if modules else None), {'mode': mode, 'modules': modules}
 
-    def _run_tests(self, where, path, attempt, command):
+    def _run_tests(self, where, path, attempt, command, retried=None):
         """Run ``command``, recording it in the ledger with the tree tested; returns
-        ``(passed, tail, entry)``. The test of a fix is a section of its register (#355)."""
+        ``(passed, tail, entry)``. The test of a fix is a section of its register (#355).
+        ``command`` may be a list of commands (#598): each runs with its own
+        ``test_timeout_seconds``, stopping at the first that fails, whose tail is returned; the
+        ledger records them joined by ``&&``. ``retried``: the failed tests that ``command`` runs
+        again alone (#598), recorded."""
+        commands = command if isinstance(command, list) else [command]
         if self.ledger is None or where is None:
-            return (*self.ws.run_tests(path, command, self.cfg.test_timeout_seconds), None)
+            return (*self._run_each(path, commands), None)
         before = self.ws.tree(path)
         started = time.monotonic()
-        passed, tail = self.ws.run_tests(path, command, self.cfg.test_timeout_seconds)
+        passed, tail = self._run_each(path, commands)
         duration = int((time.monotonic() - started) * 1000)
         after = self.ws.tree(path)
         entry = self.ledger.verification(where[0], kind=where[1], attempt=attempt,
-                                         command=command, passed=passed,
+                                         command=' && '.join(commands), passed=passed,
                                          duration_ms=duration, tree_before=before,
-                                         tree_after=after, register=fix_register(where))
+                                         tree_after=after, register=fix_register(where),
+                                         retried=retried)
         return passed, tail, entry
+
+    def _run_each(self, path, commands):
+        """``(passed, tail)`` of ``commands`` run one after the other in ``path``, each with its
+        own ``test_timeout_seconds``, stopping at the first that fails."""
+        for command in commands:
+            passed, tail = self.ws.run_tests(path, command, self.cfg.test_timeout_seconds)
+            if not passed:
+                break
+        return passed, tail
 
     def _verify(self, where, path, attempt):
         """Run the local tests (``_local_tests``); returns ``(passed, tail, entry, record)``.
@@ -3065,6 +3100,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         fail on the base commit of the branch too is not retried: the reason to escalate is then
         a ``BaseBroken`` (``dispatch_base``), and the step waits for the base branch to advance;
         a ``HostTests`` when they pass in the CI of that commit (#497), escalated to the operator.
+        Neither holds when the failed tests pass once run again alone on the branch (#598,
+        ``_retry_alone``): then the turn succeeds, with the record of that retry as the passing
+        test.
         ``prompt`` is the text, or a function of the attempt (0 first) that renders it, so that
         each attempt gets what its worktree holds then (#203).
         Returns the output, ``None`` on success or a reason to escalate, the agent configuration
@@ -3105,6 +3143,14 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             if passed:
                 return result, None, used, tested, local
             broken = self._base_broken(path, tail) if base_check else None
+            if broken is not None:
+                # Before the failure of the host or of the base, its tests once again alone
+                # (#598): when they pass they are unstable under load, and the step goes on as
+                # after passing tests. A base_broken retried here is a host_tests that its wait
+                # may escalate later, when the CI of the base turns green (``_do_host_tests``).
+                passed, tested = self._retry_alone(where, path, attempt + 1, broken)
+                if passed:
+                    return result, None, used, tested, local
             if broken is not None:
                 return result, broken, used, None, local
             failures += ('\n\n## Test failures after your previous attempt\n\nThe test command '

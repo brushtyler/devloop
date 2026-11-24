@@ -5457,7 +5457,7 @@ class RoleRunbookTests(unittest.TestCase):
 
     def test_the_supervisor_may_grant_budget_and_capacity_only_through_their_delegations(self):
         # ADR 0005, D2 and D4: grant-budget and capacity are delegations of the supervisor,
-        # reserved to the operator only for the coordinator (ADR 0002, 2026-11-22).
+        # and of the coordinator too since #595 (ADR 0002, precision of 2026-11-23).
         supervisor = ' '.join(ROLE_RUNBOOKS['supervisor'].read_text().split())
         tasks, prohibitions = supervisor.split('## Prohibitions')
         tasks = tasks.split('## Tasks')[1]
@@ -5474,8 +5474,12 @@ class RoleRunbookTests(unittest.TestCase):
                       'agent', prohibitions)
         coordinator = ' '.join(ROLE_RUNBOOKS['coordinator'].read_text().split())
         coordinator_prohibitions = coordinator.split('## Prohibitions')[1]
-        self.assertIn('`grant-budget`, `capacity`, `reconcile` and the keys of trust are the '
-                      'operator\'s in person', coordinator_prohibitions)
+        reserved = coordinator_prohibitions.split('the delegated perimeter:')[1]
+        reserved = reserved.split('are the operator\'s in person')[0]
+        self.assertIn('`approve`, `merge-budget`, `reconcile`, `trusted_users` and the keys of '
+                      'trust', reserved)
+        self.assertNotIn('grant-budget', reserved)
+        self.assertNotIn('capacity', reserved)
 
     def test_no_detail_of_the_host_in_public_texts(self):
         # #584: AGENTS.md states the rule for every published text, and each runbook recalls it

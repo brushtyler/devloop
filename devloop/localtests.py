@@ -20,6 +20,7 @@ the summary of the CI in the review and fix prompts (#300).
 (#459), and ``case_modules`` the test modules they belong to: a failure that the same modules
 reproduce on the base commit of the branch is the base's, not the implementer's. Both read what
 unittest prints, so the check runs only with the ``python-unittest-modules`` selection.
+``case_commands`` run those failed tests alone, before the failure is the host's (#598).
 
 The project declares both (ADR 0006, R5, ``Tests``): the selection is a strategy of the
 installation, with a name, and the project's name rules as its parameters (``SELECTIONS``); the
@@ -77,6 +78,9 @@ _COUNT = re.compile(r'([a-z ]+)=(\d+)')
 # A test module, or a test, that unittest could not load (an import error, a broken
 # ``load_tests``): ``unittest.loader._FailedTest.<name>``, the same id whatever the error.
 _LOAD_FAILURE = 'unittest.loader.'
+# The fixtures whose failure unittest reports under their own name (#598, ``case_commands``).
+_CLASS_FIXTURES = ('setUpClass', 'tearDownClass')
+_MODULE_FIXTURES = ('setUpModule', 'tearDownModule')
 
 
 def failed_modules(log):
@@ -214,3 +218,32 @@ def module_command(modules):
     that its output ends the tail the implementer gets back."""
     return ' && '.join(f'python3 -m unittest discover -s tests -p {shlex.quote(m)}'
                        for m in modules)
+
+
+def case_commands(cases):
+    """The shell commands that run again only the failed tests ``cases`` (``failed_cases``), one
+    per test module, sorted (#598): each runs on its own, with its own time limit. Each test is
+    selected with ``-k`` by a pattern that ends with its id, so that ``test_a`` does not select
+    ``test_ab`` too; a subtest runs its whole test. A failed fixture has no test of its own: one
+    of a class (``setUpClass``, ``tearDownClass``) runs every test of its class, one of a module
+    (``setUpModule``, ``tearDownModule``) the whole module. ``cases`` belong to test modules
+    (``case_modules``)."""
+    ids = {}
+    for case in cases:
+        test_id = case.split(' ', 1)[0]
+        module = test_id.split('.', 1)[0]
+        owner, name = test_id.rsplit('.', 1)
+        selected = ids.setdefault(f'{module}.py', {})
+        if name in _MODULE_FIXTURES and owner == module:
+            selected[None] = None  # the whole module
+        elif name in _CLASS_FIXTURES and owner != module:
+            selected[f'{owner}.*'] = None
+        else:
+            selected[test_id] = None
+    commands = []
+    for module in sorted(ids):
+        command = f'python3 -m unittest discover -s tests -p {shlex.quote(module)}'
+        if None not in ids[module]:
+            command += ''.join(f' -k {shlex.quote("*" + i)}' for i in ids[module])
+        commands.append(command)
+    return commands

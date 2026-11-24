@@ -274,7 +274,9 @@ A `round_grantable` escalation (#405) has the same lists and says instead that t
 may grant one more round with `/devloop grant-round <reason>`. A `budget_grantable` escalation
 (#411) of a turn the budget refused records, besides the step and its key, the `story`, the
 `extension` the supervisor may grant with `/devloop grant-budget <reason>`, and the `kind` and
-`agent` of the refused turn.
+`agent` of the refused turn. A `budget` escalation to the operator records, besides the
+`category` and the step a retry runs with its key, the `story`, `kind` and `agent` of the refused
+turn too (#595), for the extension the coordinator may grant on it.
 `devloop status` shows the counted rounds of each PR on the limit, as `rounds=<counted>/<max>`,
 with the rounds granted in `<max>` and `(+<n> granted)` after it when the supervisor granted some,
 followed by `(+<n> not counted)` when some rounds did not count. It reads them from the thread
@@ -609,7 +611,8 @@ event in the turn journal, written first, also records the story, the extension 
 the command (`reason`), which from then on are part of the envelope of the story. Here the
 ledger event comes before the `supervision` record, which spends the command: a dispatcher
 stopped after the journal and before the record, or whose write failed there, finds, for the
-story of any `budget_grantable` escalation of the thread, the `grant` of the item in the
+story of any `budget_grantable` escalation of the thread, or of a `budget` escalation that records
+one (#595), the `grant` of the item in the
 journal that no `supervision` record of the thread carries. It completes that grant before any
 other command, the latest one included, rebuilding the command from the journal (comment,
 author, text): the ledger event only if absent and the record `granted`, without checking nor
@@ -620,7 +623,9 @@ without running its step, and an issue blocked by an open issue waits, with noth
 Anywhere else, for instance on an item that the `failure` escalation of a `GitHubError` while
 the records were written handed to the operator, or behind a later escalation, only the records
 are written, with `trace_only: true`, and the item stays where it is: such a record does not end
-the operator's block. A temporary capacity limit
+the operator's block. An extension the coordinator's identity granted (#595), on a
+`budget_grantable` escalation or on a `budget` escalation to the operator, has the same record
+and ledger `event`, with `role: coordinator`. A temporary capacity limit
 set with `/devloop capacity` (#412,
 [Temporary capacity limits](guide.md#temporary-capacity-limits)) has its record on
 `[report] issue`, with no class: the analysis of the causes in `reason`, the key (`setting`), the
@@ -629,7 +634,10 @@ set with `/devloop capacity` (#412,
 `daily_cap`, `daily_left`). The latest `granted` record of a key, until its `until`, is the limit
 the dispatcher plans with; the same figures go in a ledger `event` `delegation_grant` with the
 `delegation` `capacity`, after a `grant` event in the turn journal. With the delegation off the
-command gets a `refused` record all the same, which spends it. A
+command gets a `refused` record all the same, which spends it. The records of the coordinator's
+identity (#595) carry `role: coordinator`: its limits are in force only with
+`[roles.coordinator]` on, the others only with `[delegations] capacity` on; the latest grant of a
+key replaces the earlier ones whatever its switch, so one switched off restores none of them. A
 [delegated merge](guide.md#delegated-merge) (#486, `/devloop merge <sha> <reason>`) has its
 record on the PR, under the title "Merge delegato al supervisore", once the merge ran: outcome
 `merged`, with the `head`, the `opinion` of the advisory review, the delegated merges of the UTC
@@ -698,6 +706,15 @@ commit), `count` and `cases`, as above. Nothing waits for `main`. While a `baseb
 holds, the dispatcher reads the CI of its `base` again at each tick: once green, the issue or the
 PR escalates `host_tests` the same way, with the `count` and the `cases` of the record (the issue
 unless one of the blocks above holds it).
+
+Before writing the `basebroken` record or escalating `host_tests`, the dispatcher waits 5
+seconds and runs once again only those failed tests, on the branch as it is, one module at a
+time, each with its own time limit (#598). When they pass it writes neither a `basebroken`
+record nor a `notice`: a `verification` record with `retried`, the tests, which its comment
+calls unstable, follows the failed one, and the step goes on as after passing tests, that record
+bound to its commit. When they fail, the record has `outcome` `fail` and the step escalates
+`host_tests` or writes the `basebroken` record; the `host_tests` after a wait therefore follows a
+failed retry too.
 
 The alert of a [red CI on `main`](guide.md#red-ci-on-main) is a dispatcher comment on
 `[run].alert_issue` without a record; with the outbox its publication covers `main_red:<sha>`, so
@@ -1219,7 +1236,7 @@ readiness check, on the PR for review, fix, sync and CI. The turns of a review r
 |---|---|---|
 | `request` | The issue goes from `agent:ready` to `agent:working` | SHA-256 of title and body, author and time of the trusted `labeled` event of `agent:ready`, ids of the trusted comments given to the implementer, time of the takeover, and the key of the implementer chosen for the issue (`implementer`, #407: an `impl:<kind>` label, the area map or the default, [the choice of the implementer](reference.md#the-implementer-app-and-the-keys-by-role)). It is a snapshot **at the takeover**, not at the time of the label |
 | `turn` | Every invocation of an agent CLI, retries, fallback models and failures included: implement, fix, sync with an agent, review, readiness check, conclave call, [advisory review](guide.md#advisory-review-for-the-operator) (`advisory`, on the PR, in a comment of its own) | Kind, agent, GitHub identity (none: the operator's `gh` login), configured model and effort (for a fallback, the fallback model and the model it replaces), real model, start, end, duration, outcome (`success`, `failure`, `unavailable`, or `cancelled` for a review turn devloop stopped because the first reviewer of its round did not approve, with [`second_reviewer = "parallel_cancel"`](reference.md#when-the-second-reviewer-starts), #521), the error if any, telemetry, and the last command the turn ran or started when the CLI exposes it (`last_command`: only codex, from the `command_execution` items of `--json`; cleaned like the tail of a timeout, on one line, at most 200 characters; absent otherwise), also for a turn that timed out; for an agy turn stopped on a denied permission, the permission as agy names it (`denied_permission`, for example `command`; absent for any other turn) and the command line agy reports as denied (`denied_command`: from the last action of `denied_actions`, cleaned the same way; absent when agy does not report it, #479). With `attempt_identity` on, the id of the [attempt](#attempt-identity) the turn belongs to (`attempt`; absent for a turn of no attempt) |
-| `verification` | Every test command the dispatcher runs after a writing turn (none when the [local tests](reference.md#local-tests) select nothing), and the full suite it runs before a review of a head without CI, or before the promotion of an approval given while no CI was known | Command, outcome, duration, the tree hash before and after the test, and the commit (none before a review) |
+| `verification` | Every test command the dispatcher runs after a writing turn (none when the [local tests](reference.md#local-tests) select nothing), and the full suite it runs before a review of a head without CI, or before the promotion of an approval given while no CI was known; and the retry alone of the failed tests of a step that would escalate [`host_tests`](#base-broken-records) or wait as `base_broken` (#598) | Command, outcome, duration, the tree hash before and after the test, and the commit (none before a review). A retry alone adds `retried`, the failed tests it ran again, which its comment calls unstable when it passed |
 | `event` | The CI of a head (`ci_round`): a failed CI round, the checks a review round saw whatever its verdict (`approve`, `request_changes` or `needs_operator`), or the passing checks read again just before the PR is promoted to `agent:ready-to-merge` (also at level 0); a sync without an agent, or the merge of `main` before a fix (`sync`) | For the CI, the head, the state (`fail`, `pass`, or `none` without checks), the review round (none at level 0) and each check with its outcome, the id of its GitHub Actions run (none for a commit status or a check outside Actions) and its duration in seconds (`duration_s`: none while it runs and for a commit status, #300). Every CI round also records `tests`, the [summary of the suite](reference.md#summary-of-the-ci-in-the-prompts) that the dispatcher reads for the review and fix prompts (read again from the job logs when a promotion records the round, for instance after a review that saw the CI pending): for each job whose log holds the final lines of `scripts/run-tests.py`, its name with `ran` and `slowest`, and for a job whose log could not be read, its name with `log: unavailable`; absent when no job has either, as always when the project declares no format of its CI logs (`[tests] ci_log_format`, ADR 0006, R5: no log is read). The same checks read again for the same head and round are not recorded twice, a new run is. A failure that joined a round that had approved its head carries `voided_approval: true` (#359). For a sync, the merged base commit and the old and new heads |
 
 **Telemetry** is what the CLI attests, not authenticated:
