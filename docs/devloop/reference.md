@@ -1540,8 +1540,8 @@ The repository is public (#583): what devloop publishes names the parameters of
 (`devloop/redact.py`), and every client it hands out passes the text of its writes (`comment`,
 `edit_comment`, `submit_review`, `create_pr` with its title, the alerts) through it, before the
 [publication outbox](protocol.md#publication-outbox), which so records and reconciles the very
-body published. It covers every text: the output of the tests in a `host_tests` or
-`tests_failed` escalation, the tail of the local tests in a record, the agents' texts.
+body published. It covers every visible text: the output of the tests in a `host_tests` or
+`tests_failed` escalation, the summary of a record, the agents' texts.
 
 | On the host | In the published text |
 |---|---|
@@ -1562,14 +1562,9 @@ body published. It covers every text: the output of the tests in a `host_tests` 
   devloop's own texts, a name shorter than three characters, or one of `trusted_users`. The
   name of the service follows the same conditions (its default `devloop` stays), but is replaced
   inside a path or the name of a unit too.
-- The records of the markers that end a body are Base64 that anyone decodes: their texts (an
-  error, a command, a finding) pass through the same substitutions, and the marker is encoded
-  again; keys, numbers, hashes and logins stay. A string of one word is an identifier the
-  controller reads (a step, an agent, a verdict): its paths and key files are replaced, never
-  the service's name nor a user's, which may be that very word (a service named `fix`, a user
-  named `claude`). A conclave record binds its proposal by its hash:
-  when the proposal's text changes, the hashes bound to it (of the record, of the proposal, of
-  its votes) follow the published text, so the record read back still holds together.
+- The substitutions apply to the visible text. The markers `devloop:<kind>:v1` that end a body
+  stay as they are, Base64 payload included: their records reach GitHub as devloop wrote them,
+  and a name never matches inside their Base64. Cleaning their fields is #620.
 - The values come from the map `redactions.json` in the `state_dir`, which
   `ops/host/setup-devloop.sh` writes from the resolved parameters (600, devloop's; it reads no
   key). The runtime values of the dispatcher prevail for its `state_dir` and its key_dir

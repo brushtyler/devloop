@@ -1034,8 +1034,8 @@ modules, one at a time, on the base commit of the branch, in a disposable worktr
 
 The output of the tests that these escalations and records quote names the parameters of the
 host, not its paths (#583): `$STATE_DIR/worktrees/issue-570/...`, `$AGENT_HOME/...`,
-`<AGENT_USER>`, as everything devloop publishes
-([Host details in the published texts](reference.md#host-details-in-the-published-texts)).
+`<AGENT_USER>`, as every visible text devloop publishes; the markers of the records stay as
+they are ([Host details in the published texts](reference.md#host-details-in-the-published-texts)).
 
 ### Red CI on `main`
 

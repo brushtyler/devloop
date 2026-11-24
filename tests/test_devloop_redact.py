@@ -19,7 +19,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from devloop import apps, conclave, ledger, markdown, redact
+from devloop import apps, ledger, markdown, redact
 from helpers import ssdlc_project
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -119,81 +119,24 @@ class RedactorTests(unittest.TestCase):
         self.assertEqual(json.loads(r.redact(record)),
                          {'tail': '$STATE_DIR/x', 'user': '<AGENT_USER>'})
 
-    def test_the_records_of_the_markers_are_redacted(self):
-        # The markers are Base64 that anyone decodes (R1-1): their texts are redacted too, and
-        # devloop reads the record back; keys, numbers and identifiers stay as they are.
-        r = redactor()
-        record = {'type': 'event', 'event': 'host_tests', 'at': '2026-11-24T00:00:00Z',
-                  'error': 'see /srv/u-dl/clone/.state/run.log (sudo -u u-ag)',
-                  'lines': ['/srv/u-sv/.keys-widget/x', 3, None], 'sha': 'a' * 40}
-        body = ledger.render(record)
-        self.assertIn('/srv/u-dl/clone/.state', markdown.read_marker(body, 'ledger')['error'])
-        published = r.redact(body)
-        self.assertEqual(markdown.read_marker(published, 'ledger'), dict(
-            record, error='see $STATE_DIR/run.log (sudo -u <AGENT_USER>)',
-            lines=['$SUPERVISOR_KEY_DIR/x', 3, None]))
-        self.assertNotIn('/srv/', published)
-        self.assertTrue(markdown.carries_record(published))
-        # Twice is once, and a marker with nothing to redact is the very same line.
-        self.assertEqual(r.redact(published), published)
-        clean = ledger.render(dict(record, error='none', lines=[]))
-        self.assertEqual(r.redact(clean), clean)
-        # A story marker after it, and a marker that does not decode, stay where they are.
-        broken = '<!-- devloop:ledger:v1 AAAA -->'
-        self.assertEqual(r.redact(f'u-ag\n{broken}\n'), f'<AGENT_USER>\n{broken}\n')
-
-    def test_a_conclave_record_stays_bound_to_its_redacted_text(self):
-        # The hash of a conclave binds the text of its proposal: it follows the redacted text,
-        # and the votes given on it too, so the record read back still holds together.
-        r = redactor()
-        record = conclave.new_record({'kind': 'blocked', 'comment': 5, 'agent': 'claude',
-                                      'step': 'fix'}, 'fix', ['claude', 'codex', 'agy'], 7,
-                                     'h' * 64, 'a' * 40, 'a' * 40, conclave.text_hash(''))
-        conclave.apply_proposal(record, {
-            'reserved': False, 'resolution': 'Spostare /srv/u-dl/clone/.state/x.',
-            'reserved_reason': '', 'operator_question': '', 'options': []})
-        conclave.apply_vote(record, 0, {'vote': 'APPROVA', 'reason': 'ok', 'reserved': False,
-                                        'reserved_reason': '', 'operator_question': '',
-                                        'options': []}, record['hash'])
-        back = markdown.read_marker(r.redact(conclave.render(record)), 'conclave')
-        self.assertEqual(back['proposal']['resolution'], 'Spostare $STATE_DIR/x.')
-        bound = conclave.text_hash('Spostare $STATE_DIR/x.')
-        self.assertEqual((back['hash'], back['proposal']['hash']), (bound, bound))
-        self.assertEqual(back['votes'][0]['proposal_hash'], bound)
-        self.assertEqual(back['issue_hash'], 'h' * 64)
-
-    def test_the_identifiers_of_a_record_stay(self):
-        # R3-1: a service named as a step, a user named as an agent. In a record they replace
-        # only its texts: its identifiers, enumerations and logins stay, and the record is read
-        # back and used as before. Its paths and key files are replaced wherever they are.
-        record = conclave.new_record({'kind': 'blocked', 'comment': 5, 'agent': 'claude',
-                                      'step': 'fix'}, 'fix', ['claude', 'codex', 'agy'], 7,
-                                     'h' * 64, 'a' * 40, 'a' * 40, conclave.text_hash(''))
-        conclave.apply_proposal(record, {
-            'reserved': False, 'resolution': 'Riavviare fix come claude in /srv/u-dl/x.',
-            'reserved_reason': '', 'operator_question': '', 'options': []})
-        body = conclave.render(record)
+    def test_the_markers_stay_as_they_are(self):
+        # The text around a marker is redacted; the marker, its Base64 payload, is the very
+        # same line, and devloop reads the very record back (its redaction is #620).
         r = redact.Redactor(paths=[('DEVLOOP_HOME', '/srv/u-dl')],
                             users=[('AGENT_USER', 'claude')], names=[('SERVICE_NAME', 'fix')])
-        back = markdown.read_marker(r.redact(body), 'conclave')
-        self.assertIsNotNone(back)
-        self.assertEqual((back['step'], back['block']['step'], back['block']['agent']),
-                         ('fix', 'fix', 'claude'))
-        self.assertEqual([back['proposal']['agent']] + [v['agent'] for v in back['votes']],
-                         ['claude', 'codex', 'agy'])
-        resolution = 'Riavviare $SERVICE_NAME come <AGENT_USER> in $DEVLOOP_HOME/x.'
-        self.assertEqual(back['proposal']['resolution'], resolution)
-        self.assertEqual(back['hash'], conclave.text_hash(resolution))
-        self.assertEqual(conclave.consistent(back)[0], conclave.consistent(record)[0])
-        # A ledger turn of that agent, and a single path or key file in a record.
-        turn = {'type': 'turn', 'state': 'open', 'kind': 'fix', 'agent': 'claude',
-                'started_at': '2026-11-24T00:00:00Z', 'ended_at': None, 'outcome': None,
-                'telemetry': None, 'cwd': '/srv/u-dl/x',
-                'key': f'{PREFIX}implementer.2026-11-23.private-key.pem'}
-        read = markdown.read_marker(r.redact(ledger.render(turn)), 'ledger')
-        self.assertEqual(read, dict(turn, cwd='$DEVLOOP_HOME/x', key="<chiave di un'app>"))
-        # Outside a record the text is redacted as before.
-        self.assertEqual(r.redact('fix claude'), '$SERVICE_NAME <AGENT_USER>')
+        record = {'type': 'event', 'event': 'host_tests', 'at': '2026-11-24T00:00:00Z',
+                  'error': 'fix claude /srv/u-dl/x', 'sha': 'a' * 40}
+        body = ledger.render(record)
+        line = redact._MARKER.search(body).group(0)
+        published = r.redact(f'fix claude in /srv/u-dl/x\n{body}')
+        self.assertTrue(published.startswith('$SERVICE_NAME <AGENT_USER> in $DEVLOOP_HOME/x\n'))
+        self.assertIn('**error:** `$SERVICE_NAME <AGENT_USER> $DEVLOOP_HOME/x`', published)
+        self.assertIn(line, published)
+        self.assertNotIn('/srv/', published.replace(line, ''))
+        self.assertEqual(markdown.read_marker(published, 'ledger'), record)
+        # A name that a Base64 payload holds between its own '+' or '/' stays there too.
+        payload = '<!-- devloop:ledger:v1 AAAA+fix+claude/AAA= -->'
+        self.assertEqual(r.redact(f'claude {payload}'), f'<AGENT_USER> {payload}')
 
     def test_the_service_name_is_a_parameter(self):
         # R1-3: the name of the service, alone and in the name of its unit, unless it is the
