@@ -469,6 +469,23 @@ class HashTests(Base):
                          ('fix', 'claude', 'claude'))
         self.assertEqual(conclave.consistent(record), (True, ''))
 
+    def test_a_proposal_beyond_the_limits_stays_a_failed_contribution_once_redacted(self):
+        # #620, R1-2: the limit holds for the text the proposer gave, which the redaction
+        # would shorten below it.
+        path = '/srv/u-dl/.state/worktrees/pr-100 '
+        text = path * (conclave.MAX_RESOLUTION // len(path) + 1)
+        r = redact.Redactor(paths=[('STATE_DIR', '/srv/u-dl/.state')])
+        self.assertGreater(len(text), conclave.MAX_RESOLUTION)
+        self.assertLessEqual(len(r.redact_text(text)), conclave.MAX_RESOLUTION)
+        self.make(proposal(text), vote(), vote())
+        self.redacting(r)
+        self.block_pr()
+        self.run_conclave(times=1)
+        record = self.record()
+        self.assertEqual(record['outcome'], conclave.BLOCKED)
+        self.assertIn('oltre i limiti', record['proposal']['missing'])
+        self.assertEqual(len(self.runner.calls), 1)
+
     def test_a_recorded_proposal_with_host_details_is_not_updated(self):
         # #620: a proposal recorded before, which the redaction would change, stops the update
         # of its record: its hash is not computed again, and no vote is asked on another text.

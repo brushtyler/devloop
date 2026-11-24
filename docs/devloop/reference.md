@@ -1568,7 +1568,7 @@ body published. It covers every visible text: the output of the tests in a `host
   again. They are the reasons (`notice`, `hold`, `supervision`, `recheck`, `authorize`, `pin`,
   the closures of a `finding`), the summary, notes, checks and finding texts of a `review`, the
   notes and requests of a `fix`, the reasons of an acceptance map, the `host_step` and the
-  reasons of the skipped models of `pr`, `fix` and `sync`, the gaps, split and trust policy
+  reasons of the skipped models of `pr`, `fix`, `sync` and `review`, the gaps, split and trust policy
   reason of a `preflight` and of the decisions of a `supervision`, the error, last command,
   denied command, test command and reason of a `ledger` record (in the sections of a register
   too), and the vote reasons, the reserved fields, the missing reasons and `stale` of a
@@ -1580,7 +1580,9 @@ body published. It covers every visible text: the output of the tests in a `host
   very same line.
 - The proposal of a conclave is bound by its hash, which the votes and the `/devloop vote`
   commands cite. devloop redacts a new proposal before hashing it: the voters' prompts and the
-  record carry the very text the hash binds, and the publication leaves it as it is. A record
+  record carry the very text the hash binds, and the publication leaves it as it is. The limit
+  of 4000 characters holds for the text as the proposer gave it, and for the redacted one: a
+  proposal beyond it stays a failed contribution, even when the redaction shortens it. A record
   whose proposal, written before, would still change is not published: the write fails, and
   the conclave stops there as for any failed write. Its hashes are never computed again, and
   no approval passes to a text other than the one voted.

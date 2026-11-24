@@ -223,6 +223,26 @@ class RedactorTests(unittest.TestCase):
                                         title='$SERVICE_NAME', detail='$SERVICE_NAME',
                                         evidence='<AGENT_USER>')]))
 
+    def test_the_skipped_models_of_a_review_are_redacted(self):
+        # R1-1: a review records the models it skipped (``dispatch_actions.skipped_models``)
+        # as a fix does: their reasons are redacted in the marker published, their models and
+        # dates stay.
+        skipped = [{'model': 'claude', 'reason': 'claude: errore in /srv/u-dl/x',
+                    'until': '2026-11-24T10:00:00Z'}]
+        review = {'verdict': 'approve', 'round': 1, 'head_sha': 'a' * 40, 'source': 'agent',
+                  'reviewer': 'claude', 'summary': 'ok', 'human_reason': '', 'note': '',
+                  'checks_performed': [], 'blocking_findings': [], 'previous_findings': [],
+                  'non_blocking_findings': [], 'profile': profile('claude'),
+                  'skipped_models': skipped}
+        client = FakeClient()
+        redact.RedactingClient(client, HOST).comment(7, markdown.publishable('x', 'review',
+                                                                             review))
+        ((_, number, body),) = client.calls
+        self.assertEqual(number, 7)
+        self.assertEqual(markdown.read_marker(body, 'review'), dict(
+            review, skipped_models=[dict(skipped[0],
+                                         reason='<AGENT_USER>: errore in $DEVLOOP_HOME/x')]))
+
     def test_a_marker_with_nothing_to_replace_stays_the_same(self):
         r = HOST
         record = {'type': 'event', 'event': 'host_tests', 'at': 't', 'error': '$STATE_DIR'}

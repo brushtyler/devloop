@@ -99,7 +99,7 @@ TEXT_FIELDS = {
     'review': ('summary', 'human_reason', 'note', 'checks_performed.*',
                *(f'{group}.*.{field}' for group in ('blocking_findings', 'non_blocking_findings')
                  for field in _FINDING),
-               'previous_findings.*.note'),
+               'previous_findings.*.note', 'skipped_models.*.reason'),
     'fix': ('responses.*.note', 'requests.*.request', *_WRITE),
     'pr': _WRITE,
     'sync': _WRITE,

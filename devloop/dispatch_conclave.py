@@ -36,7 +36,7 @@ from .conclave import (DONE, MAX_DIFF, MAX_OPTION, MAX_OPTIONS, MAX_RESOLUTION, 
                        describe_block, expire_substitute, make_stale, missing, new_record,
                        next_call, outcome, refuse_substitute, render, resolution_section,
                        settle_started, substitute_problem, substitute_vote, text_hash,
-                       veto_command,
+                       too_long, veto_command,
                        vote_command, waiting_substitute)
 from .context import _template, prompt_values
 from .dispatch_actions import Models
@@ -467,9 +467,13 @@ class ConclaveMixin:
         """``raw``, the proposer's output, with the names of the parameters in place of the
         host's values in its resolution (#620, ``redact.Redactor.redact_text``), before its
         hash: the voters get, and the record carries, the very text the hash binds, which
-        the publication then leaves as it is. As it is without a redactor."""
+        the publication then leaves as it is. As it is without a redactor, or when the output
+        as the proposer gave it is beyond the limits: a failed contribution, which the
+        redaction must not shorten into an accepted one (``apply_proposal`` checks the
+        redacted text in its turn)."""
         redactor = getattr(self.identities, 'redactor', None)
-        if redactor is None or not isinstance(raw.get('resolution'), str):
+        if (redactor is None or not isinstance(raw.get('resolution'), str)
+                or too_long(raw, 'resolution', MAX_RESOLUTION)):
             return raw
         return dict(raw, resolution=redactor.redact_text(raw['resolution']))
 
