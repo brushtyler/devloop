@@ -5372,8 +5372,9 @@ class RoleRunbookTests(unittest.TestCase):
         supervisor = ' '.join(ROLE_RUNBOOKS['supervisor'].read_text().split())
         tasks, prohibitions = supervisor.split('## Prohibitions')
         tasks = tasks.split('## Tasks')[1]
-        self.assertIn('Only when the operator turned the delegation on, and only when every one '
-                      'of its conditions holds: `grant-budget`', tasks)
+        # #611: both delegations hold in merge mode `auto` only.
+        self.assertIn('Only when the operator turned the delegation on, in merge mode `auto`, '
+                      'and only when every one of its conditions holds: `grant-budget`', tasks)
         self.assertIn('`[delegations] budget`', tasks)
         self.assertIn('`[delegations] capacity`', tasks)
         self.assertIn('never on a pull request implemented by your own agent', tasks)

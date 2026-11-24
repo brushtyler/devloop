@@ -4,10 +4,12 @@
 With ``[roles.coordinator]`` the coordinator's identity:
 
 - writes ``/devloop capacity`` on ``[report] issue`` as the supervisor does, within the caps of
-  the code and of ``[delegations]``, each grant counted in ``max_grants_per_day``, in merge mode
-  ``auto``; the delegation is on with the table, whatever ``[delegations] capacity`` says;
+  the code only, beyond the lower ones of ``[delegations]`` that bind the supervisor (#611), each
+  grant counted in ``max_grants_per_day``, in merge mode ``auto``; the delegation is on with the
+  table, whatever ``[delegations] capacity`` says;
 - grants ``/devloop grant-budget``, the one extension of a story, on a ``budget_grantable``
-  escalation and on a ``budget`` escalation to the operator; a second one stays the operator's;
+  escalation and on a ``budget`` escalation to the operator, in merge mode ``auto`` only (#611);
+  a second one stays the operator's;
 - sets priority labels that count where its ``agent:ready`` counts; its dependency and
   implementer labels still do not;
 - opens issues that count as devloop's: the supervisor and the coordinator queue them, but one
@@ -28,6 +30,7 @@ from devloop.dispatcher import Dispatcher
 from devloop.planning import Action, plan, runs_issue_step
 from test_devloop import (CFG, SHA2, FakeIdentities, FakeRunner, FakeWS, implemented, pr,
                           raw_review)
+from test_devloop_capacity import ISSUE
 from test_devloop_capacity import OFF as CAPACITY_OFF
 from test_devloop_capacity import ON as CAPACITY_ON
 from test_devloop_capacity import REASON as CAPACITY_REASON
@@ -99,13 +102,54 @@ class CapacityTests(CapacityCase):
             with self.subTest(text=text[:40]):
                 self.refused(cfg, text, why)
 
-    def test_the_lower_caps_of_the_configuration_hold(self):
+    def test_beyond_the_caps_of_the_delegation_within_the_codes(self):
+        # #611: the caps of [delegations] bind the supervisor only; the coordinator decides
+        # beyond the delegation, within the caps of the code.
+        lowered = DelegationPolicy(capacity_max_parked_prs=4, capacity_max_hours=2)
+        for delegations in (lowered, dataclasses.replace(lowered, capacity=True)):
+            with self.subTest(capacity=delegations.capacity):
+                d = self.make(coordinated(dataclasses.replace(CAPACITY_OFF,
+                                                              delegations=delegations)))
+                self.command('/devloop capacity max_parked_prs 6 24h ' + CAPACITY_REASON,
+                             login=COORDINATOR)
+                self.assertEqual(self.planned(d).max_parked_prs, 6)
+                decision = self.decisions()[-1]
+                self.assertEqual({k: decision[k] for k in ('outcome', 'value', 'cap',
+                                                           'minutes')},
+                                 {'outcome': 'granted', 'value': 6,
+                                  'cap': supervision.MAX_CAPACITY['max_parked_prs'],
+                                  'minutes': 24 * 60})
+                trace = [c['body'] for c in self.gh.threads[ISSUE]
+                         if 'tetto del codice: 6' in ' '.join(c['body'].split())]
+                self.assertEqual(len(trace), 1)
+                # Still applied at the next tick, above the cap of the delegation.
+                self.assertEqual(self.planned(d).max_parked_prs, 6)
+
+    def test_beyond_the_caps_of_the_code_with_lower_delegation_caps(self):
         cfg = coordinated(dataclasses.replace(CAPACITY_OFF, delegations=DelegationPolicy(
-            capacity_max_open_prs=4, capacity_max_hours=2)))
-        self.refused(cfg, '/devloop capacity max_open_prs 5 1h ' + CAPACITY_REASON,
-                     '`max_open_prs` va da 1 a 4 (`[delegations] capacity_max_open_prs`)')
-        self.refused(cfg, '/devloop capacity max_open_prs 3 3h ' + CAPACITY_REASON,
-                     'supera il massimo di 2 ore')
+            capacity_max_parked_prs=4, capacity_max_hours=2)))
+        self.refused(cfg, '/devloop capacity max_parked_prs 7 1h ' + CAPACITY_REASON,
+                     '`max_parked_prs` va da 1 a 6 (tetto del codice)')
+        self.refused(cfg, '/devloop capacity max_parked_prs 5 25h ' + CAPACITY_REASON,
+                     'supera il massimo di 24 ore (tetto del codice)')
+
+    def test_the_supervisor_stays_within_the_caps_of_the_delegation(self):
+        cfg = coordinated(dataclasses.replace(CAPACITY_ON, delegations=DelegationPolicy(
+            capacity=True, capacity_max_parked_prs=4, capacity_max_hours=2)))
+        for text, why in (
+                ('/devloop capacity max_parked_prs 5 1h ' + CAPACITY_REASON,
+                 '`max_parked_prs` va da 1 a 4 (`[delegations] capacity_max_parked_prs`)'),
+                ('/devloop capacity max_parked_prs 3 3h ' + CAPACITY_REASON,
+                 'supera il massimo di 2 ore (`[delegations] capacity_max_hours`)')):
+            with self.subTest(text=text[:40]):
+                d = self.make(cfg)
+                self.command(text)
+                self.assertEqual(self.planned(d).max_parked_prs, cfg.max_parked_prs)
+                decision = self.decisions()[-1]
+                self.assertEqual((decision['by'], decision['outcome']),
+                                 (SUPERVISOR_LOGIN, 'refused'))
+                self.assertNotIn('role', decision)
+                self.assertIn(why, ' '.join(self.body().split()))
 
     def test_the_daily_cap_of_the_grants_holds(self):
         cap = supervision.MAX_DAILY_GRANTS
@@ -273,6 +317,23 @@ class GrantBudgetTests(BudgetCase):
         self.assertEqual(decision['outcome'], 'refused')
         self.assertIn('precedente a #595', self.body())
         self.assertIsNone(d.ledger.journal.extension(self.story))
+
+    def test_merge_mode_auto_is_required(self):
+        # #611: as the coordinator's capacity, its grant-budget applies only in auto.
+        d = self.make(coordinated(BUDGET_OFF), raw_review())
+        self.spend(d, 4)
+        self.assertEqual(self.refuse_review(d)['class'], 'budget')
+        for mode in ('strict', 'off'):
+            with self.subTest(mode=mode):
+                d.cfg = dataclasses.replace(d.cfg, merge=MergePolicy(mode=mode))
+                decision = self.grant(d)
+                self.assertEqual((decision['by'], decision['outcome']),
+                                 (COORDINATOR, 'refused'))
+                self.assertIn(f'la modalità di merge è `{mode}`, non `auto`',
+                              ' '.join(self.body().split()))
+                self.assertEqual(self.gh.labels[100], {HUMAN})
+                self.assertIsNone(d.ledger.journal.extension(self.story))
+                self.assertEqual(d.ledger.journal.grants(), [])
 
     def test_the_operators_command_still_does_not_extend(self):
         d = self.make(coordinated(BUDGET_OFF))

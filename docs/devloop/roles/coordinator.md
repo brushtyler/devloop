@@ -216,6 +216,14 @@ the mailbox.
 
 ## Tasks
 
+- **Principle of scale** (#611). The supervisor decides within the delegation and on the single
+  pull request; you decide beyond the delegation and on the levers of the system (capacity,
+  priorities). On the escalations to the supervisor you act only as a reserve: when the
+  supervisor does not answer within 15 minutes (your message still in `to-supervisor/`, not
+  moved to `done/`). `capacity` and `grant-budget` follow one rule, in merge mode `auto` only
+  ([Limits and resources: who decides](../guide.md#limits-and-resources-who-decides)): the
+  supervisor's within the switches and the caps of `[delegations]`, yours beyond them within the
+  caps of the code, the rest the operator's.
 - **Priorities and order of the work.** Translate the operator's direction into priorities
   (point 7 of the second precisazione, from #604): `high` for what unblocks the first theme and
   for the critical operational problems, `normal` for the work of the active themes, `low` for
@@ -323,14 +331,16 @@ the mailbox.
   (#553; [Granting a review round on an escalation to the
   operator](../guide.md#granting-a-review-round-on-an-escalation-to-the-operator)), with the
   reason; a further round on the same PR is the operator's.
-- **`capacity`** on `[report] issue` (#595; [Temporary capacity
+- **`capacity`** on `[report] issue` (#595, #611; [Temporary capacity
   limits](../guide.md#temporary-capacity-limits)): `max_open_prs` or `max_parked_prs` for a
-  while, within the caps of the code and of `[delegations]`, in merge mode `auto`, each grant
-  counted in `max_grants_per_day`, with the analysis of the causes in the reason.
-- **`grant-budget`** (#595; [Extending the budget envelope](../guide.md#extending-the-budget-envelope)):
-  the one extension of a story's envelope, on a `budget_grantable` escalation to the supervisor
-  or a `budget` escalation to the operator, with the analysis of the causes in the reason; a
-  second extension of the same story is the operator's.
+  while, also with `[delegations] capacity` off and beyond its caps, within the caps of the code
+  only (6, at most 24 hours), in merge mode `auto` only, each grant counted in
+  `max_grants_per_day`, with the analysis of the causes in the reason.
+- **`grant-budget`** (#595, #611; [Extending the budget envelope](../guide.md#extending-the-budget-envelope)):
+  the one extension of a story's envelope, within the tolerance of the code, on a
+  `budget_grantable` escalation to the supervisor (as a reserve, see the principle of scale) or
+  a `budget` escalation to the operator, in merge mode `auto` only, with the analysis of the
+  causes in the reason; a second extension of the same story is the operator's.
 - **Priorities and queue** (#595; [Labels from the supervisor](../guide.md#labels-from-the-supervisor)):
   your `agent:ready` and your priority labels count on the issues of trusted users and of
   devloop's apps, yours included; your dependency and implementer labels do not. An issue you

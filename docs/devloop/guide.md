@@ -1402,12 +1402,30 @@ more round to that PR with the same command, outside the caps of the delegation
 ([Granting a review round on an escalation to the operator](#granting-a-review-round-on-an-escalation-to-the-operator), #553);
 raising `max_review_rounds` still grants more rounds to every PR.
 
+#### Limits and resources: who decides
+
+The delegated commands that change limits or resources, `/devloop capacity` and
+`/devloop grant-budget`, follow one rule (#611, decided by the operator on the issue): the
+supervisor decides within the delegation, the coordinator beyond it, within the caps of the
+code, and both only in merge mode `"auto"`; the rest is the operator's.
+
+| Who | `capacity` ([Temporary capacity limits](#temporary-capacity-limits)) | `grant-budget` ([Extending the budget envelope](#extending-the-budget-envelope)) |
+|---|---|---|
+| Supervisor (and a trusted user's `capacity`) | Only with `[delegations] capacity` on, within the caps of the delegation (`capacity_max_open_prs`, `capacity_max_parked_prs`, `capacity_max_hours`), in merge mode `"auto"` | Only with `[delegations] budget` on, on a `budget_grantable` escalation, the one extension of the story within the tolerance of the code, in merge mode `"auto"` |
+| Coordinator (with `[roles.coordinator]`) | Also with the switch off or beyond the caps of the delegation, within the caps of the code only (`MAX_CAPACITY`, `MAX_CAPACITY_HOURS`), in merge mode `"auto"` | Also with the switch off, on a `budget` escalation to the operator too, the one extension of the story within the tolerance of the code, in merge mode `"auto"` |
+| Operator | The configured values and the caps themselves; everything in merge mode `"strict"` and `"off"` | The values of the envelope, a second extension of a story; everything in merge mode `"strict"` and `"off"` |
+
+Every grant of the supervisor and of the coordinator counts against the daily cap of the
+delegations (`max_grants_per_day`). A command of either outside these conditions is refused,
+with why, and changes nothing.
+
 #### Extending the budget envelope
 
 A delegation of the operator to the supervisor (#411, [ADR 0005](../adr/0005-deleghe-e-ruoli-degli-agent.md#budget-dopo-365),
 P5-7), **off by default**: `[delegations] budget = false`. It applies only with the
 [budget](reference.md#budget-envelope) on, whose activation is a decision of the operator of its
-own ([Prerequisites of activation](reference.md#prerequisites-of-activation)).
+own ([Prerequisites of activation](reference.md#prerequisites-of-activation)). Who grants an
+extension, and within which caps, is in [Limits and resources: who decides](#limits-and-resources-who-decides).
 
 With `budget = true`, in merge mode `"auto"`, a turn of `implement`, `review`, `fix` or `sync`
 that the envelope of its story refuses goes to `agent:needs-supervisor` as `budget_grantable`
@@ -1482,7 +1500,8 @@ booked.
 With `[roles.coordinator]` the coordinator's identity writes the same command, with the same
 reason. On a `budget_grantable` escalation it counts as the supervisor's. On a `budget`
 escalation to the operator, the coordinator grants the same one extension whatever
-`[delegations] budget` and the merge mode say, when the latest record that put the item in
+`[delegations] budget` says, only in merge mode `"auto"` (#611; in `"strict"` and `"off"` the
+command is refused, as its `capacity`), when the latest record that put the item in
 `agent:needs-operator` is that escalation and every condition holds, each verified then: the
 input of the refused turn unchanged (the PR's head, the issue's base and request), an issue no
 merged devloop PR resolved, the story never extended, an extension that covers the turn and the
@@ -1513,7 +1532,8 @@ P5-8), **off by default**: `[delegations] capacity = false`. It lets the supervi
 `max_open_prs` or `max_parked_prs` for a while, without touching the configuration or the
 overlay, which stay the operator's. It needs `[report] issue`: the command is written there, on
 the issue of the [daily summary](#daily-summary), never on an escalation. With `capacity = true`
-and no `[report] issue` devloop does not start.
+and no `[report] issue` devloop does not start. Who sets a limit, and within which caps, is in
+[Limits and resources: who decides](#limits-and-resources-who-decides).
 
 With `capacity = true`, in merge mode `"auto"`, the supervisor (or a trusted user) writes, as the
 first line of a comment on that issue:
@@ -1570,10 +1590,13 @@ counters and the `next:` lines with the limits in force, the same a tick plans w
 
 **The coordinator** (#595, [ADR 0002, precision of 2026-11-23](../adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-23-compiti-del-coordinatore-594)).
 With `[roles.coordinator]` the coordinator's identity writes the same command, on the same issue,
-under the same rules: the caps of the code (`MAX_CAPACITY`, `MAX_CAPACITY_HOURS`) and the lower
-ones of `[delegations]`, every grant counted against `max_grants_per_day`, merge mode `"auto"`.
+under the same rules, except the caps: the value and the duration are checked against the caps of
+the code only (`MAX_CAPACITY`, `MAX_CAPACITY_HOURS`), not against the lower ones of
+`[delegations]`, which bind the supervisor (#611, [who decides](#limits-and-resources-who-decides)).
+Every grant counts against `max_grants_per_day`, in merge mode `"auto"` only.
 For the coordinator the delegation is on with `[roles.coordinator]`, whatever `[delegations]
-capacity` says: that key stays the switch of the supervisor's. Its records carry
+capacity` says: that key stays the switch of the supervisor's. A grant of the coordinator stops
+applying only above a cap of the code, never above a lower cap of `[delegations]`. Its records carry
 `role: coordinator`, and its limits are in force only while `[roles.coordinator]` is on; the
 supervisor's and the trusted users' only while `capacity = true`. The latest grant of a key
 is the one checked: when its switch is off, the configured value applies, never an earlier grant
@@ -1885,8 +1908,8 @@ of ADR 0002:
 | `fix` | Delegated: as a trusted user's ([Fix requested by the operator or the supervisor](#fix-requested-by-the-operator-or-the-supervisor)) |
 | `hold`, `release` | Delegated: as a trusted user's, in merge mode `auto` ([Holding a merge](#holding-a-merge)) |
 | `grant-round` | Delegated: as a trusted user's, on a `round_grantable` escalation to the supervisor within the caps of the delegation ([Granting a review round](#granting-a-review-round)), and on a `round_limit` escalation to the operator at most **one** round per PR, beyond those caps; a further round on the same PR is the operator's ([Granting a review round on an escalation to the operator](#granting-a-review-round-on-an-escalation-to-the-operator), #553) |
-| `capacity` | Delegated (#595): a temporary capacity limit on `[report] issue`, as the supervisor's, within the same caps and counted in `max_grants_per_day`, in merge mode `auto`; on with `[roles.coordinator]`, whatever `[delegations] capacity` says ([Temporary capacity limits](#temporary-capacity-limits)) |
-| `grant-budget` | Delegated (#595): the one extension of a story's budget envelope, under the conditions and caps of the supervisor's, on a `budget_grantable` escalation to the supervisor and on a `budget` escalation to the operator; a second extension stays the operator's ([Extending the budget envelope](#extending-the-budget-envelope)) |
+| `capacity` | Delegated (#595, #611): a temporary capacity limit on `[report] issue`, beyond the delegation: on with `[roles.coordinator]`, whatever `[delegations] capacity` says, within the caps of the code only (`MAX_CAPACITY`, `MAX_CAPACITY_HOURS`), counted in `max_grants_per_day`, in merge mode `auto` only ([Limits and resources: who decides](#limits-and-resources-who-decides), [Temporary capacity limits](#temporary-capacity-limits)) |
+| `grant-budget` | Delegated (#595, #611): the one extension of a story's budget envelope, within the tolerance of the code, on a `budget_grantable` escalation to the supervisor and on a `budget` escalation to the operator, whatever `[delegations] budget` says, in merge mode `auto` only; a second extension stays the operator's ([Limits and resources: who decides](#limits-and-resources-who-decides), [Extending the budget envelope](#extending-the-budget-envelope)) |
 | labels | Delegated: its `agent:ready` added again and (#595) its priority labels count, as the supervisor's, only on issues opened by a trusted user or by a devloop app; its dependency and implementer labels never count ([Labels from the supervisor](#labels-from-the-supervisor)) |
 | `approve`, `merge-budget`, `reconcile`, `trusted_users` and the keys of trust | Reserved to the operator in person: never the coordinator's. On an escalation they are answered as not applicable and spent; elsewhere they are ignored and logged, as anyone else's; `trusted_users` and the overlay are the operator's |
 | `merge` | The coordinator's reserved merge (#529): [The reserved merge of the coordinator](#the-reserved-merge-of-the-coordinator) |

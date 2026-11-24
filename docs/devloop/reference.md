@@ -189,8 +189,11 @@ false, default false, #412) lets the supervisor set a
 `MAX_CAPACITY_HOURS` in `devloop/supervision.py`. `max_parallel_actions` is not delegated: it
 applies only at a restart. With `[roles.coordinator]` the coordinator sets the same limits and
 grants the same one extension of a budget envelope, also on a `budget` escalation to the
-operator (#595), within these caps and `max_grants_per_day`, whatever `capacity` and `budget`
-say: those keys stay the switches of the supervisor's delegations. `merge` (true or false, default false, #486) lets the supervisor
+operator (#595), within `max_grants_per_day` and only in merge mode `"auto"`, whatever
+`capacity` and `budget` say: those keys stay the switches of the supervisor's delegations, and
+`capacity_max_open_prs`, `capacity_max_parked_prs` and `capacity_max_hours` bind the supervisor
+only, while the coordinator's limits stay within the caps of the code (#611,
+[who decides](guide.md#limits-and-resources-who-decides)). `merge` (true or false, default false, #486) lets the supervisor
 [merge a PR whose merge is the operator's](guide.md#delegated-merge) with `/devloop merge <sha>
 <reason>`, when every condition of the delegation holds; it needs
 `review_policy.advisory_reviewer`. `max_merges_per_day` (default 5) may only lower the cap of the
