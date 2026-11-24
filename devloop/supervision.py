@@ -65,6 +65,14 @@ outside the caps of the delegation and without changing ``max_review_rounds``. T
 identity may do the same at most ``MAX_COORDINATOR_OPERATOR_ROUNDS`` times per PR (the
 operator's decision on #553); any further round on that PR stays the operator's. A command that
 does not apply is always answered, with how to resume.
+
+The coordinator's identity closes findings on an ``open_findings`` escalation to the operator
+(#606, ADR 0002, second precision of 2026-11-23, point 3): ``/devloop finding
+<round/reviewer/ID> resolved|withdrawn <reason>``, the form of the operator's closure, as the
+first line of a comment, which may hold more such lines, one per finding. Each needs its reason;
+a finding a ``trust_policy`` review opened or kept open stays the operator's, and so does every
+finding while a reviewer of the latest round asks for changes on the head. When no finding is
+left open the PR goes back to ``agent:review``, where the recorded approval is applied again.
 """
 
 import re
@@ -90,7 +98,7 @@ CRITICAL = {
     'operator_decision': 'decisione dell\'operatore chiesta dal controllo di prontezza',
     'untrusted': 'autore non fidato o testo modificato dopo `agent:ready`',
     'reviewer_decision': 'un reviewer chiede una decisione dell\'operatore',
-    'open_findings': 'finding aperti che solo l\'operatore può chiudere',
+    'open_findings': 'finding aperti che nessun agent può più chiudere',
     'review_level': 'reviewer indipendenti insufficienti per il livello di review',
     'level_zero': 'promozione al livello 0 non possibile',
     'protected_paths': 'modifica a `protected_paths`',
@@ -114,6 +122,9 @@ CRITICAL = {
     'host_tests': 'test rossi in locale anche sulla base, verdi nella sua CI',
 }
 UNCERTAIN_TURN = 'uncertain_turn'  # a turn refused by the block on uncertain outcomes (#362)
+# An approval that leaves open findings no agent can close any more: the operator's, and the
+# coordinator's but for those the trust policy holds (#606).
+OPEN_FINDINGS = 'open_findings'
 # Tests red on the branch and on its base commit, green in the CI of that commit (#497).
 HOST_TESTS = 'host_tests'
 
@@ -186,6 +197,11 @@ MERGE_OPINIONS = ('ok', 'dubbi')
 DESIGN_LABEL = 'phase:design'
 
 RETRY, ACCEPT_DEFAULTS, DECIDE, ESCALATE = 'retry', 'accept-defaults', 'decide', 'escalate'
+# The coordinator's closure of findings on an ``open_findings`` escalation (#606): the form of the
+# operator's ``/devloop finding`` (``review.FINDING_COMMAND``), applied as a command of the
+# escalation. Not in ``COMMANDS``: a trusted user's line stays the closure it always was, read
+# while the PR is in ``agent:review``, ``agent:changes`` or ``agent:ready-to-merge``.
+FINDING = 'finding'
 GRANT_ROUND = 'grant-round'
 GRANT_BUDGET = 'grant-budget'
 CAPACITY = 'capacity'
@@ -211,14 +227,17 @@ LONG_TEXT = (DECIDE, GRANT_ROUND, GRANT_BUDGET, CAPACITY, MERGE, MERGE_BUDGET, R
 # ``capacity`` within the caps of the supervisor's delegation, on with ``[roles.coordinator]``
 # whatever ``[delegations] capacity`` says (``_capacity_command``); ``grant-budget`` the one
 # extension of a story, on a ``budget_grantable`` escalation as the supervisor's and on a
-# ``budget`` escalation to the operator (``_operator_grant_budget``). ``vote`` is the substitute
-# vote in a conclave waiting for it (#605, ADR 0002, second precision of 2026-11-23, point 3),
-# read only there (``ConclaveMixin._conclave_substitute``), never on an escalation.
+# ``budget`` escalation to the operator (``_operator_grant_budget``). ``finding`` since #606 (ADR
+# 0002, second precision of 2026-11-23, point 3): the closure of findings on an ``open_findings``
+# escalation, never of one the trust policy holds, nor while a reviewer asks for changes on the
+# head (``_coordinator_findings``). ``vote`` is the substitute vote in a conclave waiting for it
+# (#605, ADR 0002, second precision of 2026-11-23, point 3), read only there
+# (``ConclaveMixin._conclave_substitute``), never on an escalation.
 # ``authorize`` is the authorization of an issue (#607, same precision, point 1), read only by
 # ``Dispatcher._do_authorize`` (``authorization``), never on an escalation; from any other
 # identity it is refused and recorded.
 COORDINATOR_DELEGATED = (RETRY, REREVIEW, 'recheck', 'fix', 'hold', 'release', GRANT_ROUND,
-                         GRANT_BUDGET, CAPACITY, ACCEPT_DEFAULTS, DECIDE, MERGE, 'vote',
+                         GRANT_BUDGET, CAPACITY, ACCEPT_DEFAULTS, DECIDE, MERGE, FINDING, 'vote',
                          'authorize')
 COORDINATOR_RESERVED = ('approve', MERGE_BUDGET, 'reconcile')
 # The name of a command of the coordinator's identity outside ``COMMANDS`` (#528), such as
@@ -226,8 +245,10 @@ COORDINATOR_RESERVED = ('approve', MERGE_BUDGET, 'reconcile')
 # refusal, so it is kept to a plain word that fits a code span.
 COMMAND_NAME = re.compile(r'[a-z][a-z0-9-]{0,31}')
 # What a supervision record says happened to a command.
+# ``closed``: the coordinator's closure of findings (#606); it does not move the escalation it
+# answers, which stays the anchor of the commands that follow while findings stay open.
 OUTCOMES = ('applied', 'accepted', 'decided', 'escalated', 'refused', 'limit', 'granted',
-            'merged')
+            'merged', 'closed')
 
 
 def coordinator_refusal(command):
@@ -244,10 +265,10 @@ def coordinator_refusal(command):
 
 def recorded_command(command, outcome):
     """Whether a ``supervision`` record may carry ``command`` with ``outcome``: a command of
-    ``COMMANDS``, or, refused, any other of the coordinator's identity (``coordinator_command``,
-    #528), so that its refusal spends it."""
-    return command in COMMANDS or (outcome == 'refused' and isinstance(command, str)
-                                   and COMMAND_NAME.fullmatch(command) is not None)
+    ``COMMANDS``, the coordinator's ``finding`` (#606), or, refused, any other of the
+    coordinator's identity (``coordinator_command``, #528), so that its refusal spends it."""
+    return command in (*COMMANDS, FINDING) or (outcome == 'refused' and isinstance(command, str)
+                                               and COMMAND_NAME.fullmatch(command) is not None)
 
 
 def critical(cls):

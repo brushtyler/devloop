@@ -198,6 +198,8 @@ L'issue 4 è indipendente dalle altre. La 1 viene dopo #595, che tocca lo stesso
 
 **Attuazione.** Questa precisazione non cambia il codice. Finché le issue del piano non sono implementate, devloop si comporta come prima: il dispatcher non conosce `/devloop authorize` né `agent:needs-coordinator`, rifiuta dall'identità del coordinatore i comandi che non sono nel suo perimetro chiuso, e le escalation `open_findings` e `review_level` restano all'operatore.
 
+**Attuazione del punto 3 per `open_findings` (#606).** Implementata con #606, approvata dall'operatore con il [`/devloop approve` su #606](https://github.com/brushtyler/devloop/issues/606#issuecomment-7119124203). `finding` entra in `COORDINATOR_DELEGATED`: con `[roles.coordinator]` il coordinatore chiude i finding di un'escalation `open_findings` con la forma della chiusura dell'operatore, `/devloop finding <round/reviewer/ID> resolved|withdrawn <motivo>`, come prima riga di un commento sulla PR (una riga per finding). Il motivo è obbligatorio e finisce nel record `finding` della PR (`by: coordinator`) e nel riepilogo giornaliero. Il comando è rifiutato per intero se un reviewer dell'ultimo round non approva l'head (il coordinatore chiude un finding, non scavalca un verdetto), per un finding che una review `trust_policy` apre o tiene aperto (resta dell'operatore), e da qualunque altra identità. Quando non resta nessun finding aperto, la PR torna in `agent:review` e l'approvazione registrata viene riapplicata. Guida: [Closing findings as the coordinator](../devloop/guide.md#closing-findings-as-the-coordinator).
+
 ## Piano
 
 Questo ADR non cambia il codice. L'implementazione è in issue separate:
