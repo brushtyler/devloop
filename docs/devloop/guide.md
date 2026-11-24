@@ -1975,8 +1975,14 @@ and for each one:
   /devloop finding <round/reviewer/ID> resolved|withdrawn <reason>
   ```
 
-- **still valid**: it does not close it and asks for a fix with `/devloop fix <request>`, which
-  sends the PR back to the implementer ([Fix requested by the operator or the supervisor](#fix-requested-by-the-operator-or-the-supervisor)).
+- **still valid**: it does not close it and asks for a fix with `/devloop fix <request>`, in a
+  comment of its own, then removes `agent:needs-operator` and adds `agent:changes`. devloop
+  reads a fix command only on a PR in `agent:review` or `agent:changes`, never in
+  `agent:needs-operator` ([Fix requested by the operator or the supervisor](#fix-requested-by-the-operator-or-the-supervisor));
+  in `agent:changes` the fix answers the request and every finding still open too, and sends
+  the PR back to the implementer. The findings judged resolved are closed first, and the labels
+  change only once devloop has answered that closure: a closure applies only on the
+  `open_findings` escalation, and the fix then answers only the findings still valid.
 
 The dispatcher applies the command as a command of the escalation, with the PR and its thread
 read again, whole or not at all. It refuses it, answered and spent, with the PR left with the

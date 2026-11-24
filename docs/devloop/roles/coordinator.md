@@ -270,8 +270,13 @@ the mailbox.
     `/devloop finding <round/reviewer/ID> resolved|withdrawn <reason>`; one more line per
     finding to close in the same comment. The reason is required: it goes in the record of the
     pull request and in the daily summary;
-  - **still valid**: do not close it; ask for a fix with `/devloop fix <request>`, and the pull
-    request goes back to the implementer.
+  - **still valid**: do not close it; ask for a fix with `/devloop fix <request>`, in a comment
+    of its own, then remove `agent:needs-operator` and add `agent:changes`: devloop reads the
+    command only in `agent:review` or `agent:changes`, never in `agent:needs-operator`. In
+    `agent:changes` the fix answers your request and every finding still open too, and the pull
+    request goes back to the implementer. Close first the findings you judged resolved, and
+    change the labels only once devloop has answered that closure: it applies a closure only on
+    the `open_findings` escalation, and the fix then answers only the findings still valid.
 
   When no finding is left open, devloop puts the pull request back in `agent:review` and applies
   the recorded approval again; the promotion and the merge follow their rules. devloop refuses
