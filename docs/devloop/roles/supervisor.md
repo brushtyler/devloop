@@ -53,10 +53,43 @@ Two ways, each for its use:
 
 ## Watching
 
-You follow the continuous stream: `devloop watch` with your state file (the default of devloop,
-`watch-state.json` of the `state_dir`), the escalations, `run.log`, and your mailbox
-`to-supervisor/` at each wake-up. The coordinator does not share your watch: its wake-up has a
-state file of its own, so it never takes your events.
+You follow the continuous stream: every event of `devloop watch`, the escalations, `run.log`,
+and your mailbox `to-supervisor/`. Run the wake-up of the roles as a background command (for
+Claude Code, a Bash command with `run_in_background`), from the root copy that
+`setup-supervisor.sh` installs:
+
+```bash
+bash /usr/local/lib/devloop-supervisor/host/role-wait.sh --role supervisor   # SUPERVISOR_OPS_DIR
+```
+
+On the host of this repository (`PROJECT=devloop`) the copy is
+`/usr/local/lib/devloop-supervisor-devloop`: use the command of the first message of your
+session.
+
+It ends at the first of: a message in `to-supervisor/` (`casella:`, which it reports without
+consuming it, at once), any event of `devloop watch` (`evento:`), the service not active
+(`servizio:`), or the end of the period, one hour by default (`periodo:`, `--period <seconds>`).
+Read its lines, act, then start it again. Exit 1 (`errore:`) means it cannot read GitHub: tell
+the operator. It reads GitHub with `devloop-pinned watch` as devloop's user and your state file,
+the default of devloop, `watch-state.json` of the `state_dir`. The coordinator does not share
+your watch: its wake-up has a state file of its own, so it never takes your events.
+
+Each start writes your heartbeat in `heartbeat/supervisor` of the mailbox: keep the wake-up
+running. A timer of the host, the watchdog of the roles, reads the heartbeats every 5 minutes
+(Stopped roles).
+
+## Stopped roles
+
+The watchdog of the roles (`devloop-role-watchdog@<project>`, ADR 0002, second precision of
+2026-11-23, point 6) sees a role as stopped when its heartbeat is missing or older than two of
+its periods. It only detects: it has no GitHub key and changes nothing.
+
+- When the coordinator is stopped, it leaves a message in `to-supervisor/` that names the project
+  and alerts the operator. Tell the operator on GitHub (`agent:needs-operator` on the journal of
+  the project) if the coordinator does not come back; you do not start its session.
+- When you were stopped too, the message is in both mailboxes: read it at startup.
+- It warns again only when the state changes. If the watchdog itself fails, a message in both
+  mailboxes says so: tell the operator.
 
 ## Inputs
 

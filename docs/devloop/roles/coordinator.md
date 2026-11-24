@@ -64,23 +64,41 @@ periodic check. Run the wake-up as a background command (for Claude Code, a Bash
 `run_in_background`), from the root copy that `setup-coordinator.sh` installs:
 
 ```bash
-bash /usr/local/lib/devloop-coordinator/host/coordinator-wait.sh   # COORDINATOR_OPS_DIR
+bash /usr/local/lib/devloop-coordinator/host/role-wait.sh --role coordinator   # COORDINATOR_OPS_DIR
 ```
 
 On the host of this repository (`PROJECT=devloop`, #563) the copy is
 `/usr/local/lib/devloop-coordinator-devloop`: use the command of the first message of your
-session.
+session. `coordinator-wait.sh`, the wake-up of before, is the same command.
 
 It ends at the first of: a message in `to-coordinator/` (`casella:`, which it reports without
-consuming it), an event of yours on GitHub (`evento:`: `agent:needs-operator` added, "il merge
-spetta all'operatore", a comment on the issue of the alarms `[run].alert_issue`, an error of the
-watch), a new line of `run.log` with a `Traceback`, an `ALERT:`, a `401` or the refusal of the
-start (`log:`), the service not active (`servizio:`), or the end of the period, 4 hours by
+consuming it, at once), an event of yours on GitHub (`evento:`: `agent:needs-operator` added, "il
+merge spetta all'operatore", a comment on the issue of the alarms `[run].alert_issue`, an error
+of the watch), a new line of `run.log` with a `Traceback`, an `ALERT:`, a `401` or the refusal of
+the start (`log:`), the service not active (`servizio:`), or the end of the period, one hour by
 default (`periodo:`, `--period <seconds>`). Read its lines, act, then start it again. Exit 1
 (`errore:`) means it cannot read GitHub: tell the operator. It reads GitHub with
 `devloop-pinned watch` as devloop's user and a state file of its own,
 `coordinator-watch-state.json` of the `state_dir`: never run `devloop watch` with the
 supervisor's state file, whose events would be lost to the supervisor.
+
+Each start writes your heartbeat in `heartbeat/coordinator` of the mailbox: keep the wake-up
+running. A timer of the host, the watchdog of the roles, reads the heartbeats every 5 minutes
+(Stopped roles).
+
+## Stopped roles
+
+The watchdog of the roles (`devloop-role-watchdog@<project>`, ADR 0002, second precision of
+2026-11-23, point 6) sees a role as stopped when its heartbeat is missing or older than two of
+its periods. It only detects: it has no GitHub key and changes nothing.
+
+- When the supervisor is stopped, it leaves a message in `to-coordinator/` that names the
+  project. Check what the supervisor last did (the journal, `devloop status`) and tell the
+  operator on GitHub if it does not come back; you do not start its session.
+- When you were stopped too, the message is in both mailboxes and the operator was alerted: read
+  it at startup.
+- It warns again only when the state changes. If the watchdog itself fails, a message in both
+  mailboxes says so: check the host (`check-host.sh --read-only`) and tell the operator.
 
 ## GitHub
 
