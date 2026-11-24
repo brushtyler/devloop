@@ -162,6 +162,39 @@ class RedactorTests(unittest.TestCase):
         self.assertEqual(back['votes'][0]['proposal_hash'], bound)
         self.assertEqual(back['issue_hash'], 'h' * 64)
 
+    def test_the_identifiers_of_a_record_stay(self):
+        # R3-1: a service named as a step, a user named as an agent. In a record they replace
+        # only its texts: its identifiers, enumerations and logins stay, and the record is read
+        # back and used as before. Its paths and key files are replaced wherever they are.
+        record = conclave.new_record({'kind': 'blocked', 'comment': 5, 'agent': 'claude',
+                                      'step': 'fix'}, 'fix', ['claude', 'codex', 'agy'], 7,
+                                     'h' * 64, 'a' * 40, 'a' * 40, conclave.text_hash(''))
+        conclave.apply_proposal(record, {
+            'reserved': False, 'resolution': 'Riavviare fix come claude in /srv/u-dl/x.',
+            'reserved_reason': '', 'operator_question': '', 'options': []})
+        body = conclave.render(record)
+        r = redact.Redactor(paths=[('DEVLOOP_HOME', '/srv/u-dl')],
+                            users=[('AGENT_USER', 'claude')], names=[('SERVICE_NAME', 'fix')])
+        back = markdown.read_marker(r.redact(body), 'conclave')
+        self.assertIsNotNone(back)
+        self.assertEqual((back['step'], back['block']['step'], back['block']['agent']),
+                         ('fix', 'fix', 'claude'))
+        self.assertEqual([back['proposal']['agent']] + [v['agent'] for v in back['votes']],
+                         ['claude', 'codex', 'agy'])
+        resolution = 'Riavviare $SERVICE_NAME come <AGENT_USER> in $DEVLOOP_HOME/x.'
+        self.assertEqual(back['proposal']['resolution'], resolution)
+        self.assertEqual(back['hash'], conclave.text_hash(resolution))
+        self.assertEqual(conclave.consistent(back)[0], conclave.consistent(record)[0])
+        # A ledger turn of that agent, and a single path or key file in a record.
+        turn = {'type': 'turn', 'state': 'open', 'kind': 'fix', 'agent': 'claude',
+                'started_at': '2026-11-24T00:00:00Z', 'ended_at': None, 'outcome': None,
+                'telemetry': None, 'cwd': '/srv/u-dl/x',
+                'key': f'{PREFIX}implementer.2026-11-23.private-key.pem'}
+        read = markdown.read_marker(r.redact(ledger.render(turn)), 'ledger')
+        self.assertEqual(read, dict(turn, cwd='$DEVLOOP_HOME/x', key="<chiave di un'app>"))
+        # Outside a record the text is redacted as before.
+        self.assertEqual(r.redact('fix claude'), '$SERVICE_NAME <AGENT_USER>')
+
     def test_the_service_name_is_a_parameter(self):
         # R1-3: the name of the service, alone and in the name of its unit, unless it is the
         # documented default.

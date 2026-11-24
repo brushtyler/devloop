@@ -1552,7 +1552,10 @@ body published. It covers every text: the output of the tests in a `host_tests` 
   inside a path or the name of a unit too.
 - The records of the markers that end a body are Base64 that anyone decodes: their texts (an
   error, a command, a finding) pass through the same substitutions, and the marker is encoded
-  again; keys, numbers, hashes and logins stay. A conclave record binds its proposal by its hash:
+  again; keys, numbers, hashes and logins stay. A string of one word is an identifier the
+  controller reads (a step, an agent, a verdict): its paths and key files are replaced, never
+  the service's name nor a user's, which may be that very word (a service named `fix`, a user
+  named `claude`). A conclave record binds its proposal by its hash:
   when the proposal's text changes, the hashes bound to it (of the record, of the proposal, of
   its votes) follow the published text, so the record read back still holds together.
 - The values come from the map `redactions.json` in the `state_dir`, which

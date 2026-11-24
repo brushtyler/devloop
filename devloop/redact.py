@@ -23,8 +23,10 @@ the names of the parameters of ``ops/params.env`` in their place:
 
 The records of the markers that end a body (``markdown.publishable``) are encoded in Base64,
 and anyone decodes them: their texts (an error, a command, a finding) pass through the same
-substitutions before the marker is encoded again. Their keys stay as they are, and the other
-values (numbers, hashes, SHAs, logins) hold nothing to replace. A conclave record binds its
+substitutions before the marker is encoded again. Their keys stay as they are, and so do the
+names and users in a string of one word: an identifier the controller reads (a ``step``, an
+``agent``) may be a service's or a user's very name; its paths and key files are replaced
+anyway. Numbers, hashes and SHAs hold nothing to replace. A conclave record binds its
 proposal by its hash: when the text of the proposal changes, the hashes bound to it follow
 (``_rebind_conclave``).
 
@@ -150,14 +152,17 @@ class Redactor:
         out.append(self._text(text[end:]))
         return ''.join(out)
 
-    def _text(self, text):
-        """``redact`` of a text without markers."""
+    def _text(self, text, words=True):
+        """``redact`` of a text without markers; without ``words``, its paths and key files
+        alone, never the other names nor the users (``_value``)."""
         if not text:
             return text
         if self._path_re is not None:
             names = dict(self.paths)
             text = self._path_re.sub(lambda m: '$' + names[m.group(1)], text)
         text = KEY_FILE.sub(self._key, text)
+        if not words:
+            return text
         if self._name_re is not None:
             names = dict(self.names)
             text = self._name_re.sub(lambda m: '$' + names[m.group(1)], text)
@@ -182,8 +187,13 @@ class Redactor:
         return marker(match.group('kind'), redacted)
 
     def _value(self, value):
+        """``value``, of the payload of a record, redacted. A string of one word is an
+        identifier, an enumeration, a login or a hash the controller reads (a ``step``, an
+        ``agent``, a ``verdict``): a service or a user may have its very name (R3-1), so only
+        its paths and key files are replaced, which no identifier is. The other names and the
+        users are replaced in the texts, the strings of more than one word."""
         if isinstance(value, str):
-            return self._text(value)
+            return self._text(value, words=any(c.isspace() for c in value))
         if isinstance(value, list):
             return [self._value(item) for item in value]
         if isinstance(value, dict):
