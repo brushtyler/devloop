@@ -131,6 +131,8 @@ state file of its own, so it never takes your events.
   use the names of the parameters (`$STATE_DIR`, `$DEVLOOP_KEY_DIR`, `$DEVLOOP_HOME`,
   `$AGENT_HOME`, …) or a generic description (AGENTS.md, ["Dettagli dell'host nei testi
   pubblici"](../../../AGENTS.md#dettagli-dellhost-nei-testi-pubblici)). Never quote a text that
-  holds one, not even to report it.
+  holds one, not even to report it. `scripts/supervisor-token.py` refuses a text that still
+  holds an absolute path of the host or a key file (#583): fix the text; its
+  `--allow-host-details`, logged, is only for a case the operator asked for.
 - Never run on the host anything outside the sudoers above, and never a step on the host: those
   are the agent of the host's, launched by the operator ([host runbook](host.md)).

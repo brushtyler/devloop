@@ -1514,6 +1514,48 @@ environment are kept. This prevents accidental use of the operator's credentials
 deliberate access: code running as the same system user can still read files. The isolation
 comes from the [agent user](#agent-user), which cannot read the keys at all.
 
+### Host details in the published texts
+
+The repository is public (#583): what devloop publishes names the parameters of
+`ops/params.env`, not the paths of the host. At the start devloop gives `Identities` a redactor
+(`devloop/redact.py`), and every client it hands out passes the text of its writes (`comment`,
+`edit_comment`, `submit_review`, `create_pr` with its title, the alerts) through it, before the
+[publication outbox](protocol.md#publication-outbox), which so records and reconciles the very
+body published. It covers every text: the output of the tests in a `host_tests` or
+`tests_failed` escalation, the tail of the local tests in a record, the agents' texts.
+
+| On the host | In the published text |
+|---|---|
+| the `state_dir`, worktrees included | `$STATE_DIR`, e.g. `$STATE_DIR/worktrees/issue-570` |
+| the key_dirs | `$DEVLOOP_KEY_DIR`, `$SUPERVISOR_KEY_DIR`, `$COORDINATOR_KEY_DIR` |
+| the homes of the roles' users | `$DEVLOOP_HOME`, `$AGENT_HOME`, `$SUPERVISOR_HOME`, `$COORDINATOR_HOME` |
+| the other directories and files of ops | `$COORDINATION_DIR`, `$SUDOERS_FILE`, `$SYSTEMD_DIR`, ... |
+| a role's user, standing alone | `<DEVLOOP_USER>`, `<AGENT_USER>`, ... |
+| a key file, `<slug>.<date>.private-key.pem` | the role of its app: `<chiave dell'app implementer>` |
+
+- The longest path is replaced first: the `state_dir` lies in devloop's home, and becomes
+  `$STATE_DIR`, never `$DEVLOOP_HOME/...`. A path ends where a name does (`/home/devloop` does
+  not match `/home/devloop-agent`), and a path with fewer than two names (`/`, `/srv`) is never
+  replaced. `$HOME` alone is never used: a traceback holds the homes of several users.
+- A user is replaced only standing alone (not inside a name or a path), and never when it is a
+  documented default (`devloop`, `devloop-agent`, `supervisor`, `coordinator`), a common word of
+  devloop's own texts, a name shorter than three characters, or one of `trusted_users`.
+- The values come from the map `redactions.json` in the `state_dir`, which
+  `ops/host/setup-devloop.sh` writes from the resolved parameters (600, devloop's; it reads no
+  key). The runtime values of the dispatcher prevail for its `state_dir` and its key_dir
+  (`$DEVLOOP_APP_KEY_DIR`, else `[apps] key_dir`), as given and resolved; its own user and home,
+  and the user of `[agent_user] name` with its home, fill what the map lacks. Without the map
+  (or with one that is not valid, or a link) devloop says so in its log at the start and
+  replaces only those runtime values.
+- The texts already published are not rewritten: the rule holds for the new ones, and the
+  cleanup of the old ones is the operator's. With the defaults, the names of the users and many
+  paths are in the public documentation already: the substitution protects a host with values
+  that are not the defaults.
+
+`ops/host/check-host.sh` applies the same rule to its output, unless `--verbose`, and the role
+scripts that publish on their own refuse a text that still holds a path of the host
+([The supervisor app](#the-supervisor-app), [The coordinator app](#the-coordinator-app)).
+
 ### Identities of a project
 
 The identities and the trust of a project are the operator's, in the
@@ -1851,6 +1893,13 @@ model = "claude-opus-5-5"
   supervisor sets `$DEVLOOP_APP_KEY_DIR` to its own. Without `--perm` the token gets `issues=write` and
   `pull_requests=write`; only `issues` and `pull_requests` (read or write) and `metadata=read`
   may be asked for. The token reaches the command through `GH_TOKEN` only, and is never printed.
+  Before any key is read, the text the command publishes (`--body`, `--body-file` or `-F`,
+  standard input with `-`, `--input` and the fields of `gh api`) is checked (#583): one that
+  still holds an absolute path of the host (under `/home/`, `/etc/`, `/var/lib/`,
+  `/usr/local/lib/`, `/run/`, `/root/`) or the name of a key file is refused, with the
+  [names of the parameters](#host-details-in-the-published-texts) to put in their place.
+  `--allow-host-details` publishes it anyway; each use is written on standard error and in the
+  system log (syslog, tag `devloop-publication`), with the command but not the details.
 - Without the table (the key of an agent, or no `roles.supervisor`), nothing changes: the app is
   only declared, and its comments and labels count for no role.
 
@@ -1918,7 +1967,9 @@ model = "gpt-6.1-sol"
   `--perm` the token gets `issues=write` and `pull_requests=write`; only `issues` and
   `pull_requests` (read or write) and `actions`, `checks`, `statuses` and `metadata` read may be
   asked for, any other permission is refused
-  ([ops/README.md](../../ops/README.md#10-coordinatore-facoltativo)):
+  ([ops/README.md](../../ops/README.md#10-coordinatore-facoltativo)). A text with a path of the
+  host or a key file is refused as the supervisor's script refuses it, and
+  `--allow-host-details` publishes it anyway, logged (#583):
 
   ```
   DEVLOOP_APP_KEY_DIR=<COORDINATOR_KEY_DIR> python3 scripts/coordinator-token.py --state-dir <STATE_DIR> -- gh issue comment <ISSUE> --body-file <FILE>

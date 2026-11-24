@@ -128,7 +128,10 @@ DEVLOOP_APP_KEY_DIR=<key_dir> python3 scripts/coordinator-token.py --state-dir <
   `$DEVLOOP_KEY_DIR`, `$DEVLOOP_HOME`, `$AGENT_HOME`, …) or a generic description, as AGENTS.md
   says (["Dettagli dell'host nei testi
   pubblici"](../../../AGENTS.md#dettagli-dellhost-nei-testi-pubblici)): the values of the first
-  message of your session stay in your commands, never in a text.
+  message of your session stay in your commands, never in a text. `check-host.sh --read-only`
+  already prints the names of the parameters (#583), and `scripts/coordinator-token.py` refuses a
+  text that still holds an absolute path of the host or a key file: fix the text; its
+  `--allow-host-details`, logged, is only for a case the operator asked for.
 
 When GitHub or the script does not work (an error of the token, a `401`), write nothing on
 GitHub in another way: tell the operator, with the text to publish, and alert the supervisor in

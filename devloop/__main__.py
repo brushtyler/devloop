@@ -12,7 +12,7 @@ import time
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
-from . import activity, follow, pin, report, runloop, token, unavailability, watch
+from . import activity, follow, pin, redact, report, runloop, token, unavailability, watch
 from .agents import AgentRunner, isolated_env
 from .agentuser import GH_CONFIG, SHARED_DIR, WORKTREES_DIR, AgentUser, AgentUserError, SharedDir
 from .agentuser import check as check_isolation
@@ -422,6 +422,9 @@ def build(args):
     except OSError as exc:
         raise ConfigError(f'GitHub App key: {exc}. Set $DEVLOOP_APP_KEY_DIR or remove the app '
                           'from [apps] to use the ambient gh login.') from exc
+    # The published texts name the parameters, not the host's paths (#583): the map of ops in
+    # state_dir, with the dispatcher's own state_dir and key_dir prevailing.
+    identities.redactor = redact.runtime(cfg, state, log=log)
     # Agents and the test command never see the operator's GitHub credentials. With an agent
     # user (#415) they run as that user, and what they need outside their worktree is in the
     # shared directory, the only entry of state_dir besides the worktrees that user reaches.
@@ -749,10 +752,13 @@ def run_report(parser, args):
     except ConfigError as exc:
         sys.exit(f'devloop: invalid config: {exc}')
     try:
-        gh = Identities.from_config(cfg).github(DISPATCHER)
+        identities = Identities.from_config(cfg)
     except OSError as exc:
         sys.exit(f'devloop: invalid config: GitHub App key: {exc}. Set $DEVLOOP_APP_KEY_DIR or '
                  'remove the app from [apps] to use the ambient gh login.')
+    if state is not None:
+        identities.redactor = redact.runtime(cfg, state, log=log)  # #583
+    gh = identities.github(DISPATCHER)
     trust = watch.Trust.from_config(cfg)
     try:
         if args.publish:

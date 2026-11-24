@@ -23,7 +23,7 @@ import tomllib
 import unittest
 from pathlib import Path
 
-from devloop import agentuser, apps
+from devloop import agentuser, apps, redact
 from devloop.config import load_config
 from helpers import ssdlc_project
 
@@ -218,12 +218,29 @@ exec {shlex.quote(STAT)} "$@"''')
         path.write_text('\n'.join(lines) + '\n')
         return path
 
-    def run_script(self, script, *args, arch='aarch64'):
+    def run_script(self, script, *args, arch='aarch64', redacted=False):
+        """``script`` with ``args``. check-host.sh shows the real paths (--verbose), which the
+        tests of its checks compare, unless ``redacted``: its default output, with the names of
+        the parameters in their place (#583)."""
+        if script == 'host/check-host.sh' and not redacted:
+            args = ('--verbose', *args)
         env = dict(os.environ, PATH=f'{self.bin}:{os.environ.get("PATH", "/usr/bin:/bin")}',
                    OPS_TEST_CALLS=str(self.calls), OPS_OS_RELEASE=str(self.release),
                    OPS_ARCH=arch, LC_ALL='C.UTF-8')
         return subprocess.run([BASH, str(OPS / script), *args], capture_output=True, text=True,
                               env=env, stdin=subprocess.DEVNULL, timeout=120)
+
+    def redactions(self, params):
+        """The map of the substitutions (#583) that ``ops_redactions`` of ops/lib.sh builds
+        from the parameters ``params``, as setup-devloop.sh writes it."""
+        env = dict(os.environ, PATH=f'{self.bin}:{os.environ.get("PATH", "/usr/bin:/bin")}',
+                   OPS_TEST_CALLS=str(self.calls), LC_ALL='C.UTF-8')
+        done = subprocess.run(
+            [BASH, '-c', f'. {shlex.quote(str(OPS / "lib.sh"))}; '
+             f'PARAMS_FILE={shlex.quote(str(params))}; ops_load_params; ops_redactions'],
+            capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL, timeout=60)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return done.stdout
 
     def lock_dir(self, path):
         """The directory of the repository locks as setup-devloop.sh leaves it (ADR 0006, R8),
@@ -1551,6 +1568,13 @@ class DryRunTests(OpsTestCase):
         self.assertIn(f'[dry-run] scriverebbe {state}/config.local.toml (mode 600, proprietario '
                       'opsdry-nouser)', out)
         self.assertIn('    |   "autoUpdates": false,', out)
+        # #583: the map of the substitutions of the published texts, from the parameters only,
+        # devloop's alone (600).
+        self.assertIn(f'[dry-run] scriverebbe {state}/redactions.json (mode 600, proprietario '
+                      'opsdry-nouser)', out)
+        self.assertIn(f'    |     "STATE_DIR": "{state}",\n', out)
+        self.assertIn(f'    |     "DEVLOOP_KEY_DIR": "{self.home}/devloop/.ghapps",\n', out)
+        self.assertIn('    |     "DEVLOOP_USER": "opsdry-nouser",\n', out)
         # The CLIs are the agent user's (#415).
         self.assertIn("le CLI e i loro login sono dell'utente devloop-agent (#415): "
                       'setup-agent-user.sh', out)
@@ -1644,6 +1668,9 @@ class DryRunTests(OpsTestCase):
         # user and the supervisor are other users, and sudo is sudo-rs or the classic one.
         params = self.params(DEVLOOP_USER=ME, AGENT_USER=FAKE_AGENT,
                              SUPERVISOR_USER=FAKE_SUPERVISOR)
+        # The map of the substitutions of the published texts (#583), as it would be written.
+        self.fake_host('classic sudo', users=(FAKE_AGENT, FAKE_SUPERVISOR))
+        (state / 'redactions.json').write_text(self.redactions(params))
         for sudo in SUDO_FLAVORS:
             self.fake_host(sudo, users=(FAKE_AGENT, FAKE_SUPERVISOR))
             for _ in range(2):
@@ -3972,12 +3999,18 @@ exec "$@"''')
         self.assertEqual({call.rsplit(' -- ', 1)[1] for call in calls}, {'/usr/bin/bash'})
         self.assertIn('Sola lettura (--read-only): nessuna CLI avviata, niente devloop apps.', out)
         self.assertIn('  prove delle CLI saltate (--read-only): nessuna CLI avviata\n', out)
-        self.assertIn(f'  ok: {self.agent}/.local/bin/agy presente\n', out)
-        self.assertIn(f'  ok: {self.supervisor}/.local/bin/claude presente\n', out)
+        # Without --verbose, as the coordinator runs it, the output names the parameters, not
+        # the paths of the host (#583): it can be quoted as evidence.
+        self.assertIn('  ok: $AGENT_HOME/.local/bin/agy presente\n', out)
+        self.assertIn('  ok: $SUPERVISOR_HOME/.local/bin/claude presente\n', out)
         self.assertIn('==> GitHub App (devloop apps)\n  saltato (--read-only)\n', out)
         # Its parameters and templates are the copy's.
-        self.assertIn(f'  ok: {sudoers} coincide con ops/host/sudoers-coordinator\n', out)
-        self.assertIn(f"  ok: l'utente {FAKE_COORDINATOR} esiste\n", out)
+        self.assertIn('  ok: $COORDINATOR_SUDOERS_FILE coincide con ops/host/sudoers-coordinator\n',
+                      out)
+        self.assertIn("  ok: l'utente <COORDINATOR_USER> esiste\n", out)
+        for path in (self.agent, self.supervisor, self.state, sudoers):
+            self.assertNotIn(str(path), out + done.stderr)
+        self.assertNotIn(FAKE_COORDINATOR, out + done.stderr)
         self.assertNotIn('è diverso da', out)
         # Only status lines: steps, results and the count.
         for line in out.splitlines():
@@ -3985,6 +4018,65 @@ exec "$@"''')
         # The same host, without --read-only, starts the CLIs.
         done = self.run_script('host/check-host.sh', '--no-apps', '--params', str(params))
         self.assertTrue(started.exists())
+
+    def test_the_output_names_the_parameters_unless_verbose(self):
+        # #583: by default the output of check-host.sh can be quoted as evidence in a public
+        # text: the names of the parameters in place of the paths, the longest first (the
+        # state_dir lies in devloop's home), the role of the app in place of a key file, the
+        # users that are not the documented defaults as <NAME>. --verbose shows the host.
+        self.fake_host('classic sudo', users=(FAKE_AGENT, FAKE_SUPERVISOR))
+        params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=FAKE_SUPERVISOR,
+                             AGENT_USER=FAKE_AGENT)
+        done = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params),
+                               redacted=True)
+        out = done.stdout + done.stderr
+        for path in (self.home, self.tmp / 'locks', self.tmp / 'coordination',
+                     self.tmp / 'systemd', self.tmp / 'sudoers.d', self.tmp / 'tmpfiles.d'):
+            self.assertNotIn(str(path), out)
+        self.assertNotIn('.private-key.pem', out)
+        for user in (FAKE_AGENT, FAKE_SUPERVISOR):
+            self.assertNotIn(user, out)
+        self.assertIn('$STATE_DIR/run.log', out)
+        self.assertNotIn('$DEVLOOP_HOME/devloop/.devloop', out)
+        self.assertIn("  ok: $DEVLOOP_KEY_DIR/<chiave dell'app dispatcher>: 600, ", out)
+        self.assertIn("  ok: chiave di brushtyler-devloop-dispatcher presente", out)
+        self.assertIn('$AGENT_HOME/.local/bin/claude', out)
+        self.assertIn('$SUPERVISOR_HOME/.local/bin/claude', out)
+        self.assertIn("l'utente <AGENT_USER> esiste", out)
+        self.assertIn('==> Esito\n', done.stdout)
+        verbose = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params))
+        self.assertEqual(verbose.returncode, done.returncode)
+        self.assertIn(str(self.state / 'run.log'), verbose.stdout)
+        self.assertIn(f'{self.devloop}/.ghapps/{PREFIX}dispatcher.2026-11-18.private-key.pem: '
+                      '600, ', verbose.stdout)
+        self.assertIn(f"l'utente {FAKE_AGENT} esiste", verbose.stdout)
+        self.assertNotIn('$STATE_DIR', verbose.stdout)
+        # The same lines, in the same order: only the values change.
+        self.assertEqual(len(done.stdout.splitlines()), len(verbose.stdout.splitlines()))
+
+    def test_the_filter_of_ops_and_the_redactor_of_devloop_agree(self):
+        # #583: check-host.sh runs from the root copy of the coordinator, which has only the
+        # files of ops/: its filter repeats the rule of devloop/redact.py, on the same map.
+        self.fake_host('classic sudo', users=(FAKE_AGENT, FAKE_SUPERVISOR))
+        params = self.params(DEVLOOP_USER='dl-widget', SUPERVISOR_USER=FAKE_SUPERVISOR,
+                             AGENT_USER=FAKE_AGENT, STATE_DIR=str(self.home / 'devloop/state'))
+        data = self.redactions(params)
+        self.assertEqual(json.loads(data)['paths']['STATE_DIR'], str(self.home / 'devloop/state'))
+        text = (f'File "{self.home}/devloop/state/worktrees/issue-570/x.py", line 3\n'
+                f'{self.home}/devloop/.ghapps/{PREFIX}implementer.2026-01-02.private-key.pem\n'
+                f'sudo -u {FAKE_AGENT} ls {self.home}/agent {self.home}/agent-x devloop\n'
+                f'{self.home}/supervisor/.ghapps/x and dl-widget, not dl-widget-2\n')
+        lib = shlex.quote(str(OPS / 'lib.sh'))
+        done = subprocess.run([BASH, '-c', f'. {lib}; ops_redact_filter "$1"', '_', data],
+                              input=text, capture_output=True, text=True, timeout=60)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        expected = redact.Redactor.from_map(json.loads(data)).redact(text)
+        self.assertEqual(done.stdout, expected)
+        self.assertEqual(expected.splitlines(), [
+            'File "$STATE_DIR/worktrees/issue-570/x.py", line 3',
+            "$DEVLOOP_KEY_DIR/<chiave dell'app implementer>",
+            f'sudo -u <AGENT_USER> ls $AGENT_HOME {self.home}/agent-x devloop',
+            '$SUPERVISOR_KEY_DIR/x and <DEVLOOP_USER>, not dl-widget-2'])
 
     def test_the_coordinator_is_checked_when_it_is_installed(self):
         # #530: absent, a line; present, its sudoers and the root copy, equal to this checkout.

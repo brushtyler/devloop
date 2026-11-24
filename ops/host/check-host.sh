@@ -24,6 +24,10 @@
 # --read-only: la verifica del coordinatore (#530): nessuna CLI avviata (né --version né lo
 # strumento di shell: nessun modello, nessuna quota, nessuna scrittura nelle sessioni o nelle
 # cache), niente `devloop apps`, nessuna scrittura; solo righe di stato.
+# --verbose: i percorsi reali dell'host, per la diagnosi locale. Senza, l'output (anche gli errori
+# dei comandi) nomina i parametri ($STATE_DIR, $DEVLOOP_KEY_DIR, $AGENT_HOME, ...), i ruoli delle
+# chiavi e gli utenti non di default (<AGENT_USER>) al posto dei valori, e si può citare come
+# evidenza in un testo pubblico (#583).
 
 OPS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # shellcheck source=../lib.sh
@@ -32,13 +36,16 @@ set +e  # una verifica fallita si conta, non interrompe le altre
 
 CHECK_APPS=1
 READ_ONLY=0
+VERBOSE=0
 
 usage() {
-    say "Uso: sudo bash $0 [--params FILE] [--dry-run] [--no-apps] [--read-only]"
+    say "Uso: sudo bash $0 [--params FILE] [--dry-run] [--no-apps] [--read-only] [--verbose]"
     say
     say '  --no-apps       non esegue `devloop apps` (che interroga GitHub)'
     say '  --read-only     nessuna CLI avviata, niente `devloop apps`, nessuna scrittura (il'
     say '                  coordinatore, #530)'
+    say '  --verbose       i percorsi reali dell'"'"'host, per la diagnosi locale: senza, l'"'"'output'
+    say '                  nomina i parametri ($STATE_DIR, ...) e si può citare (#583)'
     say "$OPS_COMMON_HELP"
 }
 
@@ -47,11 +54,22 @@ while [ $# -gt 0 ]; do
         -h | --help) usage; exit 0 ;;
         --no-apps) CHECK_APPS=0; shift ;;
         --read-only) READ_ONLY=1; CHECK_APPS=0; shift ;;
+        --verbose) VERBOSE=1; shift ;;
         *) ops_common_arg "$@" || exit 2; shift "$OPS_SHIFT" ;;
     esac
 done
 
 ops_load_params
+# Senza --verbose, l'output e gli errori passano dal filtro dei parametri (#583): nessun percorso
+# dell'host. Il filtro finisce di scrivere prima che lo script esca.
+if [ "$VERBOSE" = 0 ]; then
+    REDACT_MAP=$(ops_redactions) || die 'la mappa delle sostituzioni non si costruisce'
+    exec > >(ops_redact_filter "$REDACT_MAP")
+    REDACT_OUT=$!
+    exec 2> >(ops_redact_filter "$REDACT_MAP" >&2)
+    REDACT_ERR=$!
+    trap 'status=$?; exec >&- 2>&-; wait "$REDACT_OUT" "$REDACT_ERR"; exit "$status"' EXIT
+fi
 # Come root, anche dal sudoers del coordinatore: nessun file della directory di chi lo lancia
 # (per esempio un modulo che python importerebbe) entra nelle verifiche.
 PARAMS_FILE=$(cd "$(dirname "$PARAMS_FILE")" && pwd)/$(basename "$PARAMS_FILE")

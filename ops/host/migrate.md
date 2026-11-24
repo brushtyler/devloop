@@ -2116,8 +2116,8 @@ origin/main`), un ruolo alla volta. Il codice di devloop non cambia: nessun pin 
 **Il nome nuovo non si pubblica**: né in un'issue, né in un commento, né in una PR, né in un
 output incollato. Lo sceglie il passo 1, a caso e non di default, e sta solo nei file dell'host
 (`params.env`, l'overlay, le copie di sicurezza del passo 3). I comandi qui sotto non lo
-stampano; `check-host.sh`, `setup-*.sh` e `devloop-pinned apps` sì: il loro output resta
-sull'host (#583). Nei resoconti all'operatore si scrive "la `key_dir` nuova", non il percorso.
+stampano; `check-host.sh --verbose`, `setup-*.sh` e `devloop-pinned apps` sì: il loro output
+resta sull'host. `check-host.sh` senza `--verbose` nomina i parametri, non i percorsi (#583). Nei resoconti all'operatore si scrive "la `key_dir` nuova", non il percorso.
 
 ### Comandi
 
@@ -2289,3 +2289,85 @@ test "$(valore "$parametro")" = "$vecchia" && echo params
 `test` stampa `params`. Poi i passi 7, 8 e 9: script di setup, verifica e riavvio. La posizione
 di prima è quella pubblicata: il rollback la rimette in uso finché non si riprova lo
 spostamento.
+
+## Mappa delle sostituzioni dei testi pubblicati (#583)
+
+Dal #583 devloop mette i nomi dei parametri (`$STATE_DIR`, `$DEVLOOP_KEY_DIR`, `$AGENT_HOME`,
+`<AGENT_USER>`, …) al posto dei percorsi e degli utenti dell'host in tutto ciò che pubblica
+([reference](../../docs/devloop/reference.md#host-details-in-the-published-texts)). I valori
+li prende all'avvio dalla mappa `redactions.json` nello `state_dir`, che `setup-devloop.sh`
+scrive dai parametri risolti di `params.env` (600, dell'utente devloop; nessuna chiave letta).
+Senza la mappa devloop parte lo stesso, lo scrive nel log, e sostituisce solo i valori che
+conosce da sé: il suo `state_dir`, la sua `key_dir`, la sua home e l'utente degli agent con la
+sua home; le home e le `key_dir` di supervisore e coordinatore restano nei testi.
+
+Anche `check-host.sh` stampa per default i nomi dei parametri, e i percorsi reali solo con
+`--verbose`, per la diagnosi locale: l'output da citare in un'issue è quello senza `--verbose`.
+Il coordinatore lo esegue dalla sua copia di root, che `setup-coordinator.sh` aggiorna.
+
+Il passo si fa con l'agent dell'host, come root, **a loop fermo**, dal checkout dell'operatore
+aggiornato, prima del pin a mano del commit del #583. Si rifà, con gli stessi comandi, ogni volta
+che cambia un parametro di `params.env` che nomina un percorso o un utente: la mappa si
+riscrive solo se è diversa.
+
+1. **Il checkout dell'operatore e il loop fermo:**
+
+   ```bash
+   git -C /root/repos/ssdlc fetch origin
+   git -C /root/repos/ssdlc checkout --detach origin/main
+   test -f /root/repos/ssdlc/ops/params.env && echo params
+   systemctl stop devloop@devloop
+   systemctl is-active devloop@devloop
+   ```
+
+   `test` stampa `params`; `is-active` stampa `inactive`.
+
+2. **La mappa**, prima con `--dry-run`:
+
+   ```bash
+   sudo bash /root/repos/ssdlc/ops/host/setup-devloop.sh --dry-run
+   sudo bash /root/repos/ssdlc/ops/host/setup-devloop.sh
+   stat -c '%a %U' /home/devloop/devloop/.devloop/redactions.json
+   ```
+
+   Il dry run stampa `scriverebbe …/redactions.json (mode 600, proprietario devloop)` con il
+   contenuto: i percorsi e gli utenti dei parametri, nessun segreto. Il dry run resta sull'host:
+   il suo output ha i valori reali e non si pubblica. `stat` stampa `600 devloop`.
+
+3. **La copia di root del coordinatore**, solo con il coordinatore sull'host (`id coordinator`):
+   ha `lib.sh` e `check-host.sh`, che cambiano.
+
+   ```bash
+   sudo bash /root/repos/ssdlc/ops/host/setup-coordinator.sh
+   ```
+
+4. **Verifica**, ancora a loop fermo:
+
+   ```bash
+   sudo bash /root/repos/ssdlc/ops/host/check-host.sh --no-apps
+   ```
+
+   Nessun `ERRORE`, e l'output nomina `$STATE_DIR`, `$DEVLOOP_KEY_DIR` e gli altri parametri, mai
+   i percorsi dell'host: è l'output che si può citare.
+
+5. **Il pin a mano e il riavvio.** Il clone di devloop su `origin/main` e il pin, come utente
+   devloop, poi l'avvio, come root:
+
+   ```bash
+   sudo -u devloop -H git -C /home/devloop/devloop fetch origin
+   sudo -u devloop -H git -C /home/devloop/devloop checkout --detach origin/main
+   sudo -u devloop -H python3 /home/devloop/devloop/scripts/devloop-pinned pin origin/main
+   systemctl start devloop@devloop
+   systemctl is-active devloop@devloop
+   ```
+
+   `is-active` stampa `active`. All'avvio il log di devloop non ha la riga `redaction:
+   redactions.json in state_dir missing`.
+
+I testi già pubblicati non si riscrivono: la regola vale dai testi nuovi, e la pulizia di quelli
+di prima resta manuale dell'operatore.
+
+**Rollback.** La mappa non cambia il comportamento della copia di prima, che non la legge: si
+lascia dov'è. Per tornare alla copia di prima, a loop fermo, il pin del suo commit
+(`sudo -u devloop -H python3 /home/devloop/devloop/scripts/devloop-pinned pin <sha12>`, con
+`<sha12>` di `pinned-<sha12>` nello `state_dir`) e il riavvio.
