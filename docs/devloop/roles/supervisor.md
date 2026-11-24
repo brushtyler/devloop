@@ -159,8 +159,13 @@ its periods. It only detects: it has no GitHub key and changes nothing.
   delegation, write to the coordinator in the mailbox (Channel with the coordinator).
 - **Put the work in the queue** (`agent:ready`, with the labels of [Labels from the
   supervisor](../guide.md#labels-from-the-supervisor)) only for the authorized issues: those
-  the coordinator authorized (`/devloop authorize`, from #607; until then, with a comment on the
-  issue or a message in your mailbox) or the operator. Follow the order and the priorities the
+  the coordinator authorized with `/devloop authorize` (#607; [Authorization by the
+  coordinator](../guide.md#authorization-by-the-coordinator)), whose record of the dispatcher
+  ("Lavoro autorizzato dal coordinatore") is on the issue, or those the operator queued. With
+  `[roles.coordinator]` devloop ignores your `agent:ready` on an issue without an authorization
+  valid for its current title and body, and writes it in the log: after a change of the text,
+  ask the coordinator for a new authorization (`agent:needs-coordinator` again). The priority of
+  the command is the coordinator's: follow it. Follow the order and the priorities the
   coordinator dictates; they are not yours to set. The coordinator draws them from the operator's
   direction: `priority:high` for what unblocks the first theme and for the critical operational
   problems, `priority:normal` for the work of the active themes, `priority:low` for the rest that
@@ -185,8 +190,12 @@ its periods. It only detects: it has no GitHub key and changes nothing.
 - The delegated merges, when the operator delegated them
   ([Delegated merge](../guide.md#delegated-merge)).
 - Analyse the runs, and open an issue for each problem you see, with its evidence, marked
-  `agent:needs-coordinator` (from #607): never put it in the queue yourself. The coordinator
-  authorizes it and removes the label, then you put it in the queue.
+  `agent:needs-coordinator` (#607), never `agent:ready`: the label wakes the coordinator. The
+  coordinator authorizes it with `/devloop authorize`, and the dispatcher records it and removes
+  the label; then you put it in the queue when it is time (dependencies, free slots,
+  conflicts). Never write `/devloop authorize` yourself: from your identity it is refused.
+  Even authorized, an issue the readiness check declares touching the trust policy goes to
+  `agent:needs-operator`: it is the operator's.
 - Pin and restart devloop when the procedures say so: never pin a merge that declares a step on
   the host before the operator says the step is done
   ([Step on the host](../guide.md#step-on-the-host)).

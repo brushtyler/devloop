@@ -37,7 +37,7 @@ from .budget import NOT_ATTESTED, consumed_usd, usd
 from .markdown import dispatcher_header, publishable, split_markers, with_record
 from .planning import counted_rounds
 from .policy import describe as describe_policy
-from .review import (CI, CLOSING, FINDINGS_ONLY, OPERATOR, finding_key, finding_state,
+from .review import (AUTHORITIES, CI, CLOSING, FINDINGS_ONLY, finding_key, finding_state,
                      findings_only, owner_of)
 
 NOT_REPORTED = 'non riportato'
@@ -114,8 +114,8 @@ def _rounds(reviews):
 
 def _findings(reviews, closures):
     """Every blocking finding ever opened, ``{key, status, by, author, round}``: ``open``, or
-    how it was closed and by whom (its owner in a later round, ``ci`` or ``operator`` with the
-    author). A finding closed under the rules before #110 has no recorded closer (None)."""
+    how it was closed and by whom (its owner in a later round, ``ci``, ``operator`` or
+    ``coordinator``, #606, with the author). A finding closed under the rules before #110 has no recorded closer (None)."""
     owners, order, closed, quorum = {}, [], {}, set()
     for review in reviews:
         owner = owner_of(review)
@@ -138,7 +138,7 @@ def _findings(reviews, closures):
         closed[key] = dict(closure, author=None)
     for c in closures:
         key = c['key']
-        if key in owners and key not in closed and (c['by'] == OPERATOR or owners[key] == CI):
+        if key in owners and key not in closed and (c['by'] in AUTHORITIES or owners[key] == CI):
             closed[key] = {'status': c['status'], 'by': c['by'], 'author': c.get('author'),
                            'round': None}
     still_open = {f['key'] for f in state.open}
@@ -459,7 +459,7 @@ def _findings_text(findings):
             state = _CLOSED.get(f['status'], 'chiuso')
             if f['by'] is None:
                 who = f'{NOT_REPORTED} (marker precedenti a #110)'
-            elif f['by'] in (CI, OPERATOR):
+            elif f['by'] in (CI, *AUTHORITIES):
                 who = f'`{f["by"]}`' + (f' (`{f["author"]}`)' if f.get('author') else '')
             else:
                 who = f'`{f["by"]}`, nel round {f["round"]}'

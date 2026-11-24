@@ -19,6 +19,8 @@ import subprocess
 from pathlib import Path
 
 from .acceptance import render_map
+from .authorization import AUTHORIZE_COMMAND, PRIORITIES
+from .authorization import OUTCOMES as AUTHORIZE_OUTCOMES
 from .config import INSTALL_ROOT
 from .github import GitHubError
 from .hoststep import render_step
@@ -43,6 +45,7 @@ DISPATCHER = 'devloop dispatcher'
 # The stamp ``devloop pin`` writes in the root of a pinned copy (``pin.STAMP``).
 PIN_STAMP = 'pin.json'
 _SHA = re.compile(r'[0-9a-f]{40}')
+_SHA256 = re.compile(r'[0-9a-f]{64}')
 
 
 def parse_version(text):
@@ -296,7 +299,8 @@ def _valid_policy(p):
 
 def _valid_closure(c):
     return (isinstance(c, dict) and isinstance(c.get('key'), str)
-            and c.get('status') in ('resolved', 'withdrawn') and c.get('by') in ('ci', 'operator')
+            and c.get('status') in ('resolved', 'withdrawn')
+            and c.get('by') in ('ci', 'operator', 'coordinator')
             and all(isinstance(c.get(k), str) for k in ('author', 'reason', 'head_sha')))
 
 
@@ -488,6 +492,19 @@ def _valid_approve(a):
     return _comment_ids(a.get('comments'))
 
 
+def _valid_authorize(a):
+    """The dispatcher's record of a ``/devloop authorize`` (#607): the comment of the command,
+    its author and time, the outcome, the priority ('' without one) and, for an authorization,
+    the SHA-256 of the title and the body it is bound to; for a refusal, why."""
+    authorized = a.get('outcome') == 'authorized'
+    return (a.get('outcome') in AUTHORIZE_OUTCOMES and _is_int(a.get('comment'), 1)
+            and isinstance(a.get('by'), str) and isinstance(a.get('at'), str)
+            and a.get('priority') in ('', *PRIORITIES)
+            and isinstance(a.get('reason', ''), str)
+            and (isinstance(a.get('hash'), str) and _SHA256.fullmatch(a['hash']) is not None
+                 if authorized else 'hash' not in a))
+
+
 RECEIPT_STATES = ('current', 'superseded')
 
 
@@ -587,7 +604,8 @@ _VALID = {'review': _valid_review, 'fix': _valid_fix, 'pr': _valid_pr, 'policy':
           'report': _valid_report,
           'receipt': _valid_pr_receipt, 'conclave': _valid_conclave,
           'advisory': _valid_advisory, 'story': _valid_story, 'pin': _valid_pin,
-          'basebroken': _valid_basebroken, 'approve': _valid_approve}
+          'basebroken': _valid_basebroken, 'approve': _valid_approve,
+          'authorize': _valid_authorize}
 
 
 def read_marker(text, kind):
@@ -1002,6 +1020,26 @@ def render_recheck(record):
         'recheck', record)
 
 
+def render_authorize(record, ready_label='agent:ready'):
+    """The dispatcher's record of a ``/devloop authorize`` (#607), with an ``authorize`` marker:
+    each command is recorded once."""
+    if record['outcome'] == 'authorized':
+        priority = (f'priorità `{record["priority"]}`' if record['priority']
+                    else 'nessuna priorità indicata')
+        text = (f'## Lavoro autorizzato dal coordinatore\n\n'
+                f'`{record["by"]}` ha autorizzato l\'issue con `{AUTHORIZE_COMMAND}` del '
+                f'{record["at"]} ({priority}). L\'autorizzazione vale per il titolo e il corpo '
+                f'di questo momento (SHA-256 `{record["hash"][:12]}`): se cambiano, decade e '
+                f'serve un nuovo `{AUTHORIZE_COMMAND}`. Ora `{ready_label}` del supervisore fa '
+                'partire l\'issue; se il controllo di prontezza la dichiara toccare la policy di '
+                'fiducia, la mette in coda solo l\'operatore.\n')
+    else:
+        text = (f'## `{AUTHORIZE_COMMAND}` rifiutato\n\n'
+                f'Il comando di `{record["by"]}` del {record["at"]} non autorizza l\'issue: '
+                f'{record["reason"]}.\n')
+    return publishable(dispatcher_header() + '\n' + text, 'authorize', record)
+
+
 def render_operator_merge(head, labeled, promotion, reasons, label):
     """The dispatcher's comment on a ready PR that devloop does not merge (#248): the merge is
     the operator's, for ``reasons`` (Markdown lines), and ``label`` stays only while the head
@@ -1017,9 +1055,11 @@ def render_operator_merge(head, labeled, promotion, reasons, label):
                                         'labeled': labeled, 'promotion': promotion})
 
 
-def render_supervision(record, text, title='Decisione del supervisore'):
+def render_supervision(record, text, title='Decisione del supervisore', records=()):
     """The dispatcher's trace of a supervisor command (#182), or of a command on an escalation
     to the operator (#321, with its own ``title``): what was asked, by whom, and the outcome,
-    in a ``supervision`` marker."""
+    in a ``supervision`` marker. ``records``: more ``(kind, payload)`` markers of the same
+    comment, such as the ``finding`` record of the coordinator's closures (#606), written
+    together with the trace that spends their command."""
     return publishable(dispatcher_header() + f'\n## {title}\n\n{text.strip()}',
-                       'supervision', record)
+                       'supervision', record, records)

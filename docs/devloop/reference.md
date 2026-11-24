@@ -1979,13 +1979,21 @@ model = "gpt-6.1-sol"
   a trusted user's `agent:ready` admits it, and without a readiness check only the trusted users'
   labels count on it ([Labels from the supervisor](guide.md#labels-from-the-supervisor)). Its
   `agent:ready` and priority labels count where the supervisor's do; its dependency and
-  implementer labels never. Its commands count only inside a **closed
+  implementer labels never. With the table, its `/devloop authorize` (#607) authorizes the work:
+  the supervisor's `agent:ready` admits an issue only while an authorization of the coordinator
+  holds for its current title and body, and the label `agent:needs-coordinator` (the field
+  `needs_coordinator` of `Labels` in `devloop/config.py`, created by `devloop setup` with the
+  other labels) asks for one ([Authorization by the coordinator](guide.md#authorization-by-the-coordinator)).
+  Its commands count only inside a **closed
   perimeter**, a constant of the code (`supervision.COORDINATOR_DELEGATED` and
   `COORDINATOR_RESERVED`) that no key widens; the guide lists it
   ([The coordinator](guide.md#the-coordinator)). A delegated command counts as a trusted user's,
   under the same conditions and caps; a command reserved to the operator, or not listed, never
   counts. `merge` is the coordinator's reserved merge (#529), under conditions and a daily cap of
   its own ([The reserved merge of the coordinator](guide.md#the-reserved-merge-of-the-coordinator)).
+  `finding` (#606) closes findings on an `open_findings` escalation, never those on the trust
+  policy nor while a reviewer asks for changes on the head
+  ([Closing findings as the coordinator](guide.md#closing-findings-as-the-coordinator)).
 - devloop never reads the app's key and never writes with it: `python3 -m devloop apps` does not
   list it, the watcher does not count it among the writers of devloop's records, and
   `devloop token` and `scripts/agent-token.py` refuse it (`unknown actor`). Its key is only in

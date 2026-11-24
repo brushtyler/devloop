@@ -5142,6 +5142,9 @@ class CoordinatorWaitTests(WakeUpCase):
 
     def test_the_events_of_the_coordinator(self):
         for line in ('new PR #14 [agent:review,agent:needs-operator] Bump',
+                     # An issue that waits for its /devloop authorize (#607).
+                     'issue #20 labels +agent:needs-coordinator',
+                     'new issue #21 [agent:needs-coordinator] Log rumoroso',
                      "PR #15 comment by brushtyler-devloop-dispatcher[bot]: ## Il merge spetta "
                      "all'operatore",
                      'issue #76 comment by brushtyler-devloop-dispatcher[bot]: ## Agent senza '
@@ -6214,7 +6217,7 @@ class RoleRunbookTests(unittest.TestCase):
         who = self.part(text, 'Who you are')
         for phrase in ('**responsible for the operations**', '**You decide**',
                        '**You do not decide**', '**You talk with**',
-                       '`/devloop authorize`, from #607', '`open_findings`, from #606',
+                       '`/devloop authorize`, from #607', '`open_findings`, #606',
                        '(`review_level`)', 'in place of an unavailable member (#605)',
                        '`capacity` and `grant-budget` within the caps (from #595)',
                        '`[direction] issue`, from #604', 'the issues opened by the supervisor',
@@ -6264,10 +6267,15 @@ class RoleRunbookTests(unittest.TestCase):
                 'do not put it in the queue until the operator is back',
                 'hold the merge with `/devloop hold`', 'Release it (`/devloop release`)',
                 # Authorization and priorities.
-                '`/devloop authorize [priority:<p>]` on the issue (from #607',
-                '`agent:needs-coordinator` (from #607)', '`trust_policy` other than `none`',
+                # Since #607 the command exists: the runbook describes it as it is.
+                '**Authorize the work** (#607', '`/devloop authorize priority:<p>`',
+                'wait for you in `agent:needs-coordinator`, which wakes you',
+                'The authorization holds for the text you read',
+                '`trust_policy` other than `none`',
                 'A priority label the operator put on an issue wins',
-                '**Open findings** (`open_findings`, point 3, from #606)',
+                '**Open findings** (`open_findings`, point 3, #606;',
+                '`/devloop finding <round/reviewer/ID> resolved|withdrawn <reason>`',
+                'you close a finding, you never override a verdict',
                 '**The conclave** (point 3, #605)'):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, tasks)
@@ -6309,11 +6317,12 @@ class RoleRunbookTests(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, channel)
         tasks = self.part(text, 'Tasks')
-        for phrase in ('only for the authorized issues', '`/devloop authorize`, from #607',
+        # Since #607 the command and the label exist: the runbook describes them as they are.
+        for phrase in ('only for the authorized issues', 'with `/devloop authorize` (#607',
                        'Follow the order and the priorities the coordinator dictates',
                        '**Every stop of the queue on purpose** goes in the journal at once, with '
-                       'its reason', '`agent:needs-coordinator` (from #607): never put it in the '
-                       'queue yourself'):
+                       'its reason', '`agent:needs-coordinator` (#607), never `agent:ready`',
+                       'Never write `/devloop authorize` yourself'):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, tasks)
         prohibitions = self.part(text, 'Prohibitions')

@@ -460,7 +460,7 @@ class PlanTests(unittest.TestCase):
     def test_a_waiting_head_is_reviewed_and_a_missing_ci_escalates(self):
         waiting = dataclasses.replace(pr(checks='none'), ci_wait=f'{WAITING}: pushed 30 s ago')
         self.assertEqual(plan(SimpleNamespace(prs=[waiting], ready_issues=[], working_issues=[],
-                                              supervised=[], conclaves=[], advisories=[]), CFG),
+                                              supervised=[], conclaves=[], advisories=[], authorizations=[]), CFG),
                          [Action('review', 100, 'CI pending: the merge waits for it')])
         # A recorded approval of the head waits for its CI (#271), as with CI pending.
         approval = norm(raw_review())
@@ -468,7 +468,7 @@ class PlanTests(unittest.TestCase):
             approved = dataclasses.replace(pr(checks=checks, reviews=[approval]), ci_wait=wait)
             self.assertEqual(plan(SimpleNamespace(prs=[approved], ready_issues=[],
                                                   working_issues=[], supervised=[],
-                                                  conclaves=[], advisories=[]), CFG), [])
+                                                  conclaves=[], advisories=[], authorizations=[]), CFG), [])
         # Changes asked before the CI was known (#271): the fix waits for the CI of the head,
         # also for a re-run of #200; a failure joins the round (#352), then the same fix.
         seen = norm(raw_review('request_changes', [finding()]))
@@ -483,20 +483,20 @@ class PlanTests(unittest.TestCase):
                                               ci_wait=wait, rerun_waiting=rerun)
                 self.assertEqual([a.kind for a in plan(SimpleNamespace(
                     prs=[waiting], ready_issues=[], working_issues=[], supervised=[],
-                    conclaves=[], advisories=[]), CFG)], kinds)
+                    conclaves=[], advisories=[], authorizations=[]), CFG)], kinds)
         # A review that saw its CI goes to the fix at once, as before.
         known = pr(checks='pending', reviews=[seen], labels={'agent:changes'})
         self.assertEqual([a.kind for a in plan(SimpleNamespace(
             prs=[known], ready_issues=[], working_issues=[], supervised=[], conclaves=[],
-            advisories=[]), CFG)], ['fix'])
+            advisories=[], authorizations=[]), CFG)], ['fix'])
         missing = dataclasses.replace(pr(checks='none'), ci_missing=['unittest'])
         self.assertEqual(plan(SimpleNamespace(prs=[missing], ready_issues=[], working_issues=[],
-                                              supervised=[], conclaves=[], advisories=[]), CFG),
+                                              supervised=[], conclaves=[], advisories=[], authorizations=[]), CFG),
                          [Action('ci_missing', 100, 'required checks missing: unittest')])
 
     def plan_of(self, p, cfg=CFG):
         return plan(SimpleNamespace(prs=[p], ready_issues=[], working_issues=[], supervised=[],
-                                    conclaves=[], advisories=[]), cfg)
+                                    conclaves=[], advisories=[], authorizations=[]), cfg)
 
     def test_one_head_one_round(self):
         """#352: a CI failure on the head of a round that asked for changes joins that round,

@@ -679,6 +679,34 @@ the cycle is gone. A `cycle` record counts only from the dispatcher's identity, 
 cycle is reported once on each issue; another cycle on the same issue is reported again. The
 record adds no label and blocks nothing by itself: the open blocks do.
 
+## Authorization by the coordinator
+
+With `[roles.coordinator]` (#607,
+[Authorization by the coordinator](guide.md#authorization-by-the-coordinator)), the `authorize`
+action records each `/devloop authorize [priority:<p>]` of an issue once: a dispatcher comment
+("Lavoro autorizzato dal coordinatore", or "`/devloop authorize` rifiutato") ending with an
+`authorize` marker, with `comment` (the id of the command), `by` and `at` (its author and time),
+`priority` (`high`, `normal`, `low`, or empty without one) and `outcome`:
+
+- `authorized`, with `hash`: the SHA-256 of the issue's title and body
+  (`authorization.text_hash`) as the dispatcher reads them, when the command comes from the
+  coordinator's identity, its arguments are well formed, the issue was opened by a trusted user
+  or by a devloop app, and neither the title nor the body changed at or after the command
+  (GitHub's times have one-second granularity: a change in the same second counts as after);
+- `refused`, with `reason` and without `hash`, otherwise.
+
+The action reads the comments and the history again first, and leaves alone the commands
+recorded since the snapshot; once an authorization holds for the current text it removes
+`agent:needs-coordinator`. An `authorize` record counts only from the dispatcher's identity. The
+supervisor's `agent:ready` admits the issue only while the latest `authorized` record carries the
+hash of the current title and body, and neither changed at or after its `at`
+(`authorization.valid_authorization`): any change of the text voids it, even one restored
+afterwards. A command not recorded yet does not admit the issue: the action records it first,
+and the issue starts on a later tick. The same holds at every start of the implementation: a
+restart after a `basebroken` record (#459) that no authorization admits is the `unauthorized`
+action, with no slot and no readiness check, which moves the issue from `agent:working` to
+`agent:needs-coordinator`.
+
 ## Base broken records
 
 When every failed test of an implementation or of a fix fails on the base commit of its branch
@@ -1036,6 +1064,7 @@ a review of the reviewer `ci`. A finding stays open until one of these closes it
 | The reviewers of the quorum, for a finding of a findings-only review | `resolved` or `withdrawn` from every reviewer the receipt of a later round requires, in that round ([Findings-only reviews](#findings-only-reviews)) |
 | The dispatcher, for a `ci` finding | Automatically, when CI passes on the PR's current head (the same commit that failed after a re-run, or a later one), in `agent:review` or still in `agent:changes` before the implementer starts |
 | The operator | The `/devloop finding` command below |
+| The coordinator, with `[roles.coordinator]` | The same command, on an `open_findings` escalation only, never for a finding a `trust_policy` review marks nor while a reviewer asks for changes on the head ([Closing findings as the coordinator](#closing-findings-as-the-coordinator), #606) |
 
 Another reviewer's assessment does not close a finding: it is recorded in its review, with a
 note, and the finding stays open. When every reviewer of a round approves but a finding of an
@@ -1050,12 +1079,14 @@ and voids its approval (one head, one round, #359, see [Approval and CI](#approv
 passing goes to the operator. When a reviewer
 of the round asks for changes, the fix receives every open finding, whoever owns it.
 Once the operator has closed them, putting the PR back into `agent:review` applies the recorded
-approval again, without a new review. The round count does not change.
+approval again, without a new review; once the coordinator has closed the last one, the
+dispatcher puts the PR back there itself. The round count does not change.
 
-The closures made by CI and by the operator are dispatcher comments with a `finding` marker,
-read only from the dispatcher's identity: each entry records the key, `resolved` or
-`withdrawn`, who closed it (`ci` or `operator`, with the author), the reason and the head. A
-closed finding stays closed. When they close every finding of a request for changes, the PR
+The closures made by CI, by the operator and by the coordinator are dispatcher comments with a
+`finding` marker, read only from the dispatcher's identity: each entry records the key,
+`resolved` or `withdrawn`, who closed it (`ci`, `operator` or `coordinator`, with the author),
+the reason and the head. The coordinator's are in the comment of the `supervision` record of its
+command. A closed finding stays closed. When they close every finding of a request for changes, the PR
 goes back to `agent:review` and the head gets a new review. The tick that records closures
 does nothing else on that PR; the next tick continues with them.
 
@@ -1099,6 +1130,35 @@ and written to the dispatcher log; one naming a finding already closed has no ef
 devloop publishes is never a command. devloop reads the comments of a PR only while it is in
 `agent:review`, `agent:changes` or `agent:ready-to-merge`: a command written while the PR is in
 `agent:needs-operator` takes effect once the label is back.
+
+#### Closing findings as the coordinator
+
+With `[roles.coordinator]` (#606, ADR 0002, second precision of 2026-11-23, point 3) the
+coordinator's identity closes the findings of an `open_findings` escalation with the same line,
+as the first line after the attribution header of a comment on the PR in
+`agent:needs-operator`; more lines below it close more findings. It is a command of the
+escalation (`finding` in `COORDINATOR_DELEGATED`), not one the reader above takes: a line of the
+coordinator is never an operator's closure. The dispatcher applies it whole or not at all, with
+the PR and its thread read again, and refuses it, with a `supervision` record `refused` that
+spends it, when:
+
+- the escalation the PR waits on is not `open_findings` (on an escalation to the supervisor it is
+  refused too);
+- a line is malformed or has no reason;
+- the latest round is not of the PR's head, or one of its reviewers does not approve it
+  (`flow_verdict`): the coordinator closes a finding, it never overrides a verdict;
+- a finding was opened or kept `unresolved` by a review with `operator_reason` `trust_policy`
+  (`review.trust_policy_findings`): it stays the operator's;
+- a finding is not open.
+
+Applied, the `supervision` record has the outcome `closed` and the head, and its comment carries
+the `finding` record of the closures, each with `by: coordinator`, the coordinator's login as
+author, the reason and the head: one comment, so that the command is never spent without its
+closures nor the other way round. An outcome `closed` does not move the escalation: while
+findings stay open, the next command of the coordinator answers it still. With no finding left
+open the PR goes back to `agent:review`, where the recorded approval is applied again. The same
+line from any other identity is no command of the escalation, and the reader above takes only a
+trusted user's.
 
 #### Markers written before #110
 
@@ -1214,7 +1274,8 @@ app, and only when the [turn journal](#story-identity) confirms it. `trusted_use
 stays for people: it
 decides who can start work with `agent:ready`, and it cannot contain bots. The only apps whose
 labels count are the supervisor's, on the issues described in
-[Labels from the supervisor](guide.md#labels-from-the-supervisor), and, with
+[Labels from the supervisor](guide.md#labels-from-the-supervisor) (with `[roles.coordinator]`
+its `agent:ready` only on an issue the coordinator authorized, #607), and, with
 `[roles.coordinator]` in the local overlay (#528, off by default), the coordinator's: only its
 `agent:ready` added again, and only on the issues opened by a trusted user or by a devloop app,
 never its priority, dependency or implementer labels

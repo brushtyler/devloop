@@ -61,6 +61,11 @@ DECISION = 'decision'
 LEGACY_VERDICT = 'needs_human'
 CI = 'ci'
 OPERATOR = 'operator'
+# The coordinator's closure of a finding on an ``open_findings`` escalation (#606): like the
+# operator's, it closes a finding of any owner. The dispatcher records it only after its checks
+# (``_coordinator_findings``).
+COORDINATOR = 'coordinator'
+AUTHORITIES = (OPERATOR, COORDINATOR)
 CLOSING = ('resolved', 'withdrawn')
 KEY = re.compile(r'[1-9][0-9]*/[A-Za-z0-9_.-]+/R[1-9][0-9]*-[1-9][0-9]*')
 FINDING_COMMAND = '/devloop finding'
@@ -102,6 +107,22 @@ def own_open_findings(review):
                     or not p.get('findings_only') and str(p.get('key', '')).split('/')[1:2]
                     == [owner])]
     return list(review['blocking_findings']) + earlier
+
+
+def trust_policy_findings(reviews):
+    """The keys of the findings a ``trust_policy`` review (#434) of ``reviews`` marks: those it
+    opens and those it keeps ``unresolved``. They stay the operator's: the coordinator does not
+    close them (#606)."""
+    keys = set()
+    for review in reviews:
+        if not trust_policy(review):
+            continue
+        owner = owner_of(review)
+        keys |= {f.get('key') or finding_key(review['round'], owner, f['id'])
+                 for f in review['blocking_findings']}
+        keys |= {p['key'] for p in review['previous_findings']
+                 if p.get('status') == 'unresolved' and p.get('key')}
+    return keys
 
 
 def flow_verdict(review):
@@ -202,7 +223,7 @@ def finding_state(reviews, closures=()):
     it; a finding whose round is unknown cannot be attributed. Migration covers only the
     historical prefix: once a record carries keys, a later record without them (or with keys on
     only some findings) closes nothing and only opens its own findings. A closure is final: by
-    ``ci`` it closes only a CI finding, by ``operator`` any finding.
+    ``ci`` it closes only a CI finding, by ``operator`` or ``coordinator`` (#606) any finding.
 
     A finding a findings-only review opens (#416) is closed neither by that reviewer nor by any
     single other one: only by the quorum of a later round, once that round's records are all
@@ -262,7 +283,7 @@ def finding_state(reviews, closures=()):
         close_round()
     for closure in closures:
         f = open_.get(closure['key'])
-        if f is not None and (closure['by'] == OPERATOR or f['owner'] == CI):
+        if f is not None and (closure['by'] in AUTHORITIES or f['owner'] == CI):
             del open_[closure['key']]
     return FindingState(list(open_.values()), known, problems, quorum_closed)
 

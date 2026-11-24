@@ -563,10 +563,14 @@ class Labels:
     merge_hold: str = 'agent:merge-hold'
     # A non-critical escalation the supervisor decides in merge mode ``auto`` (#182).
     needs_supervisor: str = 'agent:needs-supervisor'
+    # An issue that waits for the coordinator's ``/devloop authorize`` (#607): it wakes the
+    # coordinator, and the dispatcher removes it once it records the authorization.
+    needs_coordinator: str = 'agent:needs-coordinator'
 
     def all(self):
         return (self.ready, self.working, self.review, self.changes,
-                self.ready_to_merge, self.needs_operator, self.merge_hold, self.needs_supervisor)
+                self.ready_to_merge, self.needs_operator, self.merge_hold, self.needs_supervisor,
+                self.needs_coordinator)
 
     def operator(self):
         """The labels that hand an issue or a PR to the operator (#248): ``needs_operator`` and

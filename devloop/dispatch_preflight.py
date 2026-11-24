@@ -37,6 +37,13 @@ COORDINATOR_TRUST_GAP = ('L\'issue è stata aperta dal coordinatore e il control
                          'dichiara toccata la policy di fiducia (`trust_policy` diverso da '
                          '`none`), ma l\'ultimo `agent:ready` non è di un utente fidato: la '
                          'mette in coda solo l\'operatore, rimettendo `agent:ready` di persona.')
+# The same gap on any other issue not opened by a trusted user, such as the supervisor's, with
+# ``[roles.coordinator]`` (#607): the coordinator's authorization does not queue it.
+AUTHORIZED_TRUST_GAP = ('L\'issue non è stata aperta da un utente fidato e il controllo di '
+                        'prontezza dichiara toccata la policy di fiducia (`trust_policy` diverso '
+                        'da `none`), ma l\'ultimo `agent:ready` non è di un utente fidato: anche '
+                        'se il coordinatore l\'ha autorizzata, la mette in coda solo '
+                        'l\'operatore, rimettendo `agent:ready` di persona.')
 
 
 def devloop_text(body):
@@ -524,12 +531,20 @@ class PreflightMixin:
         it (``_relabeled``). Any other outcome is returned as it is. A positive outcome reused
         passes the gate again (``_preflight_view``): an operator's ``agent:ready`` replaced by the
         coordinator's or the supervisor's makes it read as failed, and blocks the issue again
-        (``_do_preflight_block``)."""
-        if not self._is_coordinator(history['author']) or outcome.get('trust_policy') == 'none':
+        (``_do_preflight_block``).
+
+        With ``[roles.coordinator]`` the gate holds on every issue not opened by a trusted user
+        (#607), such as the supervisor's: its authorization by the coordinator
+        (``/devloop authorize``) does not queue a change of the trust policy, which stays the
+        operator's (``AUTHORIZED_TRUST_GAP``)."""
+        author = history['author']
+        if (self._coordinator_login() is None or author in self.cfg.trusted_users
+                or outcome.get('trust_policy') == 'none'):
             return outcome
         if ready_approval(history['labeled'], self.cfg.labels.ready, self.cfg.trusted_users):
             return outcome
-        gap = {'kind': 'operator_decision', 'description': COORDINATOR_TRUST_GAP,
+        text = COORDINATOR_TRUST_GAP if self._is_coordinator(author) else AUTHORIZED_TRUST_GAP
+        gap = {'kind': 'operator_decision', 'description': text,
                'code_refs': [], 'proposed_default': '', 'repository_dependent': False}
         return dict(outcome, ready=False, gaps=[gap, *outcome['gaps']])
 

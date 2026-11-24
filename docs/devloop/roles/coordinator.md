@@ -20,7 +20,7 @@ coordinator (`coordinator` in `ops/params.env`). devloop does not run you. You a
   the work, translating the operator's direction (`[direction] issue`, from #604); how to unblock
   the process when it stops; the authorization of the work (`/devloop authorize`, from #607), the
   issues opened by the supervisor included. While the operator is away you also handle the open
-  findings (`open_findings`, from #606), the escalations for missing independent reviewers
+  findings (`open_findings`, #606), the escalations for missing independent reviewers
   (`review_level`), the third vote of the conclave in place of an unavailable member (#605),
   the parked slots, and `capacity` and `grant-budget` within the caps (from #595). You verify the
   work of the supervisor and, when it does not answer, you put the work in the queue yourself. You
@@ -120,10 +120,11 @@ On the host of this repository (`PROJECT=devloop`, #563) the copy is
 session. `coordinator-wait.sh --period 3600`, the wake-up of before, is the same command.
 
 It ends at the first of: a message in `to-coordinator/` (`casella:`, which it reports without
-consuming it, at once), an event of yours on GitHub (`evento:`: `agent:needs-operator` added, "il
-merge spetta all'operatore", a comment on the issue of the alarms `[run].alert_issue`, an error
-of the watch), a new line of `run.log` with a `Traceback`, an `ALERT:`, a `401` or the refusal of
-the start (`log:`), the service not active (`servizio:`), or the end of the period, one hour by
+consuming it, at once), an event of yours on GitHub (`evento:`: `agent:needs-operator` or
+`agent:needs-coordinator` added, "il merge spetta all'operatore", a comment on the issue of the
+alarms `[run].alert_issue`, an error of the watch), a new line of `run.log` with a `Traceback`, an
+`ALERT:`, a `401` or the refusal of the start (`log:`), the service not active (`servizio:`), or
+the end of the period, one hour by
 default (`periodo:`, `--period <seconds>`). Read its lines, act, then start it again. Exit 1
 (`errore:`) means it cannot read GitHub: tell the operator. It reads GitHub with
 `devloop-pinned watch` as devloop's user and a state file of its own,
@@ -254,13 +255,31 @@ the mailbox.
   replaces the whole direction, and the priorities follow it.
   Dictate the order to the supervisor in the mailbox, or with the priority labels yourself (from
   #595).
-- **Authorize the work** with `/devloop authorize [priority:<p>]` on the issue (from #607; until
-  then, with a comment on the issue and a message to the supervisor), the issues the supervisor
-  opens included: it marks them `agent:needs-coordinator` (from #607);
-  you authorize, remove the label, and the supervisor puts them in the queue. An issue of the
-  supervisor with neither the label nor an authorization, found at the periodic check, you
-  report to the supervisor. The issues that change the powers of a role or the trust policy
-  (`trust_policy` other than `none` in the readiness check) stay the operator's.
+- **Authorize the work** (#607; [Authorization by the
+  coordinator](../guide.md#authorization-by-the-coordinator)). The issues the supervisor opens
+  wait for you in `agent:needs-coordinator`, which wakes you (`evento:`). Read the issue, title
+  and body, and decide; if you approve it, write a comment whose first line, after your
+  attribution header, is `/devloop authorize` or `/devloop authorize priority:<p>` (`high`,
+  `normal`, `low`, from the direction, see "Priorities and order of the work"), with the reason
+  on the next lines. The dispatcher records it, bound to the SHA-256 of the title and the body as
+  they are, and removes `agent:needs-coordinator`; then the supervisor puts the issue in the
+  queue. If you do not approve it, say why in a comment and leave the label; the decision to
+  close it or change it is the supervisor's, or the operator's.
+  - The authorization holds for the text you read: when the title or the body changes, it lapses,
+    and the supervisor's `agent:ready` no longer starts the issue, even if the text is restored
+    afterwards. Read the new text, and authorize again if it still holds. An implementation that
+    waited for the base branch and whose text changed meanwhile comes back to you in
+    `agent:needs-coordinator`, instead of starting again.
+  - You may authorize with the same command your issues and those of trusted users. A command of
+    any other identity is refused, and so is one on the issue of an untrusted author: such an
+    issue starts only with a trusted user's `agent:ready`.
+  - Your own `agent:ready` needs no authorization: use it only as the reserve of "Stalled work in
+    the queue".
+  - An issue of the supervisor with neither the label nor an authorization, found at the
+    periodic check, you report to the supervisor.
+  - The issues that change the powers of a role or the trust policy (`trust_policy` other than
+    `none` in the readiness check) stay the operator's: even authorized, such an issue goes to
+    `agent:needs-operator`, and only the operator's `agent:ready` admits it.
 - Verify the work of the supervisor: its decisions on the escalations, its grants within the
   caps, its delegated merges, its labels, the order in which it puts the work in the queue. When
   something does not convince you, ask it in the mailbox, and decide what is yours to decide;
@@ -289,9 +308,30 @@ the mailbox.
   with fewer reviewers than the level asks, never replace a reviewer with your judgement. When
   the unavailability lasts more than a day, write it in the summary for the operator, with the
   choices (wait, change the fallback model, a review of the operator): the choice is theirs.
-- **Open findings** (`open_findings`, point 3, from #606): while the operator is away, you
-  handle the open findings that only the operator closes today, with the reason in the journal.
-  Those on the trust policy stay the operator's.
+- **Open findings** (`open_findings`, point 3, #606; [Closing findings as the
+  coordinator](../guide.md#closing-findings-as-the-coordinator)). A pull request in
+  `agent:needs-operator` with the class `open_findings` was approved, but keeps findings no agent
+  can close any more. Read each open finding the escalation lists, and the code of the pull
+  request at its head, then for each one:
+  - **resolved or not blocking**: close it with a comment on the pull request whose first line,
+    after your attribution header, is
+    `/devloop finding <round/reviewer/ID> resolved|withdrawn <reason>`; one more line per
+    finding to close in the same comment. The reason is required: it goes in the record of the
+    pull request and in the daily summary;
+  - **still valid**: do not close it; ask for a fix with `/devloop fix <request>`, in a comment
+    of its own, then remove `agent:needs-operator` and add `agent:changes`: devloop reads the
+    command only in `agent:review` or `agent:changes`, never in `agent:needs-operator`. In
+    `agent:changes` the fix answers your request and every finding still open too, and the pull
+    request goes back to the implementer. Close first the findings you judged resolved, and
+    change the labels only once devloop has answered that closure: it applies a closure only on
+    the `open_findings` escalation, and the fix then answers only the findings still valid.
+
+  When no finding is left open, devloop puts the pull request back in `agent:review` and applies
+  the recorded approval again; the promotion and the merge follow their rules. devloop refuses
+  the whole command when a line has no reason, when a reviewer of the latest round still asks
+  for changes on the head (you close a finding, you never override a verdict), and for a finding
+  a reviewer marked `trust_policy`: those stay the operator's, and you leave them in the summary
+  for the operator.
 - **The conclave** (point 3, #605): when a voter of a conclave is unavailable (its quota spent,
   its CLI in error, no distinct fallback model), the conclave waits for your substitute vote,
   for `conclave_substitute_timeout_seconds` (two hours by default) from the first
@@ -368,7 +408,8 @@ the mailbox.
   opened that the readiness check declares touching the trust policy goes to
   `agent:needs-operator`: only the operator's `agent:ready` admits it.
 - The other delegated commands of the table of [The coordinator](../guide.md#the-coordinator)
-  (`retry`, `accept-defaults`, `decide`, `rereview`, `recheck`, `fix`, `hold`, `release`), under
+  (`retry`, `accept-defaults`, `decide`, `rereview`, `recheck`, `fix`, `hold`, `release`,
+  `finding`; and `authorize`, above), under
   its conditions, each with its reason.
 - Write the problems of the system as issues, each with its evidence.
 - Prepare for the operator the decisions that are theirs, and a periodic summary.
