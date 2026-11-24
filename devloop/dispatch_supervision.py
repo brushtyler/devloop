@@ -30,7 +30,8 @@ from .policy import ZERO_LEVEL, profile_of
 from .review import current_round, current_verdict, finding_state, owner_of
 from .supervision import (ACCEPT_DEFAULTS, BUDGET_GRANTABLE, CAPACITY, CAPACITY_REFUSED, DECIDE,
                           DESIGN_LABEL, ESCALATE, GRANT_BUDGET, GRANT_ROUND, ISSUE_STEPS,
-                          MAX_CAPACITY, MAX_COORDINATOR_OPERATOR_ROUNDS, MAX_MERGE_BUDGET,
+                          MAX_CAPACITY, MAX_CAPACITY_HOURS, MAX_COORDINATOR_OPERATOR_ROUNDS,
+                          MAX_MERGE_BUDGET,
                           MAX_RETRIES, MERGE, MERGE_BUDGET, MERGED_ISSUE, OPERATOR_ROUNDS_TEXT,
                           PREFLIGHT_DEFAULT, REREVIEW, RETRY, RETRY_STEPS,
                           ROUND_GRANTABLE, SYNC_FAILED, TOOL_FAILURE, capacity_arguments,
@@ -1421,7 +1422,9 @@ class SupervisionMixin:
         ``{key: {value, until, by}}``. Each comes from the dispatcher's ``supervision`` record
         of a ``capacity`` command it ``granted``; for each key the latest grant replaces the
         earlier ones, and is in force until its ``until``. A grant whose value is above the cap
-        the configuration sets now (lowered after the grant) is not applied. A grant of the
+        the configuration sets now (lowered after the grant) is not applied; for a grant of the
+        coordinator's identity the cap is the code's (``MAX_CAPACITY``, #611), never the lower
+        one of ``[delegations]``. A grant of the
         coordinator's identity (``role: coordinator``, #595) counts only with
         ``[roles.coordinator]`` on, any other only with ``[delegations] capacity`` on: turning
         either off revokes its grants. The latest grant of a key is chosen first, and only then
@@ -1445,9 +1448,10 @@ class SupervisionMixin:
                 self.log(f'capacity: {key} = {limit["value"]} by {limit["by"]} is not applied: '
                          'its delegation is off')
                 continue
-            if not 1 <= limit['value'] <= rules.capacity_cap(key):
+            cap = MAX_CAPACITY[key] if roles[key] else rules.capacity_cap(key)
+            if not 1 <= limit['value'] <= cap:
                 self.log(f'capacity: {key} = {limit["value"]} is above the cap of the '
-                         f'configuration ({rules.capacity_cap(key)}): not applied')
+                         f'{"code" if roles[key] else "configuration"} ({cap}): not applied')
                 continue
             limits[key] = limit
         return limits
@@ -1500,8 +1504,11 @@ class SupervisionMixin:
         makes it apply from this tick until its ``until``; last the ledger ``event``.
 
         From the coordinator's identity (#595, ADR 0002, precision of 2026-11-23) the same
-        conditions and caps hold, except that ``[roles.coordinator]``, not ``[delegations]
-        capacity``, turns the delegation on; its records carry ``role: coordinator``."""
+        conditions hold, except that ``[roles.coordinator]``, not ``[delegations] capacity``,
+        turns the delegation on, and that the value and the duration are checked against the
+        caps of the code only (``MAX_CAPACITY``, ``MAX_CAPACITY_HOURS``), not against the lower
+        ones of ``[delegations]``, which bind the supervisor (#611): the coordinator decides
+        beyond the delegation. Its records carry ``role: coordinator``."""
         if name == MERGE_BUDGET:
             return self._merge_budget_command(issue, comment, text, by)
         cfg = self.cfg
@@ -1539,15 +1546,20 @@ class SupervisionMixin:
         if key in CAPACITY_REFUSED:
             return refuse(f'`{key}` non è delegata: devloop la applica solo al riavvio di '
                           '`devloop run`, quindi la cambia solo l\'operatore')
-        cap = rules.capacity_cap(key)
+        # The coordinator decides beyond the delegation, within the caps of the code (#611).
+        cap = MAX_CAPACITY.get(key) if coordinator else rules.capacity_cap(key)
+        hours = MAX_CAPACITY_HOURS if coordinator else rules.capacity_max_hours
         if cap is None:
             return refuse(f'`{key}` non è fra le chiavi della delega')
         if not 1 <= value <= cap:
-            return refuse(f'il valore {value} è fuori dai limiti della delega: `{key}` va da 1 a '
-                          f'{cap} (`[delegations] capacity_{key}`)')
-        if minutes > rules.capacity_max_hours * 60:
-            return refuse(f'la durata supera il massimo di {rules.capacity_max_hours} ore '
-                          '(`[delegations] capacity_max_hours`)')
+            return refuse(f'il valore {value} è fuori dai limiti '
+                          + (f'del codice: `{key}` va da 1 a {cap} (tetto del codice)'
+                             if coordinator else f'della delega: `{key}` va da 1 a {cap} '
+                             f'(`[delegations] capacity_{key}`)'))
+        if minutes > hours * 60:
+            return refuse(f'la durata supera il massimo di {hours} ore '
+                          + ('(tetto del codice)' if coordinator
+                             else '(`[delegations] capacity_max_hours`)'))
         written = _epoch(comment.get('created_at'))
         if written is None:
             return refuse('l\'ora del comando non è leggibile, quindi la scadenza non è '
@@ -1575,7 +1587,8 @@ class SupervisionMixin:
                    'daily_cap': rules.max_grants_per_day,
                    'daily_left': rules.max_grants_per_day - daily}
         trace('granted', f'`{key}` vale {value} fino a {iso(until)} (valore configurato: '
-              f'{configured}; tetto della delega: {cap}). Alla scadenza torna il valore '
+              f'{configured}; tetto ' + ('del codice' if coordinator else 'della delega')
+              + f': {cap}). Alla scadenza torna il valore '
               f'configurato; un altro `/devloop {CAPACITY}` sulla stessa chiave sostituisce '
               f'questo. Concessioni di oggi: {daily} di {rules.max_grants_per_day}.\n\n'
               '**Motivo e analisi delle cause:**\n\n'
@@ -1845,13 +1858,13 @@ class SupervisionMixin:
         in a ``budget`` escalation to the operator (#595, ADR 0002, precision of 2026-11-23):
         the one extension of the envelope of its story, under the conditions and caps of the
         supervisor's (``_grant_budget``, #411, ADR 0005, P5-7), whatever ``[delegations]
-        budget`` and the merge mode say. ``refuse(why, resume)`` answers why it does not apply,
-        and the item stays with the operator.
+        budget`` says. ``refuse(why, resume)`` answers why it does not apply, and the item stays
+        with the operator.
 
         It applies only when the latest record that put the item there is a ``budget``
-        escalation that records the step of the refused turn with its key, and the story and
-        the agent of that turn (written since #595; an older one is refused); on an
-        issue no merged devloop PR resolved; on the input the escalation recorded (the PR's
+        escalation, in merge mode ``auto`` (as the coordinator's ``capacity``, #611), that
+        records the step of the refused turn with its key, and the story and the agent of that
+        turn (written since #595; an older one is refused); on an issue no merged devloop PR resolved; on the input the escalation recorded (the PR's
         head, the issue's base and request); and when ``_budget_extension`` grants it now: the
         story never extended (a second extension stays the operator's), the extension covers
         the turn, the daily cap of the grants (``max_grants_per_day``) not reached. An issue
@@ -1867,6 +1880,9 @@ class SupervisionMixin:
             return refuse(f'`/devloop {GRANT_BUDGET}` estende l\'envelope di budget solo su '
                           f'un\'escalation `{BUDGET}` all\'operatore o `{BUDGET_GRANTABLE}` al '
                           'supervisore; su un\'escalation di altra classe non vale')
+        if self.cfg.merge.mode != 'auto':
+            return refuse(f'la modalità di merge è `{self.cfg.merge.mode}`, non `auto`, quindi i '
+                          'comandi del supervisore non valgono')
         fields = budget_fields(record)
         if not self._retryable(record, is_pr) or not all(k in fields for k in ('story', 'agent')):
             return refuse('l\'escalation non registra il passo, la storia, il tipo o l\'agent '

@@ -116,6 +116,14 @@ state file of its own, so it never takes your events.
 
 ## Tasks
 
+- **Principle of scale** (#611). You decide within the delegation and on the single pull
+  request; the coordinator decides beyond the delegation and on the levers of the system
+  (capacity, priorities). On your escalations the coordinator acts only as a reserve, when you do
+  not answer within 15 minutes. `capacity` and `grant-budget` follow one rule, in merge mode
+  `auto` only ([Limits and resources: who decides](../guide.md#limits-and-resources-who-decides)):
+  yours within the switches and the caps of `[delegations]`, the coordinator's beyond them
+  within the caps of the code, the rest the operator's. For a limit or an extension beyond your
+  delegation, write to the coordinator in the mailbox (Channel with the coordinator).
 - **Put the work in the queue** (`agent:ready`, with the labels of [Labels from the
   supervisor](../guide.md#labels-from-the-supervisor)) only for the authorized issues: those
   the coordinator authorized (`/devloop authorize`, from #607; until then, with a comment on the
@@ -134,8 +142,8 @@ state file of its own, so it never takes your events.
   `retry`, `rereview`, `grant-round` within the caps, `accept-defaults`, `decide`, `hold` and
   `release` ([Escalations to the supervisor](../guide.md#escalations-to-the-supervisor)), each
   with its reason.
-- Only when the operator turned the delegation on, and only when every one of its conditions
-  holds: `grant-budget` on a `budget_grantable` escalation, once per story and never on a pull
+- Only when the operator turned the delegation on, in merge mode `auto`, and only when every one
+  of its conditions holds: `grant-budget` on a `budget_grantable` escalation, once per story and never on a pull
   request implemented by your own agent
   ([Extending the budget envelope](../guide.md#extending-the-budget-envelope)), with
   `[delegations] budget`; `capacity` on the issue of the daily summary, within the caps and with
