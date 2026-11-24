@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Prepara l'host per il supervisore di devloop: utente, ACL di solo attraversamento sulla home
 # di devloop (per leggere i log) e di sola lettura sull'overlay e sul file di progetto dello
-# state_dir (#543), la casella fra supervisore e coordinatore (#543), sudoers minimale, clone,
+# state_dir (#543), la casella fra supervisore e coordinatore (#543), sudoers minimale, la copia
+# di root del risveglio role-wait.sh e il watchdog dei ruoli (#602), clone,
 # key_dir 700, impostazioni di Claude Code senza aggiornamenti automatici; con SOURCE_REPO anche un
 # clone della sorgente al tag SOURCE_REF, da cui lanciare scripts/supervisor-token.py (#571).
 # Idempotente: si può rieseguire, fa solo ciò che manca. Non scrive segreti. Claude Code, il suo
@@ -110,6 +111,21 @@ if [ "$DRY_RUN" != 1 ]; then
 fi
 put_file "$SUDOERS_FILE" 440 root "$SUDOERS" || true
 
+# Il risveglio del supervisore (#602): una copia di root di role-wait.sh, con i file che legge e i
+# parametri, fuori dal clone e dalle home, da cui il supervisore lo esegue come suo utente.
+step "Copia di root di role-wait.sh ($SUPERVISOR_OPS_DIR)"
+# shellcheck disable=SC2086  # nomi di file senza spazi
+ops_root_copy "$SUPERVISOR_OPS_DIR" $OPS_SUPERVISOR_FILES
+
+# Il watchdog dei ruoli (#602): le unità template, una volta per host, e l'istanza del progetto
+# quando il progetto ha anche il coordinatore (l'overlay lo dichiara e l'utente c'è, #571).
+step "Watchdog dei ruoli ($WATCHDOG_UNIT, #602)"
+if user_exists "$COORDINATOR_USER" && overlay_declares_coordinator "$STATE_PATH/config.local.toml"; then
+    ensure_role_watchdog 1
+else
+    ensure_role_watchdog 0
+fi
+
 step "Clone di $REPO per $SUPERVISOR_USER"
 if [ -d "$SUPERVISOR_CLONE/.git" ]; then
     # Un clone per progetto (ADR 0006, R8): uno di un altro repository è di un altro progetto,
@@ -172,3 +188,5 @@ todo "token fine-grained di sola lettura per gh, come $SUPERVISOR_USER, con acce
 
 step 'Fatto'
 say "Poi: ops/host/check-host.sh per verificare utenti, permessi, ACL, sudoers e servizio."
+say "Il supervisore aspetta i suoi eventi con il risveglio dei ruoli (#602):"
+say "  bash $SUPERVISOR_OPS_DIR/host/role-wait.sh --role supervisor"

@@ -531,6 +531,62 @@ user's would. The label approves the title and the body as they are; an edit by 
 Without `[roles].supervisor`, or without an app for it (the supervisor then acts with the
 operator's `gh` login), only `trusted_users` count, as before.
 
+### Project direction
+
+The operator's strategic direction of a project (#604,
+[ADR 0002, second precisazione of 2026-11-23, point 7](../adr/0002-ruoli-e-responsabilita.md#seconda-precisazione-del-2026-11-23-modello-operativo-dei-ruoli-597))
+lives in an issue dedicated to it, named by `[direction] issue` in the
+[local overlay](#local-config-as-an-overlay), validated as `[report] issue`. The direction is a
+comment of the operator on that issue whose first line is `## Direzione`:
+
+```markdown
+## Direzione
+1. <theme> — <goal, what "done" means>; issue: #N, #M
+2. <theme> — …
+In pausa: <themes or issues not to touch for now>
+Vincoli: <e.g. budget, what not to change>
+```
+
+- **Each direction is complete and replaces the one before**: it does not add to it. To change a
+  theme the operator publishes the whole direction again. The comments before stay as history.
+- **Only the latest comment that starts with the line `## Direzione`** (blank lines before it
+  aside) **and is written by a user of `trusted_users` counts.** The other comments of the issue
+  (questions, proposals of the coordinator or of the supervisor) are discussion and do not change
+  the direction. The comment of an app, devloop's included, never counts as a direction, even
+  with the heading.
+- **devloop does not interpret the content**: it gives it back as it is. Its structure (the
+  themes in order, "In pausa", "Vincoli", the issues it names) is for the coordinator, who
+  translates it into priorities.
+
+`devloop direction` prints the direction in force: a line with the issue, the author, the time
+of the comment (and of its last edit, when edited) and its link, then the comment as written.
+Without it, it says why: no `[direction] issue` configured, or no valid comment on it. A comment
+of a trusted user written after the direction in force that looks like one (a line `Direzione`
+as a heading of another level or in another case, or `Direzione:`) but does not start with the
+line `## Direzione` is not used: a line in the log says so, with its link. `devloop status` has
+a line on it as well, the first line of `devloop direction` (`direction: issue #N, comment of
+<login> at <time>: <link>`, or `direction: none: …`); with `[direction] issue`, a failed read of
+GitHub is a line of its own and does not stop `status`. Both read GitHub with the identity of
+the ticks' reads and write nothing; the configuration is read at each run, so a new
+`[direction]` needs no restart.
+
+The coordinator and the supervisor read it with `devloop-pinned direction`, which their sudoers
+allow, read only ([ops/README.md](../../ops/README.md); the step on the host:
+[ops/host/migrate.md](../../ops/host/migrate.md#direzione-delloperatore-nei-sudoers-dei-ruoli-604)).
+The coordinator translates it into priorities, with the priority labels
+([Start order of ready issues](#start-order-of-ready-issues)) or in its orders to the supervisor:
+
+- `priority:high`: what unblocks the first theme, and the critical operational problems;
+- `priority:normal`: the work of the active themes;
+- `priority:low`: the rest that is useful;
+- out of the queue: the paused themes and the proposals off theme, reported to the operator in
+  the summary.
+
+A priority label the operator put on an issue wins over the direction. devloop itself does not
+change: the start order is still that of the priority labels, and the direction never reaches
+the prompts of the implementer, the reviewers, the readiness check or the conclave. Without
+`[direction]` the roles behave as before: the priorities are those of the operator's labels.
+
 ### Choosing the implementer
 
 Every issue goes to `roles.implementer` unless a label chooses another (#407, ADR 0005, D7): an
@@ -775,6 +831,47 @@ no proposal and no votes.
   voter's flag of the perimeter too, because it may write its own question for the operator.
 
 Every missing contribution is recorded as `missing`, with its reason.
+
+**Substitute vote of the coordinator.** With [`[roles.coordinator]`](roles/coordinator.md) (#605,
+[ADR 0002](../adr/0002-ruoli-e-responsabilita.md), second precision of 2026-11-23, point 3), a
+voter whose call fails (an exhausted quota, a CLI in error, no distinct fallback model left)
+does not close the conclave: its vote **waits for the coordinator's substitute vote**, until
+`conclave_substitute_timeout_seconds` (default 7200, two hours) from that first unavailability.
+The record says which member is missing and why, and keeps the deadline in UTC, so that it
+survives a restart; the other vote is still collected. The coordinator reads the resolution and
+votes with a comment whose first line, after its attribution header, is
+
+```text
+/devloop vote <conclave> <sha256> APPROVE|BLOCK|RESERVED <reason>
+```
+
+where `<conclave>` is the id of the conclave's comment and `<sha256>` the hash of its current
+proposal, both written in the comment while it waits. The reason may continue on the next lines,
+up to 1000 characters. The dispatcher counts the first command of the coordinator's identity,
+written after the wait started, that names this conclave and this hash, before the deadline:
+it records it as a **substitute** vote (`APPROVE` and `BLOCK` are `APPROVA` and `BLOCCA`;
+`RESERVED` flags the reserved perimeter, and the conclave ends `RESERVED`) and closes the
+conclave with the rules above. A malformed command, one for another conclave or another hash,
+or one written or last edited after the deadline (a comment written in time and turned into a
+vote later included) is refused, and listed in the comment; the coordinator may
+write a new one while the wait lasts. A `/devloop vote` of anyone else, trusted users included,
+is ignored and only logged. Past the deadline without a vote the vote is missing, and the
+conclave closes as without a coordinator.
+
+- **The proposer is never substituted**: when the agent that stopped fails, the conclave ends
+  `BLOCKED` as before.
+- **One substitute vote per conclave**: when the second voter is missing too, before or after
+  the coordinator's vote, the conclave is `BLOCKED`, to the operator, at once: a failed call, an
+  output over the limits, or a call started without a result alike, and in either order (a
+  voter that fails after the other is already missing opens no wait).
+- **It is visible**: the vote is shown as the coordinator's in place of the member, with the
+  coordinator's identity and the agent and model of `[roles.coordinator]`; the three distinct
+  profiles rule does not apply to it, and the [daily summary](#daily-summary) lists it, so that
+  the operator sees when the diversity of the voters was reduced (for example two Claude
+  models).
+- **The operator's [veto](#veto)** annuls a decision taken with a substitute vote as any other.
+
+Without `[roles.coordinator]` a failed voter is missing at once, as before.
 
 **Record.** The dispatcher publishes one comment with its own identity on the issue or PR of the
 block, with the proposal, the votes with their reasons and the outcome, and a `conclave` marker
@@ -1351,12 +1448,30 @@ more round to that PR with the same command, outside the caps of the delegation
 ([Granting a review round on an escalation to the operator](#granting-a-review-round-on-an-escalation-to-the-operator), #553);
 raising `max_review_rounds` still grants more rounds to every PR.
 
+#### Limits and resources: who decides
+
+The delegated commands that change limits or resources, `/devloop capacity` and
+`/devloop grant-budget`, follow one rule (#611, decided by the operator on the issue): the
+supervisor decides within the delegation, the coordinator beyond it, within the caps of the
+code, and both only in merge mode `"auto"`; the rest is the operator's.
+
+| Who | `capacity` ([Temporary capacity limits](#temporary-capacity-limits)) | `grant-budget` ([Extending the budget envelope](#extending-the-budget-envelope)) |
+|---|---|---|
+| Supervisor (and a trusted user's `capacity`) | Only with `[delegations] capacity` on, within the caps of the delegation (`capacity_max_open_prs`, `capacity_max_parked_prs`, `capacity_max_hours`), in merge mode `"auto"` | Only with `[delegations] budget` on, on a `budget_grantable` escalation, the one extension of the story within the tolerance of the code, in merge mode `"auto"` |
+| Coordinator (with `[roles.coordinator]`) | Also with the switch off or beyond the caps of the delegation, within the caps of the code only (`MAX_CAPACITY`, `MAX_CAPACITY_HOURS`), in merge mode `"auto"` | Also with the switch off, on a `budget` escalation to the operator too, the one extension of the story within the tolerance of the code, in merge mode `"auto"` |
+| Operator | The configured values and the caps themselves; everything in merge mode `"strict"` and `"off"` | The values of the envelope, a second extension of a story; everything in merge mode `"strict"` and `"off"` |
+
+Every grant of the supervisor and of the coordinator counts against the daily cap of the
+delegations (`max_grants_per_day`). A command of either outside these conditions is refused,
+with why, and changes nothing.
+
 #### Extending the budget envelope
 
 A delegation of the operator to the supervisor (#411, [ADR 0005](../adr/0005-deleghe-e-ruoli-degli-agent.md#budget-dopo-365),
 P5-7), **off by default**: `[delegations] budget = false`. It applies only with the
 [budget](reference.md#budget-envelope) on, whose activation is a decision of the operator of its
-own ([Prerequisites of activation](reference.md#prerequisites-of-activation)).
+own ([Prerequisites of activation](reference.md#prerequisites-of-activation)). Who grants an
+extension, and within which caps, is in [Limits and resources: who decides](#limits-and-resources-who-decides).
 
 With `budget = true`, in merge mode `"auto"`, a turn of `implement`, `review`, `fix` or `sync`
 that the envelope of its story refuses goes to `agent:needs-supervisor` as `budget_grantable`
@@ -1431,7 +1546,8 @@ booked.
 With `[roles.coordinator]` the coordinator's identity writes the same command, with the same
 reason. On a `budget_grantable` escalation it counts as the supervisor's. On a `budget`
 escalation to the operator, the coordinator grants the same one extension whatever
-`[delegations] budget` and the merge mode say, when the latest record that put the item in
+`[delegations] budget` says, only in merge mode `"auto"` (#611; in `"strict"` and `"off"` the
+command is refused, as its `capacity`), when the latest record that put the item in
 `agent:needs-operator` is that escalation and every condition holds, each verified then: the
 input of the refused turn unchanged (the PR's head, the issue's base and request), an issue no
 merged devloop PR resolved, the story never extended, an extension that covers the turn and the
@@ -1462,7 +1578,8 @@ P5-8), **off by default**: `[delegations] capacity = false`. It lets the supervi
 `max_open_prs` or `max_parked_prs` for a while, without touching the configuration or the
 overlay, which stay the operator's. It needs `[report] issue`: the command is written there, on
 the issue of the [daily summary](#daily-summary), never on an escalation. With `capacity = true`
-and no `[report] issue` devloop does not start.
+and no `[report] issue` devloop does not start. Who sets a limit, and within which caps, is in
+[Limits and resources: who decides](#limits-and-resources-who-decides).
 
 With `capacity = true`, in merge mode `"auto"`, the supervisor (or a trusted user) writes, as the
 first line of a comment on that issue:
@@ -1519,10 +1636,13 @@ counters and the `next:` lines with the limits in force, the same a tick plans w
 
 **The coordinator** (#595, [ADR 0002, precision of 2026-11-23](../adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-23-compiti-del-coordinatore-594)).
 With `[roles.coordinator]` the coordinator's identity writes the same command, on the same issue,
-under the same rules: the caps of the code (`MAX_CAPACITY`, `MAX_CAPACITY_HOURS`) and the lower
-ones of `[delegations]`, every grant counted against `max_grants_per_day`, merge mode `"auto"`.
+under the same rules, except the caps: the value and the duration are checked against the caps of
+the code only (`MAX_CAPACITY`, `MAX_CAPACITY_HOURS`), not against the lower ones of
+`[delegations]`, which bind the supervisor (#611, [who decides](#limits-and-resources-who-decides)).
+Every grant counts against `max_grants_per_day`, in merge mode `"auto"` only.
 For the coordinator the delegation is on with `[roles.coordinator]`, whatever `[delegations]
-capacity` says: that key stays the switch of the supervisor's. Its records carry
+capacity` says: that key stays the switch of the supervisor's. A grant of the coordinator stops
+applying only above a cap of the code, never above a lower cap of `[delegations]`. Its records carry
 `role: coordinator`, and its limits are in force only while `[roles.coordinator]` is on; the
 supervisor's and the trusted users' only while `capacity = true`. The latest grant of a key
 is the one checked: when its switch is off, the configured value applies, never an earlier grant
@@ -1834,11 +1954,12 @@ of ADR 0002:
 | `fix` | Delegated: as a trusted user's ([Fix requested by the operator or the supervisor](#fix-requested-by-the-operator-or-the-supervisor)) |
 | `hold`, `release` | Delegated: as a trusted user's, in merge mode `auto` ([Holding a merge](#holding-a-merge)) |
 | `grant-round` | Delegated: as a trusted user's, on a `round_grantable` escalation to the supervisor within the caps of the delegation ([Granting a review round](#granting-a-review-round)), and on a `round_limit` escalation to the operator at most **one** round per PR, beyond those caps; a further round on the same PR is the operator's ([Granting a review round on an escalation to the operator](#granting-a-review-round-on-an-escalation-to-the-operator), #553) |
-| `capacity` | Delegated (#595): a temporary capacity limit on `[report] issue`, as the supervisor's, within the same caps and counted in `max_grants_per_day`, in merge mode `auto`; on with `[roles.coordinator]`, whatever `[delegations] capacity` says ([Temporary capacity limits](#temporary-capacity-limits)) |
-| `grant-budget` | Delegated (#595): the one extension of a story's budget envelope, under the conditions and caps of the supervisor's, on a `budget_grantable` escalation to the supervisor and on a `budget` escalation to the operator; a second extension stays the operator's ([Extending the budget envelope](#extending-the-budget-envelope)) |
+| `capacity` | Delegated (#595, #611): a temporary capacity limit on `[report] issue`, beyond the delegation: on with `[roles.coordinator]`, whatever `[delegations] capacity` says, within the caps of the code only (`MAX_CAPACITY`, `MAX_CAPACITY_HOURS`), counted in `max_grants_per_day`, in merge mode `auto` only ([Limits and resources: who decides](#limits-and-resources-who-decides), [Temporary capacity limits](#temporary-capacity-limits)) |
+| `grant-budget` | Delegated (#595, #611): the one extension of a story's budget envelope, within the tolerance of the code, on a `budget_grantable` escalation to the supervisor and on a `budget` escalation to the operator, whatever `[delegations] budget` says, in merge mode `auto` only; a second extension stays the operator's ([Limits and resources: who decides](#limits-and-resources-who-decides), [Extending the budget envelope](#extending-the-budget-envelope)) |
 | labels | Delegated: its `agent:ready` added again and (#595) its priority labels count, as the supervisor's, only on issues opened by a trusted user or by a devloop app; its dependency and implementer labels never count ([Labels from the supervisor](#labels-from-the-supervisor)) |
 | `approve`, `merge-budget`, `reconcile`, `trusted_users` and the keys of trust | Reserved to the operator in person: never the coordinator's. On an escalation they are answered as not applicable and spent; elsewhere they are ignored and logged, as anyone else's; `trusted_users` and the overlay are the operator's |
 | `merge` | The coordinator's reserved merge (#529): [The reserved merge of the coordinator](#the-reserved-merge-of-the-coordinator) |
+| `vote` | Delegated (#605): the substitute vote in place of an unavailable member, only on a conclave waiting for it, bound to its comment and to the SHA-256 of its proposal, before its deadline ([Conclave on a block](#conclave-on-a-block)); elsewhere ignored, and never a command of an escalation |
 | any other (`escalate`, `finding`, `veto`, ...) | Refused: on an escalation answered as not applicable and spent, elsewhere ignored and logged |
 
 The coordinator writes as an agent, with the attribution header of AGENTS.md: its commands are
@@ -2003,7 +2124,7 @@ the role's user, with the CLI and the model of `[roles.supervisor]` or `[roles.c
 # command (the launcher, scripts/devloop-pinned, passes them itself):
 devloop="python3 -m devloop --project-config .devloop/project.toml --local-config .devloop/config.local.toml"
 $devloop setup            # create the agent:* labels, the priority:* labels and the review level labels (reviews:0 only when level 0 is on)
-$devloop status           # running action, devloop PRs (with rounds counted on max_review_rounds, merge state and conflicts), ready issues in start order with their priority, planned actions; with [budget] on, the budget of the stories in progress; a pinned copy behind origin/main in the files of the installation
+$devloop status           # running action, devloop PRs (with rounds counted on max_review_rounds, merge state and conflicts), ready issues in start order with their priority, planned actions; with [budget] on, the budget of the stories in progress; a pinned copy behind origin/main in the files of the installation; the operator's direction in force
 $devloop apps             # check the GitHub App of each actor, on the project's repo and with its key_dir
 $devloop tick --dry-run   # print the ready issues in start order and the plan, change nothing (no lock: it runs beside a dispatcher)
 $devloop tick             # run one round
@@ -2014,6 +2135,7 @@ $devloop follow issue-52  # follow live the implementer of issue #52 (pr-<N>: re
 $devloop watch --timeout 3600  # wait for the next change on GitHub, for the supervising agent
 $devloop pin origin/main  # pin a commit of origin, after its smoke test (see Run from a pinned installation)
 $devloop report --day 2026-11-16  # print the summary of a UTC day from devloop's records (default: today; --publish: on [report] issue, see Daily summary)
+$devloop direction        # print the operator's direction in force, from [direction] issue (see Project direction)
 $devloop fallback reset agy-reviewer  # forget the models agy-reviewer remembers unavailable (see Memory of unavailable models)
 $devloop token claude -- gh pr comment 70 --body-file reply.md  # run a command as an agent's app of the project (see GitHub identities; scripts/agent-token.py calls it)
 ```
@@ -2161,7 +2283,7 @@ comment text are cut short and control characters removed. What it reports:
 | Issue or PR closed or merged | `PR #N merged: title`, `issue #N closed (completed): title` |
 | Labels added or removed | `PR #N labels +agent:changes -agent:review` |
 | New head of a PR | `PR #N new head abc1234` |
-| CI turning `pass` or `fail` on the head (the checks the dispatcher reads) | `PR #N CI pass @abc1234` |
+| CI turning `pass` or `fail` on the head (the checks the dispatcher reads); never `pass` while a GitHub Actions workflow run of the head, a re-run of failed jobs included, is queued or running (#615) | `PR #N CI pass @abc1234` |
 | devloop review: the valid `review` record in the conversation, from the identity that may write it (its native review is not reported again) | `PR #N review codex approve round 2 @abc1234` |
 | devloop review in the body of the native review of an agent with its own app (#325), from that app | `PR #N review by brushtyler-devloop-codex-agent[bot]: approve round 2 @abc1234` |
 | Native `APPROVED` or `CHANGES_REQUESTED` review of a trusted user | `PR #N review by brushtyler: APPROVED @abc1234` |
@@ -2459,6 +2581,11 @@ and writes nothing without `--publish`. The summary lists:
   of their own with the same columns: every `/devloop merge` of the coordinator's identity the
   dispatcher answered that day, merged or refused, and, once merged, how many of the
   coordinator's daily cap it took;
+- the substitute votes of the coordinator in a conclave (#605, [Conclave on a
+  block](#conclave-on-a-block)), under "Voti sostitutivi del coordinatore nel conclave": from
+  the dispatcher's `conclave` records, each vote recorded that day, with its UTC time, the issue
+  or PR, the member it replaced, the coordinator's identity, its agent and model, and the vote,
+  so that the operator sees when the diversity of the voters was reduced;
 - the auto-pins that did not move `current` (#453): from the `pin` record of the alert on
   `[run].alert_issue`, one per commit, the UTC time, the commit of `origin/main` the running copy
   stays behind and the reason (the step of the smoke test, or the first line of the failed check;

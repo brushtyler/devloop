@@ -1,0 +1,28 @@
+# Unità template del watchdog dei ruoli di devloop (ops/host/devloop-role-watchdog@.service,
+# #602; ADR 0002, seconda precisazione del 2026-11-23, punto 6). L'istanza è il progetto:
+# devloop-role-watchdog@<progetto> (_default senza PROJECT), come devloop@<progetto>. La avvia il
+# timer devloop-role-watchdog@<progetto>.timer, ogni 5 minuti: controlla i battiti di supervisore
+# e coordinatore (ops/host/role-watchdog.sh), rileva e non agisce, senza chiavi GitHub.
+# setup-supervisor.sh e setup-coordinator.sh la installano in SYSTEMD_DIR, una volta per host, e
+# i parametri del progetto (utente, copia di root, casella) in una drop-in della sua istanza,
+# SYSTEMD_DIR/devloop-role-watchdog@<progetto>.service.d/project.conf
+# (ops/host/role-watchdog-project.conf). Un'istanza senza drop-in non parte: manca ExecStart.
+[Unit]
+Description=devloop role watchdog (%i)
+# Un controllo fallito (un battito che non si legge, un messaggio che non si scrive) lo segnala
+# nelle caselle del progetto, una volta.
+OnFailure=devloop-role-watchdog-failed@%i.service
+
+[Service]
+Type=oneshot
+Environment=DEVLOOP_WATCHDOG_MODE=check
+# Lo stato dell'ultimo controllo, per non ripetere lo stesso avviso: dell'utente dell'istanza.
+StateDirectory=devloop-role-watchdog/%i
+StateDirectoryMode=0700
+UMask=0027
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+# Scrive solo nella casella del progetto (ReadWritePaths= della drop-in) e nel suo stato.
+ProtectSystem=strict
+TimeoutStartSec=120

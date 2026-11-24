@@ -8,6 +8,7 @@ Questa directory contiene gli ADR del repository: le decisioni di progetto, con 
 | [0002](0002-ruoli-e-responsabilita.md) | Ruoli e responsabilità, e modalità di merge `off`, `strict` e `auto` |
 | [0003](0003-struttura-della-documentazione.md) | Audit della documentazione e struttura di destinazione |
 | [0004](0004-passo-2-budget-stato-durevole.md) | Piano del passo 2 dell'ADR 0001 (budget, prenotazione e stato durevole) |
+| [0005](0005-deleghe-e-ruoli-degli-agent.md) | Deleghe al supervisore, implementer generico e pool dei reviewer |
 | [0006](0006-devloop-su-altri-repository.md) | devloop su altri repository (parità con il motore locale) |
 | [0007](0007-da-ssdlc-a-devloop.md) | Da ssdlc a devloop, motore SSDLC congelato e rinomina del repository |
 

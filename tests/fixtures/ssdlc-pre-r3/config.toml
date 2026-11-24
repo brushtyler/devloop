@@ -309,6 +309,10 @@ ci_log_format = "run-tests"
 
 [tests.dir_modules]
 "devloop/" = "test_devloop"
+# Added with issue #615, a change of ssdlc's values: tests/test_ops.py checks ops/ and the
+# runbooks of the roles too.
+"ops/" = "test_ops"
+"docs/devloop/roles/" = "test_ops"
 
 # Documentation map (issue #203): code paths and the documents that describe them. A key is a
 # directory prefix ending in "/" or a file, relative to the root, with no pattern characters;

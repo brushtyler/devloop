@@ -44,6 +44,7 @@ class FakeGitHub:
     def __init__(self):
         self.prs, self.issues, self.ci, self.reviews = {}, {}, {}, {}
         self.events, self.states, self.comments, self.authors = {}, {}, [], {}
+        self.runs = {}  # the workflow runs of each head, as {status}
         self.failing = False
         self.calls = []
         self.on_call = None  # run with the name of each read, e.g. to move the clock
@@ -72,6 +73,10 @@ class FakeGitHub:
     def checks(self, sha):
         self._call('checks')
         return self.ci.get(sha, 'none'), [], []
+
+    def workflow_runs(self, sha):
+        self._call('workflow_runs')
+        return [dict(run) for run in self.runs.get(sha, [])]
 
     def pr_reviews(self, number):
         self._call('pr_reviews')
@@ -357,6 +362,42 @@ class ChangesTest(unittest.TestCase):
         self.assertEqual(self.news(), ['PR #10 new head bbbbbbb', 'PR #10 CI pass @bbbbbbb'])
         gh.ci[HEAD2] = 'fail'
         self.assertEqual(self.news(), ['PR #10 CI fail @bbbbbbb'])
+
+    def test_no_ci_pass_while_a_rerun_is_queued_or_running(self):
+        # #615: the dispatcher re-ran the failed job; its new job is not yet among the check
+        # runs, so the checks of the head all pass, but its workflow run is queued again.
+        gh = self.h.gh
+        gh.ci[HEAD1] = 'fail'
+        gh.runs[HEAD1] = [{'status': 'completed'}, {'status': 'completed'}]
+        self.assertEqual(self.news(), ['PR #10 CI fail @aaaaaaa'])
+        gh.ci[HEAD1] = 'pass'
+        for status in ('queued', 'in_progress'):
+            with self.subTest(status=status):
+                gh.runs[HEAD1][1]['status'] = status
+                self.assertEqual(self.news(), [])
+        # The re-run fails again: no false pass was reported in between.
+        gh.ci[HEAD1] = 'fail'
+        gh.runs[HEAD1][1]['status'] = 'completed'
+        self.assertEqual(self.news(), ['PR #10 CI fail @aaaaaaa'])
+        # Re-run again: pass only once every run of the head completed.
+        gh.ci[HEAD1] = 'pass'
+        gh.runs[HEAD1][1]['status'] = 'queued'
+        self.assertEqual(self.news(), [])
+        gh.runs[HEAD1][1]['status'] = 'completed'
+        self.assertEqual(self.news(), ['PR #10 CI pass @aaaaaaa'])
+
+    def test_the_workflow_runs_are_read_only_for_a_head_whose_checks_pass(self):
+        gh = self.h.gh
+        for ci in ('none', 'pending', 'fail'):
+            with self.subTest(ci=ci):
+                gh.ci[HEAD1] = ci
+                gh.calls.clear()
+                self.news()
+                self.assertNotIn('workflow_runs', gh.calls)
+        gh.ci[HEAD1] = 'pass'
+        gh.calls.clear()
+        self.assertEqual(self.news(), ['PR #10 CI pass @aaaaaaa'])
+        self.assertIn('workflow_runs', gh.calls)
 
     def test_new_closed_and_merged_issues_and_prs(self):
         gh = self.h.gh
@@ -1236,6 +1277,21 @@ class GitHubReadsTest(unittest.TestCase):
         self.assertIn('number,title,author,labels', calls[-1])
         gh.issue_author(3)
         self.assertEqual(calls[-1][1:3], ['api', 'repos/o/r/issues/3'])
+
+    def test_the_workflow_runs_of_a_head(self):
+        # #615: a re-run of failed jobs makes its workflow run queued again.
+        calls = []
+        out = ('{"id":1,"name":"Tests","status":"queued","conclusion":null,"run_attempt":2}\n'
+               '{"id":2,"name":"Docs","status":"completed","conclusion":"success",'
+               '"run_attempt":1}\n')
+        gh = GitHub('o/r', run=lambda args, **kw: calls.append(args) or SimpleNamespace(
+            returncode=0, stdout=out, stderr=''))
+        self.assertEqual([(r['id'], r['status']) for r in gh.workflow_runs(HEAD1)],
+                         [(1, 'queued'), (2, 'completed')])
+        self.assertEqual(calls, [['gh', 'api', '--paginate',
+                                  f'repos/o/r/actions/runs?head_sha={HEAD1}&per_page=100',
+                                  '--jq', '.workflow_runs[] | {id, name, status, conclusion, '
+                                          'run_attempt}']])
 
     def test_issue_state_reads_rest_with_the_porcelain_contract(self):
         # #211: `gh issue view --json stateReason` fails on gh 2.46; REST has state_reason.

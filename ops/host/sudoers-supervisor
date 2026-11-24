@@ -3,7 +3,7 @@
 # sostituendo i segnaposto con i valori di params.env.
 #
 # Come utente devloop: solo il launcher della copia fissata, con status, watch, report,
-# tick --dry-run e pin. Come root: solo start, stop, restart e status del servizio.
+# direction (in sola lettura, #604), tick --dry-run e pin. Come root: solo start, stop, restart e status del servizio.
 # Nessun comando scrive sull'overlay di devloop (config.local.toml) né apre una shell.
 
 Defaults>@DEVLOOP_USER@ always_set_home, secure_path="@DEVLOOP_PATH@"
@@ -13,6 +13,7 @@ Defaults>@DEVLOOP_USER@ always_set_home, secure_path="@DEVLOOP_PATH@"
     @LAUNCHER_CMD@ status *, \
     @LAUNCHER_CMD@ watch *, \
     @LAUNCHER_CMD@ report *, \
+    @LAUNCHER_CMD@ direction, \
     @LAUNCHER_CMD@ tick --dry-run, \
     @LAUNCHER_CMD@ pin *
 

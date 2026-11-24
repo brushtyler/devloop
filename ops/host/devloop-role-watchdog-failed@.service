@@ -1,0 +1,19 @@
+# Unità template del fallimento del watchdog dei ruoli (ops/host/devloop-role-watchdog-failed@.service,
+# #602): l'OnFailure= di devloop-role-watchdog@<progetto>.service. Scrive in entrambe le caselle
+# del progetto che il controllo dei battiti è fallito, una volta finché un controllo non riesce
+# (ops/host/role-watchdog.sh con DEVLOOP_WATCHDOG_MODE=failed). Stessa drop-in dell'unità del
+# controllo, in SYSTEMD_DIR/devloop-role-watchdog-failed@<progetto>.service.d/project.conf.
+[Unit]
+Description=devloop role watchdog failed (%i)
+
+[Service]
+Type=oneshot
+Environment=DEVLOOP_WATCHDOG_MODE=failed
+StateDirectory=devloop-role-watchdog/%i
+StateDirectoryMode=0700
+UMask=0027
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+TimeoutStartSec=120

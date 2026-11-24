@@ -111,9 +111,23 @@ class ProjectTestsConfigTests(unittest.TestCase):
 
     def test_ssdlc_declares_the_strategy_of_before_with_its_rules_and_format(self):
         # Without the prefix of the engine's modules since the engine left (ADR 0007, R1).
+        # tests/test_ops.py checks ops/ and the runbooks of the roles too (#615).
         self.assertEqual(CFG.tests, Tests(selection='python-unittest-modules',
-                                          dir_modules=(('devloop/', 'test_devloop'),),
+                                          dir_modules=(('devloop/', 'test_devloop'),
+                                                       ('ops/', 'test_ops'),
+                                                       ('docs/devloop/roles/', 'test_ops')),
                                           ci_log_format='run-tests'))
+
+    def test_ssdlc_selects_test_ops_for_ops_and_the_runbooks_of_the_roles(self):
+        # #615: local tests after implement and fix, and the pertinence of a CI failure.
+        modules = ['test_devloop_watch.py', 'test_doc_links.py', 'test_ops.py']
+        for path in ('ops/host/setup-supervisor.sh', 'ops/README.md',
+                     'docs/devloop/roles/coordinator.md'):
+            with self.subTest(path=path):
+                self.assertEqual(select_modules([path], modules, CFG.tests), ['test_ops.py'])
+        for path in ('docs/devloop/guide.md', 'docs/devloop/roles.md', 'scripts/run-tests.py'):
+            with self.subTest(path=path):
+                self.assertEqual(select_modules([path], modules, CFG.tests), [])
 
     def test_the_installation_and_the_code_declare_none(self):
         self.assertEqual(config.Config.tests, Tests())

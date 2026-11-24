@@ -1,0 +1,15 @@
+# Il timer del watchdog dei ruoli di devloop (ops/host/devloop-role-watchdog@.timer, #602): avvia
+# devloop-role-watchdog@<progetto>.service ogni 5 minuti. setup-supervisor.sh e
+# setup-coordinator.sh lo installano in SYSTEMD_DIR, una volta per host, e abilitano e avviano
+# l'istanza del progetto quando il progetto ha sia il supervisore sia il coordinatore.
+[Unit]
+Description=devloop role watchdog every 5 minutes (%i)
+
+[Timer]
+# Il primo controllo 10 minuti dopo l'avvio del timer (all'abilitazione o al boot), il tempo per
+# avviare le sessioni dei ruoli; poi ogni 5 minuti.
+OnActiveSec=10min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target

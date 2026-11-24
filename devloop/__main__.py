@@ -1,5 +1,5 @@
 """devloop command line: python3 -m devloop
-{setup,status,apps,tick,run,cleanup,gc,follow,watch,pin,report,fallback,token}."""
+{setup,status,apps,tick,run,cleanup,gc,follow,watch,pin,report,direction,fallback,token}."""
 
 import argparse
 import fcntl
@@ -12,7 +12,7 @@ import time
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
-from . import activity, follow, pin, redact, report, runloop, token, unavailability, watch
+from . import activity, direction, follow, pin, redact, report, runloop, token, unavailability, watch
 from .agents import AgentRunner, isolated_env
 from .agentuser import GH_CONFIG, SHARED_DIR, WORKTREES_DIR, AgentUser, AgentUserError, SharedDir
 from .agentuser import check as check_isolation
@@ -771,6 +771,46 @@ def run_report(parser, args):
         sys.exit(f'devloop: report: {exc}')
 
 
+def run_direction(args):
+    """``devloop direction`` (#604): print the operator's direction in force, from the comments
+    of ``[direction] issue``, with its author, its date and its link, or say why there is none.
+    Reads GitHub with the identity of the ticks' reads, as ``devloop report``; writes nothing."""
+    try:
+        cfg = load(args)
+    except ConfigError as exc:
+        sys.exit(f'devloop: invalid config: {exc}')
+    if not cfg.direction.issue:
+        print(direction.missing(cfg), flush=True)
+        return
+    try:
+        gh = Identities.from_config(cfg).github(DISPATCHER)
+    except OSError as exc:
+        sys.exit(f'devloop: invalid config: GitHub App key: {exc}. Set $DEVLOOP_APP_KEY_DIR or '
+                 'remove the app from [apps] to use the ambient gh login.')
+    try:
+        found = direction.read(cfg, gh, log=log)
+    except GitHubError as exc:
+        sys.exit(f'devloop: direction: {exc}')
+    if found is None:
+        print(direction.missing(cfg), flush=True)
+        return
+    print(found.header(), flush=True)
+    print(found.body.rstrip('\n'), flush=True)
+
+
+def direction_line(cfg, gh):
+    """The line of ``devloop status`` on the operator's direction (#604): where the direction in
+    force is, or why there is none. GitHub is read only with ``[direction] issue``; a failed
+    read is a line too."""
+    if not cfg.direction.issue:
+        return direction.missing(cfg)
+    try:
+        found = direction.read(cfg, gh, log=log)
+    except GitHubError as exc:
+        return f'direction: not read from issue #{cfg.direction.issue}: {exc}'
+    return found.header() if found else direction.missing(cfg)
+
+
 def run_loop(cfg, state, dispatcher, timeout, reloader=None):
     """``devloop run`` (#177): ``runloop.Loop`` with the dispatcher's ticks, a watcher with the
     identity of the ticks' reads (as ``devloop watch``) on a state file of its own, and the
@@ -882,6 +922,9 @@ def main(argv=None):
     report_cmd.add_argument('--publish', action='store_true',
                             help='publish as the dispatcher on [report] issue: today in the body, '
                                  'a past day in its archive comment')
+    sub.add_parser('direction', help='print the operator\'s direction in force, the latest '
+                                     'comment of a trusted user on [direction] issue that starts '
+                                     'with the line "## Direzione"')
     fallback_cmd = sub.add_parser('fallback',help='the memory of the models found unavailable')
     fallback_sub = fallback_cmd.add_subparsers(dest='fallback_command', required=True)
     reset_cmd = fallback_sub.add_parser('reset', help='forget the models an agent remembers '
@@ -914,6 +957,8 @@ def main(argv=None):
         return run_fallback(args)
     if args.command == 'report':
         return run_report(parser, args)
+    if args.command == 'direction':
+        return run_direction(args)
     if args.command == 'watch':
         sys.exit(run_watch(parser, args))
     if args.command == 'follow':
@@ -1010,6 +1055,7 @@ def main(argv=None):
                 log(line)
         for line in unavailability.describe(state):
             log(line)
+        log(direction_line(cfg, dispatcher.gh))  # #604: the operator's direction in force
         if label_transition(dispatcher.gh, cfg.labels) == 'both':
             log(f'labels: {both_labels_warning(cfg.labels)}')
         snap = dispatcher.snapshot()

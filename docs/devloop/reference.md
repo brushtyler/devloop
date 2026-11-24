@@ -22,7 +22,11 @@ an implementer key (#499), and the implementer chosen for an issue must not be t
 different from each other and with different `(kind, model, effort)`, reviewer keys or keys
 without a role, never an implementer key (#499); anything else stops devloop
 at startup. Their fallback models are checked when each call runs: one whose tuple coincides with
-another member's is not used. The prompts of `implement`, `fix` and `review`
+another member's is not used. `conclave_substitute_timeout_seconds` (an integer of at least 1,
+default 7200, in the local overlay) is how long a conclave waits, from the first unavailability
+of a voter, for the coordinator's substitute vote; it counts only with `[roles.coordinator]`
+([Substitute vote of the coordinator](guide.md#conclave-on-a-block), #605). The prompts of
+`implement`, `fix` and `review`
 (`devloop/prompts/`) end with `$conclave`: the verified resolution of the latest `UNANIMOUS`
 decision on the issue or its PR, or nothing ([After a unanimous
 decision](guide.md#after-a-unanimous-decision)). Among the limits, `agent_stall_seconds` (an integer of at least 1, default 900)
@@ -121,6 +125,10 @@ is not an issue number (an integer of at least 1), or an unknown key, stops devl
 [daily summary](guide.md#daily-summary): the dedicated issue it is published on and the minutes
 between two automatic publications of `devloop run`; an `issue` that is not an issue number, an
 `interval` that is not a whole number of at least 1, or an unknown key, stops devloop at startup.
+`[direction]` (`issue`, unset by default, a key of the overlay only, #604) names the issue of the
+operator's [direction of the project](guide.md#project-direction), which `devloop direction` and
+`devloop status` read and no prompt holds; an `issue` that is not an issue number, or an unknown
+key, stops devloop at startup, as for `[report]`. Unset, there is no direction.
 `[gc]` sets the [cleanup of the state directory](guide.md#cleanup-of-the-state-directory)
 (#380): `pins` (default `true`) with `keep_pins` (default 5, the pinned copies kept besides
 `current`), `worktrees` (default `true`), `logs` (default `false`) with `log_days` (default 14),
@@ -185,8 +193,11 @@ false, default false, #412) lets the supervisor set a
 `MAX_CAPACITY_HOURS` in `devloop/supervision.py`. `max_parallel_actions` is not delegated: it
 applies only at a restart. With `[roles.coordinator]` the coordinator sets the same limits and
 grants the same one extension of a budget envelope, also on a `budget` escalation to the
-operator (#595), within these caps and `max_grants_per_day`, whatever `capacity` and `budget`
-say: those keys stay the switches of the supervisor's delegations. `merge` (true or false, default false, #486) lets the supervisor
+operator (#595), within `max_grants_per_day` and only in merge mode `"auto"`, whatever
+`capacity` and `budget` say: those keys stay the switches of the supervisor's delegations, and
+`capacity_max_open_prs`, `capacity_max_parked_prs` and `capacity_max_hours` bind the supervisor
+only, while the coordinator's limits stay within the caps of the code (#611,
+[who decides](guide.md#limits-and-resources-who-decides)). `merge` (true or false, default false, #486) lets the supervisor
 [merge a PR whose merge is the operator's](guide.md#delegated-merge) with `/devloop merge <sha>
 <reason>`, when every condition of the delegation holds; it needs
 `review_policy.advisory_reviewer`. `max_merges_per_day` (default 5) may only lower the cap of the
@@ -465,7 +476,7 @@ keys, and the installation sets none. Every key is optional:
 |---|---|---|
 | `selection` | The installation's strategy, by name. The only one is `"python-unittest-modules"` | `local_tests = "changed"` is `"full"`: the project loses no test, only time. `ci_rerun_unrelated` is off |
 | `source_prefixes` | Parameter of the selection: name prefixes, letters, digits and `_` (ssdlc: none since ADR 0007, R1) | No such rule |
-| `[tests.dir_modules]` | Parameter of the selection: `"<directory>/" = "test_<prefix>"`, a relative directory and the prefix of test module names (ssdlc: `"devloop/" = "test_devloop"`) | No such rule |
+| `[tests.dir_modules]` | Parameter of the selection: `"<directory>/" = "test_<prefix>"`, a relative directory and the prefix of test module names. A directory has one prefix; several directories may share one (ssdlc: `"devloop/" = "test_devloop"`, and `"ops/"` and `"docs/devloop/roles/"` = `"test_ops"`, #615) | No such rule |
 | `ci_log_format` | The format of the CI logs, by name. The only one is `"run-tests"`, what `scripts/run-tests.py` prints | `ci_rerun_unrelated` is off, and the [summary of the CI](#summary-of-the-ci-in-the-prompts) has no suite lines: no job log is read |
 
 An unknown key or name, a parameter without `selection`, a prefix or a directory of another
@@ -480,7 +491,8 @@ worktree, are:
   `test_<name>*.py` (with the prefix `lib_`, `pkg/lib_impact.py` selects `test_lib_impact*.py`
   and `test_impact*.py`);
 - for any file under a directory of `[tests.dir_modules]`, the modules whose name starts with its
-  prefix (with ssdlc's, any file under `devloop/` selects `tests/test_devloop*.py`).
+  prefix (with ssdlc's, any file under `devloop/` selects `tests/test_devloop*.py`, and any file
+  under `ops/` or `docs/devloop/roles/` selects `tests/test_ops.py`, which checks them too).
 
 When no module is pertinent, for example when only documentation changed, and with `"none"`,
 no test runs locally and the PR goes on to the CI. `implement_test_retries` applies to the tests

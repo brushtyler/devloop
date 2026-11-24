@@ -75,6 +75,10 @@ journal_max_mib = 64
 # takes reviewer keys, never an implementer key (#499): a block of an implementer convenes none.
 # Disabled here: enabling it is the operator's decision.
 # conclave = ["claude-reviewer", "codex-reviewer", "agy-reviewer"]
+# With [roles.coordinator] (issue #605) a voter that cannot vote does not close the conclave: it
+# waits this many seconds, from the first unavailability, for the coordinator's substitute vote
+# (/devloop vote); then the block stays with the operator.
+# conclave_substitute_timeout_seconds = 7200
 
 max_open_prs = 2            # devloop PRs in progress at once; new issues wait
 # PRs waiting for a person (issue #199): agent:needs-operator, and agent:ready-to-merge when
@@ -256,6 +260,13 @@ check = true
 [report]
 # issue = 123
 interval = 15
+
+# `devloop direction` (issue #604): the operator's direction of the project, the latest comment
+# of a user of trusted_users on this issue that starts with the line `## Direzione`, given back
+# as it is to the coordinator and the supervisor; never in a prompt. Without it the priorities
+# stay those of the operator's labels. Which issue is the operator's choice (local overlay).
+# [direction]
+# issue = 123
 
 # The CI of a new head (issue #263). With local_tests other than "full", a PR in agent:review
 # whose head has no CI yet is not reviewed for grace_minutes after its push (the dispatcher's own

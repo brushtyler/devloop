@@ -54,6 +54,12 @@
 # [report]
 # issue = 124
 
+# Issue della direzione dell'operatore (#604): vale l'ultimo commento di un utente di
+# trusted_users che inizia con la riga "## Direzione" (senza: le priorità restano alle
+# etichette dell'operatore). La leggono `devloop direction` e `devloop status`.
+# [direction]
+# issue = 125
+
 # L'utente con cui girano le CLI degli agent e i test (#415): lo prepara setup-agent-user.sh.
 # Senza, gli agent girano come l'utente devloop e possono leggere le chiavi delle app;
 # check-host.sh lo segnala come errore.
