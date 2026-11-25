@@ -137,6 +137,34 @@ TEXTS = Catalog(
                                '(`default_available`): the supervisor may accept them with '
                                '`/devloop {accept}`, or decide otherwise with `/devloop {decide} '
                                '<decisions>`.'),
+        # #672: a missing prerequisite named without the number of its issue.
+        'prerequisite_preflight': ('The readiness check found only missing prerequisites, and '
+                                   'not the number of the issue of each: {listed}.'),
+        'prerequisite_implement': ('The implementer stopped: the issue needs a prerequisite not '
+                                   'done yet, named without the number of its issue: {listed}.'),
+        'prerequisite_supervisor': ('The supervisor finds the issue of this repository that is '
+                                    'each prerequisite, adds it as "blocked by" of this issue '
+                                    'with its app, then answers `/devloop {retry}`: the retry '
+                                    'waits until the blocks close, then the step runs again. '
+                                    'When no such issue exists, `/devloop {escalate} <reason>`.'),
+        # Why the dispatcher does not add a prerequisite as "blocked by" (#672,
+        # ``Dispatcher._add_prerequisites``): the escalation of before stays.
+        'prereq_none': 'no issue number is given',
+        'prereq_self': '#{n} is this issue itself',
+        'prereq_present': '#{n} is already among the "blocked by" of the issue',
+        'prereq_missing': '#{n} does not exist in this repository',
+        'prereq_moved': '#{n} was transferred to another repository',
+        'prereq_pr': '#{n} is a pull request, not an issue',
+        'prereq_closed': '#{n} is not open',
+        'prereq_active': ('the issue would have more than {max} "blocked by" of the dispatcher '
+                          'open together ({active} open now)'),
+        'prereq_total': ('the dispatcher would add more than {max} "blocked by" to the issue in '
+                         'all ({total} added so far)'),
+        'prereq_cycle': 'the block would close a dependency cycle among {cycle}',
+        'prereq_unexplored': ('the dependencies are too many to rule out a cycle (more than '
+                              '{max} issues to read)'),
+        'prereq_stopped': ('The prerequisite named by the implementer is not added as "blocked '
+                           'by": {why}.'),
         'budget_grantable': ('The supervisor may extend the envelope of this story once, in turns '
                              'and time only, with `/devloop grant-budget <reason>`, where the '
                              'reason gives or cites the analysis of the causes: {extension}.'),
@@ -483,6 +511,34 @@ TEXTS = Catalog(
                                'proposto (`default_available`): il supervisore può accettarli '
                                'con `/devloop {accept}`, o decidere diversamente con `/devloop '
                                '{decide} <decisioni>`.'),
+        'prerequisite_preflight': ('Il controllo di prontezza ha trovato solo prerequisiti '
+                                   'mancanti, e non il numero dell\'issue di ciascuno: '
+                                   '{listed}.'),
+        'prerequisite_implement': ('L\'implementer si è fermato: l\'issue richiede un '
+                                   'prerequisito non ancora fatto, indicato senza il numero della '
+                                   'sua issue: {listed}.'),
+        'prerequisite_supervisor': ('Il supervisore trova l\'issue di questo repository che è '
+                                    'ciascun prerequisito, la aggiunge come "blocked by" di questa '
+                                    'issue con la sua app, poi risponde `/devloop {retry}`: il '
+                                    'retry attende che i blocchi si chiudano, poi il passo si '
+                                    'ripete. Se un\'issue così non esiste, `/devloop {escalate} '
+                                    '<motivo>`.'),
+        'prereq_none': 'non è indicato il numero di nessuna issue',
+        'prereq_self': '#{n} è questa stessa issue',
+        'prereq_present': '#{n} è già fra i "blocked by" dell\'issue',
+        'prereq_missing': '#{n} non esiste in questo repository',
+        'prereq_moved': '#{n} è stata trasferita in un altro repository',
+        'prereq_pr': '#{n} è una pull request, non un\'issue',
+        'prereq_closed': '#{n} non è aperta',
+        'prereq_active': ('l\'issue avrebbe più di {max} "blocked by" del dispatcher aperti '
+                          'insieme ({active} aperti ora)'),
+        'prereq_total': ('il dispatcher aggiungerebbe all\'issue più di {max} "blocked by" in '
+                         'tutto ({total} aggiunti finora)'),
+        'prereq_cycle': 'il blocco chiuderebbe un ciclo di dipendenze fra {cycle}',
+        'prereq_unexplored': ('le dipendenze sono troppe per escludere un ciclo (più di {max} '
+                              'issue da leggere)'),
+        'prereq_stopped': ('Il prerequisito indicato dall\'implementer non è aggiunto come '
+                           '"blocked by": {why}.'),
         'budget_grantable': ('Il supervisore può estendere una volta l\'envelope di questa '
                              'storia, solo in turni e tempo, con `/devloop grant-budget '
                              '<motivo>`, dove il motivo riporta o cita l\'analisi delle cause: '
@@ -1203,9 +1259,10 @@ class SupervisionMixin:
           of a PR's review whose latest round lacks the verdict of a reviewer of the quorum: a
           new round with the current configuration (``_rereview``, #491). Its input is checked
           again as for a retry.
-        - ``retry``: only for ``tool_failure`` and ``sync_failed``, and only while the input of
-          the step is the one that failed (the key of the escalation; for ``implement`` its
-          request, not its base, #475: ``retry_input``). A PR goes back to the
+        - ``retry``: only for the classes of ``RETRY_CLASSES`` (``prerequisite`` among them,
+          #672), and only while the input of the step is the one that failed (the key of the
+          escalation; for ``implement`` and for a ``prerequisite`` its request, not its base,
+          #475: ``retry_input``). A PR goes back to the
           label of its step, and the next tick runs it; an issue's step runs now. Retries
           write no review record, so they count no round. A retry of an issue blocked by an
           open issue (#277) waits, unspent, until the last block closes. After
@@ -1389,8 +1446,9 @@ class SupervisionMixin:
                                      'supervisor_refused', human_remove)
         current = self._current_key(number, key, target if is_pr else None)
         # The base of an implementation does not bind its retry (#475): the step starts again
-        # from the current base with the saved work of its timed-out turn reapplied.
-        changed = changed_input(current, key)
+        # from the current base with the saved work of its timed-out turn reapplied. Nor does
+        # the base of a step that waited for a prerequisite (#672): its merge advances it.
+        changed = changed_input(current, key, cls)
 
         def superseded():
             return refused(t('superseded', changed=', '.join(f'`{k}`' for k in changed)),
@@ -2277,10 +2335,13 @@ class SupervisionMixin:
             self.ledger.event(issue, 'delegation_grant', delegation='merge_budget', by=by,
                               comment=ident, value=n, day=day, cap=cap)
 
-    def _apply_retry(self, number, is_pr, comments, escalation, remove, trace, limit):
+    def _apply_retry(self, number, is_pr, comments, escalation, remove, trace, limit,
+                     cls=None):
         """Run again the step of ``escalation`` on issue or PR ``number`` (#182), its input
         already checked, removing the labels ``remove``: a PR goes back to the label of its
-        step, an issue's step runs now. An issue blocked by an open issue (#277), read again
+        step, an issue's step runs now. ``cls``: the class the retries are counted by, the
+        escalation's by default; on a supervisor's escalation handed to the operator, the class
+        it was handed from (#672), whose unbound fields do not tell two inputs apart. An issue blocked by an open issue (#277), read again
         now, does not run its step: the command waits, with no record and no attempt spent,
         until the last block closes. After ``MAX_RETRIES`` applied retries for the same key,
         the supervisor's and the operator's together (``retries_done``), ``limit(done)`` runs
@@ -2299,7 +2360,8 @@ class SupervisionMixin:
         # the retries each one already had.
         done = retries_done(key, [r.get('key') for _, r in
                                   self._dispatcher_records(comments, 'supervision')
-                                  if r['command'] == RETRY and r['outcome'] == 'applied'])
+                                  if r['command'] == RETRY and r['outcome'] == 'applied'],
+                            cls or escalation.get('class'))
         if done >= MAX_RETRIES:
             return limit(done)
         trace('applied', self._texts()('retry_applied', step=step, attempt=done + 1,
@@ -2465,10 +2527,11 @@ class SupervisionMixin:
                 or anchor.get('origin') in (PREFLIGHT_DEFAULT, MERGED_ISSUE)):
             return refuse(t('not_step', where=self._where(is_pr)))
         key, step = record['key'], record['step']
-        # The check that restarts an implementation waiting for its base (#459) runs on an
-        # issue in agent:working, which keeps it.
+        # The check that restarts an implementation waiting for its base (#459) or for its
+        # prerequisites (#672) runs on an issue in agent:working, which keeps it.
         if step == 'preflight' and lb.ready not in labels and not (
-                lb.working in labels and self._base_wait(comments, 'implement')):
+                lb.working in labels and (self._base_wait(comments, 'implement')
+                                          or self._prerequisite_wait(comments))):
             return refuse(t('preflight_ready', ready=lb.ready),
                           t('preflight_ready_resume', operator=lb.needs_operator,
                             ready=lb.ready))
@@ -2476,8 +2539,12 @@ class SupervisionMixin:
         if merged:
             return refuse(t('merged_why', merged=', '.join(f'#{m["number"]}' for m in merged)),
                           t('merged_resume'))
-        # As for the supervisor, the base of an implementation does not bind its retry (#475).
-        changed = changed_input(self._current_key(number, key, target if is_pr else None), key)
+        # As for the supervisor, the base of an implementation does not bind its retry (#475),
+        # nor the base of a step that waited for a prerequisite (#672), also on a supervisor's
+        # escalation of it handed to the operator: the class it was handed from counts.
+        cls = anchor.get('origin') or record.get('class')
+        changed = changed_input(self._current_key(number, key, target if is_pr else None), key,
+                                cls)
         if changed:
             return refuse(t('superseded', changed=', '.join(f'`{k}`' for k in changed)),
                           resume_)
@@ -2487,7 +2554,8 @@ class SupervisionMixin:
                              stays=stays, resume=resume_), key=key)
 
         self._apply_retry(number, is_pr, comments, record,
-                          sorted(labels & (lb.operator() | {lb.needs_supervisor})), trace, limit)
+                          sorted(labels & (lb.operator() | {lb.needs_supervisor})), trace, limit,
+                          cls)
 
     def _coordinator_findings(self, target, number, labels, fresh, comments, command, trace,
                               refuse):

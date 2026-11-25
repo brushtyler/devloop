@@ -478,7 +478,10 @@ Today these texts follow it:
   command does not apply and how to resume, the grants of a round or of the budget, the
   coordinator's closure of findings, the defaults accepted or decided, and the escalations to
   the operator they write; the note on why a non-critical escalation stays with the operator, and
-  the readiness check's escalation of its defaults to the supervisor;
+  the readiness check's escalation of its defaults to the supervisor; since #672 also the
+  `prerequisite` escalations and why a missing prerequisite is not added as "blocked by"
+  ([Missing prerequisites](guide.md#missing-prerequisites)), whose `prerequisite` record the
+  dispatcher writes in the project's language too;
 - the reasons these texts take from `devloop/supervision.py`, `devloop/budget.py` and
   `devloop/journal.py` (#633): the descriptions of the classes, how a trusted user grants one
   more round, why a command of the coordinator is not delegated, the refusal of a turn by the
@@ -1660,7 +1663,7 @@ Each agent and the dispatcher can act on GitHub with its own GitHub App (#65), c
 
 | Actor | Does |
 |---|---|
-| dispatcher | every read, labels, escalations, CI rounds, re-runs of failed CI jobs not pertinent to the PR (needs `actions: write`, see [CI failures not pertinent to the PR](#ci-failures-not-pertinent-to-the-pr)), finding closures, a PR's readiness for merge, the labels of the readiness check and its escalation to the supervisor, the record of a [conclave](guide.md#conclave-on-a-block), the restart after a `UNANIMOUS` decision and the suspension after a [veto](guide.md#veto), the summary of an [advisory review](guide.md#advisory-review-for-the-operator) |
+| dispatcher | every read, labels, escalations, CI rounds, re-runs of failed CI jobs not pertinent to the PR (needs `actions: write`, see [CI failures not pertinent to the PR](#ci-failures-not-pertinent-to-the-pr)), finding closures, a PR's readiness for merge, the labels of the readiness check and its escalation to the supervisor, the record of a [conclave](guide.md#conclave-on-a-block), the restart after a `UNANIMOUS` decision and the suspension after a [veto](guide.md#veto), the summary of an [advisory review](guide.md#advisory-review-for-the-operator), the "blocked by" of a [missing prerequisite](guide.md#missing-prerequisites) with its `prerequisite` record (`issues: write`, as its labels) |
 | readiness checker (`preflight`) | the outcome of the [readiness check](guide.md#readiness-check-before-implementation) on the issue, with its `preflight` record, also when a fallback model ran it |
 | implementer | commits (author and committer are its bot), push, opens the PR, fix and blocked comments |
 | reviewer | one native GitHub review (`APPROVE` or `REQUEST_CHANGES`; for `needs_operator`, `REQUEST_CHANGES` while blocking findings of its own stay open, else `APPROVE`, #418) on the reviewed commit, whose body is the review and its record (#325, see [Where a review is published](protocol.md#where-a-review-is-published)); an agent without an app publishes the review comment instead |

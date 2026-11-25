@@ -442,6 +442,29 @@ class GitHub:
         return {'author': graphql_login(issue['author']), 'blocked_by': blocked_by,
                 'added': added}
 
+    def issue_target(self, number):
+        """``{id, repo, number, state, pull_request}`` of issue or PR ``number`` of the
+        repository (#672): its REST id, which the "blocked by" API takes, the repository
+        (``owner/name``, or None when unknown) and the number it is in now, which differ from
+        the ones asked for an issue transferred elsewhere, since GitHub follows the transfer,
+        its state in upper case (OPEN or CLOSED) and whether it is a PR. ``GitHubNotFound``
+        when it does not exist."""
+        raw = self._json('api', f'repos/{self.repo}/issues/{int(number)}', '--jq',
+                         '{id, number, repository_url, state, '
+                         'pull_request: (.pull_request != null)}') or {}
+        url = raw.get('repository_url') or ''
+        repo = url.split('/repos/', 1)[1] if '/repos/' in url else None
+        return {'id': raw.get('id'), 'repo': repo or None, 'number': raw.get('number'),
+                'state': (raw.get('state') or '').upper() or None,
+                'pull_request': bool(raw.get('pull_request'))}
+
+    def add_blocked_by(self, number, issue_id):
+        """Add to issue ``number`` the native "blocked by" of the issue whose REST id is
+        ``issue_id`` (#672, ``issue_target``)."""
+        self._gh('api', '-X', 'POST',
+                 f'repos/{self.repo}/issues/{int(number)}/dependencies/blocked_by',
+                 '-F', f'issue_id={int(issue_id)}')
+
     def labelers(self, number, label):
         """Logins of every ``labeled`` event of ``label`` on issue or PR ``number``, oldest
         first, including events of a label removed since."""

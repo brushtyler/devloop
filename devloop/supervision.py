@@ -97,10 +97,16 @@ ROUND_GRANTABLE = 'round_grantable'
 # would cover (#411, ADR 0005, P5-7): only with ``[delegations] budget`` on and every condition
 # of the delegation verified.
 BUDGET_GRANTABLE = 'budget_grantable'
+# A readiness check or an implementer that names a missing prerequisite only in words, without
+# the number of its issue (#672, the operator's decision on the issue): the supervisor finds the
+# issue, adds the "blocked by" with its app and answers ``/devloop retry``, which waits for the
+# block to close. The base of the step does not bind that retry (``UNBOUND_CLASSES``): the base
+# advances when the prerequisite is merged.
+PREREQUISITE = 'prerequisite'
 NON_CRITICAL = (TOOL_FAILURE, PREFLIGHT_DEFAULT, SYNC_FAILED, MERGED_ISSUE, ROUND_GRANTABLE,
-                BUDGET_GRANTABLE, PUSH_FAILED)
+                BUDGET_GRANTABLE, PUSH_FAILED, PREREQUISITE)
 # The non-critical classes whose step a ``retry`` runs again.
-RETRY_CLASSES = (TOOL_FAILURE, SYNC_FAILED, PUSH_FAILED)
+RETRY_CLASSES = (TOOL_FAILURE, SYNC_FAILED, PUSH_FAILED, PREREQUISITE)
 
 # Critical classes: always to the operator. Any other value is critical too.
 CRITICAL = {
@@ -149,6 +155,9 @@ ISSUE_STEPS = ('preflight', 'implement')
 # again from the current base, with the work its timed-out turn saved reapplied, so a base branch
 # that moved since the escalation neither supersedes the retry nor starts a new count of retries.
 UNBOUND = {'implement': ('base',)}
+# The same, by the class of the escalation (#672): a step that waits for a prerequisite runs
+# again on the base that its merge advanced.
+UNBOUND_CLASSES = {PREREQUISITE: ('base',)}
 MAX_RETRIES = 2
 # The caps of the supervisor's delegations (#405, ADR 0005, D4): constants of the code, which the
 # configuration and the local overlay may only lower (``[delegations]``), never raise. The rounds
@@ -311,36 +320,38 @@ def critical(cls):
     return cls not in NON_CRITICAL
 
 
-def retry_input(key):
+def retry_input(key, cls=None):
     """The input a retry of ``key`` is bound to: the key without the fields its step does not
-    depend on (``UNBOUND``, #475)."""
-    unbound = UNBOUND.get(key.get('step'), ())
+    depend on (``UNBOUND``, #475), nor those the class ``cls`` of its escalation leaves out
+    (``UNBOUND_CLASSES``, #672)."""
+    unbound = (*UNBOUND.get(key.get('step'), ()), *UNBOUND_CLASSES.get(cls, ()))
     return {k: v for k, v in key.items() if k not in unbound}
 
 
-def changed_input(current, key):
+def changed_input(current, key, cls=None):
     """The fields of the retry key ``key`` that its input read now, ``current``, no longer has,
-    sorted: a retry is superseded when there is any. The fields ``retry_input`` leaves out do
-    not count."""
-    now, then = retry_input(current), retry_input(key)
+    sorted: a retry is superseded when there is any. The fields ``retry_input`` leaves out, for
+    the class ``cls`` of the escalation too, do not count."""
+    now, then = retry_input(current, cls), retry_input(key, cls)
     return sorted(k for k in set(now) | set(then) if now.get(k) != then.get(k))
 
 
-def _reviewers(key):
+def _reviewers(key, cls=None):
     """``(input, reviewers)`` of a retry key: its input (``retry_input``) without its reviewer,
     and the set of the reviewers it names (``{''}`` when it names none)."""
-    rest = {k: v for k, v in retry_input(key).items() if k != 'reviewer'}
+    rest = {k: v for k, v in retry_input(key, cls).items() if k != 'reviewer'}
     names = {name for name in str(key.get('reviewer') or '').split(',') if name}
     return rest, names or {''}
 
 
-def retries_done(key, keys):
+def retries_done(key, keys, cls=None):
     """How many retries of the input of ``key`` the keys of the applied retries ``keys`` already
     count: the most among the reviewers ``key`` names. A review whose reviewers failed together
     and then one by one keeps the count of each reviewer, so that none of them runs more than
-    ``MAX_RETRIES`` more times on the same input."""
-    rest, names = _reviewers(key)
-    spent = [_reviewers(k) for k in keys if isinstance(k, dict)]
+    ``MAX_RETRIES`` more times on the same input. ``cls``: the class of the escalation, whose
+    unbound fields (``UNBOUND_CLASSES``) do not tell two inputs apart."""
+    rest, names = _reviewers(key, cls)
+    spent = [_reviewers(k, cls) for k in keys if isinstance(k, dict)]
     return max(sum(1 for other, who in spent if other == rest and name in who) for name in names)
 
 
@@ -355,6 +366,7 @@ _ENGLISH = {
     ROUND_GRANTABLE: 'limit of the review rounds, with one more round the supervisor may grant',
     BUDGET_GRANTABLE: ('budget envelope of the story used up, with the one extension the '
                        'supervisor may grant'),
+    PREREQUISITE: 'prerequisite named without the number of its issue',
     'round_limit': 'limit of the review rounds',
     'operator_decision': 'decision of the operator asked by the readiness check',
     'untrusted': 'untrusted author or text changed after `agent:ready`',
@@ -406,6 +418,8 @@ def describe(cls, language=ENGLISH):
     if cls == BUDGET_GRANTABLE:
         return ('envelope di budget della storia esaurito, con l\'unica estensione che il '
                 'supervisore può concedere')
+    if cls == PREREQUISITE:
+        return 'prerequisito indicato senza il numero della sua issue'
     return CRITICAL.get(cls, 'classe non riconosciuta, quindi critica')
 
 

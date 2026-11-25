@@ -10,14 +10,16 @@
         "type": "object",
         "additionalProperties": false,
         "required": ["kind", "description", "code_refs", "proposed_default",
-                     "repository_dependent"],
+                     "repository_dependent", "prerequisite", "blocked_by"],
         "properties": {
           "kind": {"type": "string",
                    "enum": ["operator_decision", "default_available", "tool_unavailable"]},
           "description": {"type": "string"},
           "code_refs": {"type": "array", "items": {"type": "string"}},
           "proposed_default": {"type": "string"},
-          "repository_dependent": {"type": "boolean"}
+          "repository_dependent": {"type": "boolean"},
+          "prerequisite": {"type": "string"},
+          "blocked_by": {"type": "integer"}
         }
       }
     },

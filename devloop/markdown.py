@@ -241,6 +241,12 @@ TEXTS = Catalog(
         'gap_base': '  *Depends on the base branch:* the check runs again when it advances.',
         'gap_refs': '  *References:* ',
         'gap_default': '  *Proposed default:* {default}',
+        'gap_prerequisite': '  *Missing prerequisite:* {text}',
+        'gap_prerequisite_number': '  *Missing prerequisite:* {text} (#{number})',
+        'prerequisites_resume': (
+            'devloop added the native "blocked by" {issues} to this issue, without '
+            '`agent:needs-operator`: the issue leaves the queue and the check runs again once '
+            'they are all closed. Whoever finds the dependency wrong removes it.'),
         'split': '### Proposed split',
         'no_gaps': 'The check indicated neither gaps nor a split.',
         'trust_covered': ('**Trust policy:** touched, covered by a decision of the '
@@ -278,6 +284,8 @@ TEXTS = Catalog(
                                'readiness check: a new positive outcome does not remove it.'),
         'note_reused': ('Outcome of the previous check, reused: the text of the issue has not '
                         'changed.'),
+        'note_no_prerequisite_block': ('The gaps name only missing prerequisites, but devloop '
+                                       'does not add their "blocked by": {why}.'),
     },
     it={
         'truncated': ('> **Testo troncato:** la review supera il limite di 65 536 caratteri di '
@@ -380,6 +388,12 @@ TEXTS = Catalog(
         'gap_base': '  *Dipende dal branch base:* il controllo si ripete quando avanza.',
         'gap_refs': '  *Riferimenti:* ',
         'gap_default': '  *Default proposto:* {default}',
+        'gap_prerequisite': '  *Prerequisito mancante:* {text}',
+        'gap_prerequisite_number': '  *Prerequisito mancante:* {text} (#{number})',
+        'prerequisites_resume': (
+            'devloop ha aggiunto a questa issue il "blocked by" nativo {issues}, senza '
+            '`agent:needs-operator`: l\'issue esce dalla coda e il controllo si ripete quando '
+            'sono tutte chiuse. Chi trova la dipendenza sbagliata la rimuove.'),
         'split': '### Suddivisione proposta',
         'no_gaps': 'Il controllo non ha indicato lacune né una suddivisione.',
         'trust_covered': ('**Policy di fiducia:** toccata, coperta da una decisione '
@@ -414,6 +428,8 @@ TEXTS = Catalog(
                                'prontezza: un nuovo esito positivo non lo rimuove.'),
         'note_reused': ('Esito del controllo precedente, riusato: il testo dell\'issue non è '
                         'cambiato.'),
+        'note_no_prerequisite_block': ('Le lacune indicano solo prerequisiti mancanti, ma devloop '
+                                       'non aggiunge il loro "blocked by": {why}.'),
     })
 
 # The longest body GitHub accepts for a comment or a review, in characters.
@@ -600,7 +616,9 @@ def _valid_gap(g):
             and isinstance(g.get('description'), str) and isinstance(g.get('proposed_default'), str)
             and isinstance(g.get('code_refs'), list)
             and all(isinstance(ref, str) for ref in g['code_refs'])
-            and isinstance(g.get('repository_dependent', False), bool))
+            and isinstance(g.get('repository_dependent', False), bool)
+            and isinstance(g.get('prerequisite', ''), str)
+            and _is_int(g.get('blocked_by', 0)))
 
 
 # What a readiness check declares about the trust policy (#472): the change the issue asks for
@@ -615,9 +633,14 @@ def _valid_preflight(p):
     the check ran on, is missing from the records written before, and so are ``trust_policy``
     and ``trust_policy_reason`` (#472) from those written before them; ``uncovered`` is never
     ``ready``. ``refused`` (#483): the ids of the comments with a ``/devloop approve`` the
-    check answered as refused, missing when it answered none."""
+    check answered as refused, missing when it answered none. ``prerequisites`` (#672): the
+    issues the dispatcher added as "blocked by" in place of the block, on a failed check only,
+    never with ``blocked``; missing when it added none."""
     trust = p.get('trust_policy', 'none')
+    added = p.get('prerequisites', [])
     return (all(isinstance(p.get(k), str) for k in ('hash', 'agent', 'split'))
+            and isinstance(added, list) and all(_is_int(n, 1) for n in added)
+            and not (added and (p.get('ready') or p.get('blocked')))
             and _comment_ids(p.get('refused', [0]))
             and isinstance(p.get('base', ''), str)
             and trust in PREFLIGHT_TRUST and isinstance(p.get('trust_policy_reason', ''), str)
@@ -751,6 +774,20 @@ def _valid_cycle(c):
     cycle = c.get('cycle')
     return (isinstance(cycle, list) and bool(cycle)
             and all(isinstance(item, str) and item for item in cycle))
+
+
+# The steps whose missing prerequisite becomes a native block of the dispatcher (#672).
+PREREQUISITE_STEPS = ('preflight', 'implement')
+
+
+def _valid_prerequisite(p):
+    """The "blocked by" the dispatcher added to an issue for a missing prerequisite (#672): the
+    step that named it (``preflight`` or ``implement``) and the numbers of the issues of the
+    same repository it added as blocks, at least one. Only a block this record names counts as
+    trusted when the dispatcher added it (``Dispatcher._dependency_edges``)."""
+    added = p.get('added')
+    return (p.get('step') in PREREQUISITE_STEPS and isinstance(added, list) and bool(added)
+            and all(_is_int(n, 1) for n in added))
 
 
 RECHECK_REQUESTS = ('recheck', 'relabeled')
@@ -889,7 +926,7 @@ _VALID = {'review': _valid_review, 'fix': _valid_fix, 'pr': _valid_pr, 'policy':
           'receipt': _valid_pr_receipt, 'conclave': _valid_conclave,
           'advisory': _valid_advisory, 'story': _valid_story, 'pin': _valid_pin,
           'basebroken': _valid_basebroken, 'approve': _valid_approve,
-          'authorize': _valid_authorize}
+          'authorize': _valid_authorize, 'prerequisite': _valid_prerequisite}
 
 
 def read_marker(text, kind):
@@ -1174,11 +1211,20 @@ def render_preflight(record, head, note='', refused=(), language=ENGLISH):
                 if gap['proposed_default'].strip():
                     parts.append(t('gap_default', default=gap['proposed_default'].strip())
                                  .replace('\n', '\n  '))
+                # #672: the prerequisite the gap waits for, with the number of its issue if known.
+                text = ' '.join(str(gap.get('prerequisite') or '').split())
+                if text:
+                    number = gap.get('blocked_by')
+                    parts.append(t('gap_prerequisite_number', text=text, number=number)
+                                 if _is_int(number, 1) else t('gap_prerequisite', text=text))
         if record['split'].strip():
             parts += ['', t('split'), '', record['split'].strip()]
         if not record['gaps'] and not record['split'].strip():
             parts += ['', t('no_gaps')]
-        parts += ['', t('preflight_resume')]
+        added = record.get('prerequisites')
+        parts += ['', t('prerequisites_resume',
+                        issues=', '.join(f'#{n}' for n in added)) if added
+                  else t('preflight_resume')]
     if record.get('trust_policy') == 'covered':
         # #472: the decision of the operator the check found for the trust policy, shown.
         reason = record.get('trust_policy_reason', '').strip()
@@ -1338,6 +1384,15 @@ NOTICE_TEXTS = Catalog(
                        'issues starts while the cycle stays. The supervisor or the operator '
                        'removes one of the dependencies; devloop works out by itself which issues '
                        'may start, with no other action.'),
+        'prerequisite_title': 'Prerequisite added as "blocked by"',
+        'prerequisite_text': ('The {step} named a missing prerequisite: devloop adds {issues} '
+                              'as native "blocked by" of this issue, in place of an escalation '
+                              'to the operator. The issue leaves the queue and resumes once '
+                              'they are all closed, without other checks. This record is what '
+                              'makes these blocks of the dispatcher count; whoever finds one '
+                              'wrong removes it.'),
+        'step_preflight': 'readiness check',
+        'step_implement': 'implementer',
         'priority': 'priority `{priority}`',
         'no_priority': 'no priority given',
         'authorized_title': 'Work authorized by the coordinator',
@@ -1368,6 +1423,15 @@ NOTICE_TEXTS = Catalog(
                        'queste issue parte finché il ciclo resta. Il supervisore o l\'operatore '
                        'rimuove una delle dipendenze; devloop ricalcola da solo quali issue '
                        'possono partire, senza altri interventi.'),
+        'prerequisite_title': 'Prerequisito aggiunto come "blocked by"',
+        'prerequisite_text': ('Il {step} ha indicato un prerequisito mancante: devloop aggiunge '
+                              '{issues} come "blocked by" nativo di questa issue, al posto di '
+                              'un\'escalation all\'operatore. L\'issue esce dalla coda e '
+                              'riprende quando sono tutte chiuse, senza altri controlli. Questo '
+                              'record fa contare questi blocchi del dispatcher; chi ne trova uno '
+                              'sbagliato lo rimuove.'),
+        'step_preflight': 'controllo di prontezza',
+        'step_implement': 'implementer',
         'priority': 'priorità `{priority}`',
         'no_priority': 'nessuna priorità indicata',
         'authorized_title': 'Lavoro autorizzato dal coordinatore',
@@ -1401,6 +1465,18 @@ def render_cycle(record, language=ENGLISH):
     return publishable(
         dispatcher_header() + f'\n## {t("cycle_title")}\n\n'
         + t('cycle_text', issues=', '.join(record['cycle'])) + '\n', 'cycle', record)
+
+
+def render_prerequisite(record, language=ENGLISH):
+    """The dispatcher's record of the "blocked by" it adds to an issue for a missing prerequisite
+    (#672), with a ``prerequisite`` marker: the step that named it and the issues added. Only a
+    block of the dispatcher that such a record names counts. In ``language``."""
+    t = NOTICE_TEXTS.texts(language)
+    return publishable(
+        dispatcher_header() + f'\n## {t("prerequisite_title")}\n\n'
+        + t('prerequisite_text', step=t('step_' + record['step']),
+            issues=', '.join(f'#{n}' for n in record['added'])) + '\n',
+        'prerequisite', record)
 
 
 def render_recheck(record, language=ENGLISH):

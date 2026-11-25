@@ -56,6 +56,9 @@ Where a method went, when it was not obvious:
   not make that declares a step on the host holds the pin as one of its own.
 - ``issue_dependencies`` (#277) is in ``Tracker``: the native "blocked by" dependencies between
   issues, which the planner reads to hold back an issue while a trusted block is open.
+  ``issue_target`` and ``add_blocked_by`` (#672) are there too: the dispatcher adds a missing
+  prerequisite named by its number as a "blocked by" of the issue, once it is an open issue of
+  the repository.
 - ``repo_labels`` and ``rename_label`` (#248) are in ``Tracker`` next to ``ensure_label``:
   ``ensure_labels`` renames ``agent:needs-operator`` from its old name, and ``devloop status``
   reports when both names exist.
@@ -117,6 +120,12 @@ class Tracker(Protocol):
         at}]}`` (``state_reason`` and ``prs``, its open linked PRs as ``{number, author}``,
         since #671; see ``GitHub.issue_dependencies``)."""
 
+    def issue_target(self, number):
+        """``{id, repo, number, state, pull_request}`` of issue or PR ``number`` (#672): the id
+        the "blocked by" API takes, the repository and number it is in now (another for an
+        issue transferred elsewhere), OPEN or CLOSED, and whether it is a PR.
+        ``GitHubNotFound`` when it does not exist."""
+
     def labelers(self, number, label):
         """Logins of every ``labeled`` event of ``label`` on ``number``, oldest first."""
 
@@ -136,6 +145,10 @@ class Tracker(Protocol):
 
     def close_issue(self, number):
         """Close issue ``number`` as completed."""
+
+    def add_blocked_by(self, number, issue_id):
+        """Add to issue ``number`` the native "blocked by" of the issue with id ``issue_id``
+        (``issue_target``, #672)."""
 
     def edit_comment(self, comment_id, body):
         """Replace the body of comment ``comment_id``. Raises ``GitHubUncertain`` when the

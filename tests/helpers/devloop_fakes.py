@@ -96,6 +96,20 @@ class FakeGH:
     def issue_dependencies(self, number):
         return {'author': 'brushtyler', 'blocked_by': [], 'added': []}
 
+    # The issues a "blocked by" may name (#672): every number is an open issue with id
+    # ``100000 + number`` of this repository; ``targets`` replaces some of its fields (``None``:
+    # it does not exist).
+    targets = {}
+
+    def issue_target(self, number):
+        if number in self.targets and self.targets[number] is None:
+            raise GitHubNotFound(f'issue {number}: (HTTP 404)')
+        return {'id': 100000 + number, 'repo': _CFG.repo, 'number': number, 'state': 'OPEN',
+                'pull_request': False, **self.targets.get(number, {})}
+
+    def add_blocked_by(self, number, issue_id):
+        self.added_blocks = getattr(self, 'added_blocks', []) + [(number, issue_id)]
+
     # Logins of the `labeled` events of a label on a PR, oldest first: for the level-2 label
     # those a test sets, for any other those of ``edit_labels`` (``label_log``), each written
     # by ``labeler``, the login the dispatcher acts with.

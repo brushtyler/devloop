@@ -382,6 +382,10 @@ policy di fiducia descritta qui?" in Italian, the project's
 of the escalation is `operator_decision`. Records written before #472 lack both fields and are
 read as `none`; a reused outcome keeps them.
 
+Since #672 each gap also records `prerequisite` and `blocked_by`, the missing prerequisite it
+waits for, and a failed outcome whose gaps all name one adds no label: see [Prerequisite
+blocks](#prerequisite-blocks).
+
 The dispatcher removes only a block that belongs to the check. The check owns
 `agent:needs-operator` only if it added the label when the label was absent: its record keeps the
 number of earlier `labeled` events of the label, and the dispatcher must have written the only
@@ -683,7 +687,7 @@ supervisor's and the operator's.
 supervisor does, the step that failed, the key of its input and, for a PR, the label a retry
 resumes from, when the step is one a retry runs again (#321). A supervisor's escalation handed to
 the operator (`supervisor_escalated`, `supervisor_refused`) keeps them only for `tool_failure`,
-`sync_failed`, `push_failed` (#645) and `budget_grantable` (#411), whose step the operator may retry as on a `budget`
+`sync_failed`, `push_failed` (#645), `prerequisite` (#672) and `budget_grantable` (#411), whose step the operator may retry as on a `budget`
 escalation: the key of a `preflight_default` or `merged_issue` escalation only routes it.
 
 ## Dependency cycles
@@ -712,7 +716,43 @@ such prerequisite with its reason, removes `agent:ready` and `agent:needs-superv
 written and no attempt counted. Its `notice` records no `step` nor `key`, so a `/devloop retry`
 written on it is refused (`not_retryable`): the issue resumes when `agent:needs-operator` is
 removed and `agent:ready` added again. A block removed or reopened since escalates nothing. A closure without a reason releases the block, as a completed one does. The orphan
-prerequisites are only shown (`devloop status`, `devloop watch`): no record, no label.
+prerequisites are only shown (`devloop status`, `devloop watch`): no record, no label. An
+implementation that waits for [prerequisite blocks](#prerequisite-blocks) escalates the same way,
+and loses `agent:working` too.
+
+## Prerequisite blocks
+
+When a failed readiness check names only missing prerequisites, each with the number of its
+issue, or an implementer stops naming one (#672, [Missing
+prerequisites](guide.md#missing-prerequisites)), the dispatcher adds them as native "blocked by"
+of the issue (`Tracker.add_blocked_by`), in place of `agent:needs-operator` or of the `blocked`
+escalation. First it writes a dispatcher comment ("Prerequisite added as \"blocked by\"",
+"Prerequisito aggiunto come \"blocked by\"" in Italian) ending with a `prerequisite` marker:
+`step` (`preflight` or `implement`) and `added`, the numbers of the issues it adds, at least
+one; then the blocks. A block whose latest addition is the dispatcher's counts as trusted only
+while a `prerequisite` record of the dispatcher on the blocked issue names it: without the
+record it is ignored like any untrusted block. The records count the blocks against the caps of
+the code: at most 3 of the dispatcher's blocks open together on one issue, at most 5 added in
+all, those added again included; a record whose blocks were lost still counts. The record is a
+devloop record: it leaves the readiness hash and the block's attribution as they are.
+
+The record of the readiness check lists the issues added in `prerequisites`, never with
+`blocked` nor `ready`, and its `class` is `prerequisite`; each gap records `prerequisite`, the
+prerequisite in words, and `blocked_by`, the number of its issue or `0` (records written before
+#672 lack both, and are read as naming none). Such a failed outcome does not hold once the issue
+is checked again: the issue is not checked while a block is open, and when they are all closed
+the check runs again. The record of an implementation is the wait: an issue in `agent:working`
+whose latest `prerequisite` record of the dispatcher has no `basebroken` record of the dispatcher
+after it, nor a `notice` other than one of the readiness check that restarts the implementation
+(as for a wait for the base), waits, as one whose tests failed on the base too
+([Base broken records](#base-broken-records)), until its blocks are closed, then starts again;
+an escalation of that check keeps `agent:working` and the wait, and its retry or its decided gaps
+resume it. A later `prerequisite` record ends a wait for the base in the same way.
+
+Without the number of an issue, the escalation is of class `prerequisite`, non-critical: a
+`notice` with `to` `supervisor`, the `step` and the `key` of its input in `"auto"`, and the
+supervisor's `/devloop retry` waits for the blocks it adds. Its key does not bind the `base`
+(`UNBOUND_CLASSES` in `devloop/supervision.py`), since the merge of the prerequisite advances it.
 
 ## Authorization by the coordinator
 

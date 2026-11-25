@@ -82,9 +82,11 @@ class ProcessTests(Case):
                 self.assertIsNotNone(route)
                 self.assertEqual(why, '')
         # push_failed (#645): a retry of the push, decided by the supervisor (the operator's
-        # /devloop approve on #645).
+        # /devloop approve on #645). prerequisite (#672): a prerequisite named without the
+        # number of its issue, an escalation of issues only (the operator's /devloop approve on
+        # #672).
         self.assertEqual({'tool_failure', 'sync_failed', 'preflight_default', 'merged_issue',
-                          'round_grantable', 'budget_grantable', 'push_failed'},
+                          'round_grantable', 'budget_grantable', 'push_failed', 'prerequisite'},
                          set(NON_CRITICAL))
 
     def test_a_budget_extension_is_not_among_them(self):

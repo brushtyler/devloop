@@ -2,7 +2,7 @@
   "type": "object",
   "additionalProperties": false,
   "required": ["status", "summary", "pr_title", "commit_message", "pr_body", "acceptance_map",
-               "host_step", "blocked_reason"],
+               "host_step", "blocked_reason", "prerequisite", "blocked_by"],
   "properties": {
     "status": {"type": "string", "enum": ["completed", "blocked"]},
     "summary": {"type": "string"},
@@ -35,6 +35,8 @@
       }
     },
     "host_step": {"type": "string"},
-    "blocked_reason": {"type": "string"}
+    "blocked_reason": {"type": "string"},
+    "prerequisite": {"type": "string"},
+    "blocked_by": {"type": "integer"}
   }
 }

@@ -95,6 +95,14 @@ a retry or an extension that would run the issue's step, which does not run. A r
 blocked by an open issue of the repository that nobody is doing is only shown, as an orphan
 prerequisite (``_orphan_prerequisites``), by ``devloop status`` and ``devloop watch``.
 
+Missing prerequisites (#672): a failed readiness check whose gaps all name a prerequisite with
+the number of its issue, or an implementer that stops naming one, adds no escalation: the
+dispatcher writes a ``prerequisite`` record and adds the issues as "blocked by"
+(``_add_prerequisites``), within ``MAX_ACTIVE_PREREQUISITES`` and ``MAX_ADDED_PREREQUISITES``.
+Such a block counts only with that record. An implementation stopped so keeps
+``agent:working`` and waits for its blocks (``_prerequisite_wait``, ``Snapshot.base_waits``).
+A prerequisite named only in words is a ``prerequisite`` escalation, non-critical.
+
 Supervisor labels (#178): with ``roles.supervisor`` and its GitHub App (the agent's app, or
 with ``[roles.supervisor]`` as a table the role app ``[apps.supervisor]``, #408),
 ``agent:ready`` and the priority labels count also when the supervisor's app added them, but
@@ -225,14 +233,14 @@ from .context import (_cli_state_refused, _describe_bases, _failure_text, label_
                       label_transition, refused_approvals, transition_labels)
 from .dispatch_actions import ActionsMixin, Models, PendingPushes, ready_approval, rerun_of
 from .dispatch_advisory import AdvisoryFailures, AdvisoryMixin, AdvisoryResults
-from .dispatch_base import BaseMixin, MainAlerts
+from .dispatch_base import BaseMixin, MainAlerts, _of_check
 from .dispatch_conclave import ConclaveMixin
 from .dispatch_merge import MergeMixin
 from .dispatch_preflight import PreflightMixin
 from .dispatch_supervision import TEXTS as SUPERVISION_TEXTS
 from .dispatch_supervision import SupervisionMixin, UntrustedChange, budget_fields
 from .generated import changed_by_tests, generated_files
-from .github import GitHubError, GitHubUncertain, author_login, dropped_block
+from .github import GitHubError, GitHubNotFound, GitHubUncertain, author_login, dropped_block
 from .i18n import ENGLISH, Catalog
 from .journal import TEXTS as JOURNAL_TEXTS
 from .journal import (CLOSED, MERGED, RECONCILE_COMMAND, JournalError, TurnBlocked, blocked_text,
@@ -241,12 +249,14 @@ from .ledger import attempt_branch, comment_ref, fix_register, open_turns, parse
 from .localtests import module_command, select_modules
 from .markdown import (carries_record, dispatcher_header, publishable, read_marker,
                        render_authorize, render_cycle, render_escalation, render_operator_merge,
+                       render_prerequisite,
                        render_operator_release, resume_text)
 from .activity import iso, restart_line
 from .outbox import SENT as PUBLISHED, describe as outbox_describe
 from .pin import (HAND_PIN, PREFIX, CheckFailed, PinError, PinHeld, Repinned, ScanFailed,
                   SmokeError, held_prs, public_reason)
-from .planning import (BASE_CHANGED, MERGE_LANE, MERGING, RESYNC_AFTER_APPROVAL,
+from .planning import (BASE_CHANGED, MERGE_LANE, MERGING, PREREQUISITES_CLOSED,
+                       RESYNC_AFTER_APPROVAL,
                        RESYNC_CONFLICTS, PullRequest, Snapshot,
                        admit, changes_before_ci, ci_unknown, counted_rounds, issue_priority,
                        label_names, numbers_of, operator_blocked, operator_held,
@@ -274,6 +284,12 @@ AUTHORIZE_MARGIN = 300
 # How many prerequisites outside the queue a snapshot reads at most to follow the dependencies
 # of the ready issues (#277): beyond them, cycles are not looked for.
 MAX_DEPENDENCY_READS = 50
+# The "blocked by" the dispatcher adds to one issue for its missing prerequisites (#672, the
+# operator's decision on the issue): at most so many open together, and at most so many added in
+# all, those added again included. Beyond either the escalation of before stays. Constants of
+# the code.
+MAX_ACTIVE_PREREQUISITES = 3
+MAX_ADDED_PREREQUISITES = 5
 # The dropped publications one alert lists at most (#397): the others are in the local log.
 MAX_DROPS_LISTED = 30
 PRIORITY_LABEL_COLORS = {'priority:high': 'b60205', 'priority:normal': 'c2e0c6',
@@ -1930,15 +1946,34 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         # An implementation whose failed tests fail on the base too (#459): whether it still
         # waits for the base branch to advance, the issue's labels, which may hold its restart,
         # and, with ``preflight``, the view of its readiness check once it may start again.
+        # An implementation stopped for prerequisites added as "blocked by" (#672) waits the
+        # same way, until its blocks are closed; with one closed without being completed (#671)
+        # it escalates ``prerequisite_dropped`` instead (``dropped``).
         waits = {}
         for raw in working_raw:
             number = raw['number']
             if number in pr_issues:
                 continue
-            wait = self._base_wait(self.gh.issue_comments(number), 'implement')
-            if wait is None:
-                continue
+            comments = self.gh.issue_comments(number)
+            wait = self._base_wait(comments, 'implement')
             labels = label_names(raw.get('labels') or [])
+            if wait is None:
+                if self._prerequisite_wait(comments) is None:
+                    continue
+                view = self._dependency_view([number])[number]
+                holds = bool(view['blocked_by'])
+                waits[number] = {'holds': holds, 'labels': labels, 'preflight': None, 'ci': '',
+                                 'reason': PREREQUISITES_CLOSED,
+                                 'dropped': [ref for ref, _ in view['dropped']]}
+                unauthorized = '' if holds else self._unauthorized_ready(number)
+                if unauthorized:
+                    waits[number]['unauthorized'] = unauthorized
+                elif not holds and self.cfg.preflight:
+                    waits[number]['preflight'] = self._preflight_view(number, labels, base_head)
+                self.log(f'  issue #{number}: the implementation '
+                         + ('waits for its prerequisites ' + ', '.join(view['blocked_by'])
+                            if holds else 'may start again: its prerequisites are closed'))
+                continue
             holds = self._base_holds(wait, base_head)
             ci = base_ci(wait['base']) if holds else ''
             waits[number] = {'holds': holds, 'labels': labels, 'preflight': None, 'ci': ci}
@@ -2082,17 +2117,20 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
 
         A block counts only while its issue is open and only if the latest event that added it
         comes from a login that may admit the blocked issue (``_admitters``: a trusted user, or
-        the supervisor's app on an issue of a trusted user or of devloop): any other is ignored
-        and logged. The open blocks of the repository are explored in turn, ``agent:ready`` or
+        the supervisor's app on an issue of a trusted user or of devloop), or from the
+        dispatcher when a ``prerequisite`` record it signed on the blocked issue names that block
+        (#672, ``_add_prerequisites``): any other is ignored and logged. The open blocks of the repository are explored in turn, ``agent:ready`` or
         not, up to ``MAX_DEPENDENCY_READS`` issues beyond ``numbers``; an issue of another
         repository blocks as its state says, without reading its own blocks.
 
-        Returns ``(edges, dropped, linked)``: ``dropped`` (#671) maps each issue read to its
+        Returns ``(edges, dropped, linked, complete)``: ``dropped`` (#671) maps each issue read to its
         trusted blocks closed for a reason other than COMPLETED (``dropped_block``), of this
         repository or another, as ``{(repo, number): reason}``. They are no edges: a dropped
         prerequisite is no cycle, nor is it explored. ``linked`` (#671) is the set of the open
         trusted blocks with an open PR that GitHub links to them as closing them, on any branch,
-        opened by a trusted user or by one of devloop's agents (as ``_devloop_pr`` trusts it)."""
+        opened by a trusted user or by one of devloop's agents (as ``_devloop_pr`` trusts it).
+        ``complete`` (#672) is False when the reading stopped at ``MAX_DEPENDENCY_READS`` with
+        issues still to explore: ``edges`` may then miss a cycle."""
         # The repository under its name or a former one (``repo_aliases``, #540).
         home = {name.lower() for name in (self.cfg.repo, *self.cfg.repo_aliases)}
         pr_authors = set(self.cfg.trusted_users) | (
@@ -2105,17 +2143,19 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         todo = [('', number) for number in dict.fromkeys(numbers)]
         seen, edges, dropped, linked = set(todo), {}, {}, set()
         budget = len(todo) + MAX_DEPENDENCY_READS
+        complete = True
         while todo:
             node = todo.pop(0)
             if budget <= 0:
                 self.log(f'  dependencies: more than {MAX_DEPENDENCY_READS} prerequisites to '
                          f'read, {issue_ref(node)} and the others are not explored')
+                complete = False
                 break
             budget -= 1
             read = self.gh.issue_dependencies(node[1])
             admitters = self._admitters(read.get('author'))
             added_by = {key(event): event.get('by') for event in read.get('added') or []}
-            blockers, gone = set(), {}
+            blockers, gone, recorded = set(), {}, None
             for item in read.get('blocked_by') or []:
                 reason = item.get('state_reason')
                 open_ = item.get('state') == 'OPEN'
@@ -2123,7 +2163,14 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                     continue  # a block closed as completed blocks nothing
                 blocker = key(item)
                 by = added_by.get(blocker)
-                if by not in admitters:
+                trusted = by in admitters
+                if not trusted and not blocker[0] and self._signed(by):
+                    # The dispatcher's own block of a prerequisite, with its record (#672): the
+                    # records are read once per issue, and only for such a block.
+                    if recorded is None:
+                        recorded = self._recorded_prerequisites(node[1])
+                    trusted = blocker[1] in recorded
+                if not trusted:
                     self.log(f'  issue {issue_ref(node)}: ignored the block by '
                              f'{issue_ref(blocker)}, added by {by or "an unknown author"}: '
                              'neither a trusted user nor the supervisor')
@@ -2140,14 +2187,14 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                     todo.append(blocker)
             edges[node] = blockers
             dropped[node] = gone
-        return edges, dropped, linked
+        return edges, dropped, linked, complete
 
     def _dependency_view(self, numbers):
         """What planning needs about the dependencies of the ready issues ``numbers``, read now
         from GitHub (#277): for each, ``{blocked_by, blocks, cycle, dropped, prerequisites,
         linked}`` as ``Snapshot`` describes them. A dropped block (#671) is in ``blocked_by``
         too: everything that waits for a block waits for it."""
-        edges, dropped, linked = self._dependency_edges(numbers)
+        edges, dropped, linked, _ = self._dependency_edges(numbers)
         cycles = dependency_cycles(edges)
         ready = set(numbers)
         views = {}
@@ -2164,6 +2211,112 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                                  if ('', number) in edges.get(('', n), ()) and n != number),
                 'cycle': [issue_ref(m) for m in cycles.get(('', number), ())]}
         return views
+
+    # Prerequisites as native blocks (#672) ------------------------------------
+    def _recorded_prerequisites(self, number, comments=None):
+        """The numbers of the issues that the ``prerequisite`` records the dispatcher signed on
+        issue ``number`` name (#672): the blocks of the dispatcher that count there."""
+        comments = self.gh.issue_comments(number) if comments is None else comments
+        return {n for _, record in self._dispatcher_records(comments, 'prerequisite')
+                for n in record['added']}
+
+    def _add_prerequisites(self, number, wanted, step):
+        """Add the issues ``wanted``, by number, as native "blocked by" of issue ``number``, for
+        the missing prerequisites that ``step`` (``preflight`` or ``implement``) named (#672,
+        the operator's decisions on the issue). Returns ``(added, why)``: the numbers added, or
+        ``[]`` and why none is, in the project's language, when a condition fails: then the
+        escalation of before stays.
+
+        Each must be an open issue of the repository, still there under its number (not one
+        transferred elsewhere, which GitHub still answers for), not a PR nor the issue itself,
+        not already among its "blocked by"; the blocks must close no dependency cycle
+        (``dependency_cycles`` on the trusted blocks read now, with the new ones), read in
+        full: beyond ``MAX_DEPENDENCY_READS`` a cycle cannot be ruled out; and the
+        dispatcher's blocks of the issue stay within ``MAX_ACTIVE_PREREQUISITES`` open together
+        and ``MAX_ADDED_PREREQUISITES`` added in all, those added again included, as its
+        ``prerequisite`` records count them. The record is written first, then the blocks: a
+        block counts only with a record that names it (``_dependency_edges``), and a record whose
+        blocks were lost still counts against the caps."""
+        t = self._texts()
+        wanted = sorted({n for n in wanted if isinstance(n, int) and not isinstance(n, bool)})
+        if not wanted or wanted[0] < 1:
+            return [], t('prereq_none')
+        if number in wanted:
+            return [], t('prereq_self', n=number)
+        home = {name.lower() for name in (self.cfg.repo, *self.cfg.repo_aliases)}
+
+        def own(item):
+            return not item.get('repo') or item['repo'].lower() in home
+
+        read = self.gh.issue_dependencies(number)
+        present = {item.get('number') for item in read.get('blocked_by') or [] if own(item)}
+        for n in wanted:
+            if n in present:
+                return [], t('prereq_present', n=n)
+        ids = {}
+        for n in wanted:
+            try:
+                target = self.gh.issue_target(n)
+            except GitHubNotFound:
+                return [], t('prereq_missing', n=n)
+            if (target.get('number') != n
+                    or (target.get('repo') or '').lower() not in home):
+                return [], t('prereq_moved', n=n)
+            if target.get('pull_request'):
+                return [], t('prereq_pr', n=n)
+            if target.get('state') != 'OPEN' or not isinstance(target.get('id'), int):
+                return [], t('prereq_closed', n=n)
+            ids[n] = target['id']
+        comments = self.gh.issue_comments(number)
+        records = [record for _, record in self._dispatcher_records(comments, 'prerequisite')]
+        recorded = {n for record in records for n in record['added']}
+        total = sum(len(record['added']) for record in records)
+        latest = {event.get('number'): event.get('by')
+                  for event in read.get('added') or [] if own(event)}
+        active = sum(1 for item in read.get('blocked_by') or []
+                     if own(item) and item.get('state') == 'OPEN'
+                     and item.get('number') in recorded
+                     and self._signed(latest.get(item.get('number'))))
+        if active + len(wanted) > MAX_ACTIVE_PREREQUISITES:
+            return [], t('prereq_active', max=MAX_ACTIVE_PREREQUISITES, active=active)
+        if total + len(wanted) > MAX_ADDED_PREREQUISITES:
+            return [], t('prereq_total', max=MAX_ADDED_PREREQUISITES, total=total)
+        edges, _, _, complete = self._dependency_edges([number, *wanted])
+        if not complete:
+            return [], t('prereq_unexplored', max=MAX_DEPENDENCY_READS)
+        edges[('', number)] = set(edges.get(('', number), ())) | {('', n) for n in wanted}
+        cycle = dependency_cycles(edges).get(('', number))
+        if cycle:
+            return [], t('prereq_cycle', cycle=', '.join(issue_ref(m) for m in cycle))
+        self.gh.comment(number, render_prerequisite({'step': step, 'added': wanted},
+                                                    self.cfg.language))
+        for n in wanted:
+            self.gh.add_blocked_by(number, ids[n])
+        self.log(f'  issue #{number}: blocked by ' + ', '.join(f'#{n}' for n in wanted)
+                 + f', the prerequisites the {step} named')
+        return wanted, ''
+
+    def _prerequisite_wait(self, comments):
+        """The ``prerequisite`` record of an implementation in ``agent:working`` that waits for
+        its prerequisites (#672) in ``comments``, or None: the latest the dispatcher signed,
+        with no ``basebroken`` record of the dispatcher after it, nor a notice other than one
+        of the readiness check that restarts the implementation (``_of_check``), as for a wait
+        for the base (``_base_wait``): its escalation keeps ``agent:working`` and the wait, and
+        its retry or its decided gaps resume it. Its step is ``implement``, or ``preflight``
+        for the check that restarts an implementation waiting for its base (#459). The issue
+        keeps ``agent:working`` and starts again once its blocks are closed, as after a wait
+        for the base branch (``Snapshot.base_waits``)."""
+        records = self._dispatcher_records(comments, 'prerequisite')
+        if not records:
+            return None
+        position = records[-1][0]
+        if any(p > position for p, _ in self._dispatcher_records(comments, 'basebroken')):
+            return None
+        notices = self._dispatcher_records(comments, 'notice')
+        for index, (p, notice) in enumerate(notices):
+            if p > position and not _of_check(notice, [n for _, n in notices[:index]]):
+                return None
+        return records[-1][1]
 
     def _orphan_prerequisites(self, issues, ready, working, pr_issues, coordinator):
         """Set ``orphans`` on each of the ready ``issues`` with their dependency view (#671): the
@@ -2234,7 +2387,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                            for ref, reason in dropped)
         reason = TEXTS.texts(self.cfg.language)('prerequisite_dropped', ready=lb.ready,
                                                 needs_operator=lb.needs_operator, listed=listed)
-        self._escalate(number, reason, remove=[lb.ready, lb.needs_supervisor],
+        # An implementation that waits for its prerequisites (#672, ``_prerequisite_wait``)
+        # loses agent:working too: the escalation ends the wait.
+        self._escalate(number, reason, remove=[lb.ready, lb.needs_supervisor, lb.working],
                        cls=PREREQUISITE_DROPPED)
         self.log('  prerequisite closed without being completed: ' + listed)
 

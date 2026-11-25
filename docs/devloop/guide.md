@@ -478,7 +478,10 @@ written in the text and the issues that wait for it queued by hand once it is me
 - **Only trusted blocks count.** A block counts only if the latest timeline event that added it
   to the blocked issue comes from a user in `trusted_users`, or from the supervisor's app on an
   issue it may queue ([Labels from the supervisor](#labels-from-the-supervisor)): the same rule
-  as the priority labels. A block added by anyone else is ignored, and the tick log says so
+  as the priority labels. A block the dispatcher added for a
+  [missing prerequisite](#missing-prerequisites) counts too, but only while a `prerequisite`
+  record the dispatcher signed on the blocked issue names it (#672). A block added by anyone
+  else is ignored, and the tick log says so
   (`issue #<n>: ignored the block by #<m>, added by <login>`).
 - **Prerequisites first.** With the same priority, an issue that blocks other ready issues
   starts before the issues that block none, whatever the time of their `agent:ready`.
@@ -527,9 +530,10 @@ written in the text and the issues that wait for it queued by hand once it is me
   A block of another repository is never an orphan: devloop does not read its labels.
 
 **Write a prerequisite as a native block** (#670), not only in words in the text ("to open after
-#N is closed"). devloop does not read the text for prerequisites: such an issue starts, the
-implementer stops because the prerequisite is missing, and its `blocked` escalation, a critical
-one, reaches the operator after a run already spent, with nothing to decide. With the native
+#N is closed"). devloop does not read the text for prerequisites: such an issue starts, and the
+implementer stops because the prerequisite is missing, after a run already spent; devloop then
+adds the block itself, or asks the supervisor for it ([Missing
+prerequisites](#missing-prerequisites)), but the run is lost. With the native
 block ("blocked by" #N, from the issue's sidebar on GitHub or from the REST API of the issue
 dependencies) the issue waits and starts by itself once #N closes. The supervisor adds the
 block itself, with its app, before it queues an issue whose text names a prerequisite
@@ -545,6 +549,51 @@ query (`Tracker.issue_dependencies`, see [Ports and adapters](../architecture.md
 The timeline events that tell who added each block are read 100 at a time, backwards, until
 every open block has its latest addition: a long history of blocks added and removed does not
 make a trusted block look as if it came from an unknown author.
+
+#### Missing prerequisites
+
+A missing prerequisite is no decision for the operator (#672, the operator's decisions on the
+issue): the [readiness check](#readiness-check-before-implementation) and the implementer name
+it, and devloop turns it into a native block instead of `agent:needs-operator` or a `blocked`
+escalation. Each gap of the check, and the result of a blocked implementer, has two fields:
+`prerequisite`, the prerequisite in words, and `blocked_by`, the number of its issue in this
+repository when the issue, its comments or the repository give it (`0` otherwise).
+
+- **With the number.** When every gap of a failed check names a prerequisite with its number,
+  with no split, or when the implementer stops naming one, the dispatcher writes a
+  `prerequisite` record on the issue ([Protocol](protocol.md#prerequisite-blocks)) and adds each
+  issue as its "blocked by", with its app. No label is added: a ready issue keeps `agent:ready`
+  and leaves the queue; an implementation keeps `agent:working`, its worktree is removed, and it
+  waits as one that [waits for the base](#tests-red-on-the-base-too). When every block is
+  closed, the issue resumes without other checks: the readiness check runs again, and the
+  implementation starts again from the current base. A block closed without being completed
+  escalates `prerequisite_dropped`, as above.
+- **Conditions.** The dispatcher adds the blocks only when each prerequisite is an open issue
+  of the same repository, not a PR nor the issue itself, nor already among its "blocked by"
+  (an issue transferred to another repository is not, even though GitHub still answers for
+  its old number); when the blocks close no dependency cycle, read in full (beyond the 50
+  issues the reading of the dependencies explores, `MAX_DEPENDENCY_READS`, a cycle cannot be
+  ruled out and the blocks are not added); and within its caps for the issue, constants of
+  the code: at most **3** of its blocks open together (`MAX_ACTIVE_PREREQUISITES`) and at most
+  **5** added in all, those added again included (`MAX_ADDED_PREREQUISITES`), as its records
+  count them. When a condition fails, the escalation of before stays: the check's
+  `agent:needs-operator`, with a note that says why, or the implementer's `blocked`, with the
+  reason appended.
+- **Without the number** (a reference in words): an escalation of class `prerequisite`,
+  non-critical. In `"auto"` it goes to the supervisor (under the conditions of the
+  [routing](#escalations-to-the-supervisor)), which finds the issue, adds the "blocked by" with
+  its app (a trusted block) and answers `/devloop retry`: the retry waits until the blocks
+  close, then runs the step again. The base of the step does not bind that retry, since the
+  merge of the prerequisite advances it. When no such issue exists, `/devloop escalate
+  <reason>`. Outside `"auto"`, or when the routing keeps it with the operator, the escalation of
+  before.
+- **Other gaps.** A check with any gap that names no prerequisite (an `operator_decision`, a
+  default, the question on the trust policy), or with a split, escalates as before: the
+  prerequisites are listed among its gaps, and the dispatcher adds no block.
+
+An agent that names a wrong prerequisite stops the issue: the block is on the issue, with the
+record of the dispatcher, and whoever finds it wrong removes it; the
+[orphan prerequisites](#dependencies-between-issues) are shown as for any block.
 
 ### Labels from the supervisor
 
@@ -832,7 +881,10 @@ while the hash stays the same:
   The implementer starts only if the hash read just before still matches;
 - **not ready**: the issue goes to `agent:needs-operator` (it keeps `agent:ready`), and the comment
   lists the gaps with the proposed defaults and the split. If `agent:needs-operator` is removed
-  without changing the issue, the next tick blocks it again with the same outcome.
+  without changing the issue, the next tick blocks it again with the same outcome. When every
+  gap names a missing prerequisite, and there is no split, the issue is handed to no one
+  instead: devloop adds the prerequisites as "blocked by", or asks the supervisor for them
+  ([Missing prerequisites](#missing-prerequisites), #672).
 
 An issue blocked by the check is examined again on every tick, even in `agent:needs-operator`. A
 new check runs when the hash changed (a trusted user decided a point, accepted a default, or
@@ -1381,6 +1433,7 @@ next to the review; one for the trust policy gets none (#434, see
 | `sync_failed` | A [sync](protocol.md#conflicts-with-main) that failed, with no file in conflict under a sensitive path (`sensitive_paths`) or `operator_only_paths`; one whose agent could not start is a `tool_failure` | No |
 | `push_failed` | The push of the branch of an implementation, a fix or a sync that failed twice for a [transient error of GitHub](#transient-errors-of-the-push) (a 5xx answer, a connection lost): the commits of the turn are kept for a retry | No |
 | `merged_issue` | An open issue in `agent:ready` that a merged devloop PR already resolved ([Closing the issue](#closing-the-issue)) | No |
+| `prerequisite` | A failed readiness check whose gaps all name a missing prerequisite, or an implementer that stopped for one, without the number of its issue ([Missing prerequisites](#missing-prerequisites)): the supervisor adds the "blocked by" and answers `/devloop retry` | No |
 | `round_grantable` | The limit of review rounds, with `[delegations] rounds` on and every condition of [granting a round](#granting-a-review-round) verified: the supervisor may grant one more | No |
 | `round_limit` | The limit of review rounds, when the supervisor may not grant another one | Yes |
 | `operator_decision` | A readiness check with an `operator_decision` or `tool_unavailable` gap, or a split | Yes |
@@ -1498,9 +1551,10 @@ dispatcher comment with the reason and how to resume, besides the log line. As f
 it handled and every command before it, and among the commands that wait the latest applicable
 one wins; without one, the latest that does not apply is answered.
 
-- `/devloop retry` runs the failed step again, for `tool_failure`, `sync_failed` and
+- `/devloop retry` runs the failed step again, for `tool_failure`, `sync_failed`,
   `push_failed` (for this one, only the push: [Transient errors of the
-  push](#transient-errors-of-the-push)). A PR goes
+  push](#transient-errors-of-the-push)) and `prerequisite` ([Missing
+  prerequisites](#missing-prerequisites)). A PR goes
   back to the label of its step (`agent:review` for a review or a sync, `agent:changes` for a
   fix, `agent:review` for a [requested fix](#fix-requested-by-the-operator-or-the-supervisor)
   that started there, `agent:changes` for a sync that a fix in `agent:changes` started because
@@ -1519,7 +1573,9 @@ one wins; without one, the latest that does not apply is answered.
   The base does not bind the retry of an **implementation** (#475): with automatic merges `main`
   moves every few minutes, and the step starts again from the current base anyway, with the work
   its timed-out turn saved reapplied ([timeouts](protocol.md)); only its request binds it, for
-  the refusal and for the count of retries. The base of a readiness check still does.
+  the refusal and for the count of retries. The base of a readiness check still does, except on
+  a `prerequisite` escalation (#672): the merge of the prerequisite advances the base, so the
+  base binds the retry of neither step there.
   The retries are counted per reviewer: when several reviewers fail together and later only
   some of them, each keeps the retries it already had. A retry whose input has changed
   since (a new head, base or request) is refused, and the escalation stays with the supervisor.
@@ -1601,7 +1657,7 @@ the class does not admit (`accept-defaults` or `decide` on a tool failure, `retr
 `grant-round` on anything but `round_grantable`, `grant-budget` on anything but
 `budget_grantable`, `rereview` on anything but the `tool_failure` of a PR's review) is refused
 and the escalation stays with the supervisor. The answer lists the commands that apply to the
-escalation (`retry` for `tool_failure`, `sync_failed` and `push_failed`, `accept-defaults` and `decide` for
+escalation (`retry` for `tool_failure`, `sync_failed`, `push_failed` and `prerequisite`, `accept-defaults` and `decide` for
 `preflight_default`, `grant-round` for `round_grantable`, `grant-budget` for `budget_grantable`,
 none of them for an input changed since, `escalate` always) and the manual steps without the
 supervisor.
@@ -1978,7 +2034,7 @@ no command applies, and the answer gives the manual steps. The commands valid th
   key of its input. Every escalation of a failed agent, `gh` or git step (`tool_failure`,
   `failure`, `untrusted`, `push_failed`) and of a sync with conflicts that failed (`sync_failed`,
   `sync_sensitive`, `tool_failure`) records it, also when it goes to the operator; so do `supervisor_escalated` and `supervisor_refused`
-  of a `tool_failure`, `sync_failed`, `push_failed` or `budget_grantable` escalation, which keep the step of
+  of a `tool_failure`, `sync_failed`, `push_failed`, `prerequisite` or `budget_grantable` escalation, which keep the step of
   the supervisor's escalation. Their comment says that `/devloop retry` applies. An issue whose readiness check
   failed this way keeps `agent:ready`, so that the check can run again. The
   class may be critical: a retry runs the step again and bypasses none of its checks. The

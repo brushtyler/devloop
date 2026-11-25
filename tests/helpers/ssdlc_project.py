@@ -546,6 +546,26 @@ _PERMALINK_IMPLEMENT = """\
 - When an ADR or another document must cite a comment below, for example a decision of the
   operator, cite it with the link of its `Permalink:` line: the link GitHub gives that comment.
 """
+# #672: the missing prerequisite, in words and by the number of its issue, that devloop adds as
+# a native "blocked by" in place of an escalation to the operator.
+_PREREQUISITE_IMPLEMENT = """\
+- `prerequisite`: only when `status` is `blocked` because the issue needs another issue or PR
+  done first, that prerequisite as the issue or the repository names it; otherwise empty.
+- `blocked_by`: with a `prerequisite`, the number of the issue of $repo that is that
+  prerequisite, when the issue, its comments or the repository give it; otherwise `0`. Never
+  guess a number: devloop adds it as a native "blocked by" of the issue, which waits until it
+  closes.
+"""
+_PREREQUISITE_PREFLIGHT = """\
+When a gap waits for a prerequisite issue or PR not done yet, write it in `prerequisite`, as the
+issue or the repository names it, and in `blocked_by` the number of the issue of $repo that is
+that prerequisite, when the issue, its comments or the repository give it; `0` when they do not:
+never guess a number. Use `prerequisite: ""` and `blocked_by: 0` for every other gap. When every
+gap is such a prerequisite, devloop does not hand the issue to the operator: with every number
+known it adds them as native "blocked by" of the issue, which leaves the queue until they close;
+otherwise the supervisor finds the issues.
+
+"""
 _PERMALINK_FIX = """\
 - When an ADR or another document must cite a request below, a decision of the operator for
   example, cite it with the link of its `Permalink:` line: the link GitHub gives its comment.
@@ -570,6 +590,7 @@ SINCE_R4 = {
          _HOST_STEP_IMPLEMENT),
         Replaced(*_HOST_STEP_REFERENCE_531['implement']),
         ('  the issue explicitly asks for it.\n', _PERMALINK_IMPLEMENT),
+        ('- `blocked_reason`: empty unless `status` is `blocked`.\n', _PREREQUISITE_IMPLEMENT),
     ),
     'fix': (
         # #481
@@ -646,6 +667,8 @@ SINCE_R4 = {
         # ADR 0007, R1 (#538)
         Replaced('permissions, trust rules, the replay gate baseline, the merge mode, ',
                  'permissions, trust rules, the merge mode, '),
+        # #672: after the trust policy's insertion at the same anchor, so it comes before it.
+        ('external tool, access or resource can close.\n\n', _PREREQUISITE_PREFLIGHT),
     ),
     'conclave_proposal': (_NO_REPLAY_GATE_CONCLAVE,),
     'conclave_vote': (_NO_REPLAY_GATE_CONCLAVE,),

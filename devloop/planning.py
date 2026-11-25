@@ -624,7 +624,15 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None, implement=Tr
             # host_tests once the CI of the base commit passed (#497).
             if number in busy:
                 continue
-            action = base_restart(number, snapshot.base_waits[number], cfg, free, implement)
+            wait = snapshot.base_waits[number]
+            if wait.get('dropped') and not wait['labels'] & (lb.operator()
+                                                             | {lb.needs_supervisor}):
+                # A prerequisite it waits for (#672) closed without being completed (#671).
+                actions.append(Action('prerequisite_dropped', number,
+                                      'prerequisite closed without being completed: '
+                                      + ', '.join(wait['dropped'])))
+                continue
+            action = base_restart(number, wait, cfg, free, implement)
             if action is not None:
                 if action.kind in ('implement', 'preflight'):
                     free -= 1
@@ -1007,6 +1015,9 @@ BASE_ADVANCED = 'the base branch advanced since the failed readiness check, whos
 # The reason of an implementation that starts again after its failed tests failed on the base
 # too (#459), once the base branch moved past that commit.
 BASE_REPAIRED = 'the base branch moved past the commit where its failed tests failed too'
+# The reason of an implementation, or of a readiness check, that starts again once the
+# prerequisites the dispatcher added as "blocked by" are closed (#672).
+PREREQUISITES_CLOSED = 'the prerequisites added as "blocked by" are closed'
 # The reason of a step that waited for the base branch and escalates ``host_tests`` (#497).
 BASE_GREEN = 'the CI of the base commit where its failed tests failed too passed'
 
@@ -1034,9 +1045,13 @@ def base_restart(number, wait, cfg, free, implement=True):
     coordinator.
 
     While the wait holds, once the CI of the base commit passed (#497) the issue escalates
-    ``host_tests`` (``host_tests``), unless the same blocks hold it: no slot is taken."""
+    ``host_tests`` (``host_tests``), unless the same blocks hold it: no slot is taken.
+
+    An implementation that waits for the prerequisites the dispatcher added as "blocked by"
+    (#672) restarts the same way, with its own ``reason``, once they are closed."""
     lb = cfg.labels
     labels = set(wait['labels'])
+    repaired = wait.get('reason') or BASE_REPAIRED
     blocked = bool(labels & (set(cfg.blocked_labels) | {lb.needs_supervisor}))
     if wait['holds']:
         held = blocked or operator_blocked(labels, lb)
@@ -1053,17 +1068,50 @@ def base_restart(number, wait, cfg, free, implement=True):
     state, reason = preflight_state(view) if view is not None else ('ready', '')
     if operator_blocked(labels, lb):
         if view is not None and view['owned'] and state == 'run' and free > 0:
-            return Action('preflight', number, f'{reason}; {BASE_REPAIRED}')
+            return Action('preflight', number, f'{reason}; {repaired}')
         return None
     if state == 'not_ready':
         return Action('preflight_block', number, 'the readiness check of the current text failed')
     if free <= 0:
         return None
     if state == 'run':
-        return Action('preflight', number, f'{reason}; {BASE_REPAIRED}')
+        return Action('preflight', number, f'{reason}; {repaired}')
     if not implement:
         return None
-    return Action('implement', number, BASE_REPAIRED)
+    return Action('implement', number, repaired)
+
+
+def prerequisite_gaps(outcome):
+    """The gaps of a failed readiness check when every one names a missing prerequisite (#672,
+    ``prerequisite``) and no split is needed, else ``[]``: only then the check hands the issue
+    to no one, with "blocked by" or with a ``prerequisite`` escalation. Any other gap, the
+    question on the trust policy included, keeps the escalation of before."""
+    gaps = outcome.get('gaps') or []
+    if not gaps or (outcome.get('split') or '').strip():
+        return []
+    if not all(isinstance(g.get('prerequisite'), str) and g['prerequisite'].strip()
+               for g in gaps):
+        return []
+    return gaps
+
+
+def prerequisite_number(item):
+    """The number of the issue of a missing prerequisite (``blocked_by`` of a gap or of an
+    implementer's result, #672), or None when it is not given."""
+    number = item.get('blocked_by')
+    return (number if isinstance(number, int) and not isinstance(number, bool) and number > 0
+            else None)
+
+
+def prerequisite_list(items):
+    """The missing prerequisites of ``items`` (gaps or an implementer's result, #672) for the
+    text of an escalation: each in words, with ``#N`` when its number is given."""
+    shown = []
+    for item in items:
+        text = ' '.join(str(item.get('prerequisite') or '').split())
+        number = prerequisite_number(item)
+        shown.append(f'«{text}»' + (f' (#{number})' if number else ''))
+    return '; '.join(shown)
 
 
 def repository_bound(record):
@@ -1090,6 +1138,10 @@ def preflight_state(view):
         return 'run', 'the issue text changed since the readiness check'
     if not record['ready'] and view.get('relabeled'):
         return 'run', f'agent:ready added again by {view["relabeled"]} after the failed check'
+    if not record['ready'] and record.get('prerequisites'):
+        # The dispatcher added its gaps as "blocked by" (#672): the issue is checked only once
+        # they are closed, and then the check runs again.
+        return 'run', PREREQUISITES_CLOSED
     if repository_bound(record) and view.get('base') and view['base'] != record['base']:
         return 'run', BASE_ADVANCED
     return ('ready' if record['ready'] else 'not_ready'), ''
