@@ -76,13 +76,16 @@ class ProcessTests(Case):
         d = self.make(OWN)
         for cls, step in (('tool_failure', 'review'), ('sync_failed', 'sync'),
                           ('preflight_default', 'preflight'), ('merged_issue', 'implement'),
-                          ('round_grantable', 'review')):
+                          ('round_grantable', 'review'), ('push_failed', 'fix')):
             with self.subTest(cls=cls):
                 route, why = d._supervised(100, cls, step, pr())
                 self.assertIsNotNone(route)
                 self.assertEqual(why, '')
+        # push_failed (#645): a retry of the push, decided by the supervisor (the operator's
+        # /devloop approve on #645).
         self.assertEqual({'tool_failure', 'sync_failed', 'preflight_default', 'merged_issue',
-                          'round_grantable', 'budget_grantable'}, set(NON_CRITICAL))
+                          'round_grantable', 'budget_grantable', 'push_failed'},
+                         set(NON_CRITICAL))
 
     def test_a_budget_extension_is_not_among_them(self):
         # The list the operator approved on #524 does not name grant-budget.

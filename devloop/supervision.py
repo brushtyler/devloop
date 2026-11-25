@@ -10,7 +10,10 @@ operator, as before. The supervisor answers with a command, the first line of a 
 the attribution header:
 
 - ``/devloop retry``: run the failed step again, without counting a round; at most
-  ``MAX_RETRIES`` times per step and input, then the escalation becomes critical;
+  ``MAX_RETRIES`` times per step and input, then the escalation becomes critical. On a
+  ``push_failed`` escalation (#645) only the push runs again, with the commits of the turn
+  already done, kept in ``state_dir``; on a PR whose branch got that push anyway, the step is
+  only completed;
 - ``/devloop accept-defaults``: accept the defaults the readiness check proposed;
 - ``/devloop decide <text>``: decide the gaps of the readiness check otherwise (#258): the text,
   the rest of the comment, reaches the next check through the dispatcher's record;
@@ -83,6 +86,9 @@ from .i18n import ENGLISH, ITALIAN, Catalog, language_code
 TOOL_FAILURE = 'tool_failure'            # the agent or its model produced no result
 PREFLIGHT_DEFAULT = 'preflight_default'  # readiness gaps all ``default_available``
 SYNC_FAILED = 'sync_failed'              # a sync failed, no conflict on a sensitive path
+# The push of a step's branch failed twice for a transient error of the remote (#645): a 5xx
+# answer or a connection lost. A retry pushes again the commits of the turn already done.
+PUSH_FAILED = 'push_failed'
 MERGED_ISSUE = 'merged_issue'            # a ready issue that a merged devloop PR resolved (#228)
 # A PR at the round limit whose next round the supervisor may grant (#405, ADR 0005, P5-1): only
 # with ``[delegations] rounds`` on and every condition of the delegation verified.
@@ -92,7 +98,9 @@ ROUND_GRANTABLE = 'round_grantable'
 # of the delegation verified.
 BUDGET_GRANTABLE = 'budget_grantable'
 NON_CRITICAL = (TOOL_FAILURE, PREFLIGHT_DEFAULT, SYNC_FAILED, MERGED_ISSUE, ROUND_GRANTABLE,
-                BUDGET_GRANTABLE)
+                BUDGET_GRANTABLE, PUSH_FAILED)
+# The non-critical classes whose step a ``retry`` runs again.
+RETRY_CLASSES = (TOOL_FAILURE, SYNC_FAILED, PUSH_FAILED)
 
 # Critical classes: always to the operator. Any other value is critical too.
 CRITICAL = {
@@ -338,6 +346,7 @@ _ENGLISH = {
     TOOL_FAILURE: 'the agent or the model produced no result',
     PREFLIGHT_DEFAULT: 'gaps of the readiness check with a proposed default',
     SYNC_FAILED: 'sync with the base failed',
+    PUSH_FAILED: 'push of the branch failed for a transient error of GitHub',
     MERGED_ISSUE: 'issue still open, but resolved by a devloop PR already merged',
     ROUND_GRANTABLE: 'limit of the review rounds, with one more round the supervisor may grant',
     BUDGET_GRANTABLE: ('budget envelope of the story used up, with the one extension the '
@@ -383,6 +392,8 @@ def describe(cls, language=ENGLISH):
         return 'lacune del controllo di prontezza con un default proposto'
     if cls == SYNC_FAILED:
         return 'sincronizzazione con la base non riuscita'
+    if cls == PUSH_FAILED:
+        return 'push del branch non riuscito per un errore temporaneo di GitHub'
     if cls == MERGED_ISSUE:
         return 'issue ancora aperta, ma risolta da una PR devloop già mergiata'
     if cls == ROUND_GRANTABLE:

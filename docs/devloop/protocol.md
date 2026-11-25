@@ -678,7 +678,7 @@ supervisor's and the operator's.
 supervisor does, the step that failed, the key of its input and, for a PR, the label a retry
 resumes from, when the step is one a retry runs again (#321). A supervisor's escalation handed to
 the operator (`supervisor_escalated`, `supervisor_refused`) keeps them only for `tool_failure`,
-`sync_failed` and `budget_grantable` (#411), whose step the operator may retry as on a `budget`
+`sync_failed`, `push_failed` (#645) and `budget_grantable` (#411), whose step the operator may retry as on a `budget`
 escalation: the key of a `preflight_default` or `merged_issue` escalation only routes it.
 
 ## Dependency cycles

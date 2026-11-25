@@ -1628,7 +1628,10 @@ through a file or the command line. No other credential can join the push: it re
 an `insteadOf` or `pushInsteadOf` rule would rewrite, allows only the HTTPS transport, and
 disables credential helpers, askpass programs and preconfigured authentication headers. The
 header is keyed on the exact push URL, so that no `http.<url>.extraHeader` in a config file is
-more specific, and `git -c` settings inherited through `GIT_CONFIG_PARAMETERS` are dropped. An actor
+more specific, and `git -c` settings inherited through `GIT_CONFIG_PARAMETERS` are dropped. A
+push that fails for a transient error of GitHub (a 5xx answer, a connection lost) is tried once
+more, with a new token when a retry comes later; any other refusal is not
+([Transient errors of the push](guide.md#transient-errors-of-the-push), #645). An actor
 without an app uses the ambient `gh` login and its records must come from `trusted_users`, as
 before. With `publication_outbox` on (#385), `Identities.github` hands out each client with its
 `comment`, `edit_comment`, `submit_review` and `create_pr` through the

@@ -37,7 +37,7 @@ from .supervision import (ACCEPT_DEFAULTS, BUDGET_GRANTABLE, CAPACITY, CAPACITY_
                           MAX_MERGE_BUDGET,
                           MAX_RETRIES, MERGE, MERGE_BUDGET, MERGED_ISSUE, OPEN_FINDINGS,
                           PREFLIGHT_DEFAULT, REREVIEW, RETRY, RETRY_STEPS,
-                          ROUND_GRANTABLE, SYNC_FAILED, TOOL_FAILURE, capacity_arguments,
+                          RETRY_CLASSES, ROUND_GRANTABLE, TOOL_FAILURE, capacity_arguments,
                           changed_input, command_line, coordinator_command,
                           coordinator_refusal, critical,
                           merge_budget_arguments, operator_rounds_text, preflight_class,
@@ -166,7 +166,8 @@ TEXTS = Catalog(
                                   'the budget envelope'),
         'only_preflight_default': ('it applies only to a `preflight_default` escalation of the '
                                    'readiness check'),
-        'only_retry': 'it applies only to the `tool_failure` and `sync_failed` escalations',
+        'only_retry': ('it applies only to the `tool_failure`, `sync_failed` and `push_failed` '
+                       'escalations'),
         'only_rereview': 'it applies only to a `tool_failure` escalation of the review of a PR',
         'merged_why': ('the issue is already resolved by a merged devloop PR ({merged}), so '
                        'running its step again would duplicate the work'),
@@ -510,7 +511,8 @@ TEXTS = Catalog(
                                   'dall\'envelope di budget'),
         'only_preflight_default': ('vale solo per un\'escalation `preflight_default` del '
                                    'controllo di prontezza'),
-        'only_retry': 'vale solo per le escalation `tool_failure` e `sync_failed`',
+        'only_retry': ('vale solo per le escalation `tool_failure`, `sync_failed` e '
+                       '`push_failed`'),
         'only_rereview': 'vale solo per un\'escalation `tool_failure` della review di una PR',
         'merged_why': ('l\'issue è già risolta da una PR devloop mergiata ({merged}), quindi '
                        'ripeterne il passo duplicherebbe il lavoro'),
@@ -974,9 +976,15 @@ class SupervisionMixin:
     def _current_key(self, number, key, pr):
         """The key ``key`` would have now, for the same step (and reviewer) on issue or PR
         ``number``: a retry of a superseded input is refused (``changed_input``, which leaves
-        out the base of an implementation, #475)."""
+        out the base of an implementation, #475). A PR whose head is the commit of the push kept
+        for the same step and head (#645, ``_landed_push``) has the input of that step: the head
+        moved only because the push reached GitHub although both attempts lost the answer."""
         if pr is not None:
-            current = {'step': key.get('step'), 'head': self.gh.pr_head(number)}
+            head = self.gh.pr_head(number)
+            landed = self._landed_push(number, head)
+            if landed is not None and landed.matches(key.get('step'), key):
+                head = key.get('head')
+            current = {'step': key.get('step'), 'head': head}
             if 'reviewer' in key:
                 current['reviewer'] = key['reviewer']
             return current
@@ -1289,7 +1297,7 @@ class SupervisionMixin:
         # operator directly. The key of a preflight_default or merged_issue escalation only
         # routes it.
         carry = ({k: escalation[k] for k in ('step', 'key', 'resume') if k in escalation}
-                 if cls in (TOOL_FAILURE, SYNC_FAILED, BUDGET_GRANTABLE)
+                 if cls in (*RETRY_CLASSES, BUDGET_GRANTABLE)
                  and self._retryable(escalation, is_pr) else None)
         # A tool failure of an issue loses agent:ready on its way to the operator, as any failed
         # step does; the readiness check keeps it, and so does a readiness check the operator
@@ -1363,7 +1371,7 @@ class SupervisionMixin:
                 return self._decide(number, labels, comments, trace, command['reason'],
                                     coordinator=self._is_coordinator(by))
             return self._accept_defaults(number, labels, comments, trace)
-        if cls not in (TOOL_FAILURE, SYNC_FAILED):
+        if cls not in RETRY_CLASSES:
             return refused(t('only_retry'))
         if name == REREVIEW and not (is_pr and cls == TOOL_FAILURE
                                      and escalation.get('step') == 'review'):
@@ -2276,7 +2284,10 @@ class SupervisionMixin:
         now, does not run its step: the command waits, with no record and no attempt spent,
         until the last block closes. After ``MAX_RETRIES`` applied retries for the same key,
         the supervisor's and the operator's together (``retries_done``), ``limit(done)`` runs
-        instead."""
+        instead. A push of the same step and key kept after a transient error of the remote
+        (#645, ``_arm_pending_push``) makes the step push those commits again, without a new
+        turn; on a PR whose branch already got that push (``_landed_push``), the step is
+        completed now, with no new push."""
         lb = self.cfg.labels
         key, step = escalation['key'], escalation['step']
         if not is_pr:
@@ -2293,10 +2304,18 @@ class SupervisionMixin:
             return limit(done)
         trace('applied', self._texts()('retry_applied', step=step, attempt=done + 1,
                                        max=MAX_RETRIES), key=key, attempt=done + 1)
+        # A push that failed for a transient error of the remote (#645) and whose commits the
+        # dispatcher kept: the step, when it runs, pushes them again without a new turn.
+        pending = self._arm_pending_push(number, step, key)
         if is_pr:
             resume = escalation.get('resume')
-            self.gh.edit_labels(number, add=[resume if resume in (lb.review, lb.changes)
-                                             else lb.review], remove=remove)
+            resume = resume if resume in (lb.review, lb.changes) else lb.review
+            self.gh.edit_labels(number, add=[resume], remove=remove)
+            if pending is not None and self._landed_push(number, self.gh.pr_head(number)):
+                # The push reached the branch although both attempts lost the answer: the step
+                # is completed now, since the head it left may plan no step at all. A veto
+                # written since suspends it instead, without the label just given back.
+                self._complete_landed(pending, remove=[resume])
             return
         self.gh.edit_labels(number, remove=remove)
         try:
@@ -2320,7 +2339,7 @@ class SupervisionMixin:
         if not superseded and not is_pr and cls == PREFLIGHT_DEFAULT:
             valid = [f'`/devloop {ACCEPT_DEFAULTS}`',
                      f'`/devloop {DECIDE} {t("decisions_arg")}`']
-        elif (not superseded and cls in (TOOL_FAILURE, SYNC_FAILED)
+        elif (not superseded and cls in RETRY_CLASSES
               and self._retryable(escalation, is_pr)):
             valid = [f'`/devloop {RETRY}`']
         elif not superseded and is_pr and cls == ROUND_GRANTABLE:
