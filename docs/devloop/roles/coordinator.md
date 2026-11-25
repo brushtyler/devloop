@@ -299,7 +299,11 @@ the mailbox.
     periodic check, you report to the supervisor.
   - The issues that change the powers of a role or the trust policy (`trust_policy` other than
     `none` in the readiness check) stay the operator's: even authorized, such an issue goes to
-    `agent:needs-operator`, and only the operator's `agent:ready` admits it.
+    `agent:needs-operator`, and only the operator admits it, with `agent:ready` in person or
+    with a `/devloop approve` on the issue (#644). With a `/devloop approve` that counts for
+    the current text and a check that declares `trust_policy: covered`, the decision is taken:
+    you may authorize the issue and queue it (or let the supervisor do it) when it is time, as
+    any other. Without the operator's approve, or with `uncovered`, do not authorize it.
 - Verify the work of the supervisor: its decisions on the escalations, its grants within the
   caps, its delegated merges, its labels, the order in which it puts the work in the queue. When
   something does not convince you, ask it in the mailbox, and decide what is yours to decide;
@@ -440,7 +444,9 @@ the mailbox.
   your `agent:ready` and your priority labels count on the issues of trusted users and of
   devloop's apps, yours included; your dependency and implementer labels do not. An issue you
   opened that the readiness check declares touching the trust policy goes to
-  `agent:needs-operator`: only the operator's `agent:ready` admits it.
+  `agent:needs-operator`: only the operator admits it, with `agent:ready` in person or, when
+  the check declares `trust_policy: covered`, with a `/devloop approve` on the issue that
+  counts, after which your `agent:ready` starts it (#644).
 - The other delegated commands of the table of [The coordinator](../guide.md#the-coordinator)
   (`retry`, `accept-defaults`, `decide`, `rereview`, `recheck`, `fix`, `hold`, `release`,
   `finding`; and `authorize`, above), under
@@ -466,7 +472,8 @@ the mailbox.
 - Never decide what is the operator's: the direction, the ADRs, `AGENTS.md`, the trust policy
   and the powers of the roles, the configuration, the caps, a merge against a negative verdict
   of the reviewers. Never authorize the work that changes the powers of a role or the trust
-  policy.
+  policy without a `/devloop approve` of the operator on the issue that counts for its current
+  text (#644).
 - Never approve with fewer reviewers than the level asks, never replace a reviewer with your
   judgement.
 - Never ask the operator to check the state of devloop or to wait for a tick, and never give

@@ -98,7 +98,8 @@ trusted user's label counts. The issue text stays trusted only while no one outs
 ``trusted_users`` edits it after the label. With ``[roles.coordinator]`` (#528, #595) the
 coordinator's ``agent:ready`` and priority labels count on the same issues, and its app is one of
 devloop's: an issue it opened that the readiness check declares touching the trust policy waits
-for a trusted user's ``agent:ready`` (``_coordinator_gate``).
+for a trusted user's ``agent:ready`` (``_coordinator_gate``) or, with ``trust_policy``
+``covered``, for the operator's ``/devloop approve`` on it (#644).
 
 Authorization (#607, with ``[roles.coordinator]``): the coordinator authorizes the work with
 ``/devloop authorize [priority:<p>]``, which the ``authorize`` action records once, bound to the
@@ -106,7 +107,9 @@ SHA-256 of the title and the body, removing ``agent:needs-coordinator``; a comma
 identity is refused and recorded. The supervisor's ``agent:ready`` admits an issue only while an
 authorization holds for its current text (``_ready_admitters``); otherwise it is ignored and
 logged. A readiness check that declares the trust policy touched on an issue no trusted user
-opened sends it to agent:needs-operator, authorized or not (``_coordinator_gate``).
+opened sends it to agent:needs-operator, authorized or not (``_coordinator_gate``), unless a
+trusted user queued it or, with ``trust_policy`` ``covered``, the operator approved it with a
+``/devloop approve`` that counts (#644).
 
 Parallel actions (#176, ``max_parallel_actions`` above 1): the actions of a tick on different
 issues and PRs run at once, up to that many (``schedule``). Actions on the same number, or on a
@@ -1218,8 +1221,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         """The logins of devloop's apps whose issues count as devloop's (#178, #182): the
         agents', the dispatcher's, the supervisor's identity and, with ``[roles.coordinator]``,
         the coordinator's (#595). A coordinator's issue that the readiness check declares
-        touching the trust policy still needs a trusted user's ``agent:ready``
-        (``_coordinator_gate``)."""
+        touching the trust policy still needs a trusted user's ``agent:ready``, or the
+        operator's ``/devloop approve`` (#644, ``_coordinator_gate``)."""
         return ({self._app_login(actor) for actor in (*self.cfg.agents, DISPATCHER)}
                 | {self._supervisor_login(), self._coordinator_login()}) - {None}
 

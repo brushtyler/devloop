@@ -413,7 +413,8 @@ Today these texts follow it:
 - the gaps of a readiness check that devloop writes itself (#632), when it makes the record: the
   question on a change to the trust policy that no decision covers, before the agent's reason,
   and the gap of an issue the coordinator opened, or not opened by a trusted user, that touches
-  the trust policy without a trusted user's `agent:ready`; the gaps the agent lists stay in its
+  the trust policy without a trusted user's `agent:ready` nor, with `covered`, the operator's
+  `/devloop approve` (#644); the gaps the agent lists stay in its
   own words, written in the project's language as its prompt asks;
 - the texts devloop writes in a new review record (#632), when it makes it: the note on what it
   corrected (a blocking finding without evidence, a corrected verdict, the findings it added
@@ -2141,8 +2142,11 @@ model = "gpt-6.1-sol"
   trusted user and never the supervisor, and `trusted_users` refuses a bot. Since #595 it is one
   of devloop's apps: an issue it opens is one of devloop's, which the supervisor and the
   coordinator may queue, unless its readiness check declares the trust policy touched: then only
-  a trusted user's `agent:ready` admits it, and without a readiness check only the trusted users'
-  labels count on it ([Labels from the supervisor](guide.md#labels-from-the-supervisor)). Its
+  a trusted user's `agent:ready` admits it or, when the check declares `covered`, a
+  `/devloop approve` of the operator on the issue that counts (#644), after which the
+  coordinator's or the supervisor's `agent:ready` starts it; without a readiness check only the
+  trusted users' labels count on it
+  ([Labels from the supervisor](guide.md#labels-from-the-supervisor)). Its
   `agent:ready` and priority labels count where the supervisor's do; its dependency and
   implementer labels never. With the table, its `/devloop authorize` (#607) authorizes the work:
   the supervisor's `agent:ready` admits an issue only while an authorization of the coordinator
