@@ -14,7 +14,12 @@ changed into lines ``HH:MM <type> #N <detail>`` (UTC):
   ``CHANGES_REQUESTED``;
 - comments of trusted users and of devloop's apps, those a trusted user wrote in person marked
   ``operator comment``; ledger records (#133) are left out;
-- issues and PRs opened, closed or merged.
+- issues and PRs opened, closed or merged;
+- an orphan prerequisite (#671): an issue with ``agent:ready`` blocked ("blocked by", as the
+  dispatcher trusts it) by an open issue of the repository that has neither ``agent:ready`` nor
+  ``agent:working``, nor an open PR, nor an authorization of the coordinator, once per pair of
+  issues while it stays so (``Watcher._orphans``). The baseline reads no dependency: the first
+  round after it reports the orphans already there.
 
 Trust follows AGENTS.md. An issue or PR counts if its author is in ``trusted_users`` or is one of
 devloop's apps. Anyone else's produces only ``new <type> #N by an untrusted author (ignored)``
@@ -73,6 +78,7 @@ from .dispatch_actions import ready_approval
 from .dispatcher import label_admitters
 from .github import GitHubError, GitHubNotFound, author_login
 from .ledger import TITLES as ledger_titles
+from .ledger import parse_branch
 from .markdown import read_marker
 from .planning import label_names
 
@@ -143,7 +149,10 @@ class Trust:
     authors outside the trusted ones are followed."""
 
     def __init__(self, users, writers, ready_label, *, supervisor=None, coordinator=None,
-                 devloop=(), preflight=False):
+                 devloop=(), preflight=False, working_label='agent:working',
+                 branch_prefix='agent/issue-'):
+        self.working_label = working_label
+        self.branch_prefix = branch_prefix
         self.users = frozenset(users)
         self.writers = {actor: login for actor, login in dict(writers).items() if actor != MERGER}
         self.apps = frozenset(self.writers.values()) | ({coordinator} if coordinator
@@ -186,7 +195,8 @@ class Trust:
         devloop = ({identities.login(cfg.app_of(actor)) for actor in (*cfg.agents, DISPATCHER)}
                    | {supervisor, coordinator}) - {None}
         return cls(cfg.trusted_users, writers, cfg.labels.ready, supervisor=supervisor,
-                   coordinator=coordinator, devloop=devloop, preflight=bool(cfg.preflight))
+                   coordinator=coordinator, devloop=devloop, preflight=bool(cfg.preflight),
+                   working_label=cfg.labels.working, branch_prefix=cfg.branch_prefix)
 
     def ready_admitters(self, author):
         """The logins whose ``agent:ready`` admits an issue opened by ``author``, as the
@@ -200,6 +210,15 @@ class Trust:
         if self.coordinator:
             admitters |= label_admitters(author, self.users, self.coordinator, self.devloop)
         return admitters
+
+    def block_admitters(self, author):
+        """The logins whose "blocked by" counts on an issue opened by ``author`` (#277, #671),
+        as the dispatcher reads them (``Dispatcher._admitters`` without ``coordinator``): the
+        trusted users, and the supervisor on issues of trusted users or of devloop's apps."""
+        if self.coordinator and author == self.coordinator and not self.preflight:
+            return set(self.users)
+        return (label_admitters(author, self.users, self.supervisor, self.devloop)
+                if self.supervisor else set(self.users))
 
     def needs_authorization(self, login):
         """Whether an ``agent:ready`` of ``login`` admits only with an authorization of the
@@ -325,6 +344,11 @@ def valid_state(state):
         return False
     seen, since = comments.get('seen'), comments.get('since')
     if 'authors' in state and not _is_strings(state['authors']):
+        return False
+    orphans = state.get('orphans', [])
+    if not (isinstance(orphans, list) and all(
+            isinstance(pair, list) and len(pair) == 2 and all(_is_int(n) for n in pair)
+            for pair in orphans)):
         return False
     if not (_is_int(comments.get('floor')) and isinstance(seen, list)
             and all(_is_int(cid) for cid in seen) and isinstance(since, str)):
@@ -471,9 +495,14 @@ class Watcher:
     # Reads -----------------------------------------------------------------
     def _read_prs(self):
         prs = {}
+        # The issues with an open PR of a trusted author on their devloop branch (#671).
+        self._pr_issues = set()
         for raw in self.gh.open_prs():
             trusted = self.trust.trusted((raw.get('author') or {}).get('login'))
             entry = {'trusted': trusted, 'labels': sorted(label_names(raw.get('labels') or []))}
+            parsed = parse_branch(self.trust.branch_prefix, raw.get('headRefName') or '')
+            if trusted and parsed is not None and not raw.get('isCrossRepository'):
+                self._pr_issues.add(parsed[0])
             if trusted:
                 head = raw['headRefOid']
                 reviews = []
@@ -553,12 +582,64 @@ class Watcher:
         if latest[0] not in self.trust.ready_admitters(history.get('author')):
             return None
         if self.trust.needs_authorization(latest[0]):
-            records = [read_marker(c.get('body') or '', 'authorize')
-                       for c in self.gh.issue_comments(int(number))
-                       if self.trust.wrote((c.get('author') or {}).get('login'), DISPATCHER)]
-            if valid_authorization([r for r in records if r is not None], history) is None:
+            records = self._authorize_records(number)
+            if valid_authorization(records, history) is None:
                 return None
         return latest
+
+    def _authorize_records(self, number):
+        """The ``authorize`` records the dispatcher wrote on issue ``number``, oldest first."""
+        records = [read_marker(c.get('body') or '', 'authorize')
+                   for c in self.gh.issue_comments(int(number))
+                   if self.trust.wrote((c.get('author') or {}).get('login'), DISPATCHER)]
+        return [r for r in records if r is not None]
+
+    def _orphans(self, issues):
+        """The orphan prerequisites (#671), as ``[blocked, blocker]`` pairs: for each visible
+        open issue with ``agent:ready``, its trusted open blocks of the repository
+        (``Trust.block_admitters``, as the dispatcher counts them) that have neither
+        ``agent:ready`` nor ``agent:working``, nor an open PR on their devloop branch, nor, with
+        a coordinator, an authorization of the coordinator that holds for their current text. A
+        block outside the open listing, or of another repository, is not judged."""
+        home = (getattr(self.gh, 'repo', '') or '').lower()
+        busy = {self.trust.ready_label, self.trust.working_label}
+        found, authorized = [], {}
+        for number in sorted(issues, key=int):
+            entry = issues[number]
+            if not _visible(entry) or self.trust.ready_label not in entry['labels']:
+                continue
+            read = self.gh.issue_dependencies(int(number))
+            admitters = self.trust.block_admitters(read.get('author'))
+            added_by = {((e.get('repo') or '').lower(), e.get('number')): e.get('by')
+                        for e in read.get('added') or []}
+            for item in read.get('blocked_by') or []:
+                repo, blocker = (item.get('repo') or '').lower(), item.get('number')
+                if (item.get('state') != 'OPEN' or repo not in ('', home)
+                        or not _is_int(blocker) or str(blocker) not in issues
+                        or added_by.get((repo, blocker)) not in admitters):
+                    continue
+                if set(issues[str(blocker)]['labels']) & busy or blocker in self._pr_issues:
+                    continue
+                if self.trust.coordinator is not None:
+                    if blocker not in authorized:
+                        records = self._authorize_records(blocker)
+                        authorized[blocker] = bool(records) and valid_authorization(
+                            records, self.gh.issue_history(blocker)) is not None
+                    if authorized[blocker]:
+                        continue
+                pair = [int(number), blocker]
+                if pair not in found:
+                    found.append(pair)
+        return found
+
+    def _orphan_lines(self, old, orphans):
+        """One line for each orphan prerequisite not in ``old`` (the pairs of the previous
+        round): reported once per pair of issues, while it stays orphan."""
+        known = [list(pair) for pair in old]
+        return [f'issue #{blocked} orphan prerequisite #{blocker}: open, without '
+                f'{self.trust.ready_label}, {self.trust.working_label}, an open PR or an '
+                'authorization of the coordinator'
+                for blocked, blocker in orphans if [blocked, blocker] not in known]
 
     def _read_comments(self, since):
         return sorted(self.gh.comments_since(since), key=lambda c: c['id'])
@@ -595,11 +676,13 @@ class Watcher:
         comment_lines, comment_state = self._comment_lines(old['comments'], comments,
                                                            before, prs, issues, closed)
         lines += comment_lines
+        orphans = self._orphans(issues)
+        lines += self._orphan_lines(old.get('orphans') or [], orphans)
         comment_state['since'] = _stamp(started - COMMENT_MARGIN)
         while len(closed) > MAX_CLOSED:
             closed.pop(min(closed, key=int))
         return lines, {'version': STATE_VERSION, 'prs': prs, 'issues': issues, 'closed': closed,
-                       'authors': authors, 'comments': comment_state}
+                       'authors': authors, 'comments': comment_state, 'orphans': orphans}
 
     def _pr_lines(self, old, new):
         lines = []

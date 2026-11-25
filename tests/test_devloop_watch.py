@@ -117,6 +117,19 @@ class FakeGitHub:
         self._call('issue_comments')
         return [dict(c) for c in self.threads.get(number, [])]
 
+    repo = 'o/r'
+
+    def issue_dependencies(self, number):
+        # The native dependencies (#671): ``blocks`` maps an issue to ``(number, by)`` pairs,
+        # open blocks of the repository unless the pair has a third item, its ``repo``.
+        self._call('issue_dependencies')
+        pairs = getattr(self, 'blocks', {}).get(number, [])
+        items = [{'repo': p[2] if len(p) > 2 else 'o/r', 'number': p[0], 'state': 'OPEN',
+                  'state_reason': None} for p in pairs]
+        added = [{'repo': p[2] if len(p) > 2 else 'o/r', 'number': p[0], 'by': p[1],
+                  'at': '2026-11-01T00:00:00Z'} for p in pairs]
+        return {'author': OPERATOR, 'blocked_by': items, 'added': added}
+
     # Helpers for the tests
     def add_pr(self, number, author=CLAUDE, labels=('agent:review',), head=HEAD1, title=None):
         self.prs[number] = {'number': number, 'title': title or f'PR {number}',
@@ -1018,6 +1031,89 @@ class TrustChangeTest(unittest.TestCase):
         h.run(timeout=1)
         self.assertEqual(h.gh.calls.count('issue_author'), 1)
         self.assertEqual(json.loads(h.path.read_text())['authors'], h.trust.authors)
+
+
+ORPHAN = ('issue #3 orphan prerequisite #9: open, without agent:ready, agent:working, an open '
+          'PR or an authorization of the coordinator')
+
+
+class OrphanTest(unittest.TestCase):
+    """An issue with agent:ready blocked by an open issue that nobody is doing (#671)."""
+
+    def harness(self, trust=TRUST):
+        h = Harness(self, trust=trust)
+        gh = h.gh
+        gh.add_issue(3, labels=('agent:ready',))
+        gh.add_issue(9)                                 # open, nobody on it: orphan
+        gh.add_issue(4, labels=('agent:working',))      # in progress
+        gh.add_issue(5, labels=('agent:ready',))        # queued
+        gh.add_issue(6)                                 # with an open devloop PR
+        gh.add_pr(20, title='fix 6')
+        gh.prs[20]['headRefName'] = 'agent/issue-6'
+        gh.add_issue(7)                                 # a block nobody trusted added
+        gh.add_issue(1)                                 # blocks an issue without agent:ready
+        gh.blocks = {3: [(9, OPERATOR), (4, OPERATOR), (5, OPERATOR), (6, OPERATOR),
+                         (7, STRANGER), (8, OPERATOR, 'x/y')],
+                     9: [(1, OPERATOR)]}
+        return h
+
+    def test_an_orphan_prerequisite_is_reported_once_per_pair(self):
+        h = self.harness()
+        gh = h.gh
+        w = h.watcher(Clock())
+        self.assertEqual(w.round(), [])  # the baseline reads no dependency
+        self.assertNotIn('issue_dependencies', gh.calls)
+        self.assertEqual(w.round(), [ORPHAN])
+        self.assertEqual(w.round(), [])  # once per pair
+        self.assertEqual(json.loads(h.path.read_text())['orphans'], [[3, 9]])
+        # A new watcher on the same state does not repeat it.
+        w2 = h.watcher(Clock())
+        w2.state = watch.load_state(h.path)
+        self.assertEqual(w2.round(), [])
+        # Queued, #9 is no longer an orphan; back out of the queue, it is reported again.
+        gh.set_labels(9, 'agent:ready')
+        self.assertNotIn(ORPHAN, w.round())
+        gh.set_labels(9)
+        self.assertIn(ORPHAN, w.round())
+        # Its PR opened on its devloop branch, it is not either.
+        gh.add_pr(21)
+        gh.prs[21]['headRefName'] = 'agent/issue-9'
+        self.assertNotIn(ORPHAN, w.round())
+
+    def test_an_authorization_of_the_coordinator_makes_it_no_orphan(self):
+        h = self.harness(trust=roles_trust())
+        gh = h.gh
+        gh.histories[9] = {'title': TEXT[0], 'body': TEXT[1], 'author': OPERATOR,
+                           'last_edited_at': None, 'editor': None, 'labeled': [],
+                           'renamed': [], 'complete': True}
+        w = h.watcher(Clock())
+        w.round()
+        self.assertEqual(w.round(), [ORPHAN])
+        self.assertNotIn('issue_history', gh.calls)  # no record: the text is not read
+        gh.threads[9] = [authorize_record()]
+        w.state['orphans'] = []
+        self.assertEqual(w.round(), [])
+        # A record of anyone else, or for another text, does not count.
+        for thread in ([authorize_record(login=STRANGER)],
+                       [authorize_record(text=('altro', 'testo'))]):
+            with self.subTest(thread=thread):
+                gh.threads[9] = thread
+                w.state['orphans'] = []
+                self.assertEqual(w.round(), [ORPHAN])
+
+    def test_a_state_with_bad_orphans_gets_a_new_baseline(self):
+        h = self.harness()
+        w = h.watcher(Clock())
+        w.round()
+        w.round()
+        state = json.loads(h.path.read_text())
+        self.assertTrue(watch.valid_state(state))
+        for bad in ('x', [[3]], [['3', 9]], [[3, True]], [3, 9]):
+            with self.subTest(bad=bad):
+                self.assertFalse(watch.valid_state(dict(state, orphans=bad)))
+        # A state written before #671, without orphans, is valid.
+        state.pop('orphans')
+        self.assertTrue(watch.valid_state(state))
 
 
 class StateTest(unittest.TestCase):

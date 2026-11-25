@@ -88,7 +88,11 @@ unspent. A block counts only if the login that added it (the latest timeline eve
 admit the issue (``_admitters``); any other is ignored and logged. With the same priority, an
 issue that blocks other ready issues starts first. The issues of the queue on a dependency cycle
 do not start, and the dispatcher reports the cycle once on each of them (``cycle`` record),
-without labels: once the cycle is gone, they start as usual.
+without labels: once the cycle is gone, they start as usual. A trusted block closed for a reason
+other than completed (#671, ``dropped_block``) does not release the issue: it waits, and the
+``prerequisite_dropped`` action escalates it to the operator (a critical class). A ready issue
+blocked by an open issue of the repository that nobody is doing is only shown, as an orphan
+prerequisite (``_orphan_prerequisites``), by ``devloop status`` and ``devloop watch``.
 
 Supervisor labels (#178): with ``roles.supervisor`` and its GitHub App (the agent's app, or
 with ``[roles.supervisor]`` as a table the role app ``[apps.supervisor]``, #408),
@@ -225,7 +229,7 @@ from .dispatch_preflight import PreflightMixin
 from .dispatch_supervision import TEXTS as SUPERVISION_TEXTS
 from .dispatch_supervision import SupervisionMixin, UntrustedChange, budget_fields
 from .generated import changed_by_tests, generated_files
-from .github import GitHubError, GitHubUncertain, author_login
+from .github import GitHubError, GitHubUncertain, author_login, dropped_block
 from .i18n import ENGLISH, Catalog
 from .journal import TEXTS as JOURNAL_TEXTS
 from .journal import (CLOSED, MERGED, RECONCILE_COMMAND, JournalError, TurnBlocked, blocked_text,
@@ -251,7 +255,8 @@ from .ports import Backend, Tracker, summarize_checks
 from .review import (CI, OPERATOR, UNPROVEN, current_round, finding_commands, finding_key,
                      flow_verdict, open_findings, owner_of, round_verdict, trust_policy_parts)
 from .supervision import (ACCEPT_DEFAULTS, BUDGET_GRANTABLE, COORDINATOR_DELEGATED, DECIDE,
-                          PUSH_FAILED, RETRY, ROUND_GRANTABLE, TOOL_FAILURE, UNCERTAIN_TURN,
+                          PREREQUISITE_DROPPED, PUSH_FAILED, RETRY, ROUND_GRANTABLE,
+                          TOOL_FAILURE, UNCERTAIN_TURN,
                           operator_rounds_text, supervisor_command)
 from .workspace import TransientPushError, WorkspaceError
 
@@ -441,6 +446,12 @@ TEXTS = Catalog(
                       '#{issue}, so implementer and reviewers are not known. Restore the line of '
                       'the marker (it is in the history of the edits of the description) as the '
                       'last line.'),
+        'prerequisite_dropped': (
+            'The issue has `{ready}`, but a prerequisite that blocks it ("blocked by") was '
+            'closed without being completed: {listed}. devloop does not start it, since what it '
+            'needs was not done. To decide: remove the block, if the issue no longer needs it, '
+            'and add `{ready}` again; rethink the issue; or close it. Reopening the prerequisite '
+            'makes the issue wait for it again.'),
         'ci_missing': ('On head `{head}` there is no CI {minutes} minutes after the push, but '
                        '`{branch}` requires the checks {names}: the review does not start '
                        'without the CI. Check that the CI started on the head, or run it '
@@ -622,6 +633,12 @@ TEXTS = Catalog(
                       '#{issue}, quindi implementer e reviewer non sono noti. Ripristinare la riga '
                       'del marker (si trova nella cronologia delle modifiche della descrizione) '
                       'come ultima riga.'),
+        'prerequisite_dropped': (
+            'L\'issue ha `{ready}`, ma un prerequisito che la blocca ("blocked by") è stato '
+            'chiuso senza essere completato: {listed}. devloop non la avvia, perché ciò di cui '
+            'ha bisogno non è stato fatto. Da decidere: togliere il blocco, se l\'issue non ne '
+            'ha più bisogno, e aggiungere di nuovo `{ready}`; ripensare l\'issue; oppure '
+            'chiuderla. Riaprire il prerequisito fa di nuovo attendere l\'issue.'),
         'ci_missing': ('Sul head `{head}` non risulta alcuna CI {minutes} minuti dopo il push, ma '
                        '`{branch}` richiede i check {names}: la review non parte senza la CI. '
                        'Verificare che la CI sia partita sul head, o rilanciarla.'),
@@ -1901,6 +1918,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                                                               base_head)
         working_raw = self.gh.issues_with_label(lb.working)
         working = [raw['number'] for raw in working_raw]
+        self._orphan_prerequisites(candidates, {i['number'] for i in ready}, set(working),
+                                   pr_issues, coordinator)
         # An implementation whose failed tests fail on the base too (#459): whether it still
         # waits for the base branch to advance, the issue's labels, which may hold its restart,
         # and, with ``preflight``, the view of its readiness check once it may start again.
@@ -2052,7 +2071,12 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         the supervisor's app on an issue of a trusted user or of devloop): any other is ignored
         and logged. The open blocks of the repository are explored in turn, ``agent:ready`` or
         not, up to ``MAX_DEPENDENCY_READS`` issues beyond ``numbers``; an issue of another
-        repository blocks as its state says, without reading its own blocks."""
+        repository blocks as its state says, without reading its own blocks.
+
+        Returns ``(edges, dropped)``: ``dropped`` (#671) maps each issue read to its trusted
+        blocks closed for a reason other than COMPLETED (``dropped_block``), of this repository
+        or another, as ``{(repo, number): reason}``. They are no edges: a dropped prerequisite
+        is no cycle, nor is it explored."""
         # The repository under its name or a former one (``repo_aliases``, #540).
         home = {name.lower() for name in (self.cfg.repo, *self.cfg.repo_aliases)}
 
@@ -2061,7 +2085,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             return ('' if repo.lower() in home else repo, item['number'])
 
         todo = [('', number) for number in dict.fromkeys(numbers)]
-        seen, edges = set(todo), {}
+        seen, edges, dropped = set(todo), {}, {}
         budget = len(todo) + MAX_DEPENDENCY_READS
         while todo:
             node = todo.pop(0)
@@ -2073,10 +2097,12 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             read = self.gh.issue_dependencies(node[1])
             admitters = self._admitters(read.get('author'))
             added_by = {key(event): event.get('by') for event in read.get('added') or []}
-            blockers = set()
+            blockers, gone = set(), {}
             for item in read.get('blocked_by') or []:
-                if item.get('state') != 'OPEN':
-                    continue  # a closed block blocks nothing
+                reason = item.get('state_reason')
+                open_ = item.get('state') == 'OPEN'
+                if not open_ and not dropped_block(item.get('state'), reason):
+                    continue  # a block closed as completed blocks nothing
                 blocker = key(item)
                 by = added_by.get(blocker)
                 if by not in admitters:
@@ -2084,29 +2110,65 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                              f'{issue_ref(blocker)}, added by {by or "an unknown author"}: '
                              'neither a trusted user nor the supervisor')
                     continue
+                if not open_:
+                    gone[blocker] = reason.upper()
+                    continue
                 blockers.add(blocker)
                 if not blocker[0] and blocker not in seen:
                     seen.add(blocker)
                     todo.append(blocker)
             edges[node] = blockers
-        return edges
+            dropped[node] = gone
+        return edges, dropped
 
     def _dependency_view(self, numbers):
         """What planning needs about the dependencies of the ready issues ``numbers``, read now
-        from GitHub (#277): for each, ``{blocked_by, blocks, cycle}`` as ``Snapshot`` describes
-        them."""
-        edges = self._dependency_edges(numbers)
+        from GitHub (#277): for each, ``{blocked_by, blocks, cycle, dropped, prerequisites}`` as
+        ``Snapshot`` describes them. A dropped block (#671) is in ``blocked_by`` too: everything
+        that waits for a block waits for it."""
+        edges, dropped = self._dependency_edges(numbers)
         cycles = dependency_cycles(edges)
         ready = set(numbers)
         views = {}
         for number in numbers:
-            blockers = sorted(edges.get(('', number), ()))
+            gone = dropped.get(('', number), {})
+            blockers = sorted(set(edges.get(('', number), ())) | set(gone))
             views[number] = {
                 'blocked_by': [issue_ref(b) for b in blockers],
+                'dropped': [[issue_ref(b), gone[b]] for b in sorted(gone)],
+                'prerequisites': sorted(b[1] for b in edges.get(('', number), ()) if not b[0]),
                 'blocks': sorted(n for n in ready
                                  if ('', number) in edges.get(('', n), ()) and n != number),
                 'cycle': [issue_ref(m) for m in cycles.get(('', number), ())]}
         return views
+
+    def _orphan_prerequisites(self, issues, ready, working, pr_issues, coordinator):
+        """Set ``orphans`` on each of the ready ``issues`` with their dependency view (#671): the
+        numbers of its open blocks of the repository (``prerequisites``) that nobody is doing,
+        with neither ``agent:ready`` (``ready``) nor ``agent:working`` (``working``), nor an
+        open devloop PR (``pr_issues``), nor, with a ``coordinator``, an authorization of the
+        coordinator that holds for their current text (``_authorization``). Only shown: no label,
+        no comment. The authorization is read once per prerequisite."""
+        authorized = {}
+        for issue in issues:
+            orphans = []
+            for number in issue.get('prerequisites') or ():
+                if number in ready or number in working or number in pr_issues:
+                    continue
+                if coordinator is not None:
+                    if number not in authorized:
+                        comments = self.gh.issue_comments(number)
+                        authorized[number] = bool(self._authorize_records(comments)) and (
+                            self._authorization(self.gh.issue_history(number), comments)
+                            is not None)
+                    if authorized[number]:
+                        continue
+                orphans.append(number)
+            issue['orphans'] = orphans
+            if orphans:
+                self.log(f'  issue #{issue["number"]}: orphan prerequisite '
+                         + ', '.join(f'#{n}' for n in orphans)
+                         + ': open, not queued, not in progress, no open PR')
 
     def _cycle_reported(self, number, cycle):
         """Whether the dispatcher already reported ``cycle`` on issue ``number``: a ``cycle``
@@ -2126,6 +2188,25 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             return
         self.gh.comment(number, render_cycle({'cycle': cycle}, self.cfg.language))
         self.log('  dependency cycle reported: ' + ', '.join(cycle))
+
+    def _do_prerequisite_dropped(self, number):
+        """Escalate a ready issue whose trusted block was closed for a reason other than
+        COMPLETED (#671): class ``prerequisite_dropped``, critical, so to the operator in every
+        merge mode, without ``agent:ready`` nor ``agent:needs-supervisor``. The comment names
+        each dropped prerequisite with its reason. The dependencies are read again first: a block
+        removed or reopened since escalates nothing."""
+        lb = self.cfg.labels
+        dropped = self._dependency_view([number])[number]['dropped']
+        if not dropped:
+            self.log('  no dropped prerequisite any more')
+            return
+        listed = ', '.join(f'{ref} ({reason.lower().replace("_", " ")})'
+                           for ref, reason in dropped)
+        reason = TEXTS.texts(self.cfg.language)('prerequisite_dropped', ready=lb.ready,
+                                                listed=listed)
+        self._escalate(number, reason, remove=[lb.ready, lb.needs_supervisor],
+                       cls=PREREQUISITE_DROPPED)
+        self.log('  prerequisite closed without being completed: ' + listed)
 
     # Tick ----------------------------------------------------------------
     def tick(self, dry_run=False):

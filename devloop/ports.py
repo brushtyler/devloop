@@ -112,7 +112,8 @@ class Tracker(Protocol):
 
     def issue_dependencies(self, number):
         """The issues that block issue ``number`` and who added each block (#277): ``{author,
-        blocked_by: [{repo, number, state}], added: [{repo, number, by, at}]}`` (see
+        blocked_by: [{repo, number, state, state_reason}], added: [{repo, number, by, at}]}``
+        (``state_reason`` since #671; see
         ``GitHub.issue_dependencies``)."""
 
     def labelers(self, number, label):

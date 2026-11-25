@@ -130,6 +130,7 @@ CRITICAL = {
     'attempt': 'tentativo della PR non confermato dal journal, o già concluso',
     'budget': 'turno non coperto dall\'envelope di budget della storia',
     'host_tests': 'test rossi in locale anche sulla base, verdi nella sua CI',
+    'prerequisite_dropped': 'prerequisito chiuso senza essere completato',
 }
 UNCERTAIN_TURN = 'uncertain_turn'  # a turn refused by the block on uncertain outcomes (#362)
 # An approval that leaves open findings no agent can close any more: the operator's, and the
@@ -137,6 +138,9 @@ UNCERTAIN_TURN = 'uncertain_turn'  # a turn refused by the block on uncertain ou
 OPEN_FINDINGS = 'open_findings'
 # Tests red on the branch and on its base commit, green in the CI of that commit (#497).
 HOST_TESTS = 'host_tests'
+# A trusted "blocked by" of a ready issue closed for a reason other than ``completed`` (#671):
+# the prerequisite was dropped, not done, and the issue does not start.
+PREREQUISITE_DROPPED = 'prerequisite_dropped'
 
 # The steps a ``retry`` can run again, and the PR label each one resumes from.
 RETRY_STEPS = ('preflight', 'implement', 'review', 'fix', 'sync')
@@ -377,6 +381,7 @@ _ENGLISH = {
     'attempt': 'attempt of the PR not confirmed by the journal, or already concluded',
     'budget': 'turn not covered by the budget envelope of the story',
     'host_tests': 'tests red locally on the base too, green in its CI',
+    'prerequisite_dropped': 'prerequisite closed without being completed',
 }
 _ENGLISH_UNKNOWN = 'class not recognised, hence critical'
 
