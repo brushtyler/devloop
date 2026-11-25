@@ -2969,15 +2969,18 @@ class SupervisionMixin:
             pr.round_comments = operator_comments(comments[before + 1:],
                                                   self.cfg.trusted_users)
         # Operator merge (#248): one notice per head, bound to the promotion it was written or
-        # last edited for, and whether agent:needs-operator is the dispatcher's own.
+        # last edited for, and whether agent:needs-operator is the dispatcher's own. A notice
+        # whose label the dispatcher released (#673) no longer counts: if a reason comes back,
+        # the head is told again, and its label added again.
         promotions = [position for position, record in policy if record['event'] == 'promoted']
         pr.promotions = len(promotions)
         notices = self._dispatcher_records(comments, 'notice')
         merges = [(position, record) for position, record in notices
                   if record['event'] == 'operator_merge']
         current = [(position, record) for position, record in merges
-                   if record['promotion'] == pr.promotions]
+                   if record['promotion'] == pr.promotions and not record.get('released')]
         pr.operator_merges = [record['head'] for _, record in current]
+        pr.operator_current = comments[current[-1][0]].get('id') if current else None
         of_head = next((position for position, record in reversed(merges)
                         if record['head'] == pr.head_sha), None)
         pr.operator_notice = comments[of_head].get('id') if of_head is not None else None

@@ -203,9 +203,11 @@ class PullRequest:
     # the head is promoted again), how many promotions the policy records count, and whether
     # ``agent:needs-operator`` is the dispatcher's own for that notice
     # (``Dispatcher._operator_merge_owned``): then it does not stop devloop, and goes when the
-    # readiness decays.
+    # readiness decays, or when no reason is left (#673). ``operator_current``: the comment id
+    # of the latest notice of the current promotion, the one that label belongs to.
     operator_merges: list = field(default_factory=list)
     operator_notice: int = None
+    operator_current: int = None
     promotions: int = 0
     operator_owned: bool = False
     # A trusted user's ``/devloop veto`` of the latest conclave decision on the PR or its issue
@@ -238,6 +240,16 @@ def operator_merge_due(pr, cfg):
         return False
     return (not cfg.merge.enabled()
             or pr.merge_mode is not None and pr.merge_mode not in MERGING)
+
+
+def operator_merge_released(pr, cfg):
+    """Whether the dispatcher's own ``agent:needs-operator`` of an operator merge (#248) on a
+    ready PR is left without a reason (#673): the merge mode of the PR, computed now on the
+    current configuration (``[merge]``, ``[merge.levels]``, the operator-only paths, a restart
+    after a conclave, a ``trust_policy`` of the reviewers), lets devloop merge it. Only the
+    dispatcher's own label: one of an escalation, an agent or a person is never released."""
+    return (cfg.labels.ready_to_merge in pr.labels and pr.operator_owned
+            and cfg.merge.enabled() and pr.merge_mode in MERGING)
 
 
 @dataclass
@@ -687,6 +699,11 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None, implement=Tr
                 # CI re-running on the approved commit: not ready until it passes again. The
                 # recorded approval is replayed from agent:review, without a new review.
                 actions.append(Action('revoke', pr.number, 'CI pending on the approved commit'))
+            elif operator_merge_released(pr, cfg):
+                # The configuration now lets devloop merge it (#673): its own label goes, and
+                # the merge follows on a later tick, its directives checked again.
+                actions.append(Action('operator_release', pr.number,
+                                      f'merge mode {pr.merge_mode}'))
             elif pr.merge_mode in MERGING and merge_ready(pr, cfg):
                 # The merge directives are checked again just before the merge (#172).
                 actions.append(Action('merge', pr.number, f'merge mode {pr.merge_mode}'))

@@ -484,6 +484,107 @@ class OperatorMergeTests(ReadyPrCase):
         self.assertEqual(self.notices(), [])
 
 
+class OperatorReleaseTests(ReadyPrCase):
+    """#673: the dispatcher removes its own label of an operator merge from a ready PR when no
+    reason is left on the current configuration, and the merge passes to devloop."""
+
+    def restart(self, cfg):
+        """devloop restarted with ``cfg``, on the same PR."""
+        return Dispatcher(cfg, self.gh, self.ws, FakeRunner(), log=self.logs.append,
+                          identities=GitIdentities(self.gh))
+
+    def released(self, d, mode):
+        comments = len(self.gh.comments)
+        self.assertEqual(d.tick(), [Action('operator_release', 100, f'merge mode {mode}')])
+        self.assertEqual(self.gh.labels[100], {READY})
+        # The notice is edited, not written again: its text says why, its record is released.
+        self.assertEqual(len(self.gh.comments), comments)
+        self.assertEqual(self.notices(), [{'event': 'operator_merge', 'head': SHA1,
+                                           'labeled': 0, 'promotion': 0, 'released': mode}])
+        body = self.gh.comments[-1][1]
+        self.assertIn('## Il merge spetta all\'operatore', body)
+        self.assertIn('## Il merge passa a devloop', body)
+        self.assertIn(f'è `{mode}`: non resta nessuno dei motivi sopra', body)
+        self.assertIn(f'ha tolto `{OPERATOR}`', body)
+        self.assertTrue(any('the merge passes to devloop' in line for line in self.logs))
+
+    def test_a_mode_from_off_to_auto_releases_the_label_and_merges(self):
+        self.told(cfg=CFG, diff=('x.py',))
+        d = self.restart(AUTO)
+        self.released(d, 'auto')
+        self.assertEqual(self.gh.merged, [])
+        # The merge is the normal one, of the next tick.
+        self.assertEqual([a.kind for a in d.tick()], ['merge'])
+        self.assertEqual(self.gh.merged, [(100, SHA1)])
+
+    def test_a_mode_off_again_tells_the_head_again(self):
+        self.told(cfg=CFG, diff=('x.py',))
+        self.released(self.restart(AUTO), 'auto')
+        d = self.restart(CFG)
+        self.assertEqual(d.tick(), [Action('operator_merge', 100, 'merge mode off')])
+        self.assertEqual(self.gh.labels[100], {READY, OPERATOR})
+        self.assertEqual(self.notices(), [{'event': 'operator_merge', 'head': SHA1,
+                                           'labeled': 1, 'promotion': 0}])
+        self.assertNotIn('Il merge passa a devloop', self.gh.comments[-1][1])
+        self.assertTrue(d.snapshot().prs[0].operator_owned)
+        self.assertEqual(d.tick(), [])
+
+    def test_a_level_still_off_keeps_the_label(self):
+        self.told(cfg=CFG, diff=('x.py',))
+        off = dataclasses.replace(AUTO, merge=MergePolicy(mode='auto', levels=((1, 'off'),)))
+        d = self.restart(off)
+        self.assertTrue(d.snapshot().prs[0].operator_owned)
+        self.assertEqual(d.tick(), [])
+        self.assertEqual(self.gh.labels[100], {READY, OPERATOR})
+        self.assertEqual(self.gh.comment_edits, [])
+        self.assertEqual(self.gh.merged, [])
+
+    def test_an_operator_only_path_keeps_the_label(self):
+        self.told(cfg=CFG, diff=('x.py', 'AGENTS.md'))
+        d = self.restart(AUTO)
+        self.assertEqual(d.tick(), [])
+        self.assertEqual(self.gh.labels[100], {READY, OPERATOR})
+        self.assertEqual(self.gh.comment_edits, [])
+        self.assertEqual(self.gh.merged, [])
+
+    def test_a_label_of_a_person_is_not_released(self):
+        self.told(cfg=CFG, diff=('x.py',))
+        self.gh.edit_labels(100, remove=[OPERATOR])
+        self.gh.edit_labels(100, add=[OPERATOR])  # a second `labeled` event
+        d = self.restart(AUTO)
+        self.assertEqual(d.tick(), [])
+        self.assertEqual(self.gh.labels[100], {READY, OPERATOR})
+        self.assertEqual(self.gh.comment_edits, [])
+        self.assertEqual(self.gh.merged, [])
+
+    def test_an_escalation_is_not_released(self):
+        self.told(cfg=CFG, diff=('x.py',))
+        d = self.restart(AUTO)
+        d._escalate(100, 'Serve una decisione.', remove=[], cls='failure')
+        self.assertEqual(d.tick(), [])
+        self.assertEqual(self.gh.labels[100], {READY, OPERATOR})
+        self.assertEqual(self.gh.merged, [])
+
+    def test_released_is_a_merge_mode_that_merges(self):
+        base = {'event': 'operator_merge', 'head': SHA1, 'labeled': 0, 'promotion': 0}
+        for released, valid in ((None, True), ('strict', True), ('auto', True), ('off', False),
+                                (True, False)):
+            record = base if released is None else dict(base, released=released)
+            body = markdown.publishable('x', 'notice', record)
+            self.assertEqual(markdown.read_marker(body, 'notice') is not None, valid, released)
+
+    def test_a_label_no_longer_the_dispatchers_at_the_action_stays(self):
+        # Between the snapshot and the action a person adds the label again.
+        self.told(cfg=CFG, diff=('x.py',))
+        d = self.restart(AUTO)
+        snap = d.snapshot()
+        self.gh.edit_labels(100, remove=[OPERATOR])
+        self.gh.edit_labels(100, add=[OPERATOR])
+        d._do_operator_release(snap.prs[0])
+        self.assertEqual(self.gh.labels[100], {READY, OPERATOR})
+        self.assertEqual(self.gh.comment_edits, [])
+
+
 class EscalatedPrTests(ReadyPrCase):
     """agent:needs-operator from an escalation, or from a person, still stops devloop."""
 
