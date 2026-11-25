@@ -3405,3 +3405,87 @@ checkout della versione di prima; poi, come root, `rm <SYSTEMD_DIR>/devloop-fail
 `systemctl daemon-reload`. `[notify]` e `operator_mentions` si tolgono dall'overlay **prima** del
 pin della copia di prima, che li rifiuta (`unknown key`). Il bot si revoca con `@BotFather`
 (`/revoke` o `/deletebot`), e il file del token si rimuove.
+
+## Un progetto con la sorgente a un tag nuovo (#666)
+
+La procedura per portare un progetto con la sorgente a parte (`SOURCE_REPO` e `SOURCE_REF`,
+[docs/devloop/guide.md](../../docs/devloop/guide.md#installation-source)) da un tag di devloop a
+uno nuovo, su qualunque host. Non è un passo da eseguire una volta: si ripete a ogni tag nuovo, e
+per ogni progetto che lo vuole. Non riguarda un'installazione senza `SOURCE_REPO`, come quella del
+repository di devloop, che segue `main` con il pin dopo un merge. Come si sceglie e si annuncia un
+tag è in [Releases of devloop](../../docs/devloop/guide.md#releases-of-devloop).
+
+Qui `<progetto>` è il `PROJECT` del progetto, `<parametri>` il suo file di parametri, `<checkout>`
+il checkout dell'operatore di `brushtyler/devloop`, `<tag di prima>` il tag di `SOURCE_REF` di
+oggi e `<tag nuovo>` quello da fissare; `SERVICE_NAME`, `SUPERVISOR_USER` e `COORDINATOR_USER`
+sono i valori che gli script ricavano da `<parametri>` (`ops/params.env.example`). Si esegue come
+root, con l'[agent dell'host](../../docs/devloop/roles/host.md), dal checkout dell'operatore
+aggiornato (`git -C <checkout> fetch origin --tags` e
+`git -C <checkout> checkout --detach origin/main`). I passi che chiedono una persona (l'avvio
+delle sessioni) li fa l'operatore.
+
+### Comandi
+
+1. **Fermare il loop** del progetto: `systemctl stop <SERVICE_NAME>`. Le sessioni dei ruoli
+   restano attive fino al passo 7.
+
+2. **Il tag nuovo nei parametri**: in `<parametri>`, `SOURCE_REF=<tag nuovo>` al posto di
+   `SOURCE_REF=<tag di prima>`.
+
+3. **Le sezioni introdotte fra i due tag.** Sono i titoli `## ` di questo file nel tag nuovo che
+   il tag di prima non ha, nell'ordine del file; il messaggio del tag nuovo li elenca già
+   ([Releases of devloop](../../docs/devloop/guide.md#releases-of-devloop)). Il comando li stampa
+   dai due tag, senza questa sezione:
+
+   ```bash
+   git -C <checkout> show '<tag nuovo>:ops/host/migrate.md' | grep '^## ' \
+       | grep -vxF -f <(git -C <checkout> show '<tag di prima>:ops/host/migrate.md' | grep '^## ') \
+       | grep -vxF '## Un progetto con la sorgente a un tag nuovo (#666)'
+   ```
+
+   Si eseguono le sezioni stampate, una alla volta e nell'ordine del file, come quel file le ha,
+   con il solo `<parametri>` del progetto dove dicono "per ogni progetto dell'host". Il pin e
+   l'avvio del servizio che chiudono alcune sezioni non si fanno lì: li fanno i passi 5 e 6. Una
+   sezione stampata che non descrive un passo ma una procedura a richiesta (come questa, o
+   [Spostare una key_dir](#spostare-una-key_dir-582)) si salta: lo dice la sua introduzione.
+
+   Queste sezioni rilanciano `setup-project.sh`. Se il comando non stampa nulla, o se nessuna
+   delle sezioni stampate lo rilancia, si rilancia comunque, perché porti al tag nuovo i clone
+   della sorgente dei ruoli (`SUPERVISOR_SOURCE_CLONE`, `COORDINATOR_SOURCE_CLONE`) e l'avviatore
+   (`LAUNCHER_DIR`), con `--coordinator` se il progetto ha il coordinatore:
+
+   ```bash
+   sudo bash <checkout>/ops/host/setup-project.sh --params <parametri> --dry-run
+   sudo bash <checkout>/ops/host/setup-project.sh --params <parametri>
+   ```
+
+4. **La verifica**: `check-host.sh` non dà nessun `ERRORE`:
+
+   ```bash
+   sudo bash <checkout>/ops/host/check-host.sh --params <parametri>
+   ```
+
+5. **Il pin del tag nuovo**, con il [comando devloop dell'host](#comando-devloop-dellhost-588):
+   `devloop --project <progetto> pin <tag nuovo>` (con un solo progetto sull'host `devloop pin
+   <tag nuovo>`). Il pin finisce con lo smoke test della copia nuova
+   ([Pin](../../docs/devloop/guide.md#pin)); `devloop: invalid config: …` nomina una chiave
+   dell'overlay o del file di progetto che il tag nuovo legge diversamente: la descrive una delle
+   sezioni del passo 3.
+
+6. **L'avvio del servizio**: `systemctl start <SERVICE_NAME>`.
+
+7. **Le sessioni dei ruoli**, perché leggano i runbook del tag nuovo. L'operatore chiude la
+   sessione del supervisore e la riavvia, poi quella del coordinatore se il progetto lo ha:
+
+   ```bash
+   sudo -u <SUPERVISOR_USER> -H tmux kill-session -t '=devloop-supervisor-<progetto>'
+   sudo bash <checkout>/ops/host/start-role.sh --params <parametri> supervisor
+   sudo -u <COORDINATOR_USER> -H tmux kill-session -t '=devloop-coordinator-<progetto>'
+   sudo bash <checkout>/ops/host/start-role.sh --params <parametri> coordinator
+   ```
+
+**Rollback.** A loop fermo: il rollback di ciascuna sezione eseguita al passo 3, dall'ultima alla
+prima; `SOURCE_REF=<tag di prima>` in `<parametri>`; `setup-project.sh` e `check-host.sh` come ai
+passi 3 e 4; il pin del tag di prima (`devloop --project <progetto> pin <tag di prima>`, che
+riusa la sua copia se c'è ancora, [Rollback](../../docs/devloop/guide.md#rollback)); poi i passi 6
+e 7.
