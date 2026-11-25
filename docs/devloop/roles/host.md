@@ -87,6 +87,15 @@ precisazione of
   quoted in the issues (AGENTS.md, ["Dettagli dell'host nei testi
   pubblici"](../../../AGENTS.md#dettagli-dellhost-nei-testi-pubblici)). The real values stay in
   your local report to the operator.
+- In `ops/` and in the issues the details of the host stay only as generic procedures; the real
+  values (paths, users, effective configuration) and the incidents go in your local report, in
+  the files on the host or on the private channel of the notices, Telegram (from #593,
+  [Notices to the operator](../guide.md#notices-to-the-operator)). A vulnerability of devloop
+  you find goes to the operator in your local report only, never in a text meant for GitHub:
+  the advisory is theirs ([SECURITY.md](../../../SECURITY.md)).
+- The channel of the notices is the operator's to set up, with you only through the section
+  "Avvisi all'operatore (#593)" of `ops/host/migrate.md`: the token of the bot never passes
+  through your session, your report or a command line.
 
 ## Prohibitions
 

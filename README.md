@@ -60,6 +60,7 @@ python3 -m unittest discover -s tests -p 'test_name.py'  # a single module
 ```
 
 - Agents contributing to this repository follow [AGENTS.md](AGENTS.md).
+- Vulnerabilities are reported privately, never in an issue: [SECURITY.md](SECURITY.md).
 - [devloop](docs/devloop.md) dispatches issues labelled `agent:ready` to an implementer agent and an independent reviewer agent, up to a PR that a human merges (devloop merges only when the operator enables a merge mode).
 
 ## License

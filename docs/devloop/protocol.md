@@ -1274,6 +1274,19 @@ every attribution block (a `> [!NOTE]` followed only by `Bot`, `Version`, `Agent
 model included. The originals on GitHub, the PR's marker, the ledger and the commit trailers do
 not change: devloop still reads the implementer from the marker to keep it out of the reviewers.
 
+## Mentions of the operator
+
+A comment that asks the operator for a decision (#593: an escalation to the operator, a
+`needs_operator` verdict, the round limit, a review level without enough reviewers, a refused
+level 0, a block of the readiness check, a ready PR whose merge is the operator's, the alert of a
+step on the host) ends its readable text with the line `For the operator: @login …` (`Per
+l'operatore:` in Italian), with the logins of `operator_mentions`, before the block of markers,
+which stays as it is: the records are read from the markers, never from that line. Without
+`operator_mentions` the comment is the same as before, and the dispatcher's log says that nobody
+was mentioned. The alerts on `[run].alert_issue` keep their text; with `[notify]` each is
+followed by a notice on Telegram with only the number of the issue
+([Notices to the operator](guide.md#notices-to-the-operator)).
+
 ## Records bound to identities
 
 Records are bound to identities. A PR counts as a devloop PR with its marker only if it was opened

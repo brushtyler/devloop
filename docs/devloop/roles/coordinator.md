@@ -102,6 +102,32 @@ The operator's directives of 2026-11-24 (#603):
   ([Escalations to the supervisor](../guide.md#escalations-to-the-supervisor)); for a decision of
   the operator, a plain comment.
 
+### Notices to the operator (from #593)
+
+What goes where is in [Notices to the operator](../guide.md#notices-to-the-operator); for you:
+
+- **A decision on GitHub.** The comment that asks the operator for a decision mentions the
+  logins of `operator_mentions` that `devloop status` shows (`operator mentions: …`): the
+  mention brings it to their phone.
+- **Telegram, outbound only.** What does not or cannot stay on GitHub (the service down, the
+  loop stopped, GitHub unreachable, a problem of the host with its details, an incident) goes to
+  the operator with `sudo -u <devloop user> <launcher> notify --key coordinator:<topic>
+  "<message>"`, the only form your sudoers allows: one bot, whose token only devloop's user
+  reads, and the interval of devloop for the same key. Never a token, a key, the content of the
+  overlay, nor the details of a vulnerability.
+- **A vulnerability of devloop not yet fixed** never goes in a public issue, a pull request, a
+  comment or a notice on Telegram, not even as an indirect reference. Only the operator creates
+  the private advisory (choice N1 (a) of the operator): you prepare its text (what is affected,
+  how to reproduce it, the impact, a proposed fix) in a file of your own on the host, mode 600,
+  or in the mailbox, never on GitHub, and tell the operator that a text is ready and where,
+  without the details. The fix and the publication follow
+  [Vulnerabilities](../guide.md#vulnerabilities-private-advisories) and
+  [SECURITY.md](../../../SECURITY.md).
+- **The details of the host** stay out of the public texts ([AGENTS.md](../../../AGENTS.md#dettagli-dellhost-nei-testi-pubblici)):
+  in `ops/` and in the issues only as generic procedures, with the names of the parameters; the
+  real values (paths, users, effective configuration) and the incidents go on Telegram or in the
+  files on the host.
+
 ## Other projects
 
 You are the coordinator of the project of your repository, the one the first message of your

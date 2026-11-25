@@ -129,7 +129,8 @@ between two automatic publications of `devloop run`; an `issue` that is not an i
 operator's [direction of the project](guide.md#project-direction), which `devloop direction` and
 `devloop status` read and no prompt holds; an `issue` that is not an issue number, or an unknown
 key, stops devloop at startup, as for `[report]`. Unset, there is no direction.
-`[gc]` sets the [cleanup of the state directory](guide.md#cleanup-of-the-state-directory)
+`[notify]` and `operator_mentions` (keys of the overlay only, #593) set the
+[notices to the operator](#notify). `[gc]` sets the [cleanup of the state directory](guide.md#cleanup-of-the-state-directory)
 (#380): `pins` (default `true`) with `keep_pins` (default 5, the pinned copies kept besides
 `current`), `worktrees` (default `true`), `logs` (default `false`) with `log_days` (default 14),
 and `interval_minutes` (default 60, the minimum time between two cleanups of the ticks; 0: at
@@ -258,6 +259,45 @@ code running as the same user: the [agent user](#agent-user), when there is one,
 read the keys nor `state_dir`. For them, the copy and the final check catch writes to the
 reviewed tree, not access to the rest of the system. With the network disabled, codex cannot run tests
 that open TCP sockets, even on loopback.
+
+### Notify
+
+The [notices to the operator](guide.md#notices-to-the-operator) (#593), two keys of the overlay
+only (the project file cannot have them):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `[notify] backend` | unset: no channel | the channel of `devloop notify`; only `"telegram"` |
+| `[notify] chat_id` | required with `backend` | the number of the chat of the operator with the bot (negative for a group), or the `@name` of a channel |
+| `[notify] token_file` | required with `backend` | the absolute path of the file of the bot's token, in the key_dir of devloop's user: a regular file, not a link, of that user, mode 600 (`check-host.sh` checks it); never the token itself |
+| `[notify] interval` | `900` | the seconds within which the same notice, by key, is not sent again; a whole number of at least 1 |
+| `operator_mentions` | `[]` | the GitHub logins, without `@`, that the dispatcher mentions in the comments that ask the operator for a decision, independent of `trusted_users` |
+
+A value that is not valid, an unknown key or a backend other than `telegram` stops devloop at
+startup. `devloop notify` itself reads `[notify]` from the overlay alone (with `repo` and
+`language`, else the `language` of the project file beside it), so that a configuration that
+does not load, the most common cause of a refused start, still has its channel; there a
+`[notify]` not valid is a line in the log and no channel.
+
+```text
+devloop notify [--key KEY] "<message>"     # exit 0: sent, within the interval, or no channel; 1: failed
+devloop notify --test                      # whatever the interval; exit 1 also without a channel
+devloop notify --service-failed PROJECT    # the notice of the OnFailure= unit of the service
+```
+
+A key has letters, digits and `_ . : @ / -`, at most 100 characters; without `--key` it is the
+hash of the message. The state is `notify-state.json` (mode 600) in the state_dir beside the
+overlay, under `notify.lock`: written before each attempt, a failed one too, with the keys of
+the last interval only. A state that cannot be read or written lets the notice go, with a line
+in the log: a notice lost is worse than one repeated. The text starts with `devloop <repo>:`
+and is cut at 3500 characters. The Telegram backend sends one `sendMessage` with a timeout of 15
+seconds and never reads the messages of the bot; an error is logged by its HTTP status or its
+class, never with its text, which may hold the URL and so the token. The keys devloop uses:
+`run-stopped`, `run-refused`, `alert-issue:<N>`, `service-failed:<project>` and `test`; the
+roles use `<role>:<topic>`.
+
+`devloop status` shows the channel and `operator_mentions` (`notify: …`, `operator mentions:
+…`).
 
 ### Project file
 
@@ -1705,7 +1745,8 @@ body published. It covers every visible text: the output of the tests in a `host
   replaced. `$HOME` alone is never used: a traceback holds the homes of several users.
 - A user is replaced only standing alone (not inside a name or a path), and never when it is a
   documented default (`devloop`, `devloop-agent`, `supervisor`, `coordinator`,
-  `role-watchdog`), a common word of devloop's own texts, a name shorter than three characters, or one of `trusted_users`. The
+  `role-watchdog`), a common word of devloop's own texts, a name shorter than three characters, or one of `trusted_users`
+  or of `operator_mentions` (#593: a mention stays a mention). The
   name of the service follows the same conditions (its default `devloop` stays), but is replaced
   inside a path or the name of a unit too.
 - The markers `devloop:<kind>:v1` that end a body are JSON in Base64, which anyone decodes

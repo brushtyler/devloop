@@ -14,8 +14,9 @@ A tick fails when it raises an error (an action that fails is escalated by the t
 the tick succeeds). After a failed tick the loop waits ``BACKOFF_SECONDS`` (1 minute after the
 first failure in a row, 5 after the second); the ``MAX_FAILURES``-th failure in a row stops the
 loop at once, with an alert: a comment of the dispatcher on ``[run].alert_issue``, one attempt,
-or the local log when none is configured or the comment fails. A tick that succeeds resets the
-count. A new pin (``Repinned``, #174) is not a failure: it propagates, and the process starts
+or the local log when none is configured or the comment fails; then, with ``[notify]`` (#593),
+a notice to the operator's phone that names the issue of the alert. A tick that succeeds resets
+the count. A new pin (``Repinned``, #174) is not a failure: it propagates, and the process starts
 again from the new copy, unless a stop was requested during that tick: then the loop ends.
 
 Continuous mode (#227, with ``workers``, ``dispatcher.Workers``): a tick starts its actions in
@@ -33,6 +34,7 @@ from pathlib import Path
 
 from .i18n import ENGLISH, Catalog
 from .markdown import dispatcher_header, publishable
+from .notify import TEXTS as NOTIFY_TEXTS
 from .pin import Repinned
 from .watch import NOTHING_NEW, failure_class
 
@@ -101,12 +103,15 @@ class Loop:
     ``check`` (``Stopped`` on a stop) before each read, and returns 0 on news or
     ``watch.NOTHING_NEW`` at the timeout. ``alert(body)`` publishes the alert, None
     without ``[run].alert_issue``, in ``language`` (#635). ``clock`` is monotonic. ``workers``,
-    in continuous mode (#227), holds the actions the ticks started and that may still run."""
+    in continuous mode (#227), holds the actions the ticks started and that may still run.
+    ``notify`` (``notify.Notifier``, #593), when given, sends the notice of a stopped loop to the
+    operator, after the alert, with the number of its issue."""
 
     def __init__(self, tick, watch, stop_file, *, log, alert=None, alert_issue=0,
                  idle_timeout=IDLE_TIMEOUT, clock=time.monotonic, sleep=time.sleep,
-                 workers=None, language=ENGLISH):
+                 workers=None, language=ENGLISH, notify=None):
         self.tick = tick
+        self.notify = notify
         self.language = language
         self.watch = watch
         self.workers = workers
@@ -281,14 +286,28 @@ class Loop:
     def _give_up(self, failures):
         summary = (f'ALERT: {len(failures)} consecutive ticks failed '
                    f'({", ".join(failures)}): the loop stops')
+        published = False
         if self.alert is None:
             self.log(f'{summary}; no [run].alert_issue is configured')
-            return FAILED
-        try:
-            self.alert(alert_body(failures, self.language))
-        except Exception as exc:  # one attempt only: its class, never its output
-            self.log(f'{summary}; the alert on issue #{self.alert_issue} could not be published '
-                     f'({failure_class(exc)})')
-            return FAILED
-        self.log(f'{summary}; alert published on issue #{self.alert_issue}')
+        else:
+            try:
+                self.alert(alert_body(failures, self.language))
+            except Exception as exc:  # one attempt only: its class, never its output
+                self.log(f'{summary}; the alert on issue #{self.alert_issue} could not be '
+                         f'published ({failure_class(exc)})')
+            else:
+                published = True
+                self.log(f'{summary}; alert published on issue #{self.alert_issue}')
+        self._notify_stopped(failures, published)
         return FAILED
+
+    def _notify_stopped(self, failures, published):
+        """The notice of the stopped loop to the operator's phone (#593), with the issue of the
+        alert when it was published there; ``notify.Notifier.notify`` never raises."""
+        if self.notify is None:
+            return
+        t = NOTIFY_TEXTS.texts(self.language)
+        text = t('stopped', count=len(failures), classes=', '.join(failures))
+        text += (t('stopped_issue', issue=self.alert_issue) if published
+                 else t('stopped_log'))
+        self.notify.notify(text, key='run-stopped')

@@ -65,7 +65,8 @@ from pathlib import Path
 from .github import GitHubError
 from .i18n import Catalog
 from .localtests import UNITTEST_MODULES, case_commands, case_modules, module_command
-from .markdown import dispatcher_header, publishable
+from .markdown import dispatcher_header, publishable, with_mentions
+from .notify import TEXTS as NOTIFY_TEXTS
 from .outbox import SENT as PUBLISHED
 from .ports import summarize_checks
 from .supervision import HOST_TESTS, PREFLIGHT_DEFAULT
@@ -234,6 +235,29 @@ class BaseMixin:
     other methods through ``self``."""
 
     flaky_retry_pause = FLAKY_RETRY_PAUSE
+
+    # The operator's attention (#593) ----------------------------------------------
+    def _ping_alert(self, issue):
+        """The ping of an alert just published on ``[run].alert_issue`` (#593): only the number
+        of the issue, to the operator's phone (``notify.Notifier``), one per interval of
+        ``[notify]`` for that issue. Without a notifier, nothing; it never raises."""
+        notifier = getattr(self, 'notifier', None)
+        if notifier is None:
+            return
+        notifier.notify(NOTIFY_TEXTS.texts(self.cfg.language)('alert', issue=issue),
+                        key=f'alert-issue:{issue}')
+
+    def _for_operator(self, body):
+        """``body``, a comment that asks the operator for a decision, with the mention of
+        ``operator_mentions`` (#593, ``markdown.with_mentions``), which reaches the phone through
+        GitHub's notifications. Without logins, as it is, and a line in the log: nobody is
+        mentioned, and no login is ever written in the code."""
+        logins = getattr(self.cfg, 'operator_mentions', ())
+        if not logins:
+            self.log('  no operator_mentions configured: the request to the operator mentions '
+                     'nobody')
+            return body
+        return with_mentions(body, logins, self.cfg.language)
 
     # Tests red on the base too ------------------------------------------------
     def _base_broken(self, path, tail=''):

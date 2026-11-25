@@ -106,6 +106,31 @@ class RunPolicy:
     alert_issue: int = 0
 
 
+# The backends of ``[notify]`` (#593): the channels ``devloop notify`` sends on
+# (``notify.CHANNELS``).
+NOTIFY_BACKENDS = ('telegram',)
+# The seconds within which the same notice, by key, is not sent again (#593).
+NOTIFY_INTERVAL = 900
+_CHAT_ID = re.compile(r'-?[0-9]{1,20}|@[A-Za-z][A-Za-z0-9_]{4,31}')
+_LOGIN = re.compile(r'[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}')
+
+
+@dataclass(frozen=True)
+class NotifyPolicy:
+    """``[notify]`` (#593), of the overlay: the channel of the notices to the operator outside
+    GitHub, sent by ``devloop notify``. ``backend`` is '' without the table: no channel, and a
+    notice is only a line in the log. ``token_file`` is the absolute path of the file of the
+    bot's token, never the token; ``interval`` the seconds within which the same notice, by key,
+    is not sent again."""
+    backend: str = ''
+    chat_id: str = ''
+    token_file: str = ''
+    interval: int = NOTIFY_INTERVAL
+
+    def enabled(self):
+        return bool(self.backend)
+
+
 @dataclass(frozen=True)
 class ReportPolicy:
     """``[report]`` (#256): the issue of the daily summary of ``devloop report``, or 0 when none
@@ -695,6 +720,10 @@ class Config:
     report: ReportPolicy = field(default_factory=ReportPolicy)
     # The operator's direction (#604).
     direction: DirectionPolicy = field(default_factory=DirectionPolicy)
+    # The channel of the notices to the operator outside GitHub (#593), of the overlay.
+    notify: NotifyPolicy = field(default_factory=NotifyPolicy)
+    # The logins mentioned in the comments that ask the operator for a decision (#593).
+    operator_mentions: tuple = ()
     # The wait for the CI of a new head (#263).
     ci: CIPolicy = field(default_factory=CIPolicy)
     # The cleanup of state_dir (#380).
@@ -1119,6 +1148,50 @@ def parse_run(table):
                                    or alert < 1):
         raise ConfigError('run.alert_issue: expected the number of an issue')
     return RunPolicy(alert_issue=alert)
+
+
+def parse_notify(table):
+    """``[notify]`` (#593): ``backend`` (one of ``NOTIFY_BACKENDS``), ``chat_id`` (the number of
+    a chat, or the ``@name`` of a channel), ``token_file`` (an absolute path) and ``interval``
+    (whole seconds, at least 1, default ``NOTIFY_INTERVAL``). An empty or absent table is no
+    channel."""
+    if not isinstance(table, dict):
+        raise ConfigError('notify: expected a table')
+    unknown = set(table) - {'backend', 'chat_id', 'token_file', 'interval'}
+    if unknown:
+        raise ConfigError(f'notify: unknown keys {sorted(unknown)}')
+    if not table:
+        return NotifyPolicy()
+    backend = table.get('backend')
+    if backend not in NOTIFY_BACKENDS:
+        raise ConfigError(f'notify.backend: must be one of {NOTIFY_BACKENDS}')
+    chat = table.get('chat_id')
+    if isinstance(chat, int) and not isinstance(chat, bool):
+        chat = str(chat)
+    if not isinstance(chat, str) or not _CHAT_ID.fullmatch(chat):
+        raise ConfigError('notify.chat_id: expected the number of a chat, or the @name of a '
+                          'channel')
+    token_file = table.get('token_file')
+    if not isinstance(token_file, str) or not token_file.startswith('/'):
+        raise ConfigError('notify.token_file: expected the absolute path of the file of the '
+                          "bot's token, in the key_dir of devloop's user")
+    interval = table.get('interval', NOTIFY_INTERVAL)
+    if not isinstance(interval, int) or isinstance(interval, bool) or interval < 1:
+        raise ConfigError('notify.interval: expected a whole number of seconds, at least 1')
+    return NotifyPolicy(backend=backend, chat_id=chat, token_file=token_file,
+                        interval=interval)
+
+
+def parse_operator_mentions(data):
+    """``operator_mentions`` (#593), of the overlay: the GitHub logins, without ``@``, that the
+    dispatcher mentions in the comments that ask the operator for a decision. Empty by default:
+    nobody is mentioned. Independent of ``trusted_users``: who is warned is not who may
+    authorize."""
+    logins = _str_list(data, 'operator_mentions', 'config')
+    for login in logins:
+        if not _LOGIN.fullmatch(login):
+            raise ConfigError(f'operator_mentions: {login!r} is not a GitHub login (without @)')
+    return tuple(dict.fromkeys(logins))
 
 
 def parse_report(table):
@@ -2022,6 +2095,8 @@ def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
         run=parse_run(data.get('run', {})),
         report=report,
         direction=parse_direction(data.get('direction', {})),
+        notify=parse_notify(data.get('notify', {})),
+        operator_mentions=parse_operator_mentions(data),
         ci=parse_ci(data.get('ci', {})),
         gc=parse_gc(data.get('gc', {})),
         agent_user=parse_agent_user(data.get('agent_user', {})),
@@ -2124,7 +2199,7 @@ OVERLAY_KEYS = {
                      'test_timeout_seconds',
                      'agent_command_timeout_seconds', 'agent_stall_seconds',
                      'agent_stall_action', 'blocked_labels', 'priority_labels',
-                     'protected_paths')),
+                     'protected_paths', 'operator_mentions')),
     'review_policy': {**dict.fromkeys(('default_level', 'label', 'sensitive_paths',
                                        'sensitive_path_lists', 'advisory_reviewer',
                                        'findings_reviewer', 'provider_quorum', 'fallback_provider_ban',
@@ -2140,6 +2215,7 @@ OVERLAY_KEYS = {
     'run': {'alert_issue': None},
     'report': dict.fromkeys(('issue', 'interval')),
     'direction': {'issue': None},
+    'notify': dict.fromkeys(('backend', 'chat_id', 'token_file', 'interval')),
     'ci': dict.fromkeys(('grace_minutes', 'required_timeout_minutes')),
     'gc': dict.fromkeys(('pins', 'keep_pins', 'worktrees', 'logs', 'log_days',
                          'interval_minutes')),
