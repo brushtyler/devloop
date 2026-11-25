@@ -5,6 +5,7 @@ remote (a 5xx answer, a connection lost). When the second attempt fails too, the
 ``push_failed``, non-critical, and ``/devloop retry`` pushes again the commits of the turn already
 done, without a new turn. Any other refusal of the remote stays a ``failure``, critical."""
 
+import dataclasses
 import json
 import tempfile
 import unittest
@@ -17,7 +18,7 @@ from devloop.dispatcher import Dispatcher
 from devloop.planning import Action
 from devloop.workspace import TransientPushError, Workspace, WorkspaceError, transient_push
 from test_devloop import SHA1, SHA2, finding, fixed, implemented, norm, pr, raw_review
-from test_devloop_conclave import NEEDS_OPERATOR
+from test_devloop_conclave import NEEDS_OPERATOR, proposal, vote
 from test_devloop_conclave_resume import DIFF, ResumeBase
 from test_devloop_supervision import (AUTO, HUMAN, READY, REVIEW, STRICT, SUPER, Case,
                                       Identities, SupWS)
@@ -441,6 +442,70 @@ class VetoTests(ResumeBase):
         (escalation,) = self.escalations(7)
         self.assertEqual((escalation['class'], escalation['veto_of']), ('conclave_veto', cid))
         self.assertIn('second attempt of the push of agent/issue-7 not made', '\n'.join(self.logs))
+        self.assertEqual(self.d.pending_pushes.numbers(), [])
+
+    def landed_fix(self):
+        """PR #100 whose fix, run with the resolution of a unanimous conclave, lost the
+        connection on both attempts of its push, which reached the branch anyway: escalated as
+        ``push_failed``, its commit kept. Returns the conclave comment and the PR."""
+        self.make(proposal(), vote(), vote(), fixed())
+        self.block_pr()
+        self.run_conclave()
+        cid = self.conclave_comment(100)
+        self.d._do_conclave(self.target())
+        errors, push = [git_error(LOST), git_error(LOST)], self.ws.push
+
+        def failing(path, branch, replace=False, auth=None):
+            push(path, branch, replace, auth)
+            if errors:
+                raise errors.pop(0)
+
+        self.ws.push = failing
+        self.d.push_retry_pause = 0
+        p = pr(labels=['agent:changes'], reviews=[norm(raw_review('request_changes',
+                                                                  [finding()]))])
+        self.gh.labels[100] = set(p.labels)
+        with self.assertRaises(TransientPushError) as ctx:
+            self.d._do_fix(p)
+        (kept,) = [self.d.pending_pushes.get(n) for n in self.d.pending_pushes.numbers()]
+        self.gh.head = kept.commit  # the push reached the branch
+        self.d._escalate_failure(Action('fix', 100), p, ctx.exception)
+        self.assertEqual(self.escalations(100)[-1]['class'], 'push_failed')
+        return cid, p
+
+    def fixes(self):
+        return [c for c in self.gh.thread.get(100, []) if markdown.read_marker(c['body'], 'fix')]
+
+    def test_a_veto_before_a_retry_completes_a_landed_push_publishes_nothing(self):
+        # The retry finds the push already on the branch (#645): a veto written after the push
+        # suspends the step, as before any other publication of the resolution's work (#142).
+        cid, p = self.landed_fix()
+        arm = self.d._arm_pending_push
+
+        def armed(*args):
+            pending = arm(*args)
+            self.gh.say(7, '/devloop veto', 'brushtyler')
+            return pending
+
+        self.d._arm_pending_push = armed
+        self.gh.say(100, '/devloop retry', 'brushtyler')
+        self.d._do_supervise(pr(labels=[NEEDS_OPERATOR]))
+        self.assertEqual(self.fixes(), [])
+        self.assertEqual(self.gh.labels[100], {NEEDS_OPERATOR})
+        self.assertEqual([(e['class'], e.get('veto_of')) for e in self.escalations(100)][-1],
+                         ('conclave_veto', cid))
+        self.assertEqual(self.d.pending_pushes.numbers(), [])
+
+    def test_a_veto_before_the_fix_completes_a_landed_push_publishes_nothing(self):
+        # The same push completed by the fix the retry planned again (``_resume_push``).
+        cid, p = self.landed_fix()
+        self.d._arm_pending_push(100, 'fix', {'head': p.head_sha})
+        self.gh.say(7, '/devloop veto', 'brushtyler')
+        self.d._do_fix(dataclasses.replace(p, head_sha=self.gh.head))
+        self.assertEqual(self.fixes(), [])
+        self.assertEqual(self.gh.labels[100], {NEEDS_OPERATOR})
+        self.assertEqual([(e['class'], e.get('veto_of')) for e in self.escalations(100)][-1],
+                         ('conclave_veto', cid))
         self.assertEqual(self.d.pending_pushes.numbers(), [])
 
 

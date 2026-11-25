@@ -496,23 +496,25 @@ class ActionsMixin:
             return None
         return self._after_push(pending)
 
-    def _push_vetoed(self, pending):
+    def _push_vetoed(self, pending, remove=()):
         """Whether a veto of the conclave decision whose resolution the turn of ``pending`` had
         (#142) was written since: then nothing it produced is published, and the step is
-        suspended (``_veto_suspend``). Checked before the push, before its second attempt and
-        before the push a retry repeats (#645). A sync has no such decision."""
+        suspended (``_veto_suspend``), removing also the labels ``remove``. Checked before the
+        push, before its second attempt, before the push a retry repeats and before a retry
+        completes a push that already reached GitHub (#645). A sync has no such decision."""
         data, lb = pending.data, self.cfg.labels
         decision = data.get('conclave')
         if pending.step == 'sync' or decision is None:
             return False
         if pending.pr:
             veto = self._veto_after(data['issue'], pending.number, decision)
-            remove, what = data['remove'], 'veto_fix'
+            labels, what = list(data['remove']), 'veto_fix'
         else:
             veto = self._veto_after(pending.number, None, decision)
-            remove, what = [lb.working], 'veto_implement'
+            labels, what = [lb.working], 'veto_implement'
         if veto:
-            self._veto_suspend(pending.number, decision, veto, remove,
+            labels += [label for label in remove if label not in labels]
+            self._veto_suspend(pending.number, decision, veto, labels,
                                TEXTS.texts(self.cfg.language)(what))
         return bool(veto)
 
@@ -551,11 +553,15 @@ class ActionsMixin:
             return pending
         return None
 
-    def _complete_landed(self, pending):
+    def _complete_landed(self, pending, remove=()):
         """Complete the step of ``pending``, armed by a retry, whose push already reached GitHub
         (``_landed_push``, #645): what it prepared for after the push is published, with no new
-        push and no new turn."""
+        push and no new turn. A veto of the resolution its turn had, written since, publishes
+        nothing and suspends the step (``_push_vetoed``), removing also the labels ``remove``:
+        those the retry gave back to the PR."""
         self.pending_pushes.drop(pending.number)
+        if self._push_vetoed(pending, remove):
+            return None
         self.log(f'  the push of {pending.commit[:12]} had already reached {pending.branch}: '
                  'the step is recorded, without a new push nor a new turn')
         return self._after_push(pending)

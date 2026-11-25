@@ -1330,7 +1330,9 @@ escalation, within the same `MAX_RETRIES` of the step and key.
 
 A connection lost may lose the answer of a push that reached GitHub. On a PR whose head is then
 the commit kept, the retry does not refuse the input as superseded: that head is the step's own
-push, so the retry records the fix, or the sync, without a new push nor a new turn. A head
+push, so the retry records the fix, or the sync, without a new push nor a new turn. A veto of a
+conclave written since is checked before that record too: nothing is published, and the step is
+suspended (`conclave_veto`, [Veto](#veto)). A head
 that is neither the one the step started from nor the commit kept refuses the retry, as
 before.
 

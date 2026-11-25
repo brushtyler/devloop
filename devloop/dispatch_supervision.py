@@ -2309,12 +2309,13 @@ class SupervisionMixin:
         pending = self._arm_pending_push(number, step, key)
         if is_pr:
             resume = escalation.get('resume')
-            self.gh.edit_labels(number, add=[resume if resume in (lb.review, lb.changes)
-                                             else lb.review], remove=remove)
+            resume = resume if resume in (lb.review, lb.changes) else lb.review
+            self.gh.edit_labels(number, add=[resume], remove=remove)
             if pending is not None and self._landed_push(number, self.gh.pr_head(number)):
                 # The push reached the branch although both attempts lost the answer: the step
-                # is completed now, since the head it left may plan no step at all.
-                self._complete_landed(pending)
+                # is completed now, since the head it left may plan no step at all. A veto
+                # written since suspends it instead, without the label just given back.
+                self._complete_landed(pending, remove=[resume])
             return
         self.gh.edit_labels(number, remove=remove)
         try:
