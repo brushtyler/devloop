@@ -882,13 +882,44 @@ class Workspace:
             detail = (done.stderr.strip() or done.stdout.strip())[:500]
             raise WorkspaceError(f'git merge {base}: the merge did not start'
                                  + (f': {detail}' if detail else ''))
+        return self._unmerged(path)
+
+    def _unmerged(self, path):
+        """The paths of the index of ``path`` still unmerged (in conflict)."""
         out = self._git('diff', '--name-only', '-z', '--diff-filter=U', cwd=path)
-        return [name for name in out.split('\0') if name]
+        return sorted({name for name in out.split('\0') if name})
 
     def merge_head(self, path):
         """The commit being merged into ``path``, or None when no merge is in progress."""
         return self._git('rev-parse', '-q', '--verify', 'MERGE_HEAD', cwd=path,
                          check=False).strip() or None
+
+    def stage_merge(self, path):
+        """Register in the index of ``path`` the resolution the agent left in the worktree,
+        when a merge is in progress (#662): everything ``git add -A`` stages, so that a file the
+        agent deleted leaves the index. A file the local tests create again afterwards is then
+        an untracked file, which ``.gitignore`` excludes from the commit, and no longer an
+        unmerged path that ``git add -A`` would put back. Returns None without a merge in
+        progress, otherwise the paths still unmerged after it."""
+        if self.merge_head(path) is None:
+            return None
+        self._git('add', '-A', cwd=path)
+        return self._unmerged(path)
+
+    def restored_files(self, path, since):
+        """The paths that ``origin/<base>`` deleted in its commits not reachable from ``since``
+        and that HEAD of ``path`` still has, while the base does not (#662): files the base
+        removed and the branch puts back, for instance a conflict resolved by keeping the
+        branch's version of a file the base took out of the index."""
+        base = f'origin/{self.base_branch}'
+        out = self._git('log', '--diff-filter=D', '--name-only', '-z', '--no-renames',
+                        '--format=', f'{since}..{base}', cwd=path)
+        deleted = {name.strip('\n') for name in out.split('\0')} - {''}
+        if not deleted:
+            return []
+        out = self._git('diff', '--name-only', '-z', '--no-renames', '--diff-filter=A', base,
+                        'HEAD', cwd=path)
+        return sorted(deleted & {name for name in out.split('\0') if name})
 
     def base_commits(self, path, name, limit=5):
         """``<short sha> <subject>`` of the base-branch commits, not yet on the branch, that

@@ -385,6 +385,8 @@ TEXTS = Catalog(
                                '{problem}. devloop does not go on with the work on this PR: the '
                                'operator decides.'),
         'tests_failed': 'The local tests fail even after the attempts of correction.',
+        'merge_unmerged': ('After the resolution of the conflicts the index still has unmerged '
+                           'files: {files}.'),
         'blocked_title': 'Work blocked',
         'protected': ('The change touches protected paths (`protected_paths`), which devloop '
                       'does not publish: a workflow or a local action on a branch of this '
@@ -562,6 +564,8 @@ TEXTS = Catalog(
                                '{problem}. devloop non prosegue il lavoro su questa PR: decide '
                                'l\'operatore.'),
         'tests_failed': 'I test locali falliscono anche dopo i tentativi di correzione.',
+        'merge_unmerged': ('Dopo la risoluzione dei conflitti restano nell\'indice file non '
+                           'risolti: {files}.'),
         'blocked_title': 'Lavoro bloccato',
         'protected': ('La modifica tocca percorsi protetti (`protected_paths`), che devloop non '
                       'pubblica: un workflow o una action locale su un branch di questo '
@@ -3752,6 +3756,14 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                 return result, None, used, None, None
             if not self.ws.has_changes(path) and schema == 'implement':
                 return result, ('Implementazione senza modifiche ai file.', ''), used, None, None
+            # A merge in progress (a sync): the agent's resolution enters the index before the
+            # local tests (#662), so that a file it deleted and the tests create again stays
+            # out of the commit when ``.gitignore`` excludes it.
+            left = self.ws.stage_merge(path)
+            if left:
+                return (result, (TEXTS.texts(self.cfg.language)(
+                    'merge_unmerged', files=', '.join(f'`{f}`' for f in left)), ''),
+                        used, None, None)
             passed, tail, tested, local = self._verify(where, path, attempt + 1)
             if passed:
                 return result, None, used, tested, local
