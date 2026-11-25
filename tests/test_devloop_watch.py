@@ -982,6 +982,32 @@ class TrustChangeTest(unittest.TestCase):
         self.assertEqual(h.run(timeout=1)[0], 0)
         self.assertEqual(h.lines(), [f'issue #620 comment by {COORD}: /devloop retry'])
 
+    def test_an_admitted_issue_closed_in_the_round_of_the_change_is_read_again(self):
+        # Admitted under the previous trust and closed during the upgrade: not cached as external,
+        # so its comments do not depend on an admission that a later agent:ready ends.
+        for versioned in (False, True):
+            with self.subTest(versioned=versioned):
+                h = Harness(self, trust=previous_trust())
+                h.gh.add_issue(620, author=COORD, labels=('agent:ready',))
+                h.gh.events[620] = [{'label': 'agent:ready', 'by': OPERATOR,
+                                     'at': '2026-11-16T09:00:00Z'}]
+                h.run(timeout=1)
+                self.assertTrue(json.loads(h.path.read_text())['issues']['620']['admitted'])
+                self.upgrade(h, versioned)
+                del h.gh.issues[620]
+                h.gh.states[620] = {'state': 'CLOSED', 'stateReason': 'COMPLETED'}
+                h.gh.authors[620] = (COORD, False)
+                self.assertEqual(h.run(timeout=1)[0], 0)
+                self.assertEqual(h.lines(), ['issue #620 closed (completed)'])
+                self.assertNotIn('620', json.loads(h.path.read_text())['closed'])
+                h.out.clear()
+                h.gh.events[620].append({'label': 'agent:ready', 'by': STRANGER,
+                                         'at': '2026-11-16T10:00:00Z'})
+                h.gh.comment(801, 620, COORD, '/devloop retry')
+                self.assertEqual(h.run(timeout=1)[0], 0)
+                self.assertEqual(h.lines(), [f'issue #620 comment by {COORD}: /devloop retry'])
+                self.assertEqual(json.loads(h.path.read_text())['closed']['620'], 'issue')
+
     def test_the_same_authors_keep_what_was_read(self):
         h = Harness(self, trust=roles_trust())
         h.run(timeout=1)

@@ -581,19 +581,17 @@ class Watcher:
         issues = self._read_issues(old['issues'])
         comments = self._read_comments(old['comments']['since'])
         # Read with other trusted authors (#648), or by a version that did not record them: the
-        # types and authors outside the listings are read again.
+        # types and authors outside the listings are read again, those of the objects closed in
+        # this round included, as the previous round's classification of them does not hold.
         authors = self.trust.authors
         same = old.get('authors') == authors
         closed = dict(old['closed']) if same else {}
         lines = []
         lines += self._pr_lines(old['prs'], prs)
         lines += self._issue_lines(old['issues'], issues)
-        lines += self._closed_lines('PR', old['prs'], prs, closed)
-        lines += self._closed_lines('issue', old['issues'], issues, closed)
-        # For the comments, so are those of the previous round's untrusted ones no longer open.
-        before = old if same else {
-            kind: {number: entry for number, entry in old[kind].items() if entry['trusted']}
-            for kind in ('prs', 'issues')}
+        lines += self._closed_lines('PR', old['prs'], prs, closed if same else {})
+        lines += self._closed_lines('issue', old['issues'], issues, closed if same else {})
+        before = old if same else {'prs': {}, 'issues': {}}
         comment_lines, comment_state = self._comment_lines(old['comments'], comments,
                                                            before, prs, issues, closed)
         lines += comment_lines
