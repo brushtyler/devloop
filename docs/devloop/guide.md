@@ -2655,6 +2655,7 @@ comment text are cut short and control characters removed. What it reports:
 | devloop review in the body of the native review of an agent with its own app (#325), from that app | `PR #N review by brushtyler-devloop-codex-agent[bot]: approve round 2 @abc1234` |
 | Native `APPROVED` or `CHANGES_REQUESTED` review of a trusted user | `PR #N review by brushtyler: APPROVED @abc1234` |
 | Comment of a trusted user or of a devloop app; one a trusted user wrote in person (no attribution header) is an `operator comment` | `issue #N operator comment by brushtyler: first line` |
+| An `operator comment` that answers (#676): its first line, read as devloop reads commands (without leading spaces), is a `/devloop` command, or the issue or PR has `agent:needs-operator` (at the previous read or now). The coordinator's wake-up wakes on it, not on the other comments of the operator | `issue #N operator reply by brushtyler: /devloop approve` |
 
 The [ledger](protocol.md#evidence-and-telemetry) records (`## devloop ledger`, or `## Registro devloop`
 in Italian, whatever the [language](reference.md#language-of-the-texts) of the project today) are not

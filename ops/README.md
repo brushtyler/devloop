@@ -998,7 +998,10 @@ Esce con 0 e una riga per motivo al primo di questi: un messaggio in `to-coordin
 casella (`casella:`, subito, senza consumarlo), un evento del coordinatore su GitHub (`evento:`:
 `agent:needs-operator` aggiunta, `agent:needs-coordinator` aggiunta (#607), "il merge spetta
 all'operatore", un commento sull'issue degli
-allarmi `[run].alert_issue`, un errore del watch; gli altri eventi li salta), una riga nuova di
+allarmi `[run].alert_issue`, una risposta dell'operatore (`operator reply`, #676: un suo commento
+di persona che comincia con un comando `/devloop` o su un'issue o una PR in
+`agent:needs-operator`), un errore del watch; gli altri eventi li salta, anche gli altri
+commenti dell'operatore), una riga nuova di
 `run.log` con un `Traceback`, un `ALERT:`, un `401` o il rifiuto dell'avvio (`log:`), il servizio
 non attivo (`servizio:`, una volta per cambio di stato), o la fine del periodo
 (`COORDINATOR_WAIT_PERIOD`, per default `ROLE_WAIT_PERIOD`, 3600 secondi, o `--period`;

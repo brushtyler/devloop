@@ -422,6 +422,63 @@ ruoli non la guarda.
 tornano a lasciare le comunicazioni per l'operatore nel riepilogo della sessione con il runbook di
 prima.
 
+## Sveglia del coordinatore sulle risposte dell'operatore (#676)
+
+Il passo sull'host di #676, su un host con il coordinatore già installato. Con #676 `devloop
+watch` scrive `operator reply`, al posto di `operator comment`, per un commento che l'operatore
+scrive di persona quando la sua prima riga è un comando `/devloop` o quando l'issue o la PR è in
+`agent:needs-operator`; la sveglia dei ruoli (`ops/host/role-wait.sh --role coordinator`) esce
+anche su quella riga ([runbook del
+coordinatore](../../docs/devloop/roles/coordinator.md#watching)). La sveglia gira dalla copia di
+root di `ops/` del coordinatore: finché resta quella di prima, il coordinatore vede le risposte
+dell'operatore solo al controllo periodico o con un messaggio nella casella. Il supervisore si
+sveglia su ogni evento e non cambia, ma la sua copia di root di `role-wait.sh` si aggiorna
+anche lei, perché `check-host.sh` non la segnali diversa da quella del checkout. Nei comandi,
+`<checkout>` è il checkout dell'operatore e `<parametri>` il file di parametri del progetto.
+
+L'ordine fra pin e copie non conta: la copia fissata di prima non scrive `operator reply`, e la
+sveglia di prima non la aspetta (il supervisore, con la copia nuova di devloop, la riceve come
+ogni altro evento). devloop mergia la PR di #676 come le altre, ma non fa il pin automatico di
+quel commit né dei successivi finché l'operatore non fa il pin a mano dopo il passo ([Ogni
+cambio con un passo sull'host](#ogni-cambio-con-un-passo-sullhost)).
+
+### Comandi
+
+Come root, dal checkout dell'operatore aggiornato (`git -C <checkout> fetch origin` e
+`git -C <checkout> checkout --detach origin/main`, con il merge di #676), **per ogni progetto
+dell'host** con supervisore o coordinatore:
+
+1. **le copie di root**, prima con `--dry-run`: le azioni nuove sono solo l'aggiornamento delle
+   copie di root di `ops/` (con `host/role-wait.sh`). Un'altra azione che il passo non spiega
+   vuol dire che l'host non corrisponde ai parametri: ci si ferma e si chiede all'operatore. Lo
+   script del coordinatore si esegue solo se il progetto ha il coordinatore:
+
+   ```bash
+   sudo bash <checkout>/ops/host/setup-supervisor.sh --params <parametri> --dry-run
+   sudo bash <checkout>/ops/host/setup-supervisor.sh --params <parametri>
+   sudo bash <checkout>/ops/host/setup-coordinator.sh --params <parametri> --dry-run
+   sudo bash <checkout>/ops/host/setup-coordinator.sh --params <parametri>
+   ```
+
+2. **la verifica**: nessun `ERRORE` nei passi `Risveglio del supervisore` e del coordinatore:
+
+   ```bash
+   sudo bash <checkout>/ops/host/check-host.sh --params <parametri> --no-apps
+   ```
+
+3. **il pin a mano**, a loop fermo, del commit di #676 o di uno successivo, come utente
+   `DEVLOOP_USER`, poi l'avvio: `systemctl stop <SERVICE_NAME>`, `devloop pin origin/main` (con
+   più progetti `devloop --project <progetto> pin origin/main`), `systemctl start
+   <SERVICE_NAME>`. Il pin a mano fa riprendere il pin automatico;
+
+4. **le sessioni dei ruoli**: non serve riavviarle per la sveglia, che ogni risveglio rilancia
+   dalla copia di root; il coordinatore legge però la parte nuova del suo runbook solo da una
+   sessione nuova, che l'operatore avvia quando vuole con `ops/host/start-role.sh`.
+
+**Rollback**: i passi 1 e 2 dal checkout della versione di prima rimettono la sveglia di prima;
+il pin a mano della copia di prima, a loop fermo, rimette `operator comment` su ogni commento
+dell'operatore.
+
 ## Configurazione di ssdlc nel suo file di progetto
 
 Con l'ADR 0006, R3, `devloop/config.toml` non contiene più i fatti di ssdlc né le restrizioni che

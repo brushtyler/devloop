@@ -21,6 +21,7 @@ from devloop.__main__ import main
 from devloop.apps import DISPATCHER, STEP_TIMEOUT, AppAuth, Identities, http_json
 from devloop.github import GitHub, GitHubError, GitHubNotFound
 from devloop.authorization import text_hash
+from devloop.config import LEGACY_NEEDS_OPERATOR
 from devloop.markdown import marker, render_authorize
 from helpers import ssdlc_project
 from helpers.ssdlc_project import load as load_config
@@ -520,6 +521,39 @@ class ChangesTest(unittest.TestCase):
             'issue #5 comment by dl-claude[bot]: ## Correzioni',
             'PR #10 comment by brushtyler: Published'])
         self.assertEqual(self.news(), [])  # the same comments, read again, are not repeated
+
+    def test_an_operator_reply_a_command_or_a_comment_in_needs_operator(self):
+        # #676: the coordinator's wake-up wakes on a reply of the operator, not on every note.
+        gh = self.h.gh
+        gh.add_issue(7, labels=('agent:needs-operator',))
+        gh.add_issue(8, labels=(LEGACY_NEEDS_OPERATOR,))  # its name before #248
+        self.assertEqual(self.news(), ['new issue #7 [agent:needs-operator] issue 7',
+                                       f'new issue #8 [{LEGACY_NEEDS_OPERATOR}] issue 8'])
+        gh.comment(301, 5, OPERATOR, '/devloop approve')
+        gh.comment(302, 10, OPERATOR, '\n  /devloop retry\nbecause')
+        gh.comment(303, 5, OPERATOR, 'I will write /devloop approve later')
+        gh.comment(304, 7, OPERATOR, 'Yes, go ahead with the default')
+        gh.comment(305, 8, OPERATOR, 'ok')
+        gh.comment(306, 5, OPERATOR, '/devloopapprove')
+        # With the header it is no comment of the operator in person, command or not.
+        gh.comment(307, 5, OPERATOR, '> [!NOTE]\n> **Agent:** Claude Code\n\n/devloop retry')
+        gh.comment(308, 7, CLAUDE, '> [!NOTE]\n> **Agent:** Claude Code\n\nnote')
+        self.assertEqual(self.news(), [
+            'issue #5 operator reply by brushtyler: /devloop approve',
+            'PR #10 operator reply by brushtyler: /devloop retry',
+            'issue #5 operator comment by brushtyler: I will write /devloop approve later',
+            'issue #7 operator reply by brushtyler: Yes, go ahead with the default',
+            'issue #8 operator reply by brushtyler: ok',
+            'issue #5 operator comment by brushtyler: /devloopapprove',
+            'issue #5 comment by brushtyler: /devloop retry',
+            'issue #7 comment by dl-claude[bot]: note'])
+        # The label removed in the round of the comment: it was there at the previous read.
+        gh.set_labels(7, 'agent:ready')
+        gh.comment(309, 7, OPERATOR, 'done')
+        self.assertEqual(self.news(), ['issue #7 labels +agent:ready -agent:needs-operator',
+                                       'issue #7 operator reply by brushtyler: done'])
+        gh.comment(310, 7, OPERATOR, 'thanks')
+        self.assertEqual(self.news(), ['issue #7 operator comment by brushtyler: thanks'])
 
     def test_devloop_review_from_its_record_and_trusted_native_reviews(self):
         gh = self.h.gh
@@ -1429,6 +1463,8 @@ class CommandLineTest(unittest.TestCase):
         self.assertIn('brushtyler-devloop-codex-agent[bot]', trust.apps)
         self.assertTrue(trust.wrote('brushtyler-devloop-codex-agent[bot]', 'codex'))
         self.assertFalse(trust.wrote('brushtyler', 'codex'))
+        # The labels that make a comment of the operator a reply (#676).
+        self.assertEqual(trust.operator_labels, cfg.labels.operator())
         no_apps = watch.Trust({'op'}, {}, 'agent:ready')
         self.assertTrue(no_apps.wrote('op', 'codex'))
         # The merger app (#201) is configured but never trusted: it only merges.
