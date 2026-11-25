@@ -7,11 +7,16 @@ leave such files out, since a tracked file may be wanted: it points them out in 
 the PR and in the fix record.
 """
 
+import importlib.util
 import os
+import py_compile
+import shlex
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from devloop import markdown
 from devloop.dispatcher import Dispatcher
@@ -293,6 +298,33 @@ class CommitNotBoundTests(unittest.TestCase):
         self.assertEqual(check['tree_before'], check['tree_after'])
         self.assertNotIn('changed_by_tests', check)
         self.assertEqual(check['commit'], commit)
+
+    def test_the_local_tests_write_no_bytecode(self):
+        # #660: the tracked bytecode of the interpreter that runs the tests, stale after the
+        # change of the turn. Python would rewrite it on import; devloop runs the local tests
+        # with PYTHONDONTWRITEBYTECODE=1, also when its own environment does not set it.
+        source = self.root / 'pkg' / 'm.py'
+        source.write_text('X = 10\n')  # a size other than the turn's: the bytecode is stale
+        cached = importlib.util.cache_from_source(str(source))
+        py_compile.compile(str(source), cfile=cached, doraise=True,
+                           invalidation_mode=py_compile.PycInvalidationMode.TIMESTAMP)
+        self.git('add', '-A')
+        self.git('commit', '-q', '-m', 'bytecode')
+        before = Path(cached).read_bytes()
+        command = f'{shlex.quote(sys.executable)} -c "import pkg.m; assert pkg.m.X == 2"'
+        with mock.patch.dict(os.environ):
+            os.environ.pop('PYTHONDONTWRITEBYTECODE', None)
+            check, commit = self.run_and_commit(command)
+        self.assertEqual(Path(cached).read_bytes(), before)
+        self.assertEqual(check['tree_before'], check['tree_after'])
+        self.assertNotIn('changed_by_tests', check)
+        self.assertEqual(check['commit'], commit)
+        self.assertEqual(self.ws.changed_files(self.root, since='HEAD~1'), ['pkg/m.py'])
+        # The environment configured for the tests (the agents' one) gets it too.
+        ws = Workspace(self.root, '.state', 'main',
+                       test_env=dict(os.environ, PYTHONDONTWRITEBYTECODE=''))
+        self.assertTrue(ws.run_tests(self.root, command, 60)[0])
+        self.assertEqual(Path(cached).read_bytes(), before)
 
 
 class PointedOutTests(unittest.TestCase):

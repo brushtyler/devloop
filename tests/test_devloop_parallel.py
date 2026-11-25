@@ -448,7 +448,7 @@ class SharedStateTests(unittest.TestCase):
                                                   SimpleNamespace(returncode=0, stdout='',
                                                                   stderr=''))[1])
         plain.run_tests('/wt/a', 'make test', 10)
-        self.assertEqual(calls, [{'HOME': '/h'}])
+        self.assertEqual(calls, [{'HOME': '/h', 'PYTHONDONTWRITEBYTECODE': '1'}])
 
     def test_review_copies_of_parallel_reviewers_have_their_own_names(self):
         # A real root: review_copy creates the parent of the copy, which outside a temporary

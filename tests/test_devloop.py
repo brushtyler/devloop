@@ -1933,6 +1933,21 @@ class CredentialIsolationTests(unittest.TestCase):
             self.assertEqual((env['BASH_DEFAULT_TIMEOUT_MS'], env['BASH_MAX_TIMEOUT_MS']),
                              ('7', '42'))
 
+    def test_the_turns_write_no_python_bytecode(self):
+        # #660: the tests an agent runs in its turn do not rewrite a tracked __pycache__/, with
+        # or without an agent user, whatever the operator's environment says.
+        import devloop.__main__ as cli
+        user = mock.Mock(environment=lambda env: dict(env, HOME='/agent'))
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {}, clear=False):
+            for value in (None, '', '0'):
+                os.environ.pop('PYTHONDONTWRITEBYTECODE', None)
+                if value is not None:
+                    os.environ['PYTHONDONTWRITEBYTECODE'] = value
+                for agent_user in (None, user):
+                    with self.subTest(value=value, agent_user=agent_user):
+                        env = cli.agent_environment(CFG, Path(tmp), agent_user)
+                        self.assertEqual(env['PYTHONDONTWRITEBYTECODE'], '1')
+
     def test_agent_command_timeout_is_configurable_and_within_the_test_timeout(self):
         data = ssdlc_project.data()
         self.assertEqual(CFG.agent_command_timeout_seconds, 600)
@@ -2069,7 +2084,8 @@ class CredentialIsolationTests(unittest.TestCase):
             seen.append(kw.get('env'))
             return SimpleNamespace(returncode=0, stdout='ok', stderr='')
         Workspace('/repo', '.state', 'main', run=fake_run, test_env={'X': '1'}).run_tests('/wt', 'true', 5)
-        self.assertEqual(seen[-1], {'X': '1'})
+        # The environment configured, with no Python bytecode written (#660).
+        self.assertEqual(seen[-1], {'X': '1', 'PYTHONDONTWRITEBYTECODE': '1'})
 
     def git(self, *args, cwd):
         subprocess.run(['git', *args], cwd=cwd, check=True, capture_output=True)

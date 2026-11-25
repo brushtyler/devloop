@@ -209,6 +209,11 @@ def git_config_env(pairs):
 # no hook and no fsmonitor program runs, whatever a config says.
 WORKTREE_GIT_CONFIG = (('core.hooksPath', os.devnull), ('core.fsmonitor', 'false'))
 
+# In the environment of the local tests and of the agents' turns (#660): Python writes no
+# bytecode, so a project that tracks its __pycache__/ does not see it rewritten in the commit. A
+# project that is not Python ignores it.
+NO_BYTECODE = {'PYTHONDONTWRITEBYTECODE': '1'}
+
 
 def _identity_env(author):
     """Variables that make ``author`` (``{name, email}``) both author and committer of one git
@@ -991,9 +996,10 @@ class Workspace:
         """``(passed, output_tail)`` for the project test command in ``path``. With an agent
         user (#415) the command runs as that user, and git trusts ``path``, which belongs to the
         dispatcher's user (#500, ``AgentUser.git_env``). The identities of the failed tests,
-        read from the whole output, are kept for ``failed_cases`` (#459)."""
+        read from the whole output, are kept for ``failed_cases`` (#459). Python writes no
+        bytecode (``NO_BYTECODE``, #660)."""
         self._failed[str(path)] = None
-        env = self._test_env
+        env = dict(os.environ if self._test_env is None else self._test_env, **NO_BYTECODE)
         run = run_in_group if self._run is subprocess.run else self._run
         argv = ['bash', '-c', command]
         user = self.agent_user

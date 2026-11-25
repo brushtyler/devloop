@@ -36,7 +36,7 @@ from .markdown import dispatcher_header, publishable
 from .outbox import for_identities
 from .planning import plan, queue_lines
 from .stall import StallWatch
-from .workspace import Workspace
+from .workspace import NO_BYTECODE, Workspace
 
 # The descriptor of the dispatcher lock, passed on by a restart from a new pinned copy (#174).
 LOCK_FD = 'DEVLOOP_LOCK_FD'
@@ -454,6 +454,9 @@ def agent_environment(cfg, gh_config, agent_user=None):
     env.pop('PYTHONPATH', None)
     # The launcher's state_dir (ADR 0006, R1) is the dispatcher's: not that of the code under test.
     env.pop(STATE_ENV, None)
+    # Python writes no bytecode (#660), whatever the operator's value: the tests an agent runs in
+    # its turn leave a tracked __pycache__/ of the project as it is, out of the commit.
+    env.update(NO_BYTECODE)
     env.setdefault('BASH_DEFAULT_TIMEOUT_MS', str(cfg.agent_command_timeout_seconds * 1000))
     env.setdefault('BASH_MAX_TIMEOUT_MS', str(cfg.test_timeout_seconds * 1000))
     return env
