@@ -1259,6 +1259,20 @@ recorded after it (or after the promotion, for a comment edited), and the label'
 keeps today's behaviour: devloop leaves the PR alone. These PRs are already counted among the
 [parked PRs](#open-pr-limits): the count does not change.
 
+The reasons are recomputed on every tick, on the current configuration (#673). When none is
+left, because the configuration changed and a restart applied it (`[merge] mode` from `"off"` to
+`"strict"` or `"auto"`, a level no longer `"off"` in `[merge.levels]`, a path no longer
+operator-only), devloop removes its own `agent:needs-operator` itself from the tick after the
+restart: there is no need to remove it by hand. It says so in the log and edits the same comment,
+adding a section ("The merge passed to devloop", "Il merge passa a devloop") with the merge mode
+that now lets it merge; the comment's record gets `released`. Then the merge is the normal one,
+on a later tick, with every merge directive checked again. While a reason is left (merge off, a
+level `off`, operator-only paths, the restart after a conclave, a reviewer's `trust_policy`),
+the label stays, and with it the operator's queue, the coordinator's reserved merge and the
+supervisor's delegated merge. A label that is not the dispatcher's (an escalation, an agent, a
+person) is never removed. If a reason comes back later on the same head, the dispatcher edits
+the comment again and adds the label back.
+
 ### Holding a merge
 
 Only in `"auto"`. A PR comment whose first line, after the attribution header if any, is
@@ -3813,8 +3827,8 @@ and the loop keeps the value it started with until it is
 [stopped and started again](#starting-and-stopping-the-loop) (a
 [pin after a merge](#pin-after-a-merge) restarts it too). No rule of trust or merge changes while
 the loop runs. After the restart, a move from `[merge] mode = "off"` to `"strict"` or `"auto"`
-does not reach the PRs already ready whose merge is the operator's: they wait until the operator
-removes their `agent:needs-operator` ([Merge modes](#merge-modes),
+reaches the PRs already ready whose merge is the operator's from the next tick: devloop removes
+their `agent:needs-operator` itself, if no reason is left (#673; [Merge modes](#merge-modes),
 [Ready PRs whose merge is the operator's](#ready-prs-whose-merge-is-the-operators)).
 
 A configuration that does not load (a TOML error, an unknown key, a value out of range, an
