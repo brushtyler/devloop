@@ -104,7 +104,12 @@ for a trusted user's ``agent:ready`` (``_coordinator_gate``) or, with ``trust_po
 Authorization (#607, with ``[roles.coordinator]``): the coordinator authorizes the work with
 ``/devloop authorize [priority:<p>]``, which the ``authorize`` action records once, bound to the
 SHA-256 of the title and the body, removing ``agent:needs-coordinator``; a command of any other
-identity is refused and recorded. The supervisor's ``agent:ready`` admits an issue only while an
+identity is refused and recorded. The dispatcher looks for the command on the issues in
+``agent:needs-coordinator``, on the ready ones whose ``agent:ready`` is the supervisor's and
+(#656) on any open issue, whatever its labels, where the coordinator wrote one: at the first
+snapshot of the process in the threads of every open issue, then in the comments written since
+the previous snapshot, and on an issue found until its command is recorded
+(``_coordinator_authorizations``). The supervisor's ``agent:ready`` admits an issue only while an
 authorization holds for its current text (``_ready_admitters``); otherwise it is ignored and
 logged. A readiness check that declares the trust policy touched on an issue no trusted user
 opened sends it to agent:needs-operator, authorized or not (``_coordinator_gate``), unless a
@@ -253,6 +258,11 @@ from .workspace import TransientPushError, WorkspaceError
 # The colours of the labels of the review level, of level 0 and of the priorities; their
 # descriptions, in the project's ``language`` (#635), are ``label_*`` of ``TEXTS``.
 LEVEL_LABEL_COLOR = '5319e7'
+# The coordinator's ``/devloop authorize`` on an issue outside agent:needs-coordinator and the
+# supervisor's agent:ready (#656): the first snapshot of a process reads the threads of every
+# open issue, however long ago the command was written; each later one reads only the comments
+# written since the previous one, ``AUTHORIZE_MARGIN`` seconds earlier for the clock of GitHub.
+AUTHORIZE_MARGIN = 300
 # How many prerequisites outside the queue a snapshot reads at most to follow the dependencies
 # of the ready issues (#277): beyond them, cycles are not looked for.
 MAX_DEPENDENCY_READS = 50
@@ -1026,6 +1036,13 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         # the dispatcher's own push, else its commit date, read once.
         self.clock = clock
         self._ci_since = {}
+        # When the previous snapshot read the coordinator's comments (#656), None before the
+        # first: the next one reads from there (``_coordinator_authorizations``). And the issues
+        # with a command of the coordinator not recorded yet, read again at each snapshot until
+        # it is: one that cannot be recorded now (a busy issue) is not lost once its comment is
+        # older than the reads.
+        self._authorize_since = None
+        self._authorize_watch = ()
         # The pushes of a step's branch that failed twice for a transient error of the remote
         # (#645, ``PendingPushes``), by issue or PR, for a retry that pushes the commits of the
         # turn again without a new turn: in ``state_dir`` from ``devloop``, so that a restart
@@ -1317,6 +1334,52 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                 if isinstance(c.get('id'), int) and not isinstance(c.get('id'), bool)
                 and c['id'] not in recorded and not carries_record(c.get('body') or '')
                 and authorize_arguments(c.get('body')) is not None]
+
+    def _coordinator_authorizations(self, coordinator, known):
+        """The open issues outside ``known`` where the coordinator's identity (``coordinator``)
+        wrote a ``/devloop authorize`` that no record answers yet (#656), whatever their labels:
+        an issue it opened and authorized at once is in neither agent:needs-coordinator nor
+        the supervisor's agent:ready.
+
+        The first snapshot of the process reads the threads of every open issue, however many
+        (``open_issue_numbers``, with no limit on their count), so that a command written while
+        devloop was stopped, however long ago, is found; each later one
+        reads only the comments written or edited since the previous one (``AUTHORIZE_MARGIN``),
+        not the threads of every open issue. An issue found stays watched (``_authorize_watch``)
+        and is read again at each snapshot until its command is recorded or it is closed: one
+        ``plan`` cannot record now, because it is busy, is not lost when its comment leaves the
+        reads. Pull requests and closed issues are skipped. Who may authorize and what an
+        authorization is worth do not change: ``_do_authorize`` decides, and refuses, as on any
+        other issue."""
+        started = self.clock()
+        if self._authorize_since is None:
+            seen = [n for n in self.gh.open_issue_numbers()
+                    if isinstance(n, int) and not isinstance(n, bool)]
+            hinted = set(self._authorize_watch)
+        else:
+            stamp = time.strftime('%Y-%m-%dT%H:%M:%SZ',
+                                  time.gmtime(self._authorize_since - AUTHORIZE_MARGIN))
+            seen = [c['number'] for c in self.gh.comments_since(stamp)
+                    if c.get('login') == coordinator and not c.get('pull_request')
+                    and isinstance(c.get('number'), int)
+                    and not carries_record(c.get('body') or '')
+                    and authorize_arguments(c.get('body')) is not None]
+            hinted = set(self._authorize_watch) | set(seen)
+        found, watch = [], []
+        for number in dict.fromkeys([*self._authorize_watch, *seen]):
+            if number in known:
+                # Read by ``snapshot`` already; watched still, in case it leaves those sets.
+                if number in hinted:
+                    watch.append(number)
+                continue
+            pending = self._pending_authorizations(self.gh.issue_comments(number))
+            if (any((c.get('author') or {}).get('login') == coordinator for c in pending)
+                    and (self.gh.issue(number).get('state') or '').upper() == 'OPEN'):
+                found.append(number)
+                watch.append(number)
+        # Only once every read succeeded: a failed one is read again at the next snapshot.
+        self._authorize_since, self._authorize_watch = started, tuple(watch)
+        return found
 
     def _authorization(self, history, comments):
         """The coordinator's authorization that holds for the issue's current title and body
@@ -1769,9 +1832,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         pr_issues = {pr.issue for pr in prs}
         skip = set(self.cfg.blocked_labels) | {lb.working, lb.needs_supervisor}
         # The issues with a /devloop authorize to record (#607): those in
-        # agent:needs-coordinator, and the ready ones whose agent:ready needs an authorization.
+        # agent:needs-coordinator, the ready ones whose agent:ready needs an authorization and
+        # (#656) any other open one where the coordinator wrote one.
         authorizing = []
-        if self._coordinator_login() is not None:
+        coordinator = self._coordinator_login()
+        if coordinator is not None:
             for raw in self.gh.issues_with_label(lb.needs_coordinator):
                 if self._pending_authorizations(self.gh.issue_comments(raw['number'])):
                     authorizing.append(raw['number'])
@@ -1806,6 +1871,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                 # A merged PR that resolved it (#228): ``plan`` never starts it again.
                 issue['merged'] = [p['number'] for p in self._merged_prs(issue['number'])]
             ready.append(issue)
+        if coordinator is not None:
+            authorizing += self._coordinator_authorizations(coordinator, set(authorizing))
         # Native dependencies (#277) of the issues that may start, then the readiness check of
         # those without an open block (#114), that may start or are blocked by the check.
         candidates = [i for i in ready if 'merged' in i and not i['merged']]

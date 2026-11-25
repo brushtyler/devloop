@@ -16,7 +16,9 @@ Without ``[roles.coordinator]`` nothing changes: the supervisor's labels count a
 """
 
 import dataclasses
+import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import test_devloop_preflight_recheck as recheck_tests
@@ -24,6 +26,7 @@ from devloop import authorization, markdown, supervision
 from devloop.dispatch_base import BaseBroken
 from devloop.dispatch_preflight import GAP_TEXTS
 from devloop.dispatcher import Dispatcher
+from devloop.github import GitHubError
 from devloop.planning import Snapshot, plan
 from test_devloop import implemented
 from test_devloop_coordinator import COORDINATOR, coordinated, declared, header
@@ -68,10 +71,25 @@ class TextGH(recheck_tests.ClockGH):
         self.ready_events.append((login, self.now()))
 
 
+class DatedGH(TextGH):
+    """TextGH whose ``comments_since`` returns only the comments written at ``since`` or later,
+    as GitHub does, and whose time (``timestamp``) is that of its latest comment or event."""
+
+    def comments_since(self, since):
+        written = {c['id']: c['created_at'] for t in self.threads.values() for c in t}
+        return [c for c in super().comments_since(since) if written[c['id']] >= since]
+
+    def timestamp(self):
+        return (recheck_tests.START + timedelta(minutes=self.minute)).replace(
+            tzinfo=timezone.utc).timestamp()
+
+
 class Case(unittest.TestCase):
+    GH = TextGH
+
     def make(self, cfg=CFG):
         self.cfg = cfg
-        self.gh, self.ws = TextGH(), recheck_tests.CountingWS()
+        self.gh, self.ws = self.GH(), recheck_tests.CountingWS()
         self.runner, self.logs = recheck_tests.StepRunner(), []
         return Dispatcher(cfg, self.gh, self.ws, self.runner, log=self.logs.append,
                           identities=Identities(self.gh))
@@ -386,6 +404,187 @@ class AuthorizeTests(Case):
         self.assertEqual([(a.kind, a.number) for a in actions],
                          [('authorize', 7), ('authorize', 8)])
         self.assertEqual(plan(Snapshot([], [], [], authorizations=[7]), cfg, busy={7}), [])
+
+
+class UnlabelledTests(Case):
+    """#656: the coordinator's command is recorded on an open issue whatever its labels, found
+    among the comments written since the previous snapshot."""
+
+    def make(self, cfg=CFG, author=COORDINATOR):
+        d = super().make(cfg)
+        self.gh.author = author
+        self.gh.labels[7] = set()
+        return d
+
+    def test_the_coordinators_issue_without_labels_is_authorized_then_queued(self):
+        d = self.make()
+        record = self.authorize(d, 'priority:high')
+        self.assertEqual((record['outcome'], record['by'], record['priority']),
+                         ('authorized', COORDINATOR, 'high'))
+        self.assertEqual(record['hash'], authorization.text_hash('Issue 7', 'Do the thing.'))
+        self.assertIn('Lavoro autorizzato dal coordinatore', self.gh.threads[7][-1]['body'])
+        self.assertEqual(self.gh.labels[7], set())
+        # Recorded once: the next ticks plan nothing, until the supervisor queues it.
+        self.assertEqual(self.planned(d), [])
+        self.gh.ready()
+        self.assertEqual(self.planned(d), [('preflight', 7)])
+        self.assertTrue(self.check(d)['ready'])
+        self.assertEqual(self.planned(d), [('implement', 7)])
+        self.assertEqual(len(self.records()), 1)
+        self.assertEqual(self.ignored(), [])
+
+    def test_a_trusted_users_issue_without_labels_is_authorized(self):
+        d = self.make(author='brushtyler')
+        self.assertEqual(self.authorize(d)['outcome'], 'authorized')
+        self.gh.ready()
+        self.assertEqual(self.planned(d), [('preflight', 7)])
+
+    def test_the_refusals_stay(self):
+        # An issue of an untrusted author.
+        d = self.make(author='stranger')
+        record = self.authorize(d)
+        self.assertEqual(record['outcome'], 'refused')
+        self.assertIn('utente fidato', record['reason'])
+        # A text changed after the command.
+        d = self.make()
+        self.gh.say(7, COORDINATOR, header() + '\n/devloop authorize')
+        self.gh.edit('Do another thing.')
+        self.assertEqual(self.ticked(d), [('authorize', 7)])
+        record = self.records()[-1]
+        self.assertEqual(record['outcome'], 'refused')
+        self.assertIn('cambiati dopo il comando', record['reason'])
+        self.gh.ready()
+        self.assertEqual(self.planned(d), [])
+        # Another identity: only the coordinator's command is looked for on such an issue, and
+        # once it is, the other one is refused there as anywhere else.
+        d = self.make()
+        self.gh.say(7, SUPERVISOR_LOGIN, header() + '\n/devloop authorize')
+        self.assertEqual(self.planned(d), [])
+        self.gh.say(7, COORDINATOR, header() + '\n/devloop authorize')
+        self.assertEqual(self.ticked(d), [('authorize', 7)])
+        self.assertEqual([(r['by'], r['outcome']) for r in self.records()],
+                         [(SUPERVISOR_LOGIN, 'refused'), (COORDINATOR, 'authorized')])
+
+    def test_pull_requests_closed_issues_and_records_are_skipped(self):
+        d = self.make()
+        # The first snapshot reads the open issues; the command comes after it.
+        self.assertEqual(self.planned(d), [])
+        self.gh.say(7, COORDINATOR, header() + '\n/devloop authorize')
+        reads = self.gh.comments_since
+        self.gh.comments_since = lambda since: [dict(c, pull_request=True) for c in reads(since)]
+        self.assertEqual(self.planned(d), [])
+        self.gh.comments_since = reads
+        self.gh.closed = [7]
+        self.assertEqual(self.planned(d), [])
+        self.gh.closed = []
+        self.assertEqual(self.ticked(d), [('authorize', 7)])
+        # The record quotes no command: nothing more to record.
+        self.assertEqual(self.planned(d), [])
+
+    def test_the_open_issues_first_then_the_comments_since_the_previous_snapshot(self):
+        start = datetime(2026, 11, 25, 12, 0, tzinfo=timezone.utc).timestamp()
+        now = [start]
+        d = self.make()
+        d.clock = lambda: now[0]
+
+        def fails(*args):
+            raise GitHubError('HTTP 502')
+        # A failed first read is made again whole at the next snapshot.
+        self.gh.open_issue_numbers = fails
+        with self.assertRaises(GitHubError):
+            d.snapshot()
+        del self.gh.open_issue_numbers
+        d.snapshot()
+        self.assertEqual((self.gh.open_reads, getattr(self.gh, 'since_reads', [])), (1, []))
+        now[0] += 60
+        d.snapshot()
+        # Then from the previous snapshot, five minutes earlier; no other read of the issues.
+        self.assertEqual((self.gh.open_reads, self.gh.since_reads),
+                         (1, ['2026-11-25T11:55:00Z']))
+        # A failed read is read again from the same time.
+        reads = self.gh.comments_since
+        self.gh.comments_since = fails
+        now[0] += 60
+        with self.assertRaises(GitHubError):
+            d.snapshot()
+        self.gh.comments_since = reads
+        d.snapshot()
+        self.assertEqual(self.gh.since_reads[-1], '2026-11-25T11:56:00Z')
+
+    def test_without_the_coordinator_no_comment_is_read(self):
+        d = self.make(recheck_tests.CFG)
+        self.gh.say(7, COORDINATOR, header() + '\n/devloop authorize')
+        self.assertEqual(self.planned(d), [])
+        self.assertFalse(hasattr(self.gh, 'since_reads'))
+        self.assertFalse(hasattr(self.gh, 'open_reads'))
+
+
+class DatedTests(Case):
+    """#656, with the comments read as GitHub reads them, only those written since a time."""
+
+    GH = DatedGH
+
+    def make(self, cfg=CFG, author=COORDINATOR):
+        d = super().make(cfg)
+        self.gh.author = author
+        self.gh.labels[7] = set()
+        d.clock = self.gh.timestamp
+        return d
+
+    def test_a_busy_issue_keeps_its_command_until_it_is_recorded(self):
+        d = self.make()
+        self.gh.labels[7] = {WORKING}
+        self.assertEqual(d.snapshot().authorizations, [])
+        self.gh.say(7, COORDINATOR, header() + '\n/devloop authorize')
+        # A worker on the issue for three ticks: nothing is recorded meanwhile, and the
+        # command leaves the reads of the comments.
+        for _ in range(3):
+            self.gh.minute += 15
+            snapshot = d.snapshot()
+            self.assertEqual(snapshot.authorizations, [7])
+            self.assertEqual(plan(snapshot, self.cfg, busy={7}), [])
+        self.assertEqual(self.gh.comments_since(self.gh.since_reads[-1]), [])
+        # The worker ends: the command is recorded at the next tick, once.
+        self.gh.labels[7] = set()
+        self.gh.minute += 15
+        self.assertEqual(self.ticked(d), [('authorize', 7)])
+        self.assertEqual([r['outcome'] for r in self.records()], ['authorized'])
+        self.assertEqual(self.planned(d), [])
+        self.gh.ready()
+        self.assertEqual(self.planned(d), [('preflight', 7)])
+
+    def test_a_command_written_while_devloop_was_stopped_is_found_at_restart(self):
+        self.make()
+        self.gh.say(7, COORDINATOR, header() + '\n/devloop authorize')
+        # devloop restarts three days later: the command is older than any read of the
+        # comments of a day, but the threads of the open issues are read at the first snapshot.
+        self.gh.minute += 3 * 24 * 60
+        d = Dispatcher(self.cfg, self.gh, self.ws, self.runner, log=self.logs.append,
+                       identities=Identities(self.gh), clock=self.gh.timestamp)
+        day = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(self.gh.timestamp() - 86400))
+        self.assertEqual(self.gh.comments_since(day), [])
+        self.assertEqual(self.ticked(d), [('authorize', 7)])
+        self.assertEqual([(r['by'], r['outcome']) for r in self.records()],
+                         [(COORDINATOR, 'authorized')])
+        self.assertEqual(self.gh.open_reads, 1)
+        self.assertEqual(self.planned(d), [])
+
+    def test_the_first_snapshot_reads_every_open_issue_beyond_the_first_300(self):
+        self.make()
+        # 301 open issues without labels, #7 to #307; the command is on the last one, which a
+        # read of the first 300 (``gh issue list --limit 300``) leaves out.
+        for number in range(8, 308):
+            self.gh.labels[number] = set()
+        self.gh.say(307, COORDINATOR, header() + '\n/devloop authorize')
+        self.assertNotIn(307, [raw['number'] for raw in self.gh.open_issues()])
+        self.gh.minute += 3 * 24 * 60
+        d = Dispatcher(self.cfg, self.gh, self.ws, self.runner, log=self.logs.append,
+                       identities=Identities(self.gh), clock=self.gh.timestamp)
+        self.assertEqual(self.ticked(d), [('authorize', 307)])
+        self.assertEqual([(r['by'], r['outcome']) for r in self.gh.records(307, 'authorize')],
+                         [(COORDINATOR, 'authorized')])
+        self.assertEqual(self.gh.open_reads, 1)
+        self.assertEqual(self.planned(d), [])
 
 
 class LabelTests(unittest.TestCase):

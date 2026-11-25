@@ -695,7 +695,11 @@ record adds no label and blocks nothing by itself: the open blocks do.
 
 With `[roles.coordinator]` (#607,
 [Authorization by the coordinator](guide.md#authorization-by-the-coordinator)), the `authorize`
-action records each `/devloop authorize [priority:<p>]` of an issue once: a dispatcher comment
+action records each `/devloop authorize [priority:<p>]` of an issue once (planned for the issues
+in `agent:needs-coordinator`, for the ready ones whose `agent:ready` is the supervisor's and, since
+#656, for any open issue where the coordinator's identity wrote one, whatever its labels, found
+in the threads of the open issues at the first snapshot of the process, then among the comments
+written since the previous snapshot, and again at each snapshot until recorded): a dispatcher comment
 ("Work authorized by the coordinator", or "`/devloop authorize` refused"; in Italian "Lavoro
 autorizzato dal coordinatore", "`/devloop authorize` rifiutato") ending with an
 `authorize` marker, with `comment` (the id of the command), `by` and `at` (its author and time),

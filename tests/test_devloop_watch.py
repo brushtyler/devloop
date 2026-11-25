@@ -1594,6 +1594,8 @@ class GitHubReadsTest(unittest.TestCase):
                          [{'id': 7, 'login': 'x[bot]', 'body': 'b', 'number': 3}])
         self.assertIn('repos/o/r/issues/comments?since=2026-11-16T10:00:00Z&per_page=100',
                       calls[-1])
+        # Whether the comment is of a PR (#656): the dispatcher looks only at issues.
+        self.assertIn('pull_request: (.html_url | test("/pull/"))', calls[-1][-1])
         gh.open_issues()
         self.assertEqual(calls[-1][1:3], ['issue', 'list'])
         self.assertIn('number,title,author,labels', calls[-1])

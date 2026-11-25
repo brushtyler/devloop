@@ -58,6 +58,33 @@ class SupGH(SnapshotGH):
 
     issue_comments = pr_comments
 
+    def comments_since(self, since):
+        """Every comment of every thread, whatever ``since`` (kept in ``since_reads``), as the
+        REST read reports them (#656)."""
+        self.since_reads = [*getattr(self, 'since_reads', []), since]
+        prs = {raw['number'] for raw in self.open_prs()}
+        return [{'id': c['id'], 'login': c['author']['login'], 'body': c['body'],
+                 'number': number, 'pull_request': number in prs}
+                for number, thread in self.threads.items() for c in thread]
+
+    def open_issue_numbers(self):
+        """Every number with a thread or labels but the PRs and the ``closed`` ones, all of
+        them however many, counted in ``open_reads`` (#656)."""
+        self.open_reads = getattr(self, 'open_reads', 0) + 1
+        prs = {raw['number'] for raw in self.open_prs()}
+        return sorted((set(self.threads) | set(self.labels)) - prs
+                      - set(getattr(self, 'closed', ())))
+
+    def open_issues(self, limit=300):
+        """The first ``limit`` of ``open_issue_numbers``, as ``gh issue list`` reports them,
+        not counted: the adapter's read with its limit, which the dispatcher must not use."""
+        reads = getattr(self, 'open_reads', 0)
+        numbers = self.open_issue_numbers()
+        self.open_reads = reads
+        return [{'number': n, 'title': f'Issue {n}', 'author': {'login': self.author},
+                 'labels': [{'name': x} for x in sorted(self.labels.get(n, ()))]}
+                for n in numbers][:limit]
+
     def open_prs(self):
         return super().open_prs() if self.has_pr else []
 
@@ -67,7 +94,8 @@ class SupGH(SnapshotGH):
 
     def issue(self, number):
         return dict(super().issue(number),
-                    labels=[{'name': n} for n in sorted(self.labels.get(number, ()))])
+                    labels=[{'name': n} for n in sorted(self.labels.get(number, ()))],
+                    state='CLOSED' if number in getattr(self, 'closed', ()) else 'OPEN')
 
     def issue_history(self, number):
         return dict(super().issue_history(number), author=self.author)

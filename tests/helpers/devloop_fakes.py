@@ -84,6 +84,14 @@ class FakeGH:
     def issue_comments(self, number):
         return self.pr_comments(number)
 
+    # The comments of every issue and PR written since a time (#656): none by default.
+    def comments_since(self, since):
+        return []
+
+    # The numbers of the open issues (#656): none by default.
+    def open_issue_numbers(self):
+        return []
+
     # Native dependencies (#277): none by default.
     def issue_dependencies(self, number):
         return {'author': 'brushtyler', 'blocked_by': [], 'added': []}

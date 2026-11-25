@@ -280,8 +280,9 @@ class Snapshot:
     # no longer holds and no authorization of the coordinator admits its restart: why.
     base_waits: dict = field(default_factory=dict)
     # With ``[roles.coordinator]`` (#607), the numbers of the issues with a ``/devloop
-    # authorize`` the dispatcher has not recorded yet: those in agent:needs-coordinator, and
-    # the ready ones whose agent:ready is the supervisor's. One ``authorize`` action each.
+    # authorize`` the dispatcher has not recorded yet: those in agent:needs-coordinator, the
+    # ready ones whose agent:ready is the supervisor's and (#656) any other open one where the
+    # coordinator wrote one. One ``authorize`` action each.
     authorizations: list = field(default_factory=list)
 
 

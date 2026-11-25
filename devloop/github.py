@@ -267,6 +267,13 @@ class GitHub:
         return self._json('issue', 'list', '-R', self.repo, '--state', 'open', '--limit',
                           str(limit), '--json', 'number,title,author,labels')
 
+    def open_issue_numbers(self):
+        """The numbers of every open issue, pull requests excluded, read with REST page by page
+        until the last, without a limit on their count (#656)."""
+        return self._json_lines('api', '--paginate',
+                                f'repos/{self.repo}/issues?state=open&per_page=100',
+                                '--jq', '.[] | select(.pull_request == null) | .number')
+
     def issue_state(self, number):
         """``{state, stateReason}`` of issue ``number``, read fresh: ``state`` OPEN or CLOSED,
         ``stateReason`` (COMPLETED, NOT_PLANNED, ...) or None, both in upper case as `gh issue
@@ -285,12 +292,13 @@ class GitHub:
 
     def comments_since(self, since):
         """Conversation comments of every issue and PR created or edited at ``since`` (ISO 8601,
-        UTC) or later, as ``{id, login, number, body}``. Read with REST, so an app's login is
-        ``<slug>[bot]``."""
+        UTC) or later, as ``{id, login, number, body, pull_request}``, ``pull_request`` True
+        for a comment of a PR (#656). Read with REST, so an app's login is ``<slug>[bot]``."""
         return self._json_lines('api', '--paginate',
                                 f'repos/{self.repo}/issues/comments?since={since}&per_page=100',
                                 '--jq', '.[] | {id, login: .user.login, body, '
-                                        'number: (.issue_url | split("/") | last | tonumber)}')
+                                        'number: (.issue_url | split("/") | last | tonumber), '
+                                        'pull_request: (.html_url | test("/pull/"))}')
 
     def dated_comments(self, since=None, number=None):
         """Conversation comments with their creation time (#256), oldest first, as ``{id,

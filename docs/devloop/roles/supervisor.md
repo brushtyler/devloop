@@ -249,7 +249,10 @@ coordinator in the mailbox.
   the coordinator authorized with `/devloop authorize` (#607; [Authorization by the
   coordinator](../guide.md#authorization-by-the-coordinator)), whose record of the dispatcher
   ("Work authorized by the coordinator", "Lavoro autorizzato dal coordinatore" in Italian) is
-  on the issue, or those the operator queued. With
+  on the issue, or those the operator queued. What counts is the record, not the label: an issue
+  the coordinator opened and authorized at once, without `agent:needs-coordinator`, gets its
+  record too, at the next tick of the dispatcher (#656), and you queue it once the record is
+  there. With
   `[roles.coordinator]` devloop ignores your `agent:ready` on an issue without an authorization
   valid for its current title and body, and writes it in the log: after a change of the text,
   ask the coordinator for a new authorization (`agent:needs-coordinator` again). The priority of
