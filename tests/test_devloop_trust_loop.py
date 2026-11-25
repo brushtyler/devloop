@@ -20,7 +20,8 @@ from devloop.planning import Action, Snapshot, ci_joins_round, plan, waiting_rev
 from devloop.schema import SchemaError, with_defaults
 from test_devloop import (CFG, REV, REV_NAME, SHA1, FakeGH, FakeRunner, FakeWS, finding, norm,
                           pr, raw_review)
-from test_devloop_merge import MERGE, READY, STRICT, Case, MergeGH, header, records
+from test_devloop_merge import (MERGE, READY, STRICT, Case, Identities, MergeGH, header,
+                                records)
 
 OPERATOR = 'agent:needs-operator'
 PARTS = 'Tocca la policy di fiducia: punto 4, `devloop/dispatcher.py` (condizioni di merge).'
@@ -362,6 +363,25 @@ class OperatorMergeTests(Case):
                 self.assertEqual(d.tick(), [])
                 self.assertEqual(len(records(self.gh, 'notice')), 1)
                 self.assertEqual(escalations(self.gh), [])
+
+    def test_a_mode_that_merges_does_not_release_the_label_of_a_trust_policy(self):
+        # #673: [merge] goes from off to strict, but the reviewer still says the PR touches the
+        # trust policy: the dispatcher's own label stays.
+        self.assertEqual([a.kind for a in self.make(CFG, gh=TrustGH()).tick()],
+                         ['operator_merge'])
+        d = Dispatcher(STRICT, self.gh, self.ws, FakeRunner(), log=self.logs.append,
+                       identities=Identities(self.gh))
+        snap = d.snapshot()
+        self.assertTrue(snap.prs[0].operator_owned)
+        self.assertEqual(snap.prs[0].merge_mode, 'off')
+        self.assertEqual(d.tick(), [])
+        self.assert_not_merged()
+        self.assertEqual(self.gh.labels[100], {READY, OPERATOR})
+        self.assertEqual(self.gh.comment_edits, [])
+        # Recomputed by the action itself, the reason is still there.
+        d._do_operator_release(snap.prs[0])
+        self.assertEqual(self.gh.labels[100], {READY, OPERATOR})
+        self.assertEqual(self.gh.comment_edits, [])
 
     def test_an_approval_of_the_same_reviewer_hands_the_merge_back_to_devloop(self):
         # #461: trust_policy with a finding in round 1, a faithful implementation approved in

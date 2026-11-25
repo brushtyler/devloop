@@ -638,10 +638,13 @@ def _valid_notice(n):
     (``supervision.critical``). Since #248 also a ready PR whose merge is the operator's
     (``operator_merge``): its head, how many ``labeled`` events of ``agent:needs-operator``
     (under both its names) came before the dispatcher added it, and the promotion it belongs
-    to, as the count of promotions recorded on the PR."""
+    to, as the count of promotions recorded on the PR. Since #673 its ``released``, once the
+    dispatcher removed its label because the configuration lets devloop merge the PR: the merge
+    mode of that moment."""
     if n.get('event') == 'operator_merge':
         return (isinstance(n.get('head'), str) and _is_int(n.get('labeled'))
-                and _is_int(n.get('promotion')))
+                and _is_int(n.get('promotion'))
+                and n.get('released', 'strict') in ('strict', 'auto'))
     return n.get('event') in NOTICES
 
 
@@ -1353,6 +1356,11 @@ NOTICE_TEXTS = Catalog(
                                 'if it conflicts with the base, checks the CI again and, with a '
                                 'new commit, revokes the readiness and sends it back to review, '
                                 'removing `{label}`.'),
+        'operator_release_title': 'The merge passed to devloop',
+        'operator_release_text': ('With the current configuration the merge mode of this PR is '
+                                  '`{mode}`: none of the reasons above is left. devloop removed '
+                                  '`{label}` and merges commit `{head}` itself, once every merge '
+                                  'directive holds again.'),
     },
     it={
         'cycle_title': 'Ciclo di dipendenze',
@@ -1378,6 +1386,11 @@ NOTICE_TEXTS = Catalog(
                                 'sincronizza se va in conflitto con la base, ricontrolla la CI e, '
                                 'con un nuovo commit, revoca la prontezza e la rimanda in review, '
                                 'togliendo `{label}`.'),
+        'operator_release_title': 'Il merge passa a devloop',
+        'operator_release_text': ('Con la configurazione attuale la modalità di merge di questa PR '
+                                  'è `{mode}`: non resta nessuno dei motivi sopra. devloop ha '
+                                  'tolto `{label}` e mergia da sé il commit `{head}`, quando '
+                                  'tutte le direttive di merge valgono di nuovo.'),
     })
 
 
@@ -1433,6 +1446,18 @@ def render_operator_merge(head, labeled, promotion, reasons, label, language=ENG
             + '\n')
     return publishable(body, 'notice', {'event': 'operator_merge', 'head': head,
                                         'labeled': labeled, 'promotion': promotion})
+
+
+def render_operator_release(body, record, mode, label, language=ENGLISH):
+    """``body``, the ``operator_merge`` notice of a ready PR (#248) with its ``record``, edited
+    when the dispatcher removes its ``label`` because no reason is left (#673): its text, and a
+    section that says the merge passed to devloop, in merge mode ``mode``; its record with
+    ``released``. In ``language`` (#635)."""
+    t = NOTICE_TEXTS.texts(language)
+    text = (split_markers(body)[0] + f'\n\n## {t("operator_release_title")}\n\n'
+            + t('operator_release_text', mode=mode, label=label, head=record['head'][:12])
+            + '\n')
+    return with_record(body, 'notice', dict(record, released=mode), text=text)
 
 
 def render_supervision(record, text, title=None, records=(), language=ENGLISH):
