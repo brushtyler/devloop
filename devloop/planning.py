@@ -256,8 +256,9 @@ class Snapshot:
     # without one) and ``cycle_reported`` (whether the dispatcher already reported that cycle).
     # Since #671 ``blocked_by`` holds the dropped blocks too, those closed for a reason other
     # than completed, which ``dropped`` lists as ``[ref, reason]`` (``prerequisite_dropped``);
-    # ``prerequisites``, the numbers of their open blocks of the repository, and ``orphans``,
-    # those of them that nobody is doing (``Dispatcher._orphan_prerequisites``).
+    # ``prerequisites``, the numbers of their open blocks of the repository, ``linked``, those of
+    # them with an open PR of a trusted author that GitHub links to them, on any branch, and
+    # ``orphans``, those of them that nobody is doing (``Dispatcher._orphan_prerequisites``).
     ready_issues: list
     working_issues: list  # issue numbers
     # Issues and PRs in agent:needs-supervisor with a supervisor command to apply (#182), or in
@@ -265,7 +266,8 @@ class Snapshot:
     # step, pr, anchor, coordinator}`` (``_supervisor_view``; ``coordinator``, whether the
     # coordinator wrote it, #595), with ``refusal`` for a command only to answer; a command that
     # runs an issue's step (``runs_issue_step``) has ``blocked_by`` too, its open blocks (#277),
-    # and waits while it is not empty.
+    # and waits while it is not empty; and ``dropped`` (#671), its blocks closed without being
+    # completed, with which it does not run and the issue escalates ``prerequisite_dropped``.
     supervised: list = field(default_factory=list)
     # With ``conclave`` (#141), the issues and PRs in agent:needs-operator whose block still
     # needs its conclave: dicts ``{number, calls, reason}``, ``calls`` being the calls left
@@ -585,8 +587,14 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None, implement=Tr
         # budget envelope of an issue's refused step (#411), runs that step, and takes a free PR
         # slot as the step itself would; without one it waits for a later tick. While the issue
         # is blocked by an open issue (#277) it waits too, and takes no slot. A command only to
-        # answer (#321) takes no slot.
+        # answer (#321) takes no slot. One whose issue has a prerequisite closed without being
+        # completed (#671) does not run: the issue is escalated to the operator, with no slot.
         if runs_issue_step(item):
+            if item.get('dropped'):
+                actions.append(Action('prerequisite_dropped', item['number'],
+                                      'prerequisite closed without being completed: '
+                                      + ', '.join(ref for ref, _ in item['dropped'])))
+                continue
             if item.get('blocked_by') or free <= 0:
                 continue
             free -= 1

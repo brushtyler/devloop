@@ -90,7 +90,8 @@ issue that blocks other ready issues starts first. The issues of the queue on a 
 do not start, and the dispatcher reports the cycle once on each of them (``cycle`` record),
 without labels: once the cycle is gone, they start as usual. A trusted block closed for a reason
 other than completed (#671, ``dropped_block``) does not release the issue: it waits, and the
-``prerequisite_dropped`` action escalates it to the operator (a critical class). A ready issue
+``prerequisite_dropped`` action escalates it to the operator (a critical class), as it does with
+a retry or an extension that would run the issue's step, which does not run. A ready issue
 blocked by an open issue of the repository that nobody is doing is only shown, as an orphan
 prerequisite (``_orphan_prerequisites``), by ``devloop status`` and ``devloop watch``.
 
@@ -447,11 +448,11 @@ TEXTS = Catalog(
                       'the marker (it is in the history of the edits of the description) as the '
                       'last line.'),
         'prerequisite_dropped': (
-            'The issue has `{ready}`, but a prerequisite that blocks it ("blocked by") was '
-            'closed without being completed: {listed}. devloop does not start it, since what it '
-            'needs was not done. To decide: remove the block, if the issue no longer needs it, '
-            'and add `{ready}` again; rethink the issue; or close it. Reopening the prerequisite '
-            'makes the issue wait for it again.'),
+            'A prerequisite that blocks the issue ("blocked by") was closed without being '
+            'completed: {listed}. devloop does not start its work, nor a retry of it, since what '
+            'it needs was not done. To decide: remove the block, if the issue no longer needs '
+            'it, and add `{ready}` again (or repeat the command that was waiting); rethink the '
+            'issue; or close it. Reopening the prerequisite makes the issue wait for it again.'),
         'ci_missing': ('On head `{head}` there is no CI {minutes} minutes after the push, but '
                        '`{branch}` requires the checks {names}: the review does not start '
                        'without the CI. Check that the CI started on the head, or run it '
@@ -634,11 +635,12 @@ TEXTS = Catalog(
                       'del marker (si trova nella cronologia delle modifiche della descrizione) '
                       'come ultima riga.'),
         'prerequisite_dropped': (
-            'L\'issue ha `{ready}`, ma un prerequisito che la blocca ("blocked by") è stato '
-            'chiuso senza essere completato: {listed}. devloop non la avvia, perché ciò di cui '
-            'ha bisogno non è stato fatto. Da decidere: togliere il blocco, se l\'issue non ne '
-            'ha più bisogno, e aggiungere di nuovo `{ready}`; ripensare l\'issue; oppure '
-            'chiuderla. Riaprire il prerequisito fa di nuovo attendere l\'issue.'),
+            'Un prerequisito che blocca l\'issue ("blocked by") è stato chiuso senza essere '
+            'completato: {listed}. devloop non ne avvia il lavoro, né un suo retry, perché ciò '
+            'di cui ha bisogno non è stato fatto. Da decidere: togliere il blocco, se l\'issue '
+            'non ne ha più bisogno, e aggiungere di nuovo `{ready}` (o ripetere il comando che '
+            'attendeva); ripensare l\'issue; oppure chiuderla. Riaprire il prerequisito fa di '
+            'nuovo attendere l\'issue.'),
         'ci_missing': ('Sul head `{head}` non risulta alcuna CI {minutes} minuti dopo il push, ma '
                        '`{branch}` richiede i check {names}: la review non parte senza la CI. '
                        'Verificare che la CI sia partita sul head, o rilanciarla.'),
@@ -2049,12 +2051,19 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                                   coordinator=self._is_coordinator(view.get('by'))))
         # A retry of an issue's step, or an extension of the budget envelope that runs it
         # (#411, #595), waits while the issue is blocked (#277), as a ready issue does:
-        # ``blocked_by`` holds its open blocks.
+        # ``blocked_by`` holds its open blocks. With a block closed without being completed
+        # (#671, ``dropped``) it does not run: the issue escalates ``prerequisite_dropped``.
         retries = [item for item in found if runs_issue_step(item)]
         views = self._dependency_view([item['number'] for item in retries]) if retries else {}
         for item in retries:
             item['blocked_by'] = views[item['number']]['blocked_by']
-            if item['blocked_by']:
+            item['dropped'] = views[item['number']]['dropped']
+            if item['dropped']:
+                what = 'the retry' if item['command'] == RETRY else 'the extension'
+                self.log(f'  issue #{item["number"]}: {what} does not run, prerequisite closed '
+                         'without being completed: '
+                         + ', '.join(ref for ref, _ in item['dropped']))
+            elif item['blocked_by']:
                 what = 'the retry' if item['command'] == RETRY else 'the extension'
                 self.log(f'  issue #{item["number"]}: {what} waits, blocked by '
                          + ', '.join(item['blocked_by']))
@@ -2073,19 +2082,23 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         not, up to ``MAX_DEPENDENCY_READS`` issues beyond ``numbers``; an issue of another
         repository blocks as its state says, without reading its own blocks.
 
-        Returns ``(edges, dropped)``: ``dropped`` (#671) maps each issue read to its trusted
-        blocks closed for a reason other than COMPLETED (``dropped_block``), of this repository
-        or another, as ``{(repo, number): reason}``. They are no edges: a dropped prerequisite
-        is no cycle, nor is it explored."""
+        Returns ``(edges, dropped, linked)``: ``dropped`` (#671) maps each issue read to its
+        trusted blocks closed for a reason other than COMPLETED (``dropped_block``), of this
+        repository or another, as ``{(repo, number): reason}``. They are no edges: a dropped
+        prerequisite is no cycle, nor is it explored. ``linked`` (#671) is the set of the open
+        trusted blocks with an open PR that GitHub links to them as closing them, on any branch,
+        opened by a trusted user or by one of devloop's agents (as ``_devloop_pr`` trusts it)."""
         # The repository under its name or a former one (``repo_aliases``, #540).
         home = {name.lower() for name in (self.cfg.repo, *self.cfg.repo_aliases)}
+        pr_authors = set(self.cfg.trusted_users) | (
+            self.identities.agent_logins() if self.identities else set())
 
         def key(item):
             repo = item.get('repo') or ''
             return ('' if repo.lower() in home else repo, item['number'])
 
         todo = [('', number) for number in dict.fromkeys(numbers)]
-        seen, edges, dropped = set(todo), {}, {}
+        seen, edges, dropped, linked = set(todo), {}, {}, set()
         budget = len(todo) + MAX_DEPENDENCY_READS
         while todo:
             node = todo.pop(0)
@@ -2114,19 +2127,22 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                     gone[blocker] = reason.upper()
                     continue
                 blockers.add(blocker)
+                if any(isinstance(pr, dict) and pr.get('author') in pr_authors
+                       for pr in item.get('prs') or ()):
+                    linked.add(blocker)
                 if not blocker[0] and blocker not in seen:
                     seen.add(blocker)
                     todo.append(blocker)
             edges[node] = blockers
             dropped[node] = gone
-        return edges, dropped
+        return edges, dropped, linked
 
     def _dependency_view(self, numbers):
         """What planning needs about the dependencies of the ready issues ``numbers``, read now
-        from GitHub (#277): for each, ``{blocked_by, blocks, cycle, dropped, prerequisites}`` as
-        ``Snapshot`` describes them. A dropped block (#671) is in ``blocked_by`` too: everything
-        that waits for a block waits for it."""
-        edges, dropped = self._dependency_edges(numbers)
+        from GitHub (#277): for each, ``{blocked_by, blocks, cycle, dropped, prerequisites,
+        linked}`` as ``Snapshot`` describes them. A dropped block (#671) is in ``blocked_by``
+        too: everything that waits for a block waits for it."""
+        edges, dropped, linked = self._dependency_edges(numbers)
         cycles = dependency_cycles(edges)
         ready = set(numbers)
         views = {}
@@ -2137,6 +2153,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                 'blocked_by': [issue_ref(b) for b in blockers],
                 'dropped': [[issue_ref(b), gone[b]] for b in sorted(gone)],
                 'prerequisites': sorted(b[1] for b in edges.get(('', number), ()) if not b[0]),
+                'linked': sorted(b[1] for b in edges.get(('', number), ())
+                                 if not b[0] and b in linked),
                 'blocks': sorted(n for n in ready
                                  if ('', number) in edges.get(('', n), ()) and n != number),
                 'cycle': [issue_ref(m) for m in cycles.get(('', number), ())]}
@@ -2146,14 +2164,17 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         """Set ``orphans`` on each of the ready ``issues`` with their dependency view (#671): the
         numbers of its open blocks of the repository (``prerequisites``) that nobody is doing,
         with neither ``agent:ready`` (``ready``) nor ``agent:working`` (``working``), nor an
-        open devloop PR (``pr_issues``), nor, with a ``coordinator``, an authorization of the
-        coordinator that holds for their current text (``_authorization``). Only shown: no label,
-        no comment. The authorization is read once per prerequisite."""
+        open PR: a devloop one (``pr_issues``) or, on any branch, one of a trusted author that
+        GitHub links to it (``linked``, ``_dependency_edges``); nor, with a ``coordinator``, an
+        authorization of the coordinator that holds for their current text
+        (``_authorization``). Only shown: no label, no comment. The authorization is read once
+        per prerequisite."""
         authorized = {}
         for issue in issues:
             orphans = []
             for number in issue.get('prerequisites') or ():
-                if number in ready or number in working or number in pr_issues:
+                if (number in ready or number in working or number in pr_issues
+                        or number in (issue.get('linked') or ())):
                     continue
                 if coordinator is not None:
                     if number not in authorized:
@@ -2190,9 +2211,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         self.log('  dependency cycle reported: ' + ', '.join(cycle))
 
     def _do_prerequisite_dropped(self, number):
-        """Escalate a ready issue whose trusted block was closed for a reason other than
-        COMPLETED (#671): class ``prerequisite_dropped``, critical, so to the operator in every
-        merge mode, without ``agent:ready`` nor ``agent:needs-supervisor``. The comment names
+        """Escalate an issue whose trusted block was closed for a reason other than COMPLETED
+        (#671), ready or with a retry or an extension that would run its step
+        (``_supervised_items``): class ``prerequisite_dropped``, critical, so to the operator in
+        every merge mode, without ``agent:ready`` nor ``agent:needs-supervisor``. The command
+        does not run, and the new escalation spends it (``_supervisor_view``). The comment names
         each dropped prerequisite with its reason. The dependencies are read again first: a block
         removed or reopened since escalates nothing."""
         lb = self.cfg.labels

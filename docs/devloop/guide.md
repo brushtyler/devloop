@@ -499,12 +499,20 @@ written in the text and the issues that wait for it queued by hand once it is me
   prerequisite closed so and its reason; whoever receives it decides: remove the block and add
   `agent:ready` again, rethink the issue, or close it. Reopening the prerequisite makes the issue
   wait for it again. The same holds for a block of another repository whose reason can be read;
-  a closure without a reason counts as completed. Only trusted blocks count, as above; the line
+  a closure without a reason counts as completed. A supervisor's `/devloop retry` of the
+  readiness check or of the implementation, or an extension of the budget envelope that would
+  run the step, does not run either: the dispatcher escalates the issue in the same way, with no
+  slot taken and no attempt spent, and the escalation spends the command (the tick log says `the
+  retry does not run, prerequisite closed without being completed: #<n>`); after removing the
+  block, the command is written again. Only trusted blocks count, as above; the line
   of the issue in `devloop status` adds `, prerequisite closed without being completed #<n> (not
   planned)`.
 - **Orphan prerequisites are shown** (#671). When a ready issue is blocked by an open issue of
   the same repository that nobody is doing, with neither `agent:ready` nor `agent:working`, no
-  open devloop PR and, with `[roles.coordinator]`, no
+  open PR of a trusted user or of devloop's agents (on its devloop branch, or on any branch
+  that GitHub links to the prerequisite as closing it: a closing keyword such as `Closes #<m>`
+  in a PR towards the default branch, or the "Development" sidebar) and, with
+  `[roles.coordinator]`, no
   [authorization of the coordinator](#authorization-by-the-coordinator) that holds for its
   current text, the issue would wait for ever. `devloop status` and `devloop tick --dry-run`
   show one line per pair after the queue, `orphan prerequisite: #<n> waits for #<m>, …`, and
@@ -1365,7 +1373,7 @@ next to the review; one for the trust policy gets none (#434, see
 | `tests_failed`, `blocked`, `interrupted`, `unattributable`, `lost_meta`, `inconsistent`, `configuration`, `failure` | Tests still failing (or no change), an agent that declared itself blocked, an interrupted implementation, findings without an owner, a lost PR marker, an inconsistent PR state, a configuration to decide (a turn refused for an entry of the directories of the CLIs that is not in the [list](#agent-user), #517, also in a sync), a `gh`, git or dispatcher error (a push the remote refused, for its permissions, the rules of the branch or a conflict, included) | Yes |
 | `host_tests` | Local tests that fail on the base commit of the branch too, but pass in the CI of that commit: a [failure of the host](#tests-red-on-the-base-too), not of `main` | Yes |
 | `receipt_conflict` | The [receipt of the PR](protocol.md#pr-receipt) contradicts the markers at its promotion | Yes |
-| `prerequisite_dropped` | A ready issue whose trusted "blocked by" was closed for a reason other than completed, such as not planned ([Dependencies between issues](#dependencies-between-issues)) | Yes |
+| `prerequisite_dropped` | A ready issue, or one with a retry or an extension that would run its step, whose trusted "blocked by" was closed for a reason other than completed, such as not planned ([Dependencies between issues](#dependencies-between-issues)) | Yes |
 | `retry_limit`, `supervisor_escalated`, `supervisor_refused` | The supervisor's retries are spent, it handed the escalation over, or it gave a command the escalation does not admit | Yes |
 | `conclave_veto` | A trusted user annulled the latest decision of a [conclave](#conclave-on-a-block) with `/devloop veto` | Yes |
 | `uncertain_turn` | With `block_uncertain_turns` on, a turn refused because its work has [uncertain turns](protocol.md#turn-journal) a trusted user has not reconciled with `/devloop reconcile` | Yes |

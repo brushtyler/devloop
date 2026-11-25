@@ -701,13 +701,15 @@ record adds no label and blocks nothing by itself: the open blocks do.
 A trusted block whose issue was closed for a reason other than completed (`stateReason`
 `NOT_PLANNED`, `DUPLICATE`, …; #671, [Dependencies between
 issues](guide.md#dependencies-between-issues)) keeps blocking the ready issue: it never starts,
-and a retry of its step waits as for an open block. The `prerequisite_dropped` action, planned
-for a ready issue in neither `agent:needs-operator` nor `agent:needs-supervisor`, reads the
-dependencies again and, if such a block is still there, escalates the issue with an escalation
-comment of class `prerequisite_dropped` (critical: `notice` marker with `critical` true and `to`
-`operator`, in every merge mode), which lists each such prerequisite with its reason, removes
-`agent:ready` and adds `agent:needs-operator`. A block removed or reopened since escalates
-nothing. A closure without a reason releases the block, as a completed one does. The orphan
+and a supervisor command that would run its step (a retry, or an extension of the budget
+envelope) does not run. The `prerequisite_dropped` action, planned for a ready issue in neither
+`agent:needs-operator` nor `agent:needs-supervisor`, and for an issue with such a command still
+to apply, without taking a slot, reads the dependencies again and, if such a block is still
+there, escalates the issue with an escalation comment of class `prerequisite_dropped` (critical:
+`notice` marker with `critical` true and `to` `operator`, in every merge mode), which lists each
+such prerequisite with its reason, removes `agent:ready` and `agent:needs-supervisor` and adds
+`agent:needs-operator`. The new escalation spends the command: no `supervision` record is
+written and no attempt counted. A block removed or reopened since escalates nothing. A closure without a reason releases the block, as a completed one does. The orphan
 prerequisites are only shown (`devloop status`, `devloop watch`): no record, no label.
 
 ## Authorization by the coordinator

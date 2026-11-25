@@ -121,11 +121,13 @@ class FakeGitHub:
 
     def issue_dependencies(self, number):
         # The native dependencies (#671): ``blocks`` maps an issue to ``(number, by)`` pairs,
-        # open blocks of the repository unless the pair has a third item, its ``repo``.
+        # open blocks of the repository unless the pair has a third item, its ``repo``;
+        # ``linked`` maps a block to the open PRs GitHub links to it, ``{number, author}``.
         self._call('issue_dependencies')
         pairs = getattr(self, 'blocks', {}).get(number, [])
         items = [{'repo': p[2] if len(p) > 2 else 'o/r', 'number': p[0], 'state': 'OPEN',
-                  'state_reason': None} for p in pairs]
+                  'state_reason': None, 'prs': getattr(self, 'linked', {}).get(p[0], [])}
+                 for p in pairs]
         added = [{'repo': p[2] if len(p) > 2 else 'o/r', 'number': p[0], 'by': p[1],
                   'at': '2026-11-01T00:00:00Z'} for p in pairs]
         return {'author': OPERATOR, 'blocked_by': items, 'added': added}
@@ -1079,6 +1081,20 @@ class OrphanTest(unittest.TestCase):
         gh.add_pr(21)
         gh.prs[21]['headRefName'] = 'agent/issue-9'
         self.assertNotIn(ORPHAN, w.round())
+
+    def test_an_open_pr_linked_on_any_branch_makes_it_no_orphan(self):
+        # The operator's PR #22 on a branch of their own closes #9: GitHub links it to #9.
+        h = self.harness()
+        gh = h.gh
+        gh.add_pr(22, author=OPERATOR)
+        gh.prs[22]['headRefName'] = 'fix-prerequisite'
+        gh.linked = {9: [{'number': 22, 'author': OPERATOR}]}
+        w = h.watcher(Clock())
+        w.round()
+        self.assertEqual(w.round(), [])
+        # A linked PR of an untrusted author is nobody's work.
+        gh.linked = {9: [{'number': 23, 'author': STRANGER}]}
+        self.assertEqual(w.round(), [ORPHAN])
 
     def test_an_authorization_of_the_coordinator_makes_it_no_orphan(self):
         h = self.harness(trust=roles_trust())

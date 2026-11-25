@@ -37,13 +37,16 @@ _ISSUE_HISTORY = (
 # the read is incomplete.
 _HISTORY_PAGES = 100
 # Native dependencies of an issue (#277): the issues that block it, with their state and the
-# reason of their closure (#671; GitHub allows at most 50 per issue), and who added each
-# "blocked by" (the timeline events, read backwards one page at a time, from ``$before``).
+# reason of their closure (#671; GitHub allows at most 50 per issue) and the PRs GitHub links to
+# them as closing them (#671, any branch: a closing keyword or the "Development" sidebar), and
+# who added each "blocked by" (the timeline events, read backwards one page at a time, from
+# ``$before``).
 _ISSUE_DEPENDENCIES = (
     'query($owner:String!,$name:String!,$number:Int!,$before:String){'
     'repository(owner:$owner,name:$name){'
     'issue(number:$number){author{__typename login} '
-    'blockedBy(first:50){nodes{number state stateReason repository{nameWithOwner}}} '
+    'blockedBy(first:50){nodes{number state stateReason repository{nameWithOwner} '
+    'closedByPullRequestsReferences(first:20){nodes{number state author{__typename login}}}}} '
     'timelineItems(itemTypes:[BLOCKED_BY_ADDED_EVENT],last:100,before:$before){'
     'pageInfo{hasPreviousPage startCursor} nodes{__typename '
     '... on BlockedByAddedEvent{createdAt actor{__typename login} '
@@ -380,7 +383,8 @@ class GitHub:
         blocked_by, added}``. ``blocked_by`` lists the issues that block it now as ``{repo,
         number, state, state_reason}`` (``state`` OPEN or CLOSED, ``state_reason`` as GitHub
         gives it, such as COMPLETED or NOT_PLANNED, or None, #671; ``repo`` as
-        ``owner/name``); ``added`` the events that added a blocker, oldest first, as ``{repo,
+        ``owner/name``) and ``prs``, the open PRs that GitHub links to it as closing it, on any
+        branch, as ``{number, author}`` (#671, the first 20); ``added`` the events that added a blocker, oldest first, as ``{repo,
         number, by, at}``. Logins are in REST form (``graphql_login``).
 
         The events are read backwards, 100 at a time, until every open blocker, and every
@@ -415,8 +419,13 @@ class GitHub:
         blocked_by = []
         for node in issue['blockedBy']['nodes']:
             repo, blocker = where(node)
+            linked = (node.get('closedByPullRequestsReferences') or {}).get('nodes') or []
             blocked_by.append({'repo': repo, 'number': blocker, 'state': node.get('state'),
-                               'state_reason': node.get('stateReason')})
+                               'state_reason': node.get('stateReason'),
+                               'prs': [{'number': pr.get('number'),
+                                        'author': graphql_login(pr.get('author'))}
+                                       for pr in linked
+                                       if isinstance(pr, dict) and pr.get('state') == 'OPEN']})
         added = []
         for page in reversed(pages):  # the oldest page was read last
             for node in page:

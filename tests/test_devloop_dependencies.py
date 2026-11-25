@@ -27,10 +27,11 @@ DPCFG = dataclasses.replace(PCFG, max_open_prs=10, max_actions_per_tick=10)
 SUPERVISOR_LOGIN = FakeIdentities.LOGINS['agy']
 
 
-def block(number, state='OPEN', by='brushtyler', repo=REPO, reason=None):
+def block(number, state='OPEN', by='brushtyler', repo=REPO, reason=None, prs=()):
     """``(blocker, event)``: issue ``number`` blocks, added by ``by``; ``reason``, the reason of
-    its closure (#671)."""
-    return ({'repo': repo, 'number': number, 'state': state, 'state_reason': reason},
+    its closure (#671), ``prs`` the open PRs GitHub links to it, ``(number, author)`` pairs."""
+    return ({'repo': repo, 'number': number, 'state': state, 'state_reason': reason,
+             'prs': [{'number': n, 'author': a} for n, a in prs]},
             {'repo': repo, 'number': number, 'by': by, 'at': at(10)})
 
 
@@ -293,7 +294,17 @@ class DependencyTests(unittest.TestCase):
                          [orphan])
         # Shown only: no action for it, so no label and no comment.
         self.assertNotIn(3, [a.number for a in plan(snap, DCFG)])
-        # An open PR of the prerequisite is work in progress.
+        # An open PR of a trusted author that GitHub links to the prerequisite, on any branch,
+        # is work in progress; one of anyone else is not.
+        for author, orphans in (('brushtyler', []), (FakeIdentities.LOGINS['claude'], []),
+                                ('stranger', [9])):
+            with self.subTest(author=author), \
+                    mock.patch.object(d, 'identities', FakeIdentities(self.gh)):
+                self.gh.blocks = {**blocks, 3: [block(9, prs=[(20, author)])]}
+                self.assertEqual({i['number']: i['orphans'] for i in d.snapshot().ready_issues
+                                  if i['number'] == 3}, {3: orphans})
+        self.gh.blocks = blocks
+        # An open devloop PR of the prerequisite is work in progress.
         issues_ = [{'number': 3, 'prerequisites': [9]}]
         d._orphan_prerequisites(issues_, set(), set(), {9}, None)
         self.assertEqual(issues_[0]['orphans'], [])
@@ -365,7 +376,15 @@ class AdapterTests(unittest.TestCase):
         payload = {'data': {'repository': {'issue': {
             'author': {'__typename': 'User', 'login': 'brushtyler'},
             'blockedBy': {'nodes': [
-                {'number': 5, 'state': 'OPEN', 'repository': {'nameWithOwner': 'o/r'}},
+                {'number': 5, 'state': 'OPEN', 'repository': {'nameWithOwner': 'o/r'},
+                 # #671: the PRs GitHub links to #5, on any branch; only the open ones count.
+                 'closedByPullRequestsReferences': {'nodes': [
+                     {'number': 20, 'state': 'OPEN',
+                      'author': {'__typename': 'User', 'login': 'brushtyler'}},
+                     {'number': 19, 'state': 'CLOSED',
+                      'author': {'__typename': 'User', 'login': 'brushtyler'}},
+                     {'number': 21, 'state': 'OPEN',
+                      'author': {'__typename': 'Bot', 'login': 'claude'}}]}},
                 {'number': 8, 'state': 'CLOSED', 'repository': {'nameWithOwner': 'x/y'}}]},
             'timelineItems': {'nodes': [
                 {'__typename': 'BlockedByAddedEvent', 'createdAt': at(3),
@@ -380,9 +399,11 @@ class AdapterTests(unittest.TestCase):
 
         self.assertEqual(GitHub('o/r', run=fake_run).issue_dependencies(7), {
             'author': 'brushtyler',
-            'blocked_by': [{'repo': 'o/r', 'number': 5, 'state': 'OPEN', 'state_reason': None},
+            'blocked_by': [{'repo': 'o/r', 'number': 5, 'state': 'OPEN', 'state_reason': None,
+                            'prs': [{'number': 20, 'author': 'brushtyler'},
+                                    {'number': 21, 'author': 'claude[bot]'}]},
                            {'repo': 'x/y', 'number': 8, 'state': 'CLOSED',
-                            'state_reason': None}],
+                            'state_reason': None, 'prs': []}],
             'added': [{'repo': 'o/r', 'number': 5, 'by': 'sup[bot]', 'at': at(3)}]})
         (argv,) = calls
         self.assertIn('graphql', argv)
@@ -390,6 +411,7 @@ class AdapterTests(unittest.TestCase):
         query = next(a for a in argv if a.startswith('query='))
         self.assertIn('blockedBy', query)
         self.assertIn('stateReason', query)  # #671
+        self.assertIn('closedByPullRequestsReferences', query)  # #671
         self.assertIn('BLOCKED_BY_ADDED_EVENT', query)
         self.assertFalse(any(a.startswith('before=') for a in argv))
 
@@ -469,9 +491,10 @@ class RetryTests(supervision.Case):
     """A supervisor's ``/devloop retry`` of an issue's step waits while the issue is blocked
     (#277), with no slot taken and no attempt spent, and runs once the block closes."""
 
-    def blocked(self, state='OPEN'):
-        """Issue #7 is blocked by #1, added by a trusted user, in ``state``."""
-        pair = block(1, state)
+    def blocked(self, state='OPEN', reason=None):
+        """Issue #7 is blocked by #1, added by a trusted user, in ``state`` (closed for
+        ``reason``)."""
+        pair = block(1, state, reason=reason)
         self.gh.issue_dependencies = lambda n: (
             {'author': 'brushtyler', 'blocked_by': [dict(pair[0])], 'added': [dict(pair[1])]}
             if n == 7 else {'author': 'brushtyler', 'blocked_by': [], 'added': []})
@@ -511,6 +534,40 @@ class RetryTests(supervision.Case):
                 self.assertEqual((decision['outcome'], decision['attempt']), ('applied', 1))
                 if step == 'implement':
                     self.assertEqual(len(self.gh.created), 1)
+
+    def test_a_retry_with_a_dropped_prerequisite_escalates_to_the_operator(self):
+        # #671: in auto, the supervisor retries an issue whose prerequisite was closed as not
+        # planned. The retry does not run, spends nothing, takes no slot, and the issue goes to
+        # the operator with the critical class; the retry, spent, is not applied later.
+        cfg = dataclasses.replace(supervision.AUTO, max_open_prs=1)
+        d = self.make(cfg, supervision.crash(), implemented(), has_pr=False)
+        self.assertEqual(self.tick(d), [('implement', 7)])
+        self.blocked('CLOSED', 'NOT_PLANNED')
+        self.gh.command(7, '/devloop retry')
+        snap = d.snapshot()
+        self.assertEqual((snap.supervised[0]['blocked_by'], snap.supervised[0]['dropped']),
+                         (['#1'], [['#1', 'NOT_PLANNED']]))
+        self.assertIn('  issue #7: the retry does not run, prerequisite closed without being '
+                      'completed: #1', self.logs)
+        snap.ready_issues.append({'number': 8, 'title': 'Issue 8', 'labels': {READY},
+                                  'labeler': 'brushtyler', 'admitted': True, 'merged': [],
+                                  'blocked_by': []})
+        self.assertEqual([(a.kind, a.number) for a in plan(snap, cfg)],
+                         [('prerequisite_dropped', 7), ('implement', 8)])
+        self.assertEqual(self.tick(d), [('prerequisite_dropped', 7)])
+        self.assertEqual(len(self.runner.calls), 1)
+        self.assertEqual(self.decisions(7), [])
+        notice = markdown.read_marker(self.gh.comments[-1][1], 'notice')
+        self.assertEqual((notice['class'], notice['critical'], notice['to']),
+                         ('prerequisite_dropped', True, 'operator'))
+        self.assertIn('#1 (not planned)', self.gh.comments[-1][1])
+        self.assertEqual(self.gh.labels[7] & {supervision.SUPER, supervision.HUMAN},
+                         {supervision.HUMAN})
+        # The escalation spent the retry: nothing more, even once the block is completed.
+        self.assertEqual(self.tick(d), [])
+        self.blocked('CLOSED', 'COMPLETED')
+        self.assertEqual(self.tick(d), [])
+        self.assertEqual(len(self.runner.calls), 1)
 
     def test_a_blocked_retry_takes_no_slot(self):
         d = self.make(supervision.AUTO, supervision.crash(), has_pr=False)

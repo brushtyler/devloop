@@ -17,7 +17,8 @@ changed into lines ``HH:MM <type> #N <detail>`` (UTC):
 - issues and PRs opened, closed or merged;
 - an orphan prerequisite (#671): an issue with ``agent:ready`` blocked ("blocked by", as the
   dispatcher trusts it) by an open issue of the repository that has neither ``agent:ready`` nor
-  ``agent:working``, nor an open PR, nor an authorization of the coordinator, once per pair of
+  ``agent:working``, nor an open PR (on its devloop branch, or on any branch that GitHub links to
+  it), nor an authorization of the coordinator, once per pair of
   issues while it stays so (``Watcher._orphans``). The baseline reads no dependency: the first
   round after it reports the orphans already there.
 
@@ -598,9 +599,11 @@ class Watcher:
         """The orphan prerequisites (#671), as ``[blocked, blocker]`` pairs: for each visible
         open issue with ``agent:ready``, its trusted open blocks of the repository
         (``Trust.block_admitters``, as the dispatcher counts them) that have neither
-        ``agent:ready`` nor ``agent:working``, nor an open PR on their devloop branch, nor, with
-        a coordinator, an authorization of the coordinator that holds for their current text. A
-        block outside the open listing, or of another repository, is not judged."""
+        ``agent:ready`` nor ``agent:working``, nor an open PR of a trusted author, on their
+        devloop branch or on any branch that GitHub links to them as closing them (``prs`` of
+        ``issue_dependencies``), nor, with a coordinator, an authorization of the coordinator
+        that holds for their current text. A block outside the open listing, or of another
+        repository, is not judged."""
         home = (getattr(self.gh, 'repo', '') or '').lower()
         busy = {self.trust.ready_label, self.trust.working_label}
         found, authorized = [], {}
@@ -620,6 +623,9 @@ class Watcher:
                     continue
                 if set(issues[str(blocker)]['labels']) & busy or blocker in self._pr_issues:
                     continue
+                if any(isinstance(pr, dict) and self.trust.trusted(pr.get('author'))
+                       for pr in item.get('prs') or ()):
+                    continue  # an open PR on any branch, linked to it by GitHub
                 if self.trust.coordinator is not None:
                     if blocker not in authorized:
                         records = self._authorize_records(blocker)
