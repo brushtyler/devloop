@@ -94,7 +94,7 @@ class PortDeclarationTests(unittest.TestCase):
         # The adapter's methods outside the ports, documented in devloop/ports.py.
         self.assertEqual(public_methods(GitHub) - declared,
                          {'last_labeler', 'open_issues', 'issue_state',
-                          'issue_author', 'dated_comments', 'search_prs', 'edit_issue_body',
+                          'issue_author', 'issue_labels', 'dated_comments', 'search_prs', 'edit_issue_body',
                           'workflow_runs'})
 
     def test_the_dispatcher_depends_on_the_ports(self):

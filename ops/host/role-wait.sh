@@ -26,7 +26,10 @@
 #   "watch baseline:"). Il coordinatore solo sui suoi: la label agent:needs-operator aggiunta,
 #   la label agent:needs-coordinator aggiunta (un'issue che aspetta il suo /devloop authorize,
 #   #607), "il merge spetta all'operatore", un commento sull'issue degli allarmi
-#   ([run].alert_issue dell'overlay), un errore del watch;
+#   ([run].alert_issue dell'overlay), una risposta dell'operatore ("operator reply", #676: un suo
+#   commento di persona la cui prima riga, dopo l'intestazione, è un comando /devloop, o su
+#   un'issue o una PR in agent:needs-operator; lo distingue devloop watch, che conosce le label),
+#   un errore del watch. Non sugli altri commenti dell'operatore ("operator comment");
 # - solo per il coordinatore, una riga nuova di run.log (tail -n 200 come utente devloop, dal suo
 #   sudoers) con un Traceback, un allarme (ALERT:), un 401 o "Bad credentials", o il rifiuto
 #   dell'avvio ("devloop: ...", l'uscita del comando);
@@ -174,6 +177,8 @@ role_event() {
     fi
     [[ ${line,,} == *"merge spetta all'operatore"* ]] && return 0
     [[ $line == 'watch error:'* ]] && return 0
+    # Una risposta dell'operatore (#676): devloop watch la distingue da un commento qualunque.
+    [[ $line =~ ^(PR|issue)\ \#[0-9]+\ operator\ reply\ by\  ]] && return 0
     [ -n "$ALERT_ISSUE" ] && [[ $line =~ ^issue\ \#$ALERT_ISSUE\ (operator\ )?comment\ by\  ]] \
         && return 0
     return 1

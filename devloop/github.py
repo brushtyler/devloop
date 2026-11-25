@@ -302,6 +302,12 @@ class GitHub:
         return self._json('api', f'repos/{self.repo}/issues/{int(number)}', '--jq',
                           '{login: .user.login, pull_request: (.pull_request != null)}')
 
+    def issue_labels(self, number):
+        """The names of the labels of issue or PR ``number``, whatever its state, read fresh
+        (#676)."""
+        return self._json('api', f'repos/{self.repo}/issues/{int(number)}',
+                          '--jq', '[.labels[].name]') or []
+
     def comments_since(self, since):
         """Conversation comments of every issue and PR created or edited at ``since`` (ISO 8601,
         UTC) or later, as ``{id, login, number, body, pull_request}``, ``pull_request`` True

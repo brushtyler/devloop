@@ -6332,6 +6332,10 @@ class CoordinatorWaitTests(WakeUpCase):
                         'issue #7 labels +agent:ready -agent:needs-operator',
                         'new issue #10 [agent:ready] Fix the docs',
                         'issue #11 operator comment by brushtyler: about agent:needs-operator',
+                        # Any other note of the operator (#676), even one that names a reply.
+                        'issue #12 operator comment by brushtyler: /devloopapprove',
+                        'issue #13 operator comment by brushtyler: operator reply by brushtyler',
+                        'issue #14 comment by brushtyler: /devloop approve',
                         'issue #77 comment by brushtyler-devloop-dispatcher[bot]: ## Allarme'])
         self.answer(3, ['PR #12 labels +agent:needs-operator -agent:review',
                         'PR #13 CI fail @def5678'])
@@ -6360,6 +6364,10 @@ class CoordinatorWaitTests(WakeUpCase):
                      "all'operatore",
                      'issue #76 comment by brushtyler-devloop-dispatcher[bot]: ## Agent senza '
                      'utente dedicato',
+                     # A reply of the operator (#676): a /devloop command, or a comment on an
+                     # issue or PR in agent:needs-operator, as devloop watch marks it.
+                     'issue #672 operator reply by brushtyler: /devloop approve',
+                     'PR #16 operator reply by brushtyler: sì, procedi',
                      'watch error: 3 consecutive rounds could not read GitHub, the last valid '
                      'state is kept'):
             with self.subTest(line=line):

@@ -190,7 +190,7 @@ session. `coordinator-wait.sh --period 3600`, the wake-up of before, is the same
 It ends at the first of: a message in `to-coordinator/` (`casella:`, which it reports without
 consuming it, at once), an event of yours on GitHub (`evento:`: `agent:needs-operator` or
 `agent:needs-coordinator` added, "il merge spetta all'operatore", a comment on the issue of the
-alarms `[run].alert_issue`, an error of the watch), a new line of `run.log` with a `Traceback`, an
+alarms `[run].alert_issue`, an `operator reply`, an error of the watch), a new line of `run.log` with a `Traceback`, an
 `ALERT:`, a `401` or the refusal of the start (`log:`), the service not active (`servizio:`), or
 the end of the period, one hour by
 default (`periodo:`, `--period <seconds>`). Read its lines, act, then start it again. Exit 1
@@ -198,6 +198,13 @@ default (`periodo:`, `--period <seconds>`). Read its lines, act, then start it a
 `devloop-pinned watch` as devloop's user and a state file of its own,
 `coordinator-watch-state.json` of the `state_dir`: never run `devloop watch` with the
 supervisor's state file, whose events would be lost to the supervisor.
+
+An `operator reply` (#676) is a comment the operator wrote in person, without an attribution
+header, whose first line is a `/devloop` command (`approve`, `retry`, `recheck`, …) or which is
+on an issue or pull request in `agent:needs-operator` (at the previous read or now): the
+operator answering something that waits for them. Their other comments (`operator comment`) do
+not wake you: you read them at the periodic check. What to do at this wake-up is in Tasks,
+"Replies of the operator".
 
 Each start writes your heartbeat in `heartbeat/coordinator` of the mailbox: keep the wake-up
 running. A timer of the host, the watchdog of the roles, reads the heartbeats every 5 minutes
@@ -358,6 +365,19 @@ the mailbox.
     the current text and a check that declares `trust_policy: covered`, the decision is taken:
     you may authorize the issue and queue it (or let the supervisor do it) when it is time, as
     any other. Without the operator's approve, or with `uncovered`, do not authorize it.
+- **Replies of the operator** (#676). At an `operator reply` (`evento:`), read the comment and
+  the issue or pull request it is on.
+  - A `/devloop` command: follow its outcome, the dispatcher's record or answer at its next
+    tick (for example the `approve` recorded, the round started again). A command refused or
+    without an answer after a few ticks you report to the operator, in `to-operator/`.
+  - When you had stopped that issue waiting for the operator (an issue for them in
+    `agent:needs-operator`, or one you left out of the queue until their `/devloop approve`),
+    and the reply gives what was missing, put it back in the queue as you would have done
+    without the wait (for an issue that changes the trust policy, "Authorize the work"):
+    authorize it and queue it, or let the supervisor do it, in the order of the priorities. The
+    labels follow the rules of the task that stopped it; a decision that stays the operator's
+    stays theirs.
+  - A reply that asks something of you, answer it; one that only informs, note it.
 - Verify the work of the supervisor: its decisions on the escalations, its grants within the
   caps, its delegated merges, its labels, the order in which it puts the work in the queue. When
   something does not convince you, ask it in the mailbox, and decide what is yours to decide;

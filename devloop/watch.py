@@ -13,7 +13,11 @@ changed into lines ``HH:MM <type> #N <detail>`` (UTC):
   own app (#325), reported with its verdict and round; a trusted user's native ``APPROVED`` or
   ``CHANGES_REQUESTED``;
 - comments of trusted users and of devloop's apps, those a trusted user wrote in person marked
-  ``operator comment``; ledger records (#133) are left out;
+  ``operator comment``, or ``operator reply`` (#676) when the first line after the attribution
+  header is a ``/devloop`` command or the issue or PR has ``agent:needs-operator`` (at the
+  previous read or now; read from GitHub for one outside the open listings, closed or beyond
+  their limit): the coordinator's wake-up wakes on a reply, not on every note; ledger records
+  (#133) are left out;
 - issues and PRs opened, closed or merged;
 - an orphan prerequisite (#671): an issue with ``agent:ready`` blocked ("blocked by", as the
   dispatcher trusts it) by an open issue of the repository that has neither ``agent:ready`` nor
@@ -81,7 +85,9 @@ from .github import GitHubError, GitHubNotFound, author_login
 from .ledger import TITLES as ledger_titles
 from .ledger import parse_branch
 from .markdown import read_marker
+from .config import Labels
 from .planning import label_names
+from .supervision import command_line
 
 STATE_VERSION = 3
 # In the state's ``closed``: an issue of an untrusted author, whose admission is read again.
@@ -150,8 +156,8 @@ class Trust:
     authors outside the trusted ones are followed."""
 
     def __init__(self, users, writers, ready_label, *, supervisor=None, coordinator=None,
-                 devloop=(), preflight=False, working_label='agent:working',
-                 branch_prefix='agent/issue-'):
+                 devloop=(), preflight=False, operator_labels=Labels().operator(),
+                 working_label='agent:working', branch_prefix='agent/issue-'):
         self.working_label = working_label
         self.branch_prefix = branch_prefix
         self.users = frozenset(users)
@@ -163,6 +169,9 @@ class Trust:
         self.coordinator = coordinator
         self.devloop = frozenset(devloop)
         self.preflight = bool(preflight)
+        # The labels that hand an issue or a PR to the operator (#676, ``Labels.operator``): a
+        # comment of the operator on one is a reply.
+        self.operator_labels = frozenset(operator_labels)
 
     @classmethod
     def from_config(cls, cfg):
@@ -197,7 +206,8 @@ class Trust:
                    | {supervisor, coordinator}) - {None}
         return cls(cfg.trusted_users, writers, cfg.labels.ready, supervisor=supervisor,
                    coordinator=coordinator, devloop=devloop, preflight=bool(cfg.preflight),
-                   working_label=cfg.labels.working, branch_prefix=cfg.branch_prefix)
+                   operator_labels=cfg.labels.operator(), working_label=cfg.labels.working,
+                   branch_prefix=cfg.branch_prefix)
 
     def ready_admitters(self, author):
         """The logins whose ``agent:ready`` admits an issue opened by ``author``, as the
@@ -748,7 +758,8 @@ class Watcher:
 
     def _closed_lines(self, kind, old, new, closed):
         """Lines for the visible issues or PRs no longer open. One still open but beyond the
-        listing's limit stays in the state as it was. Only GitHub's answer that the object does
+        listing's limit stays in the state as it was, marked ``carried``: its labels are those
+        of an older read (``_labels_of``). Only GitHub's answer that the object does
         not exist (deleted, transferred) gives ``no longer open``; a failed read fails the
         round, so the next one asks again."""
         lines = []
@@ -766,7 +777,7 @@ class Watcher:
             except GitHubNotFound:
                 outcome = 'no longer open'  # deleted or transferred
             if outcome == 'open':
-                new[number] = prev
+                new[number] = dict(prev, carried=True)
                 continue
             title = f': {prev["title"]}' if prev.get('title') else ''
             lines.append(f'{kind} #{number} {outcome or "no longer open"}{title}')
@@ -778,6 +789,7 @@ class Watcher:
         floor = previous['floor']
         seen = set(previous['seen'])
         approvals = {}  # admissions of closed external issues read in this round
+        read = {}  # labels of the issues and PRs outside the listings read in this round
         lines = []
         for comment in comments:
             cid = comment['id']
@@ -791,7 +803,8 @@ class Watcher:
             kind = self._object_kind(number, old, prs, issues, closed, approvals)
             if kind is None:
                 continue  # an untrusted author's issue or PR, not admitted
-            line = self._comment_line(kind, number, login, comment.get('body') or '')
+            line = self._comment_line(kind, number, login, comment.get('body') or '',
+                                      lambda: self._labels_of(number, old, prs, issues, read))
             if line:
                 lines.append(line)
         kept = sorted(seen)
@@ -819,6 +832,28 @@ class Watcher:
             approvals[number] = bool(self._approved(number))
         return 'issue' if approvals[number] else None
 
+    def _labels_of(self, number, old, prs, issues, read):
+        """The labels of issue or PR ``number`` (#676): those of the open listings now and at
+        the previous read; for one outside the listings now (closed, beyond the listing's
+        limit) also those GitHub gives now, read once per round (``read``) and never
+        remembered, since they change after the close too. The labels of an entry kept in the
+        state beyond the listing's limit (``carried``, ``_closed_lines``) are those of an older
+        read and do not count. One GitHub no longer has has none from GitHub; a failed read
+        fails the round, so the next one asks again."""
+        current = prs.get(number) or issues.get(number)
+        entries = [entry for entry in (current, old['prs'].get(number),
+                                       old['issues'].get(number))
+                   if entry is not None and not entry.get('carried')]
+        labels = {name for entry in entries for name in entry.get('labels') or ()}
+        if current is not None and not current.get('carried'):
+            return labels
+        if number not in read:
+            try:
+                read[number] = set(self.gh.issue_labels(int(number)))
+            except GitHubNotFound:
+                read[number] = set()  # deleted or transferred
+        return labels | read[number]
+
     def _resolve(self, number):
         """``PR`` or ``issue`` for issue or PR ``number`` of a trusted author, ``EXTERNAL`` for
         an issue of an untrusted author (its admission is read apart), None for an untrusted
@@ -832,7 +867,9 @@ class Watcher:
             return kind
         return EXTERNAL if kind == 'issue' else None
 
-    def _comment_line(self, kind, number, login, body):
+    def _comment_line(self, kind, number, login, body, labels=set):
+        """``labels`` gives the labels of the issue or PR: it is called only for a comment of
+        the operator in person that is no command, since it can read them from GitHub."""
         if (read_marker(body, 'ledger') is not None
                 or first_line(body).startswith(LEDGER_TITLES)):
             return None  # the ledger (#133): recorded on GitHub, too frequent to report
@@ -845,6 +882,11 @@ class Watcher:
                         f'{review["round"]} @{review["head_sha"][:7]}')
         operator = login in self.trust.users and not body.lstrip().startswith('> [!NOTE]')
         what = 'operator comment' if operator else 'comment'
+        # A reply of the operator (#676): a ``/devloop`` command, read as the dispatcher reads
+        # commands (``command_line``), or any comment on an issue or PR handed to the operator.
+        if operator and (command_line(body).split()[:1] == ['/devloop']
+                         or self.trust.operator_labels & set(labels())):
+            what = 'operator reply'
         return f'{kind} #{number} {what} by {login}: {clean(first_line(body), TEXT_LEN)}'
 
 
