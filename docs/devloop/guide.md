@@ -2390,7 +2390,8 @@ so the phone is never a channel of commands.
 - **A service down.** A dead process cannot warn: the units of the service
   (`ops/host/devloop.service`, `ops/host/devloop@.service`) have an
   `OnFailure=devloop-failed@<project>.service`, which runs `devloop notify --service-failed
-  <project>` through the devloop command of the host. With `Restart=on-failure` systemd puts the
+  <project>` through the devloop command of the host (`_default` for an installation without
+  `PROJECT`). With `Restart=on-failure` systemd puts the
   service in the failed state only when it stops restarting it: the exit code 4 of a stopped
   loop, or the limit of its restarts. A start refused at each restart is told by devloop itself,
   above.

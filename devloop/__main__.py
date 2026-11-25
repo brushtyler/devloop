@@ -1066,7 +1066,7 @@ def run_notify(parser, args):
     service in the failed state (``ops/host/devloop-failed@.service``)."""
     if args.key is not None and not notify.KEY.fullmatch(args.key):
         parser.error('notify: --key takes letters, digits and _ . : @ / - (at most 100)')
-    if args.service_failed is not None and not notify.KEY.fullmatch(args.service_failed):
+    if args.service_failed is not None and not notify.PROJECT.fullmatch(args.service_failed):
         parser.error('notify: --service-failed takes the name of a project')
     given = [args.message is not None, args.test, args.service_failed is not None]
     if sum(given) != 1:

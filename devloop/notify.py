@@ -50,6 +50,9 @@ LOCK_FILE = 'notify.lock'
 MAX_TEXT = 3500
 # A key: letters, digits and a few separators, so that it is safe in a log line and in JSON.
 KEY = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.:@/-]{0,99}')
+# The name of a project of the host, as ``ops/host/devloop-command`` takes it: the PROJECT of
+# ``ops/lib.sh``, or ``_default``, the instance of an installation without PROJECT.
+PROJECT = re.compile(r'_default|[a-z0-9]([a-z0-9-]{0,14}[a-z0-9])?')
 # The form of a bot token of Telegram: its number, ':' and its secret.
 TOKEN = re.compile(r'[0-9]{1,20}:[A-Za-z0-9_-]{20,100}')
 

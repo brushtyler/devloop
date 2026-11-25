@@ -398,9 +398,17 @@ class CommandTests(unittest.TestCase):
         state = json.loads((Path(self.dir.name) / notify.STATE_FILE).read_text())
         self.assertIn('service-failed:widget', state['keys'])
 
+    def test_the_service_failed_without_project(self):
+        # Without PROJECT the instance of the unit is _default (ops/lib.sh): its notice too.
+        self.assertEqual(self.run_cli('--service-failed', '_default'), 0)
+        self.assertIn('progetto _default', FakeChannel.sent[0])
+        state = json.loads((Path(self.dir.name) / notify.STATE_FILE).read_text())
+        self.assertIn('service-failed:_default', state['keys'])
+
     def test_arguments_not_valid(self):
         for argv in ((), ('x', '--test'), ('x', '--key', 'a b'), ('   ',),
-                     ('--service-failed', '../x')):
+                     ('--service-failed', '../x'), ('--service-failed', 'Widget'),
+                     ('--service-failed', '_other')):
             with self.subTest(argv=argv):
                 self.assertEqual(self.run_cli(*argv), 2)
         self.assertEqual(FakeChannel.sent, [])
