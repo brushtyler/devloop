@@ -1192,17 +1192,17 @@ Which modes exist, and that choosing one is the operator's decision, is set by
 - **Merge directives and record.** What devloop checks just before a merge, how it merges and
   what it records: [Merge directives and record](protocol.md#merge-directives-and-record).
 - **From `"off"` to `"strict"` or `"auto"`.** A new mode applies after a
-  [restart](#changes-while-the-loop-runs), and only to what devloop decides from then on. The PRs
-  already ready whose merge was the operator's because of the mode stay where they are: they keep
-  the dispatcher's `agent:needs-operator`, with its comment "The merge is the operator's", which
-  holds devloop's merge, and the dispatcher removes that label only when the readiness decays
-  ([Ready PRs whose merge is the operator's](#ready-prs-whose-merge-is-the-operators)). For
-  devloop to merge one of them, the operator removes `agent:needs-operator` from it: devloop
-  merges it from the next tick if the [merge directives](protocol.md#merge-directives-and-record)
-  still hold. The other reasons of that comment still hold in the new mode: an operator-only
-  path, a level whose override is `"off"`, work restarted after a
-  [conclave](#after-a-unanimous-decision), a reviewer's `trust_policy` not cleared. Removing the
-  label gives back to devloop only the PRs held by the mode; the others stay the operator's.
+  [restart](#changes-while-the-loop-runs). For the PRs already ready that carry the dispatcher's
+  `agent:needs-operator`, with its comment "The merge is the operator's", devloop recomputes the
+  reasons on the new configuration from the tick after the restart (#673): when none is left, it
+  removes its own label itself and edits that comment, saying that the merge passed to devloop
+  ([Ready PRs whose merge is the operator's](#ready-prs-whose-merge-is-the-operators)); there is
+  no need to remove it by hand. The merge follows on a later tick, if the
+  [merge directives](protocol.md#merge-directives-and-record) still hold. The other reasons of
+  that comment still hold in the new mode: an operator-only path, a level whose override is
+  `"off"`, work restarted after a [conclave](#after-a-unanimous-decision), a reviewer's
+  `trust_policy` not cleared. The PRs held by one of them keep the label and stay in the
+  operator's queue.
 
 ### Closing the issue
 
