@@ -2514,30 +2514,35 @@ The [ledger](protocol.md#evidence-and-telemetry) records (`## devloop ledger`, o
 in Italian, whatever the [language](reference.md#language-of-the-texts) of the project today) are not
 reported: they are too frequent. Trust follows [AGENTS.md](../../AGENTS.md): an issue or PR counts if its author is in
 `trusted_users` or is one of devloop's apps (the `[apps]` logins of the agents and the
-dispatcher; not the [merger app](reference.md#the-merger-app), which only merges: its comments and the
-`review` records naming it are ignored). Anyone else's issue or PR
+dispatcher, and with `[roles.coordinator]` the [coordinator's](reference.md#the-coordinator-app),
+#648; not the [merger app](reference.md#the-merger-app), which only merges: its comments and the
+`review` records naming it are ignored). The coordinator's issues and comments, its `/devloop`
+commands included, are reported as the agents' are, but it writes no record of devloop's: a
+`review` record in its comment is reported as a plain comment. Anyone else's issue or PR
 produces only `new issue #N by an untrusted author (ignored)` (or `new PR`), with no title nor
 content, and nothing after it. The exception is an issue that the dispatcher admits (#623): its
 latest `agent:ready`, whether the label is still there or the dispatcher already replaced it with
 `agent:working`, was added by one of the logins whose `agent:ready` the dispatcher accepts on an
 issue of that author. A user in `trusted_users` always; on an issue of one of devloop's apps,
-the [coordinator's](reference.md#the-coordinator-app)
-included, the supervisor's identity and the coordinator's too, on the coordinator's own only with
-a [readiness check](#readiness-check-before-implementation). With `[roles.coordinator]` the supervisor's
+the supervisor's identity and the coordinator's too. With `[roles.coordinator]` the supervisor's
 label counts only while an authorization of the coordinator (`/devloop authorize`, #607)
 recorded by the dispatcher holds for the current title and body. While so it is reported
 (`issue #N admitted with agent:ready by <login>`), its labels, closure and trusted comments, never
 its title. A later `agent:ready` added by anyone else ends the admission. The labeled events of an
 external issue are read when it is first seen and whenever its labels change, with its author,
 text and authorization records when the label is the supervisor's or the coordinator's: an
-authorization given or voided while the labels stay the same is seen at their next change. The
-coordinator's app is not one of the trusted authors: its issues are external issues, and its
-comments are not reported. Labels, heads, CI and closures of a trusted issue or PR are
+authorization given or voided while the labels stay the same is seen at their next change.
+Labels, heads, CI and closures of a trusted issue or PR are
 reported whoever changed them; comments and reviews only when their author is trusted or a
 devloop app. A trusted comment on an issue or PR outside the open listings (closed before the
 baseline, say) is reported too: the watcher reads its author once and remembers it. On such an
 external issue the admission can change while it stays closed, so the watcher reads its latest
-`agent:ready` again in every round with a new trusted comment on it.
+`agent:ready` again in every round with a new trusted comment on it. The state records the
+trusted authors: when they change (`trusted_users`, `[roles.coordinator]` added or removed, or a
+state written before #648), the authors read for the objects outside the open listings are read
+again, and an open issue or PR whose author has become trusted is reported once as `issue #N
+author now trusted [labels] title` (or `PR #N`, with its reviews), then followed as any trusted
+one.
 
 Two modes:
 
