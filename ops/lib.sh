@@ -49,6 +49,10 @@ OPS_WATCHDOG_UNITS='devloop-role-watchdog@.service devloop-role-watchdog@.timer 
 # messaggi per destinatario, ciascuna con la sua done/ per i messaggi letti. Tutte di root, del
 # gruppo COORDINATION_GROUP (supervisore e coordinatore, nessun altro), 2770.
 COORDINATION_BOXES='to-coordinator to-supervisor'
+# La cartella delle comunicazioni dei ruoli all'operatore (#663), accanto alle due caselle, con la
+# sua done/ e gli stessi permessi: i ruoli ci scrivono, l'operatore la legge dalla sua shell.
+# Non è fra COORDINATION_BOXES: il watchdog dei ruoli non ci scrive.
+COORDINATION_OPERATOR_BOX=to-operator
 # I battiti dei ruoli (#602): COORDINATION_DIR/heartbeat/<ruolo>, che role-wait.sh scrive a ogni
 # avvio e il watchdog dei ruoli legge; la directory è come le caselle, senza done/.
 COORDINATION_HEARTBEAT=heartbeat
@@ -1090,14 +1094,25 @@ ensure_traverse_acl() {
     fi
 }
 
+# coordination_dirs: le directory della casella, una per riga: COORDINATION_DIR, una directory di
+# messaggi per destinatario (COORDINATION_BOXES e COORDINATION_OPERATOR_BOX, #663) con la sua
+# done/, e quella dei battiti (#602, COORDINATION_HEARTBEAT).
+coordination_dirs() {
+    local box
+    printf '%s\n' "$COORDINATION_DIR"
+    for box in $COORDINATION_BOXES $COORDINATION_OPERATOR_BOX; do
+        printf '%s\n' "$COORDINATION_DIR/$box" "$COORDINATION_DIR/$box/done"
+    done
+    printf '%s\n' "$COORDINATION_DIR/$COORDINATION_HEARTBEAT"
+}
+
 # ensure_coordination USER: la casella fra supervisore e coordinatore (#543). Il gruppo
-# COORDINATION_GROUP con dentro USER, e COORDINATION_DIR con una directory di messaggi per
-# destinatario (COORDINATION_BOXES) e la sua done/, e quella dei battiti (#602,
-# COORDINATION_HEARTBEAT), tutte root:COORDINATION_GROUP 2770: i due
-# ruoli si scrivono a vicenda, nessun altro utente vi entra. Una voce che è un link o un file al
+# COORDINATION_GROUP con dentro USER, e le directory di coordination_dirs, tutte
+# root:COORDINATION_GROUP 2770: i due ruoli si scrivono a vicenda e scrivono all'operatore in
+# to-operator/ (#663), nessun altro utente vi entra. Una voce che è un link o un file al
 # posto di una directory (la casella di prima, con un file per destinatario) ferma lo script.
 ensure_coordination() {
-    local user=$1 box dir actual
+    local user=$1 dir actual
     if getent group "$COORDINATION_GROUP" >/dev/null; then
         ok "il gruppo $COORDINATION_GROUP esiste"
     else
@@ -1109,10 +1124,7 @@ ensure_coordination() {
         # Vale dalla prossima sessione dell'utente.
         run usermod -aG "$COORDINATION_GROUP" "$user"
     fi
-    for dir in "$COORDINATION_DIR" \
-        $(for box in $COORDINATION_BOXES; do
-              printf '%s\n' "$COORDINATION_DIR/$box" "$COORDINATION_DIR/$box/done"
-          done) "$COORDINATION_DIR/$COORDINATION_HEARTBEAT"; do
+    for dir in $(coordination_dirs); do
         if [ -L "$dir" ] || { [ -e "$dir" ] && ! [ -d "$dir" ]; }; then
             die "$dir non è una directory: la casella di prima va spostata (ops/host/migrate.md, \"Casella fra i ruoli e sveglia del coordinatore (#543)\"); niente cambiato da qui"
         fi

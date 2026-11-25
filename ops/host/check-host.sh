@@ -511,9 +511,7 @@ for user in $members; do
         fail "un utente che non è un ruolo di questo progetto è nel gruppo $COORDINATION_GROUP: la casella è solo del supervisore e del coordinatore del progetto (il nome e il comando con --verbose; ops/host/migrate.md, \"Utenti dei ruoli per progetto\")"
     fi
 done
-for dir in "$COORDINATION_DIR" $(for box in $COORDINATION_BOXES; do
-                                     printf '%s\n' "$COORDINATION_DIR/$box" "$COORDINATION_DIR/$box/done"
-                                 done) "$COORDINATION_DIR/$COORDINATION_HEARTBEAT"; do
+for dir in $(coordination_dirs); do
     if [ -L "$dir" ] || ! [ -d "$dir" ]; then
         fail "$dir non esiste o non è una directory (setup-supervisor.sh)"
         continue
