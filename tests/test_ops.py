@@ -2849,7 +2849,8 @@ class DryRunTests(OpsTestCase):
             self.assertIn(f'[dry-run] install -d -m 1770 -o root -g opsdry-noagent '
                           f'{agent}/{name}\n', out)
         for name in ('.local', '.local/bin'):
-            self.assertIn(f'[dry-run] install -d -m 755 -o root -g root {agent}/{name}\n', out)
+            self.assertIn(f'[dry-run] install -d -m 755 -o root -g opsdry-noagent '
+                          f'{agent}/{name}\n', out)
         self.assertNotIn(f'-m 755 -o root -g root {agent}/.claude\n', out)
         # #517: each sealed entry that does not exist is a placeholder of root: a file when
         # its name has a suffix ({} for a JSON file), a directory otherwise.
@@ -2942,6 +2943,37 @@ class DryRunTests(OpsTestCase):
         self.assertNotIn('chown -hR root:root', out)
         self.assertIn('devloop non parte finché non si riesegue lo script senza --unseal', out)
         self.assertEqual(self.mutating_calls(), [])
+
+    def test_setup_agent_user_leaves_the_local_directory_as_it_left_it(self):
+        # #680: a second run without --unseal finds ~/.local and ~/.local/bin as the first left
+        # them, root's, of the agent user's group, 755: it changes neither their owner nor their
+        # mode. A fake stat and find show them, and what ~/.local holds, so.
+        self.fake_host('classic sudo', users=(FAKE_AGENT,))
+        agent = self.home / 'agent'
+        local = agent / '.local'
+        (local / 'bin').mkdir(parents=True)
+        paths = '|'.join(shlex.quote(str(p)) for p in (local, local / 'bin'))
+        self.shim('stat', f'''if [ "$1" = -c ] && [ $# -eq 3 ]; then
+    case "$3" in {paths})
+        printf '%s\\n' "$2" | sed 's/%a/755/g; s/%U/root/g; s/%G/{FAKE_AGENT}/g'; exit 0 ;;
+    esac
+fi
+exec {shlex.quote(STAT)} "$@"''')
+        # unsealed of the script: nothing in ~/.local that is not root's and of the group, or
+        # that the group cannot read.
+        find = shutil.which('find') or '/usr/bin/find'
+        self.shim('find', f'''case "$1" in {shlex.quote(str(local))}) exit 0 ;; esac
+exec {shlex.quote(find)} "$@"''')
+        params = self.params(DEVLOOP_USER=ME, AGENT_USER=FAKE_AGENT)
+        done = self.run_script('host/setup-agent-user.sh', '--dry-run', '--params', str(params))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        out = done.stdout
+        self.assertIn(f'ok: {local}: 755, root:{FAKE_AGENT}', out)
+        self.assertIn(f'ok: {local / "bin"}: 755, root:{FAKE_AGENT}', out)
+        self.assertIn(f'ok: {local}: di root, leggibile da {FAKE_AGENT}, non scrivibile', out)
+        self.assertEqual([line for line in out.splitlines()
+                          if re.match(r'\[dry-run\] (chown|chmod|install)\b', line)
+                          and str(local) in line], [])
 
     def test_setup_agent_user_seals_the_configuration_of_agy(self):
         # #517: ~/.gemini/config, 700 of the agent user on the host, holds the plugins agy

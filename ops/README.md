@@ -563,7 +563,8 @@ configurazione o i binari delle CLI per i turni dopo, per esempio aggiungendo a
   di root, del gruppo di `devloop-agent`, `1770`. Le CLI vi salvano i loro login con un file
   temporaneo e un `rename` (`.credentials.json` di claude, `auth.json` di codex con `auth.lock`),
   e vi creano lock, cache e temporanei; `devloop-agent` non vi rinomina né rimuove ciò che è di
-  root, né le directory stesse. `~/.local` e `~/.local/bin` sono di root, `755`;
+  root, né le directory stesse. `~/.local` e `~/.local/bin` sono di root, del gruppo di
+  `devloop-agent`, `755`, come vuole la sigillatura qui sotto (#680);
 - ciò che porta istruzioni, configurazione, plugin o binari (`AGENT_CLI_SEALED` di `ops/lib.sh`,
   come in `devloop/agentuser.py`: `~/.claude/settings.json`, scritto senza aggiornamenti
   automatici, `~/.claude/CLAUDE.md`, `rules`, `agents`, `commands`, `skills`, `hooks`,

@@ -135,8 +135,10 @@ else
         ensure_acl "$AGENT_HOME/$dir" "g::rwx" "group::rwx"
     done
     step "~/.local di $AGENT_USER: di root (#438)"
+    # Del gruppo dell'utente degli agent, come la sigillatura qui sotto vuole .local e ciò che
+    # contiene (#680): con un altro gruppo i due passi si annullerebbero a ogni esecuzione.
     for dir in .local .local/bin; do
-        owned "$AGENT_HOME/$dir" 755 root root
+        owned "$AGENT_HOME/$dir" 755 root "$AGENT_GROUP"
     done
 fi
 
