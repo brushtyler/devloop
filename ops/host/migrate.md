@@ -3235,3 +3235,103 @@ Il servizio e l'installazione del progetto restano; un `setup-devloop.sh` succes
 poi `rmdir <DEVLOOP_PROJECTS_DIR>`. Il servizio non li usa; gli avvisi di devloop nominano ancora
 `devloop pin`, che senza il comando si fa con il comando lungo dell'unità (`ExecStart` dell'unità o
 della drop-in del progetto, senza `run`, come `DEVLOOP_USER`).
+
+## Avvisi all'operatore (#593)
+
+Con #593 devloop avvisa l'operatore anche fuori da GitHub
+([docs/devloop/guide.md](../../docs/devloop/guide.md#notices-to-the-operator)): il comando
+`devloop notify`, con il canale Telegram di `[notify]` dell'overlay, solo in uscita; la menzione
+dei login di `operator_mentions` nei commenti che chiedono una decisione; l'`OnFailure=` delle
+unità del servizio verso la nuova unità template [`devloop-failed@.service`](devloop-failed@.service),
+che esegue `devloop notify --service-failed <progetto>` con il comando devloop dell'host (#588);
+la regola `devloop-pinned notify *` nei sudoers di supervisore e coordinatore (scelta N2 (a)
+dell'operatore: un solo bot, il token leggibile solo dall'utente devloop).
+
+Il codice di devloop non ha bisogno d'altro: senza `[notify]` un avviso è solo una riga nel log,
+senza `operator_mentions` i commenti non menzionano nessuno. Il passo serve all'unità e ai sudoers
+installati sull'host, che restano quelli di prima finché gli script di setup non li riscrivono:
+fino ad allora `check-host.sh` li segnala diversi da quelli generati e segnala come errore che
+`devloop-failed@.service` non esiste. devloop mergia la PR di #593 come le altre, ma non fa il pin
+automatico di quel commit né dei successivi finché l'operatore non fa il pin a mano dopo il passo
+([Ogni cambio con un passo sull'host](#ogni-cambio-con-un-passo-sullhost)).
+
+### Comandi
+
+Come root, dal checkout dell'operatore aggiornato (`git -C <checkout> fetch origin` e
+`git -C <checkout> checkout --detach origin/main`, con il merge di #593), **per ogni progetto
+dell'host**, con il suo file di parametri `<parametri>`:
+
+1. **l'unità**, prima con `--dry-run`: l'elenco delle azioni deve contenere, oltre a quanto lo
+   script già ricorda come da fare a mano, solo l'unità del servizio (`OnFailure=`), la nuova
+   `SYSTEMD_DIR/devloop-failed@.service` (al primo progetto dell'host) e `systemctl
+   daemon-reload`. Un'altra azione vuol dire che l'host non corrisponde ai parametri: ci si ferma
+   e si chiede all'operatore. Il servizio non si riavvia per questo: `OnFailure=` vale dal
+   `daemon-reload`.
+
+   ```bash
+   sudo bash <checkout>/ops/host/setup-devloop.sh --params <parametri> --dry-run
+   sudo bash <checkout>/ops/host/setup-devloop.sh --params <parametri>
+   ```
+
+2. **i sudoers dei ruoli**: quello del supervisore e, se c'è, quello del coordinatore con la sua
+   copia di root di `ops/`, che `setup-coordinator.sh` aggiorna insieme:
+
+   ```bash
+   sudo bash <checkout>/ops/host/setup-supervisor.sh --params <parametri> --dry-run
+   sudo bash <checkout>/ops/host/setup-supervisor.sh --params <parametri>
+   sudo bash <checkout>/ops/host/setup-coordinator.sh --params <parametri> --dry-run
+   sudo bash <checkout>/ops/host/setup-coordinator.sh --params <parametri>
+   ```
+
+3. **la verifica**: `check-host.sh` non dà nessun `ERRORE`, con le righe `ok: … coincide con
+   ops/host/devloop-failed@.service` e, nel passo *Token del bot degli avvisi*, `l'overlay non ha
+   [notify]` finché il canale non c'è:
+
+   ```bash
+   sudo bash <checkout>/ops/host/check-host.sh --params <parametri> --no-apps
+   ```
+
+4. **il pin a mano**, a loop fermo, del commit di #593 o di uno successivo, come utente
+   `DEVLOOP_USER`, poi l'avvio: `systemctl stop <SERVICE_NAME>`, `devloop pin origin/main` (con
+   più progetti `devloop --project <progetto> pin origin/main`), `systemctl start
+   <SERVICE_NAME>`. Il pin a mano fa riprendere il pin automatico. `devloop status` mostra le
+   righe `notify: no channel …` e `operator mentions: none …`.
+
+### Il canale e le menzioni (dell'operatore)
+
+Non fanno parte del passo: il bot, il token e i login li sceglie l'operatore, quando vuole, e
+il token non passa mai dalla sessione di un agent. Come in
+[docs/devloop/guide.md](../../docs/devloop/guide.md#devloop-notify-and-telegram):
+
+1. il bot con `@BotFather` (`/newbot`), il `chat_id` da un messaggio mandato al bot e letto a mano
+   una volta con `getUpdates`;
+2. il token da solo in un file della key_dir dell'utente devloop (`DEVLOOP_KEY_DIR`), di
+   `DEVLOOP_USER`, mode 600, scritto senza passare dalla riga di comando (per esempio con un
+   editor, come `DEVLOOP_USER`);
+3. nell'overlay dello `state_dir`, come `DEVLOOP_USER`:
+
+   ```toml
+   operator_mentions = ["<login dell'operatore>"]
+
+   [notify]
+   backend = "telegram"
+   chat_id = <chat_id>
+   token_file = "<percorso assoluto del file del token>"
+   ```
+
+   Un valore non valido ferma devloop all'avvio: si verifica con `devloop status` prima di
+   riavviare il loop, che legge le due chiavi al proprio avvio (`devloop notify` le rilegge a ogni
+   esecuzione);
+4. la prova: `devloop notify --test` (con più progetti `devloop --project <progetto> notify
+   --test`) esce con 0 e il messaggio di prova arriva sul telefono; `check-host.sh` dà `ok:
+   token_file di [notify]: 600, <DEVLOOP_USER>`;
+5. nelle impostazioni del repository su GitHub, *Security*, attivare **Private vulnerability
+   reporting** ([SECURITY.md](../../SECURITY.md)) e verificare che la notifica di una nuova
+   advisory arrivi davvero sul telefono, con GitHub Mobile. Se non arriva, lo si scrive
+   nell'issue #593 o in una nuova: serve il ping su Telegram anche per le advisory (scelta N3).
+
+**Rollback.** I sudoers e l'unità del servizio di prima si rimettono rieseguendo i passi 1 e 2 dal
+checkout della versione di prima; poi, come root, `rm <SYSTEMD_DIR>/devloop-failed@.service` e
+`systemctl daemon-reload`. `[notify]` e `operator_mentions` si tolgono dall'overlay **prima** del
+pin della copia di prima, che li rifiuta (`unknown key`). Il bot si revoca con `@BotFather`
+(`/revoke` o `/deletebot`), e il file del token si rimuove.

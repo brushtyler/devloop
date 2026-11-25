@@ -28,13 +28,13 @@ VERIFIED_ARCH=aarch64
 OPS_STATE_DIR=.devloop
 
 # I segnaposto @NOME@ che `render` sostituisce nei file dichiarativi (unità, sudoers).
-OPS_TEMPLATE_VARS='REPO DEVLOOP_USER SUPERVISOR_USER AGENT_USER COORDINATOR_USER DEVLOOP_HOME AGENT_HOME DEVLOOP_CLONE STATE_DIR STATE_PATH LAUNCHER_CMD DEVLOOP_PATH AGENT_PATH SERVICE_NAME REPO_LOCK_DIR REPO_LOCK_GROUP COORDINATOR_OPS_DIR COORDINATION_DIR WATCHDOG_USER WATCHDOG_OPS_DIR DEVLOOP_PROJECTS_DIR'
+OPS_TEMPLATE_VARS='REPO DEVLOOP_USER SUPERVISOR_USER AGENT_USER COORDINATOR_USER DEVLOOP_HOME AGENT_HOME DEVLOOP_CLONE STATE_DIR STATE_PATH LAUNCHER_CMD DEVLOOP_PATH AGENT_PATH SERVICE_NAME REPO_LOCK_DIR REPO_LOCK_GROUP COORDINATOR_OPS_DIR COORDINATION_DIR WATCHDOG_USER WATCHDOG_OPS_DIR DEVLOOP_PROJECTS_DIR DEVLOOP_COMMAND OPS_INSTANCE'
 
 # I file di ops/ che check-host.sh legge (#530): setup-coordinator.sh li copia, con i parametri
 # (params.env), nella directory di root COORDINATOR_OPS_DIR, da cui il coordinatore esegue come
 # root `check-host.sh --read-only`, mai dal clone di devloop né da un checkout scrivibile. Con
 # loro il risveglio dei ruoli (role-wait.sh, #602) e il suo involucro coordinator-wait.sh (#543).
-OPS_COORDINATOR_FILES='lib.sh host/check-host.sh host/role-wait.sh host/coordinator-wait.sh host/role-watchdog.sh host/sudoers-supervisor host/sudoers-agent host/sudoers-coordinator host/tmpfiles-devloop-repos.conf host/devloop.service host/devloop@.service host/devloop-project.conf host/devloop-role-watchdog@.service host/devloop-role-watchdog@.timer host/devloop-role-watchdog-failed@.service host/role-watchdog-project.conf host/devloop-command host/devloop-command-project'
+OPS_COORDINATOR_FILES='lib.sh host/check-host.sh host/role-wait.sh host/coordinator-wait.sh host/role-watchdog.sh host/sudoers-supervisor host/sudoers-agent host/sudoers-coordinator host/tmpfiles-devloop-repos.conf host/devloop.service host/devloop@.service host/devloop-project.conf host/devloop-role-watchdog@.service host/devloop-role-watchdog@.timer host/devloop-role-watchdog-failed@.service host/role-watchdog-project.conf host/devloop-command host/devloop-command-project host/devloop-failed@.service'
 # Il risveglio del supervisore (#602): setup-supervisor.sh copia questi file, con i parametri,
 # nella directory di root SUPERVISOR_OPS_DIR, da cui il supervisore lo esegue.
 OPS_SUPERVISOR_FILES='lib.sh host/role-wait.sh'
@@ -719,6 +719,9 @@ ops_load_params() {
         UNIT_TEMPLATE=devloop.service
         DROPIN_FILE=''
     fi
+    # L'unità dell'avviso di un servizio caduto (#593), l'OnFailure= del servizio: template,
+    # comune ai progetti dell'host, con il progetto come istanza.
+    FAILED_UNIT_FILE=$SYSTEMD_DIR/devloop-failed@.service
     # La directory dei lock per repository (ADR 0006, R8): comune agli utenti devloop dell'host,
     # fuori dalle loro home e dagli state_dir, almeno due livelli sotto la radice.
     [[ $REPO_LOCK_DIR =~ ^/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+$ ]] && ! [[ $REPO_LOCK_DIR/ =~ /\.\.?/ ]] \
@@ -814,8 +817,9 @@ _ops_host_users() {
     for file in "$SYSTEMD_DIR"/devloop*.service "$SYSTEMD_DIR"/devloop@*.service.d/project.conf; do
         [ -f "$file" ] && [ -r "$file" ] || continue
         [ "$file" = "$UNIT_FILE" ] || [ "$file" = "$DROPIN_FILE" ] && continue
-        # Le unità del watchdog dei ruoli (#602) non sono il servizio di un progetto.
-        case $(basename "$file") in devloop-role-watchdog*) continue ;; esac
+        # Le unità del watchdog dei ruoli (#602) e dell'avviso di un servizio caduto (#593) non
+        # sono il servizio di un progetto.
+        case $(basename "$file") in devloop-role-watchdog* | devloop-failed@*) continue ;; esac
         sed -n "s|^User=\([a-z_][a-z0-9_-]*\)\$|\1 devloop $file|p" "$file"
     done
     # Il watchdog dei ruoli di un altro progetto (#602): il suo utente entra solo nella casella di
@@ -916,7 +920,7 @@ _ops_unit_overlay() {
     local file
     for file in "$SYSTEMD_DIR"/devloop*.service "$SYSTEMD_DIR"/devloop@*.service.d/project.conf; do
         [ -f "$file" ] && [ -r "$file" ] || continue
-        case $(basename "$file") in devloop-role-watchdog*) continue ;; esac
+        case $(basename "$file") in devloop-role-watchdog* | devloop-failed@*) continue ;; esac
         grep -qxF "User=$1" "$file" || continue
         sed -n 's|^StandardOutput=append:\(/.*\)/run\.log$|\1/config.local.toml|p' "$file" | head -n 1
         return

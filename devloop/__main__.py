@@ -1,5 +1,5 @@
 """devloop command line: python3 -m devloop
-{setup,status,apps,tick,run,cleanup,gc,follow,watch,pin,report,direction,fallback,token}."""
+{setup,status,apps,tick,run,cleanup,gc,follow,watch,pin,report,direction,fallback,token,notify}."""
 
 import argparse
 import fcntl
@@ -12,7 +12,8 @@ import time
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
-from . import activity, direction, follow, pin, redact, report, runloop, token, unavailability, watch
+from . import (activity, direction, follow, notify, pin, redact, report, runloop, token,
+               unavailability, watch)
 from .agents import AgentRunner, isolated_env
 from .agentuser import GH_CONFIG, SHARED_DIR, WORKTREES_DIR, AgentUser, AgentUserError, SharedDir
 from .agentuser import check as check_isolation
@@ -207,7 +208,16 @@ def record_start(dispatcher, log):
     return lambda print_: reload(print_, only_if_changed=True)
 
 
-def project_tables_warning(alert_issue, state, gh, out=None, copy=None, language=ENGLISH):
+def ping_alert(notifier, issue, language=ENGLISH):
+    """The ping of an alert just published on ``issue``, ``[run].alert_issue`` (#593), as
+    ``BaseMixin._ping_alert``: only its number, to the operator's phone. Never raises."""
+    if notifier is not None:
+        notifier.notify(notify.TEXTS.texts(language)('alert', issue=issue),
+                        key=f'alert-issue:{issue}')
+
+
+def project_tables_warning(alert_issue, state, gh, out=None, copy=None, language=ENGLISH,
+                           notifier=None):
     """The warning of the tables of the project file that this copy knows and the configuration
     lacks (#462, ``config.missing_project_tables``): ``warn(missing)`` writes it in the log
     each time, at the start and at each reload, and on ``alert_issue`` once for each set of
@@ -256,6 +266,7 @@ def project_tables_warning(alert_issue, state, gh, out=None, copy=None, language
                 f'published ({type(exc).__name__})')
             return
         log(f'config: alert of the missing tables published on #{alert_issue}')
+        ping_alert(notifier, alert_issue, language)
         try:
             tmp = path.with_name(f'.{TABLES_ALERTED}-{os.getpid()}')
             tmp.write_text(json.dumps({'missing': list(missing)}) + '\n', encoding='utf-8')
@@ -265,7 +276,7 @@ def project_tables_warning(alert_issue, state, gh, out=None, copy=None, language
     return warn
 
 
-def agent_user_warning(off, alert_issue, state, gh, out=None, language=ENGLISH):
+def agent_user_warning(off, alert_issue, state, gh, out=None, language=ENGLISH, notifier=None):
     """The warning of the agents running as the dispatcher's user (#490): with
     ``[agent_user] name`` empty (``off``), at the start of ``tick`` and ``run``, a line in the
     log each time and a comment on ``alert_issue`` once (``AGENT_USER_ALERTED`` in ``state``;
@@ -300,6 +311,7 @@ def agent_user_warning(off, alert_issue, state, gh, out=None, language=ENGLISH):
             f'({type(exc).__name__})')
         return
     out(f'agent_user: alert published on #{alert_issue}')
+    ping_alert(notifier, alert_issue, language)
     try:
         path.write_text('alerted\n', encoding='utf-8')
     except OSError as exc:
@@ -518,7 +530,8 @@ def build(args):
                             main_alerts=MainAlerts(state),
                             pending_pushes=PendingPushes(state),
                             housekeeping=Housekeeping(state, ws, gh, ledger=ledger,
-                                                      log=tick_log))
+                                                      log=tick_log),
+                            notifier=notify.from_config(cfg, state, log=tick_log))
     # What the trace T1 (ADR 0006, K1) records of the start: the files this configuration came
     # from, as they were read.
     data = compose_sources(sources)
@@ -849,6 +862,20 @@ def direction_line(cfg, gh):
     return found.header() if found else direction.missing(cfg)
 
 
+def attention_lines(cfg):
+    """The lines of ``devloop status`` on how the operator is warned (#593): the channel of the
+    notices, and the logins the requests for a decision mention, which the roles mention too."""
+    channel = (f'notify: {cfg.notify.backend}, the same key at most once every '
+               f'{cfg.notify.interval} seconds' if cfg.notify.enabled()
+               else 'notify: no channel ([notify] of the overlay): the notices are only lines '
+                    'of the log')
+    mentions = ('operator mentions: ' + ', '.join(f'@{login}' for login in cfg.operator_mentions)
+                if cfg.operator_mentions
+                else 'operator mentions: none (operator_mentions of the overlay): the requests '
+                     'for a decision mention nobody')
+    return [channel, mentions]
+
+
 def run_loop(cfg, state, dispatcher, timeout, reloader=None):
     """``devloop run`` (#177): ``runloop.Loop`` with the dispatcher's ticks, a watcher with the
     identity of the ticks' reads (as ``devloop watch``) on a state file of its own, and the
@@ -897,7 +924,8 @@ def run_loop(cfg, state, dispatcher, timeout, reloader=None):
 
     return runloop.Loop(tick, wait_for_news, state / runloop.STOP_FILE, log=log,
                         alert=alert, alert_issue=issue, idle_timeout=timeout,
-                        workers=workers, language=cfg.language).run()
+                        workers=workers, language=cfg.language,
+                        notify=getattr(dispatcher, 'notifier', None)).run()
 
 
 def main(argv=None):
@@ -975,6 +1003,21 @@ def main(argv=None):
     token_cmd.add_argument('actor', help=f'one of {", ".join(token.ACTORS)}')
     token_cmd.add_argument('--perm', action='append', metavar='NAME=LEVEL',
                            help='a permission of the token; repeat it for more')
+    notify_cmd = sub.add_parser('notify', help='send a notice to the operator on the channel '
+                                               'of [notify] of the overlay (Telegram, outbound '
+                                               'only), once per key and interval')
+    notify_cmd.add_argument('message', nargs='?',
+                            help='the text of the notice: never a secret, nor the details of '
+                                 'a vulnerability')
+    notify_cmd.add_argument('--key', help='the key of the notice, not sent again within the '
+                                          'interval of [notify] (default: the hash of the '
+                                          'message)')
+    notify_cmd.add_argument('--test', action='store_true',
+                            help='send a test notice, whatever the interval: exit code 1 when '
+                                 'it is not sent')
+    notify_cmd.add_argument('--service-failed', metavar='PROJECT',
+                            help='the notice of the service of PROJECT in the failed state '
+                                 '(the OnFailure= unit of the service)')
     argv = sys.argv[1:] if argv is None else list(argv)
     # The command of `token` (ADR 0006, R6) is everything after its --, options included.
     command = None
@@ -983,10 +1026,71 @@ def main(argv=None):
         argv, command = argv[:split], argv[split + 1:]
     args = parser.parse_args(argv)
 
+    timeout = None
     if args.command == 'run':
         timeout = idle_timeout(parser, args)
         if args.interval is not None:
             log('run: --interval is deprecated, use --idle-timeout')
+        # A refused start, a stop with a message or a crash (#593): a notice to the operator's
+        # phone. A crash names only the class of its error: the traceback stays in the log.
+        try:
+            return _command(parser, args, argv, command, timeout)
+        except SystemExit as exc:
+            if isinstance(exc.code, str):
+                notify_refused(args, exc.code)
+            raise
+        except Exception as exc:
+            notify_refused(args, f'unexpected error {type(exc).__name__}')
+            raise
+    return _command(parser, args, argv, command, timeout)
+
+
+def notify_refused(args, reason):
+    """The notice of a ``devloop run`` that did not start, or stopped, with ``reason``, its
+    message (#593): with the ``[notify]`` of the overlay alone, read again, so that a
+    configuration that does not load, the most common cause, still has its channel. Once per
+    interval of ``[notify]``: a service restarted every minute does not repeat it."""
+    notifier, language = notify.from_overlay(args.local_config, log=log)
+    reason = ' '.join(str(reason).split())
+    notifier.notify(notify.TEXTS.texts(language)('refused', command=args.command,
+                                                 reason=reason[:1000]),
+                    key=f'{args.command}-refused')
+
+
+def run_notify(parser, args):
+    """``devloop notify`` (#593): send a notice to the operator on the channel of ``[notify]``
+    of the overlay (read alone, ``notify.from_overlay``), once per key and interval. Exit code
+    0 when sent, not sent again within the interval or without a channel (a line in the log);
+    1 when the send failed. ``--test`` sends a test notice whatever the interval, and exits
+    with 1 also without a channel; ``--service-failed PROJECT`` is the notice of the unit of a
+    service in the failed state (``ops/host/devloop-failed@.service``)."""
+    if args.key is not None and not notify.KEY.fullmatch(args.key):
+        parser.error('notify: --key takes letters, digits and _ . : @ / - (at most 100)')
+    if args.service_failed is not None and not notify.PROJECT.fullmatch(args.service_failed):
+        parser.error('notify: --service-failed takes the name of a project')
+    given = [args.message is not None, args.test, args.service_failed is not None]
+    if sum(given) != 1:
+        parser.error('notify: give one of a message, --test or --service-failed PROJECT')
+    if args.message is not None and not args.message.strip():
+        parser.error('notify: the message is empty')
+    notifier, language = notify.from_overlay(args.local_config, log=log)
+    t = notify.TEXTS.texts(language)
+    if args.test:
+        if not notifier.enabled():
+            log('notify: no channel is configured ([notify] of the overlay): nothing to test')
+            return 1
+        return 0 if notifier.notify(t('test'), key='test', force=True) == notify.SENT else 1
+    if args.service_failed is not None:
+        message = t('service_failed', project=args.service_failed)
+        key = args.key or f'service-failed:{args.service_failed}'
+    else:
+        message, key = args.message, args.key
+    return 1 if notifier.notify(message, key=key) == notify.FAILED else 0
+
+
+def _command(parser, args, argv, command, timeout):
+    if args.command == 'notify':
+        sys.exit(run_notify(parser, args))
     if args.command == 'pin':
         return run_pin(args)
     if args.command == 'token':
@@ -1094,6 +1198,8 @@ def main(argv=None):
         for line in unavailability.describe(state):
             log(line)
         log(direction_line(cfg, dispatcher.gh))  # #604: the operator's direction in force
+        for line in attention_lines(cfg):  # #593: how the operator is warned
+            log(line)
         if label_transition(dispatcher.gh, cfg.labels) == 'both':
             log(f'labels: {both_labels_warning(cfg.labels)}')
         snap = dispatcher.snapshot()
@@ -1154,13 +1260,15 @@ def main(argv=None):
             # The tables of the project file this copy knows and lacks (#462): at the start
             # and at each reload of `run`.
             warn = project_tables_warning(cfg.run.alert_issue, state, dispatcher.gh,
-                                          language=cfg.language)
+                                          language=cfg.language,
+                                          notifier=getattr(dispatcher, 'notifier', None))
             warn(missing)
         off = getattr(dispatcher, 'agent_user_off', None)
         if args.command in ('tick', 'run') and isinstance(off, bool):
             # Without an agent user (#490): a warning, once on alert_issue; devloop goes on.
             agent_user_warning(off, cfg.run.alert_issue, state, dispatcher.gh,
-                               language=cfg.language)
+                               language=cfg.language,
+                               notifier=getattr(dispatcher, 'notifier', None))
         if args.command == 'cleanup':
             for name in dispatcher.ws.names():
                 dispatcher.ws.remove(name)

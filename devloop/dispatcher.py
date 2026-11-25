@@ -1009,8 +1009,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
     def __init__(self, cfg, gh: Backend, ws, runner, log=print, identities=None, activity=None,
                  ledger=None, merger=None, pinner=None, memory=None, clock=time.time,
                  advisory_results=None, advisory_failures=None, housekeeping=None,
-                 main_alerts=None, pending_pushes=None):
+                 main_alerts=None, pending_pushes=None, notifier=None):
         self.cfg = cfg
+        # The notices to the operator outside GitHub (#593, ``notify.Notifier``), or None: the
+        # ping of each alert on ``[run].alert_issue`` (``_ping_alert``).
+        self.notifier = notifier
         # The commit of the base branch whose red CI was last alerted (#459, ``MainAlerts``):
         # in ``state_dir`` from ``devloop``, in memory without it; and the one this process
         # last logged.
@@ -2388,6 +2391,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             return
         self.pinner.mark_alerted(exc.sha)
         self.log(f'  alert of the refused pin published on #{issue}')
+        self._ping_alert(issue)
 
     def _run_action(self, action, prs):
         """Run one action; a failure of an agent, ``gh``, git or trust escalates its issue or
@@ -2474,8 +2478,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             if why:
                 reason = (reason.rstrip() + '\n\n'
                           + SUPERVISION_TEXTS.texts(language)('why_operator', why=why))
-            self.gh.comment(number, render_escalation(reason, detail, cls, retry=retry,
-                                                      extra=extra, language=language))
+            self.gh.comment(number, self._for_operator(render_escalation(
+                reason, detail, cls, retry=retry, extra=extra, language=language)))
             self.gh.edit_labels(number, add=[lb.needs_operator], remove=remove)
         if lb.ready_to_merge in remove:
             # An escalation that takes the readiness away voids the receipt of the promotion
@@ -2758,8 +2762,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         a second alert about the same drops or threshold. Without it, a comment as before."""
         alert = getattr(self.gh, 'alert', None)
         if getattr(self.identities, 'outbox', None) is None or not callable(alert):
-            return self.gh.comment(issue, body)
-        return alert(issue, body, covers=covers)
+            published = self.gh.comment(issue, body)
+        else:
+            published = alert(issue, body, covers=covers)
+        self._ping_alert(issue)
+        return published
 
     def _alert_failed(self, what, issue, exc, covers):
         """Log an alert that raised ``exc``: tried again at the next tick when it certainly was
@@ -3758,9 +3765,10 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         if conclave is not None:
             payload['conclave'] = conclave
         language = self.cfg.language
-        author.comment(number, publishable(
+        # A block asks the operator to decide: the notice mentions them (#593).
+        author.comment(number, self._for_operator(publishable(
             self.runner.header(agent) + f'\n## {TEXTS.texts(language)("blocked_title")}\n\n'
-            + reason.strip() + '\n\n' + resume_text(language), 'notice', payload))
+            + reason.strip() + '\n\n' + resume_text(language), 'notice', payload)))
         self.gh.edit_labels(number, add=[self.cfg.labels.needs_operator], remove=remove)
 
     def _protected_changes(self, path, since=None):
@@ -3884,9 +3892,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         elif verdict == 'needs_operator':
             if announce:
                 # The reviewer's record asks for the decision; this one classifies it (#182).
-                self.gh.comment(pr.number, render_escalation(
+                self.gh.comment(pr.number, self._for_operator(render_escalation(
                     TEXTS.texts(self.cfg.language)('reviewer_decision'),
-                    cls='reviewer_decision', language=self.cfg.language))
+                    cls='reviewer_decision', language=self.cfg.language)))
             self.gh.edit_labels(pr.number, add=[lb.needs_operator], remove=transient)
         elif verdict == UNPROVEN:
             # #481: a reviewer's request for changes had no evidence. Nothing to fix, and no
@@ -3915,10 +3923,10 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                     reason += '\n\n' + SUPERVISION_TEXTS.texts(self.cfg.language)('why_round',
                                                                                   why=why)
                 # The head and the label to resume, for a trusted user's grant-round (#553).
-                self.gh.comment(pr.number, render_escalation(
+                self.gh.comment(pr.number, self._for_operator(render_escalation(
                     reason, cls='round_limit',
                     extra={'head': pr.head_sha, 'resume': self._round_resume(pr)},
-                    language=self.cfg.language))
+                    language=self.cfg.language)))
             self.gh.edit_labels(pr.number, add=[lb.needs_operator], remove=transient)
         else:
             # A CI failure on a ready PR (#248): the dispatcher's own operator label goes too.
@@ -3948,8 +3956,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         if not reasons:
             return
         labeled = len(self._operator_labelers(pr.number))
-        body = render_operator_merge(pr.head_sha, labeled, pr.promotions, reasons,
-                                     lb.needs_operator, self.cfg.language)
+        body = self._for_operator(render_operator_merge(pr.head_sha, labeled, pr.promotions,
+                                                        reasons, lb.needs_operator,
+                                                        self.cfg.language))
         if pr.operator_notice is None:
             self.gh.comment(pr.number, body)
         else:

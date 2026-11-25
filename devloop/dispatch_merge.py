@@ -896,19 +896,20 @@ class MergeMixin:
                     profiles=[self._profile(key, 'review') for key in reviewers])
 
     def _policy_comment(self, pr, title, text, receipt, event, bases=(), cls=None,
-                        prepared=None):
+                        prepared=None, operator=False):
         """A dispatcher ``policy`` record; ``bases``: the base checks it relied on (#160);
         ``cls``: the class of the escalation it records, if any (#182); ``prepared``: the
-        receipt of a promotion, written in the same comment (``_publish_policy``)."""
+        receipt of a promotion, written in the same comment (``_publish_policy``);
+        ``operator``: it asks the operator for a decision, and mentions them (#593)."""
         payload = {'event': event, 'receipt': receipt}
         if bases:
             payload['bases'] = list(bases)
         if cls:
             payload['class'] = cls
         self._publish_policy(pr, dispatcher_header() + f'\n## {title}\n\n{text.strip()}\n\n'
-                             + self._describe_receipt(receipt), payload, prepared)
+                             + self._describe_receipt(receipt), payload, prepared, operator)
 
-    def _publish_policy(self, pr, text, payload, prepared=None):
+    def _publish_policy(self, pr, text, payload, prepared=None, operator=False):
         """Write the ``policy`` record ``payload`` with ``text``. With ``prepared``, the receipt
         of a promotion (#135, ``_checked_receipt``), every receipt still current on the PR is
         marked superseded first, so that only the latest promotion's holds; then one comment
@@ -917,7 +918,8 @@ class MergeMixin:
         two, the promotion and then its receipt, as before #338. A failure raises: the promotion
         stops before its label, as for any ``gh`` failure."""
         if prepared is None:
-            self.gh.comment(pr.number, publishable(text, 'policy', payload))
+            body = publishable(text, 'policy', payload)
+            self.gh.comment(pr.number, self._for_operator(body) if operator else body)
             return
         content, thread = prepared
         language = self.cfg.language
@@ -941,7 +943,7 @@ class MergeMixin:
         self._policy_comment(
             pr, t('level_title', level=level),
             t('level_text', level=level, needed=needed, why=self._select(pr, level)[1]),
-            receipt, 'level', cls='review_level')
+            receipt, 'level', cls='review_level', operator=True)
         self.gh.edit_labels(pr.number, add=[lb.needs_operator],
                             remove=[lb.review, lb.changes, lb.ready_to_merge])
         if lb.ready_to_merge in pr.labels:
@@ -1148,13 +1150,13 @@ class MergeMixin:
     def _refuse_zero(self, pr, receipt, why, states=()):
         """Level 0 holds but the head cannot be promoted: the operator decides."""
         lb, t = self.cfg.labels, self._merge_texts()
-        self.gh.comment(pr.number, publishable(
+        self.gh.comment(pr.number, self._for_operator(publishable(
             dispatcher_header() + f'\n## {t("refuse_zero_title")}\n\n'
             + t('refuse_zero_text', why=why.strip(), needs_operator=lb.needs_operator,
                 review=lb.review, zero=self.cfg.review_policy.zero_label)
             + '\n\n' + self._describe_receipt(receipt),
             'policy', {'event': 'level', 'receipt': receipt, 'checks': list(states),
-                       'class': 'level_zero'}))
+                       'class': 'level_zero'})))
         self.gh.edit_labels(pr.number, add=[lb.needs_operator],
                             remove=[lb.review, lb.changes, lb.ready_to_merge])
         if lb.ready_to_merge in pr.labels:
@@ -1604,12 +1606,14 @@ class MergeMixin:
                 'host_text', what=what, pinning=pinning,
                 step='\n'.join('> ' + line for line in step.splitlines())))
         try:
-            self.gh.comment(issue, body)
+            # The step is the operator's (#593): the comment mentions operator_mentions.
+            self.gh.comment(issue, self._for_operator(body))
         except Exception as exc:  # its class, never its output
             self.log(f'  the alert of the step on the host on #{issue} could not be '
                      f'published ({type(exc).__name__})')
             return False
         self.log(f'  alert of the step on the host published on #{issue}')
+        self._ping_alert(issue)
         return True
 
     def _label_host_step(self, pr):

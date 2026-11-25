@@ -14,7 +14,8 @@ the names of the parameters of ``ops/params.env`` in their place:
 - the name of a role's user standing alone, as ``<DEVLOOP_USER>``: only a name that is not one
   of the documented defaults (``PUBLIC_USERS``, already in the public documentation, and
   common words of devloop's own texts), at least ``MIN_USER`` characters long, and not one of
-  the GitHub logins of ``keep`` (the trusted users, whose names the records carry);
+  the GitHub logins of ``keep`` (the trusted users, whose names the records carry, and the
+  logins of ``operator_mentions``, #593, whose mentions must reach them);
 - the name of a key file (``<slug>.<date>.private-key.pem``) as the role of its app, never the
   slug nor the date: ``<chiave dell'app implementer>``;
 - the other names of the installation (``names`` of the map: ``SERVICE_NAME``), as
@@ -341,7 +342,9 @@ def runtime(cfg, state, log=None, uid=None):
             paths.setdefault('AGENT_HOME', _home(agent))
     roles = {app.slug: actor for actor, app in (getattr(cfg, 'apps', None) or {}).items()}
     return Redactor(pairs + list(paths.items()), users.items(), roles,
-                    keep=getattr(cfg, 'trusted_users', ()), prefix=data.get('app_prefix', ''),
+                    keep=(*getattr(cfg, 'trusted_users', ()),
+                          *getattr(cfg, 'operator_mentions', ())),
+                    prefix=data.get('app_prefix', ''),
                     names=names.items())
 
 

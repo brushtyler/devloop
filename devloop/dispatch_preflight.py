@@ -488,9 +488,10 @@ class PreflightMixin:
             note = note or t('note_label_present', labels=shown)
         else:
             record.update(blocked=True, labeled=len(self._operator_labelers(number)))
-        # Comment first: if the label is lost, the next tick blocks the issue again.
-        author.comment(number, render_preflight(record, head, note, refused,
-                                                language=language))
+        # Comment first: if the label is lost, the next tick blocks the issue again. A block
+        # asks the operator to decide the gaps: the comment mentions them (#593).
+        body = render_preflight(record, head, note, refused, language=language)
+        author.comment(number, self._for_operator(body) if record.get('blocked') else body)
         if record['blocked'] and not owned:
             self.gh.edit_labels(number, add=[lb.needs_operator])
         self.log(f'  not ready: {len(record["gaps"])} gap(s)')

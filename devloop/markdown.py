@@ -1268,6 +1268,28 @@ def resume_text(language=ENGLISH):
 
 
 
+# The mention of the operator in a request for a decision (#593), in the project's ``language``.
+MENTION_TEXTS = Catalog(
+    en={'mention': 'For the operator: {logins}'},
+    it={'mention': 'Per l\'operatore: {logins}'})
+
+
+def with_mentions(body, logins, language=ENGLISH):
+    """``body``, a comment that asks the operator for a decision, with a line that mentions
+    ``logins`` (``operator_mentions``, #593) at the end of its readable text, before the markers
+    that end it, which stay as they are. GitHub notifies a login mentioned, on the phone too
+    with GitHub Mobile. Without logins, ``body`` as it is."""
+    if not logins:
+        return body
+    readable, markers = split_markers(body)
+    line = MENTION_TEXTS.texts(language)('mention',
+                                         logins=' '.join(f'@{login}' for login in logins))
+    out = readable.rstrip('\n') + '\n\n' + line + '\n'
+    if markers:
+        out += '\n' + ''.join(f'{m}\n' for m in markers)
+    return out
+
+
 def operator_retry_text(step, language=ENGLISH):
     """How a trusted user runs again the step ``step`` of an escalation to the operator
     (#321), in ``language`` (#633)."""

@@ -206,6 +206,10 @@ if [ -n "$DROPIN_FILE" ]; then
     put_file "$DROPIN_FILE" 644 root "$(render "$OPS_DIR/host/devloop-project.conf")" \
         && unit_changed=1
 fi
+# L'OnFailure= del servizio (#593): l'avviso all'operatore di un servizio caduto, con il comando
+# devloop dell'host e [notify] dell'overlay. Template comune ai progetti dell'host.
+put_file "$FAILED_UNIT_FILE" 644 root "$(render "$OPS_DIR/host/devloop-failed@.service")" \
+    && unit_changed=1
 if [ "$unit_changed" = 1 ]; then
     run systemctl daemon-reload
 fi

@@ -202,8 +202,9 @@ default_key_dirs() {
         return
     fi
     for other in "$SYSTEMD_DIR"/devloop*.service; do
-        # Le unità del watchdog dei ruoli (#602) non sono un'installazione.
-        case $(basename "$other") in devloop-role-watchdog*) continue ;; esac
+        # Le unità del watchdog dei ruoli (#602) e dell'avviso di un servizio caduto (#593) non
+        # sono un'installazione.
+        case $(basename "$other") in devloop-role-watchdog* | devloop-failed@*) continue ;; esac
         if [ -f "$other" ] && [ "$other" != "$UNIT_FILE" ]; then
             printf '%s\n' "$home/.ghapps-$PROJECT"
             return
@@ -302,6 +303,34 @@ check_keys "$SUPERVISOR_KEY_DIR" "$SUPERVISOR_USER" "$SUPERVISOR_KEYS" 1
 check_left_keys DEVLOOP_KEY_DIR "$DEVLOOP_HOME/.ghapps"
 # shellcheck disable=SC2046  # percorsi senza spazi (ops_load_params)
 check_left_keys SUPERVISOR_KEY_DIR $(default_key_dirs "$SUPERVISOR_HOME")
+
+# Il token del bot degli avvisi all'operatore (#593), se l'overlay ha [notify]: un file regolare,
+# non un link, dell'utente devloop, 600, che nessun altro legge (devloop notify lo rifiuta
+# altrimenti). Non se ne legge il contenuto.
+step "Token del bot degli avvisi ([notify], #593)"
+NOTIFY_TOKEN=$([ -f "$STATE_PATH/config.local.toml" ] && python3 -I -B - "$STATE_PATH/config.local.toml" <<'EOF'
+import sys, tomllib
+try:
+    table = tomllib.load(open(sys.argv[1], 'rb')).get('notify') or {}
+except (OSError, ValueError):
+    sys.exit(0)
+value = table.get('token_file') if isinstance(table, dict) else None
+if isinstance(value, str):
+    print(value)
+EOF
+)
+if [ -z "$NOTIFY_TOKEN" ]; then
+    ok "l'overlay non ha [notify] con token_file: nessun canale per gli avvisi, devloop li scrive solo nel log"
+elif [ -L "$NOTIFY_TOKEN" ] || ! [ -f "$NOTIFY_TOKEN" ]; then
+    fail "il token_file di [notify] non esiste o non è un file regolare: devloop notify non invia (docs/devloop/guide.md, \"Notices to the operator\")"
+else
+    actual=$(stat -c '%a %U' "$NOTIFY_TOKEN")
+    if [ "$actual" = "600 $DEVLOOP_USER" ]; then
+        ok "token_file di [notify]: 600, $DEVLOOP_USER"
+    else
+        fail "il token_file di [notify] è $actual, deve essere 600 $DEVLOOP_USER: devloop notify lo rifiuta"
+    fi
+fi
 
 # check_traverse USER SETUP: USER attraversa soltanto la home di devloop (ACL --x, che mette lo
 # script SETUP) e non ha ACL sulle directory private di devloop, che restano 700.
@@ -923,6 +952,8 @@ check_unit() {
 }
 check_unit "$UNIT_FILE" "$UNIT_TEMPLATE"
 [ -z "$DROPIN_FILE" ] || check_unit "$DROPIN_FILE" devloop-project.conf
+# L'OnFailure= del servizio (#593): l'avviso all'operatore di un servizio caduto.
+check_unit "$FAILED_UNIT_FILE" devloop-failed@.service
 # Un repository, un host (ADR 0006, R8): nessun'altra unità di devloop di questo host lo gestisce.
 for other in "$SYSTEMD_DIR"/devloop*.service "$SYSTEMD_DIR"/devloop@*.service.d/project.conf; do
     [ -f "$other" ] || continue

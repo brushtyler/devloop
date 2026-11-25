@@ -163,13 +163,17 @@ ops/
     devloop.service          unità systemd (con segnaposto @NOME@)
     devloop@.service         unità template, per più progetti sullo stesso host (PROJECT)
     devloop-project.conf     drop-in di un progetto per devloop@<progetto> (con segnaposto)
+    devloop-failed@.service  unità template dell'avviso all'operatore di un servizio caduto, l'
+                             OnFailure= delle due unità del servizio: `devloop notify
+                             --service-failed <progetto>` con il comando devloop (#593)
     tmpfiles-devloop-repos.conf  directory dei lock per repository, comune all'host
     devloop-command          il comando devloop dell'host: il launcher di un progetto come la
                              sua unità, scelto con --project (con segnaposto)
     devloop-command-project  il file di un progetto per il comando devloop (con segnaposto)
     sudoers-agent            sudoers con cui devloop avvia CLI e test come utente degli agent
     sudoers-supervisor       sudoers minimale del supervisore (con segnaposto @NOME@)
-    sudoers-coordinator      sudoers del coordinatore, solo comandi di lettura (con segnaposto)
+    sudoers-coordinator      sudoers del coordinatore, comandi di lettura e l'avviso
+                             all'operatore, devloop-pinned notify (con segnaposto)
     config.local.toml.example  overlay di devloop, tutto commentato
     check-host.sh            verifica utenti, permessi (700/600), chiavi, ACL, sudoers, casella,
                              utente degli agent, coordinatore, servizio, CLI e `devloop apps`;
@@ -863,6 +867,19 @@ questo repository dal #563) ha: utente `devloop`,
 azioni in corso, fino a `agent_timeout_seconds`), `TimeoutStopSec=4200`, `Restart=on-failure`
 con `RestartSec=60`, e `RestartPreventExitStatus=4` (dopo l'allarme di tre tick falliti il loop
 resta fermo, come descritto in *Continuous loop* della guida di devloop).
+
+**Avvisi all'operatore (#593).** L'unità ha `OnFailure=devloop-failed@<progetto>.service`
+(`_default` senza `PROJECT`): quando systemd la lascia nello stato failed (il codice 4, o il limite
+dei riavvii), l'unità template `ops/host/devloop-failed@.service`, che `setup-devloop.sh`
+installa una volta per host, esegue come root il comando devloop dell'host con `--project
+<progetto> notify --service-failed <progetto>`: l'avviso parte sul canale di `[notify]`
+dell'overlay del progetto, al più una volta per intervallo, o resta una riga nel journal senza
+canale. Il canale (un bot Telegram, solo in uscita, con il token in un file 600 della key_dir di
+`devloop`), `operator_mentions` e la prova `devloop notify --test` sono dell'operatore
+([docs/devloop/guide.md](../docs/devloop/guide.md#notices-to-the-operator); su un host attivo
+[migrate.md](host/migrate.md#avvisi-alloperatore-593)). Supervisore e coordinatore inviano con
+`devloop-pinned notify`, che i loro sudoers ammettono; `check-host.sh` verifica l'unità e, con
+`[notify]`, proprietario e permessi del file del token.
 
 ### 10. Coordinatore (facoltativo)
 

@@ -80,6 +80,27 @@ Move each message of the coordinator to `done/` as soon as you read it: one left
 `to-supervisor/` after 15 minutes tells the coordinator that you do not answer, and it puts the
 work in the queue itself.
 
+## Notices to the operator (from #593)
+
+What goes where is in [Notices to the operator](../guide.md#notices-to-the-operator); for you:
+
+- **A decision on GitHub.** When you write to the operator directly on GitHub (the two
+  exceptions above), mention in that comment the logins of `operator_mentions` that
+  `devloop status` shows (`operator mentions: …`): the mention brings it to their phone.
+- **Telegram, outbound only.** When you write to the operator directly about what does not or
+  cannot stay on GitHub (the service down, the loop stopped, GitHub unreachable, a problem of the
+  host with its details, an incident), send it with
+  `sudo -u <devloop user> <launcher> notify --key supervisor:<topic> "<message>"`, the only form
+  your sudoers allows: one bot, whose token only devloop's user reads, and the interval of
+  devloop for the same key. Never a token, a key, the content of the overlay, nor the details of
+  a vulnerability.
+- **A vulnerability of devloop not yet fixed** goes to the coordinator in the mailbox, never on
+  GitHub nor on Telegram, not even as an indirect reference: the advisory is the operator's
+  ([Vulnerabilities](../guide.md#vulnerabilities-private-advisories), [SECURITY.md](../../../SECURITY.md)).
+- **The details of the host** stay out of the public texts ([AGENTS.md](../../../AGENTS.md#dettagli-dellhost-nei-testi-pubblici)):
+  in an issue only as generic procedures, with the names of the parameters; the real values and
+  the incidents go on Telegram or in the mailbox.
+
 ## Other projects
 
 You serve only the project of your repository, the one the first message of your session names,

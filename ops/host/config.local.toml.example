@@ -13,6 +13,9 @@
 # devloop/config.toml. Senza repo e trusted_users devloop non parte. repo è REPO di params.env.
 # repo = "brushtyler/devloop"
 # trusted_users = ["brushtyler"]
+# I login GitHub, senza @, menzionati nei commenti che chiedono una decisione all'operatore (#593):
+# la menzione arriva sul telefono con GitHub Mobile. Indipendenti da trusted_users; senza, nessuno.
+# operator_mentions = ["brushtyler"]
 # Solo dopo una rinomina del repository su GitHub (#540, ADR 0007): i nomi di prima, perché i
 # link ai commenti, i record del journal e i marker scritti con quei nomi restino validi.
 # ops/host/migrate.md, "Rinomina del repository in devloop".
@@ -53,6 +56,16 @@
 # Issue del riepilogo giornaliero (senza: nessun riepilogo).
 # [report]
 # issue = 124
+
+# Gli avvisi all'operatore fuori da GitHub (#593): `devloop notify`, Telegram, solo in uscita.
+# token_file è il file del token del bot nella key_dir dell'utente devloop, suo, mode 600: mai il
+# token qui. Lo stesso avviso non si ripete entro interval secondi. Senza: solo righe nel log.
+# docs/devloop/guide.md, "Notices to the operator"; ops/host/migrate.md, "Avvisi all'operatore".
+# [notify]
+# backend = "telegram"
+# chat_id = 123456789
+# token_file = "/home/devloop/.ghapps/telegram-bot.token"
+# interval = 900
 
 # Issue della direzione dell'operatore (#604): vale l'ultimo commento di un utente di
 # trusted_users che inizia con la riga "## Direzione" (senza: le priorità restano alle

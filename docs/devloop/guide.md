@@ -2338,6 +2338,116 @@ they read and write GitHub with their apps, with no personal token
 ([ADR 0002](../adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-24-utenti-dei-ruoli-per-insieme-di-app-643),
 #643).
 
+## Notices to the operator
+
+Without them the operator learns that devloop needs them only by looking at GitHub (#593).
+Three channels reach them, each with a rule on what goes in it:
+
+| What | Channel | Who writes |
+|---|---|---|
+| Ordinary decisions on an issue or a pull request (approvals, choices, reserved merges, a step on the host) | A **mention** of the logins of `operator_mentions` in the comment that asks for the decision; GitHub Mobile brings it to the phone | the dispatcher, and the roles' apps (supervisor, coordinator) |
+| What does not or cannot stay on GitHub: a service down, a refused start, a stopped loop, the host's problems with their details, incidents, GitHub unreachable | **Telegram, outbound only**, with `devloop notify` | devloop, the roles and the `OnFailure=` unit of the service |
+| A vulnerability of devloop not yet fixed | A **private advisory** of GitHub ([below](#vulnerabilities-private-advisories)), with no ping on Telegram | whoever finds it, through the operator |
+
+Two rules hold for every channel: **never a secret** (tokens, keys, the content of the overlay),
+and **never the details of a vulnerability outside its advisory**. Telegram is not end-to-end
+encrypted for bots: it is private with respect to the repository, not confidential.
+
+### Mentions
+
+`operator_mentions` of the overlay lists the GitHub logins, without `@`, mentioned in the
+comments of the dispatcher that ask the operator for a decision: the escalations to the
+operator (`agent:needs-operator`), the notice of an agent that stops as `blocked`, a
+`needs_operator` verdict, the round limit, a level of
+review without enough reviewers, a level 0 refused, a block of the readiness check, a ready PR
+whose merge is the operator's and the alert of a step on the host. The line `For the operator:
+@login …` (in the project's `language`) ends the readable text, before the markers. It is a list
+of its own, independent of `trusted_users`: who is warned is not who may authorize. Without it
+nobody is mentioned, the dispatcher writes in its log that it mentioned nobody, and no login is
+ever written in the code. `devloop status` shows the list, so that the roles mention the same
+logins in their own requests for a decision.
+
+### `devloop notify` and Telegram
+
+`devloop notify "<message>"` sends a notice on the channel of `[notify]` of the overlay
+([reference](reference.md#notify)): the backend `telegram`, the `chat_id` and the absolute
+path of the file of the bot's token. Without `[notify]` the command writes in the log that there
+is no channel and exits with 0. The bot only sends: devloop never reads the messages it receives,
+so the phone is never a channel of commands.
+
+- **Key and interval.** Each notice has a key (`--key`; without it, the hash of the message):
+  the same key is not sent again within `interval` seconds of `[notify]` (900 by default). The
+  state is `notify-state.json` in the state_dir, shared by every caller of the project, and it
+  is updated at every attempt, a failed one too: one attempt per key and interval, no automatic
+  retry. A failed send is a line in the log and the exit code 1; it never stops a tick.
+- **What devloop sends by itself.** The loop stopped after three failed ticks
+  ([Continuous loop](#continuous-loop)), with the number of the issue of its alert; a
+  `devloop run` that did not start, or stopped, with its message (a crash names only the class
+  of its error), once per interval however often systemd restarts it; a ping with the number of
+  the issue for each other alert published on `[run].alert_issue` (the red CI of the base
+  branch, a refused pin, a step on the host, the dropped publications, the size of the journal,
+  the warnings of the start), one per interval: the alert stays on the issue as before.
+- **A service down.** A dead process cannot warn: the units of the service
+  (`ops/host/devloop.service`, `ops/host/devloop@.service`) have an
+  `OnFailure=devloop-failed@<project>.service`, which runs `devloop notify --service-failed
+  <project>` through the devloop command of the host (`_default` for an installation without
+  `PROJECT`). With `Restart=on-failure` systemd puts the
+  service in the failed state only when it stops restarting it: the exit code 4 of a stopped
+  loop, or the limit of its restarts. A start refused at each restart is told by devloop itself,
+  above.
+- **The roles.** Supervisor and coordinator send a notice for what the first table sends to
+  Telegram with `sudo -u <devloop user> <launcher> notify --key <role>:<topic> "<message>"`: one
+  bot, whose token only devloop's user reads, and the interval and the deduplication of devloop
+  (choice N2 (a) of the operator, #593); their sudoers allow `notify` and its arguments.
+
+To set the channel up, on the host, with the loop stopped
+(`ops/host/migrate.md`, "Avvisi all'operatore (#593)"):
+
+1. **The bot.** In Telegram, write to `@BotFather`, send `/newbot` and choose its name and
+   username: BotFather answers with the token of the bot. It is a secret: never in the overlay,
+   in an issue, in a log or in a chat other than the one with BotFather.
+2. **The `chat_id`.** Send any message to the new bot from the operator's account, then read
+   `https://api.telegram.org/bot<TOKEN>/getUpdates` once, by hand, from the operator's machine:
+   the `chat_id` is `message.chat.id` of that message. devloop never calls `getUpdates`.
+3. **The token.** Write it alone in a file of the key_dir of devloop's user (`$DEVLOOP_KEY_DIR`),
+   owned by that user, mode 600: `devloop notify` refuses a file that is a link, of another
+   user or readable by others, and `ops/host/check-host.sh` checks it when the overlay has
+   `[notify]`.
+4. **The overlay.** `[notify]` with `backend = "telegram"`, `chat_id` and `token_file`, and
+   `operator_mentions`.
+5. **The check.** `devloop notify --test` sends a test notice whatever the interval, and exits
+   with 1 when it is not sent or there is no channel.
+
+### Vulnerabilities: private advisories
+
+A vulnerability of devloop not yet fixed follows [SECURITY.md](../../SECURITY.md):
+
+- it **never goes in a public issue**, nor in a pull request, a comment, a review, the journal
+  of the project or a notice on Telegram, not even as an indirect reference; on the host, the
+  roles tell each other in the mailbox;
+- it goes in a **private advisory** of GitHub, which **only the operator creates** (choice N1
+  (a) of the operator, #593): the coordinator prepares its text on the host, in a file of its
+  own or in the mailbox, never on GitHub, and tells the operator that a text is ready, without
+  the details;
+- **the fix** is made in the temporary private fork of the advisory, outside devloop, which
+  works on public pull requests. Alternatively, with a public pull request that says the
+  minimum, accepting that the fix itself reveals the problem: the choice is the operator's, case
+  by case;
+- after the fix, the operator publishes the advisory.
+
+There is no ping on Telegram for an advisory (choice N3): the notification of GitHub reaches the
+phone. The operator turns private vulnerability reporting on in the settings of the repository,
+and checks that the notification of a new advisory really reaches the phone; otherwise a ping on
+Telegram is added.
+
+### Host details out of the public texts
+
+The rule of [AGENTS.md](../../AGENTS.md#dettagli-dellhost-nei-testi-pubblici) (#583) holds, and
+`devloop notify` completes it: in `ops/` and in the issues the details of the host stay **only
+as generic procedures**, with the names of the parameters; the real values (paths, users,
+effective configuration) and the incidents go on the private channel, Telegram, or in the files
+on the host. Telegram takes the details of the host, never a secret nor a vulnerability.
+
 ## Usage
 
 ```bash
@@ -2345,7 +2455,7 @@ they read and write GitHub with their apps, with no personal token
 # command (the launcher, scripts/devloop-pinned, passes them itself):
 devloop="python3 -m devloop --project-config .devloop/project.toml --local-config .devloop/config.local.toml"
 $devloop setup            # create the agent:* labels, the priority:* labels and the review level labels (reviews:0 only when level 0 is on)
-$devloop status           # running action, devloop PRs (with rounds counted on max_review_rounds, merge state and conflicts), ready issues in start order with their priority, planned actions; with [budget] on, the budget of the stories in progress; a pinned copy behind origin/main in the files of the installation; the operator's direction in force
+$devloop status           # running action, devloop PRs (with rounds counted on max_review_rounds, merge state and conflicts), ready issues in start order with their priority, planned actions; with [budget] on, the budget of the stories in progress; a pinned copy behind origin/main in the files of the installation; the operator's direction in force; the channel of the notices and operator_mentions
 $devloop apps             # check the GitHub App of each actor, on the project's repo and with its key_dir
 $devloop tick --dry-run   # print the ready issues in start order and the plan, change nothing (no lock: it runs beside a dispatcher)
 $devloop tick             # run one round
@@ -2359,6 +2469,7 @@ $devloop report --day 2026-11-16  # print the summary of a UTC day from devloop'
 $devloop direction        # print the operator's direction in force, from [direction] issue (see Project direction)
 $devloop fallback reset agy-reviewer  # forget the models agy-reviewer remembers unavailable (see Memory of unavailable models)
 $devloop token claude -- gh pr comment 70 --body-file reply.md  # run a command as an agent's app of the project (see GitHub identities; scripts/agent-token.py calls it)
+$devloop notify --key host:disk "disk almost full"  # a notice to the operator on [notify], once per key and interval (see Notices to the operator); --test to check the channel
 ```
 
 Run it from any checkout of this repository. Worktrees, agent prompts and logs, and the lock that
@@ -2649,7 +2760,9 @@ stops the loop at once (the 30 minutes that would follow it are never waited), w
   attempt only: if it fails, the log says so, with the class of that error;
 - without it, a line `ALERT: 3 consecutive ticks failed (…): the loop stops` in the local log.
 
-Either way the loop exits with code 4 and runs no other tick. A successful tick resets the count.
+Then, with `[notify]`, a notice to the operator's phone that names the issue of the alert, or the
+local log when the alert was not published ([Notices to the operator](#notices-to-the-operator),
+#593). Either way the loop exits with code 4 and runs no other tick. A successful tick resets the count.
 The log keeps the full message of each failed tick.
 
 **Lock.** The loop holds the dispatcher lock (`state_dir/dispatcher.lock`) for as long as it
@@ -2711,7 +2824,9 @@ sudo -u devloop rm /home/devloop/devloop/.devloop/STOP     # then `systemctl sta
 ```
 
 After an alert (exit code 4) the unit stays stopped: remove the cause, then
-`systemctl start devloop`.
+`systemctl start devloop`. The units of [`ops/`](../../ops/README.md) also have
+`OnFailure=devloop-failed@<project>.service`, the notice of a service in the failed state
+([Notices to the operator](#notices-to-the-operator), #593).
 
 The host that develops this repository runs, since #563, the instance `devloop@devloop` of the
 template unit of [`ops/`](../../ops/README.md) (`PROJECT=devloop`), with the same users: there the

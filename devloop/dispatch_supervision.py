@@ -1179,8 +1179,8 @@ class SupervisionMixin:
         retry resumes, recorded again so that the operator may still retry it (#321).
         ``extra``: more fields of its record, such as the head of a ``round_limit`` (#553)."""
         lb = self.cfg.labels
-        self.gh.comment(number, render_escalation(reason, cls=cls, retry=retry, extra=extra,
-                                                  language=self.cfg.language))
+        self.gh.comment(number, self._for_operator(render_escalation(
+            reason, cls=cls, retry=retry, extra=extra, language=self.cfg.language)))
         self.gh.edit_labels(number, add=[lb.needs_operator],
                             remove=[lb.needs_supervisor, *remove])
 

@@ -5,6 +5,9 @@
 Description=devloop continuous loop (@REPO@)
 Wants=network-online.target
 After=network-online.target
+# Un servizio fermo nello stato failed avvisa l'operatore (#593): devloop notify --service-failed,
+# con il canale di [notify] dell'overlay (ops/host/devloop-failed@.service).
+OnFailure=devloop-failed@@OPS_INSTANCE@.service
 
 [Service]
 Type=simple

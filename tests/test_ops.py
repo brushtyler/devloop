@@ -72,6 +72,8 @@ SUDO_FLAVORS = {'sudo-rs': 'sudo-rs 0.2.8', 'classic sudo': 'Sudo version 1.9.17
 # arguments in coordinator-wait.sh, with its own state file.
 WAIT_WATCH = ('@LAUNCHER_CMD@ watch --until-change --interval 60 --timeout 300 '
               '--state @STATE_PATH@/coordinator-watch-state.json')
+# The notice of a role to the operator (#593, N2 (a)): devloop-pinned notify, with its text.
+NOTIFY = '@LAUNCHER_CMD@ notify *'
 
 
 def token_script(name):
@@ -122,6 +124,13 @@ def render(template, values):
     for name, value in values.items():
         text = text.replace(f'@{name}@', value)
     return text + '\n'
+
+
+def failed_unit(tmp):
+    """The unit of the notice of a service down (#593) in ``tmp``/systemd, as setup-devloop.sh
+    installs it with the devloop command of the tests' parameters."""
+    (tmp / 'systemd/devloop-failed@.service').write_text(render(
+        'host/devloop-failed@.service', {'DEVLOOP_COMMAND': str(tmp / 'bin-root' / 'devloop')}))
 
 
 @unittest.skipIf(BASH is None, 'bash is not installed')
@@ -1774,9 +1783,14 @@ class DeclarativeFileTests(unittest.TestCase):
 
     def test_the_template_with_the_project_drop_in_is_the_unit(self):
         # ADR 0006, R8: devloop@<project> runs as devloop.service does, with the parameters of
-        # its project in the drop-in.
-        self.assertEqual(self.directives('devloop@.service', 'devloop-project.conf'),
-                         self.directives('devloop.service'))
+        # its project in the drop-in. The OnFailure= of both (#593) names the instance of the
+        # project: %i of the template, OPS_INSTANCE (_default) of the unit.
+        instance = self.directives('devloop@.service', 'devloop-project.conf')
+        unit = self.directives('devloop.service')
+        self.assertEqual(instance.pop(('[Unit]', 'OnFailure')), 'devloop-failed@%i.service')
+        self.assertEqual(unit.pop(('[Unit]', 'OnFailure')),
+                         'devloop-failed@@OPS_INSTANCE@.service')
+        self.assertEqual(instance, unit)
         template = self.directives('devloop@.service')
         self.assertEqual(template['[Unit]', 'Description'], 'devloop continuous loop (%i)')
         # Without the drop-in an instance has no command, user or directory: it cannot start.
@@ -1801,7 +1815,7 @@ class DeclarativeFileTests(unittest.TestCase):
         self.assertTrue(body[1].startswith('@SUPERVISOR_USER@ ALL=(@DEVLOOP_USER@) NOPASSWD:'))
         self.assertEqual(as_devloop, [launcher + args for args in (
             'status', 'status *', 'watch *', 'report *', 'direction', 'tick --dry-run',
-            'pin *')])
+            'pin *', 'notify *')])
         as_root = [c.strip() for c in body[2].split('NOPASSWD:', 1)[1].split(',')]
         self.assertTrue(body[2].startswith('@SUPERVISOR_USER@ ALL=(root) NOPASSWD:'))
         self.assertEqual(as_root, ['/usr/bin/systemctl start @SERVICE_NAME@',
@@ -1824,13 +1838,17 @@ class DeclarativeFileTests(unittest.TestCase):
         self.assertTrue(body[1].startswith('@COORDINATOR_USER@ ALL=(@DEVLOOP_USER@) NOPASSWD: '))
         as_devloop = [c.strip() for c in body[1].split('NOPASSWD:', 1)[1].split(',')]
         self.assertEqual(as_devloop, ['@LAUNCHER_CMD@ status', '@LAUNCHER_CMD@ direction',
-                                      WAIT_WATCH,
+                                      NOTIFY, WAIT_WATCH,
                                       '/usr/bin/tail -n 200 @STATE_PATH@/run.log',
                                       '/usr/bin/tail -n 1000 @STATE_PATH@/run.log'])
         # The watch is the one subcommand of devloop-pinned besides status, and not the
         # supervisor's state file (state_dir/watch-state.json): the events stay the supervisor's.
         self.assertNotIn('/watch-state.json', WAIT_WATCH)
         as_devloop.remove(WAIT_WATCH)
+        # #593, choice N2 (a) of the operator: the notice to the operator is the one write and
+        # the one command with free arguments, its text; the checks below hold for the others.
+        as_devloop.remove(NOTIFY)
+        body = [line.replace(NOTIFY + ', ', '') for line in body]
         self.assertTrue(body[2].startswith('@COORDINATOR_USER@ ALL=(root) NOPASSWD: '))
         as_root = [c.strip() for c in body[2].split('NOPASSWD:', 1)[1].split(',')]
         self.assertEqual(as_root, [
@@ -2051,8 +2069,9 @@ class DryRunTests(OpsTestCase):
         (self.tmp / 'systemd/devloop.service').write_text(render('host/devloop.service', {
             'REPO': 'brushtyler/devloop', 'DEVLOOP_USER': ME, 'DEVLOOP_CLONE': str(clone),
             'LAUNCHER_CMD': f'/usr/bin/python3 {clone}/scripts/devloop-pinned',
-            'STATE_PATH': f'{clone}/.devloop',
+            'STATE_PATH': f'{clone}/.devloop', 'OPS_INSTANCE': '_default',
             'DEVLOOP_PATH': f'{devloop}/.local/bin:/usr/local/bin:/usr/bin:/bin'}))
+        failed_unit(self.tmp)
         # The devloop command of the host and the file of the project (#588), as written.
         projects = self.tmp / 'etc-devloop/projects'
         projects.mkdir(parents=True)
@@ -4454,8 +4473,9 @@ class CheckHostTests(OpsTestCase):
             'REPO': 'brushtyler/devloop', 'DEVLOOP_USER': ME,
             'DEVLOOP_CLONE': str(self.devloop / 'devloop'),
             'LAUNCHER_CMD': f'/usr/bin/python3 {self.devloop}/devloop/scripts/devloop-pinned',
-            'STATE_PATH': str(state),
+            'STATE_PATH': str(state), 'OPS_INSTANCE': '_default',
             'DEVLOOP_PATH': f'{self.devloop}/.local/bin:/usr/local/bin:/usr/bin:/bin'}))
+        failed_unit(self.tmp)
         self.acl(f'user:{ME}:--x')
         self.service('active')
 
