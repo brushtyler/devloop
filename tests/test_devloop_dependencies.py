@@ -550,6 +550,30 @@ class DocumentationTests(unittest.TestCase):
         docs.assert_documented(self, protocol, ['prerequisite_dropped', 'NOT_PLANNED',
                                                 'agent:needs-operator'], issues=(671,))
 
+    def test_a_prerequisite_in_words_is_written_as_a_native_block(self):
+        # #670: the guide recommends the native block and the readiness check.
+        section = docs.plan_section('docs/devloop/guide.md', 'Dependencies between issues',
+                                    root=docs.ROOT)
+        docs.assert_documented(self, section, [
+            'write a prerequisite as a native block', 'blocked escalation',
+            'supervisor adds the block itself', 'readiness check', 'reviewer key',
+            'repository_dependent', "operator's choice, per project"], issues=(670,))
+        quick = docs.plan_section('docs/devloop/quickstart.md', '4. Project file and overlay',
+                                  root=docs.ROOT)
+        docs.assert_documented(self, quick, [
+            'readiness check is recommended for a new project', 'reviewer key',
+            'repository_dependent', "operator's choice, per project", 'native block'],
+            issues=(670,))
+        # The supervisor adds the block with its app, through the REST API, and writes to the
+        # coordinator when the prerequisite is not an issue.
+        runbook = docs.plan_section('docs/devloop/roles/supervisor.md', 'Tasks',
+                                    root=docs.ROOT)
+        docs.assert_documented(self, runbook, [
+            'a prerequisite written in the text becomes a native block', 'with your app',
+            'gh has no command for the blocks', 'scripts/supervisor-token.py',
+            "repos/{owner}/{repo}/issues/<ISSUE>/dependencies/blocked_by",
+            '-F issue_id=<ID>', 'write to the coordinator in the mailbox'], issues=(670,))
+
 
 if __name__ == '__main__':
     unittest.main()

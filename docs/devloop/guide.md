@@ -514,6 +514,20 @@ written in the text and the issues that wait for it queued by hand once it is me
   its periodic check, and the supervisor in its flow. No label is added and no comment written.
   A block of another repository is never an orphan: devloop does not read its labels.
 
+**Write a prerequisite as a native block** (#670), not only in words in the text ("to open after
+#N is closed"). devloop does not read the text for prerequisites: such an issue starts, the
+implementer stops because the prerequisite is missing, and its `blocked` escalation, a critical
+one, reaches the operator after a run already spent, with nothing to decide. With the native
+block ("blocked by" #N, from the issue's sidebar on GitHub or from the REST API of the issue
+dependencies) the issue waits and starts by itself once #N closes. The supervisor adds the
+block itself, with its app, before it queues an issue whose text names a prerequisite
+([supervisor runbook](roles/supervisor.md#tasks)). For a new project the
+[readiness check](#readiness-check-before-implementation) is recommended too, with a reviewer
+key (`preflight = "<agent>-reviewer"`): it also sees a prerequisite written only in the text,
+reports it as a gap with `repository_dependent` and checks the issue again once `main`
+advances, before an implementation run is spent. Enabling it stays the operator's choice, per
+project.
+
 The dependencies are read once per tick, for each ready issue that may start, usually with one GraphQL
 query (`Tracker.issue_dependencies`, see [Ports and adapters](../architecture.md#ports-and-adapters)).
 The timeline events that tell who added each block are read 100 at a time, backwards, until

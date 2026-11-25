@@ -337,6 +337,14 @@ slug = "acme-widget-devloop-supervisor"
   ([Ready PRs whose merge is the operator's](guide.md#ready-prs-whose-merge-is-the-operators)).
   Other keys of the operator, such as
   `[run] alert_issue`, are in [Starting and stopping the loop](guide.md#starting-and-stopping-the-loop).
+- The readiness check is recommended for a new project (#670): `preflight` in the overlay with a
+  reviewer key, such as `preflight = "codex-reviewer"`, checks each issue before the implementer
+  starts. It also sees a prerequisite written only in the text of an issue, as a gap with
+  `repository_dependent`, before an implementation run is spent on it
+  ([Readiness check before implementation](guide.md#readiness-check-before-implementation)).
+  Enabling it is the operator's choice, per project; the example leaves it out. Write a
+  prerequisite as a native block ("blocked by") rather than in words: the issue then waits for
+  it by itself ([Dependencies between issues](guide.md#dependencies-between-issues)).
 
 ## 5. Agent user and CLI logins
 
