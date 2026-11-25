@@ -144,7 +144,9 @@ per head, edited when the head is promoted again, that says why (``_do_operator_
 label, and only while the notice of the current promotion is the latest of the dispatcher's
 and the dispatcher added it after the notice, does not stop devloop
 (``_operator_merge_owned``): the PR is synced, its CI checked, and when its readiness decays the
-dispatcher removes the label with ``agent:ready-to-merge``. Any other ``agent:needs-operator``,
+dispatcher removes the label with ``agent:ready-to-merge``. When the reasons, recomputed on the
+current configuration, are none (#673), it removes the label alone and edits its notice
+(``_do_operator_release``): the merge passes to devloop. Any other ``agent:needs-operator``,
 or the name it had before #248 (``config.LEGACY_NEEDS_OPERATOR``), hands the PR or the issue
 to the operator as before.
 
@@ -234,7 +236,7 @@ from .ledger import attempt_branch, comment_ref, fix_register, open_turns, parse
 from .localtests import module_command, select_modules
 from .markdown import (carries_record, dispatcher_header, publishable, read_marker,
                        render_authorize, render_cycle, render_escalation, render_operator_merge,
-                       resume_text)
+                       render_operator_release, resume_text)
 from .activity import iso, restart_line
 from .outbox import SENT as PUBLISHED, describe as outbox_describe
 from .pin import (HAND_PIN, PREFIX, CheckFailed, PinError, PinHeld, Repinned, ScanFailed,
@@ -4045,6 +4047,44 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             self.log(f'  promoted again: updated the notice of {pr.head_sha[:12]}')
         self.gh.edit_labels(pr.number, add=[lb.needs_operator])
         self.log(f'  the merge of {pr.head_sha[:12]} is the operator\'s')
+
+    def _do_operator_release(self, pr):
+        """Remove the dispatcher's own ``agent:needs-operator`` of an operator merge (#673) from
+        a ready PR when, recomputed on the current configuration (``_operator_merge_reasons``),
+        no reason is left: the merge passes to devloop, the normal one of a later tick, whose
+        directives are checked again (``_do_merge``). The PR and its thread are read again
+        first: a head or a state changed since the snapshot leave it to the next tick, and a
+        label that is no longer the dispatcher's (an escalation, an agent, a person) or a reason
+        that is left keep the label. The notice that label belongs to is edited, not written
+        again: it says that the merge passed to devloop, and why, and its record carries
+        ``released``. Notice first: a label that cannot be removed fails the step, which
+        escalates the PR."""
+        lb = self.cfg.labels
+        fresh = self.gh.pr_state(pr.number)
+        if fresh.get('state') != 'OPEN' or (fresh.get('headRefOid') or '') != pr.head_sha:
+            self.log('  head or state changed since the snapshot; next tick')
+            return
+        comments = self._pr_thread(pr.number)
+        pr = self._fresh_pr(pr, label_names(fresh.get('labels') or []), fresh, comments)
+        if lb.ready_to_merge not in pr.labels or not pr.operator_owned:
+            self.log(f'  {lb.needs_operator} is no longer the dispatcher\'s own of an operator '
+                     'merge: it stays')
+            return
+        if self._operator_merge_reasons(pr):
+            self.log(f'  the merge of {pr.head_sha[:12]} stays the operator\'s')
+            return
+        mode = self._merge_mode(pr)
+        notice = next((c for c in comments if c.get('id') == pr.operator_current), None)
+        record = read_marker((notice or {}).get('body') or '', 'notice')
+        if mode not in MERGING or record is None:
+            self.log('  merge mode or notice not verifiable; next tick')
+            return
+        self.gh.edit_comment(notice['id'], render_operator_release(
+            notice['body'], record, mode, lb.needs_operator, self.cfg.language))
+        self.gh.edit_labels(pr.number, remove=[lb.needs_operator])
+        self.log(f'  merge mode {mode}: no reason is left to leave the merge of '
+                 f'{pr.head_sha[:12]} to the operator; {lb.needs_operator} removed, the merge '
+                 'passes to devloop')
 
     def _operator_merge_reasons(self, pr):
         """Why devloop does not merge the ready ``pr`` (#248), as Markdown lines: ``[merge]``
