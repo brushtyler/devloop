@@ -394,7 +394,7 @@ ops_devloop_keys() {
 # per valore un percorso, sostituiti dal più lungo (STATE_DIR è STATE_PATH, lo state_dir risolto),
 # e quelli che sono nomi di utenti dei ruoli, sostituiti solo da soli e solo se non sono i default
 # documentati (OPS_PUBLIC_USERS, come PUBLIC_USERS di devloop/redact.py).
-OPS_REDACT_PATHS='STATE_DIR DEVLOOP_KEY_DIR SUPERVISOR_KEY_DIR COORDINATOR_KEY_DIR DEVLOOP_HOME AGENT_HOME SUPERVISOR_HOME COORDINATOR_HOME COORDINATION_DIR COORDINATOR_OPS_DIR SUPERVISOR_OPS_DIR WATCHDOG_OPS_DIR LAUNCHER_DIR REPO_LOCK_DIR SYSTEMD_DIR SUDOERS_FILE AGENT_SUDOERS_FILE COORDINATOR_SUDOERS_FILE TMPFILES_FILE DEVLOOP_PROJECTS_DIR DEVLOOP_COMMAND'
+OPS_REDACT_PATHS='STATE_DIR DEVLOOP_KEY_DIR SUPERVISOR_KEY_DIR COORDINATOR_KEY_DIR COORDINATOR_CLONE DEVLOOP_HOME AGENT_HOME SUPERVISOR_HOME COORDINATOR_HOME COORDINATION_DIR COORDINATOR_OPS_DIR SUPERVISOR_OPS_DIR WATCHDOG_OPS_DIR LAUNCHER_DIR REPO_LOCK_DIR SYSTEMD_DIR SUDOERS_FILE AGENT_SUDOERS_FILE COORDINATOR_SUDOERS_FILE TMPFILES_FILE DEVLOOP_PROJECTS_DIR DEVLOOP_COMMAND'
 OPS_REDACT_USERS='DEVLOOP_USER AGENT_USER SUPERVISOR_USER COORDINATOR_USER WATCHDOG_USER'
 # Gli altri nomi dell'installazione, sostituiti da soli e nei nomi dei percorsi e delle unità
 # ($SYSTEMD_DIR/$SERVICE_NAME.service), alle condizioni degli utenti.
@@ -942,6 +942,15 @@ ops_check_host_users() {
                 SUPERVISOR_USER:supervisor) app=supervisor ;;
                 COORDINATOR_USER:coordinator) app=coordinator ;;
             esac
+            # Un progetto senza coordinatore non dà nulla al suo COORDINATOR_USER: il nome di
+            # default dell'insieme può essere quello del coordinatore di un altro progetto
+            # dell'insieme, e non lo ferma. Il controllo vale quando l'overlay lo dichiara, o
+            # quando lo script sta per predisporlo o avviarlo (OPS_WITH_COORDINATOR=1:
+            # setup-coordinator.sh, start-role.sh coordinator), prima di dargli accessi.
+            if [ "$app" = coordinator ] && [ "${OPS_WITH_COORDINATOR:-0}" != 1 ] \
+                && ! overlay_declares_coordinator "$STATE_PATH/config.local.toml"; then
+                continue
+            fi
             if [ -n "$app" ]; then
                 mine=$(overlay_app_id "$STATE_PATH/config.local.toml" "$app" || true)
                 theirs=''

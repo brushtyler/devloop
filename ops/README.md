@@ -1370,8 +1370,11 @@ dello stesso insieme (#643): gli script lo verificano con lo stesso `app_id` in
 quello dell'altro (trovato dal log della sua unità). Con `app_id` diversi si fermano sempre;
 finché uno dei due overlay non dichiara l'app del ruolo, `setup-supervisor.sh`,
 `setup-coordinator.sh` e `check-host.sh` si fermano, mentre un `--dry-run`, `setup-devloop.sh` e
-`setup-agent-user.sh`, che non toccano gli utenti dei ruoli, avvisano soltanto. I sudoers sono di
-root: senza root (`--dry-run`) la verifica legge solo le unità. `check-host.sh` verifica anche che
+`setup-agent-user.sh`, che non toccano gli utenti dei ruoli, avvisano soltanto. Un progetto senza
+coordinatore non dà nulla al suo `COORDINATOR_USER`, che può avere il nome del coordinatore di un
+altro progetto dell'insieme: la verifica del coordinatore vale solo se l'overlay lo dichiara, e in
+`setup-coordinator.sh` e `start-role.sh coordinator`, che lo predispongono o lo avviano. I
+sudoers sono di root: senza root (`--dry-run`) la verifica legge solo le unità. `check-host.sh` verifica anche che
 nel gruppo della casella non ci sia nessun utente oltre ai due ruoli del progetto.
 `setup-supervisor.sh` e `setup-coordinator.sh` si fermano anche se `SUPERVISOR_CLONE` o
 `COORDINATOR_CLONE` è già un clone di un altro repository.

@@ -2988,11 +2988,15 @@ tutti i progetti dell'insieme (quelli con lo stesso `APP_PREFIX`), compreso quel
    ```bash
    for f in "${insieme[@]}"; do for n in SUPERVISOR_USER COORDINATOR_USER SUPERVISOR_KEY_DIR COORDINATOR_KEY_DIR; do printf '%s %s: %s -> %s\n' "$(basename "$f")" "$n" "$(prima "$(copia "$f")" "$n")" "$(leggi "$f" "$n")"; done; done
    grep -nE '^(SUPERVISOR|COORDINATOR)_HOME=' "${insieme[@]}" || echo nessuna
+   gia=1; for f in "${insieme[@]}"; do for n in SUPERVISOR_USER COORDINATOR_USER SUPERVISOR_KEY_DIR COORDINATOR_KEY_DIR; do v=$(leggi "$f" "$n"); [ "$v" = "$(prima "$(copia "$f")" "$n")" ] && [ "$v" = "$(leggi "$resta" "$n")" ] || gia=0; done; done; [ "$gia" = 1 ] && echo "già dell'insieme" || echo 'da riunire'
    ```
 
-   Se per ogni progetto i due valori coincidono (i parametri li scrivono già), l'insieme ha già i
-   suoi utenti: si passa al passo 5. `grep` stampa `nessuna`; se un file scrive una home di un
-   ruolo, ci si ferma e si chiede all'operatore.
+   `grep` stampa `nessuna`; se un file scrive una home di un ruolo, ci si ferma e si chiede
+   all'operatore. L'ultima riga stampa `già dell'insieme` solo se ogni progetto scrive già nei
+   parametri gli utenti e le `key_dir` dei ruoli (i due valori coincidono) e se sono, per tutti,
+   quelli del progetto che resta: l'insieme ha già i suoi utenti, e si passa al passo 5, poi al
+   passo 7, senza i passi 3, 4 e 6. Con `da riunire` si va avanti dal passo 3: anche un progetto
+   con i valori già scritti, ma diversi da quelli del progetto che resta, ha ancora utenti suoi.
 
 3. **Gli utenti dell'insieme nei parametri** di ogni progetto dell'insieme: quelli di prima del
    progetto che resta, scritti, al posto di ogni riga che scriveva gli utenti o le `key_dir` dei
@@ -3009,14 +3013,17 @@ tutti i progetti dell'insieme (quelli con lo stesso `APP_PREFIX`), compreso quel
    progetto che resta.
 
 4. **Le sessioni dei progetti che passano**, ferme, con i loro risvegli e il loro watchdog: per
-   ogni file `f` dell'insieme diverso da `$resta`, con i suoi utenti di prima:
+   ogni file `f` dell'insieme diverso da `$resta`, con i suoi utenti di prima, ruolo per ruolo,
+   solo per i ruoli il cui utente cambia:
 
    ```bash
-   for f in "${insieme[@]}"; do [ "$f" = "$resta" ] && continue; c=$(copia "$f"); p=$(leggi "$f" PROJECT); systemctl stop "devloop-role-watchdog@$p.timer"; sudo -u "$(prima "$c" SUPERVISOR_USER)" -H tmux kill-session -t "=devloop-supervisor-$p"; sudo -u "$(prima "$c" COORDINATOR_USER)" -H tmux kill-session -t "=devloop-coordinator-$p"; pkill -u "$(prima "$c" SUPERVISOR_USER)" -f 'wait\.sh'; pkill -u "$(prima "$c" COORDINATOR_USER)" -f 'wait\.sh'; done
+   for f in "${insieme[@]}"; do [ "$f" = "$resta" ] && continue; c=$(copia "$f"); p=$(leggi "$f" PROJECT); systemctl stop "devloop-role-watchdog@$p.timer"; for r in supervisor coordinator; do n=${r^^}_USER; u=$(prima "$c" "$n"); [ "$u" = "$(leggi "$f" "$n")" ] && { echo "resta: $r di $p"; continue; }; sudo -u "$u" -H tmux kill-session -t "=devloop-$r-$p"; pkill -u "$u" -f 'wait\.sh'; done; done
    ```
 
    Una sessione che non c'è dà `can't find session`, un risveglio che non c'è nessun output: va
-   bene. Le righe del coordinatore valgono solo per un progetto che lo ha.
+   bene. Le righe del coordinatore valgono solo per un progetto che lo ha. `resta:` nomina un
+   ruolo il cui utente di prima è già quello dell'insieme: la sua sessione non si ferma, perché
+   `pkill` fermerebbe anche i risvegli degli altri progetti dello stesso utente.
 
 5. **Gli script di ogni progetto dell'insieme**, prima con `--dry-run`: danno agli utenti
    dell'insieme le ACL, il gruppo della casella, i sudoers, le copie di root, i clone e il
@@ -3037,16 +3044,20 @@ tutti i progetti dell'insieme (quelli con lo stesso `APP_PREFIX`), compreso quel
 6. **Gli utenti di prima dei progetti che passano**, fuori dai file del progetto: le ACL sulla home
    di devloop, sullo `state_dir`, sull'overlay e sul file di progetto, il gruppo della casella, e
    le chiavi delle app di ruolo nelle loro `key_dir`, copie di quelle dell'insieme, che si
-   tolgono solo se sono uguali a quelle della `key_dir` dell'insieme:
+   tolgono solo se sono uguali a quelle della `key_dir` dell'insieme. Ruolo per ruolo, e solo
+   dove cambia: un utente di prima che è già quello dell'insieme tiene le sue ACL e i suoi gruppi,
+   e una `key_dir` di prima che è già quella dell'insieme (lo stesso percorso, anche per un link)
+   tiene le sue chiavi, che sono quelle che restano:
 
    ```bash
-   for f in "${insieme[@]}"; do [ "$f" = "$resta" ] && continue; c=$(copia "$f"); home=$(leggi "$f" DEVLOOP_HOME) state=$(leggi "$f" STATE_PATH) gruppo=$(leggi "$f" COORDINATION_GROUP); for u in "$(prima "$c" SUPERVISOR_USER)" "$(prima "$c" COORDINATOR_USER)"; do id -u "$u" >/dev/null 2>&1 || continue; setfacl -x "u:$u" "$home" "$state" "$state/config.local.toml" "$state/project.toml" 2>/dev/null; gpasswd -d "$u" "$gruppo" 2>/dev/null; done; done
-   for f in "${insieme[@]}"; do [ "$f" = "$resta" ] && continue; c=$(copia "$f"); for n in SUPERVISOR_KEY_DIR COORDINATOR_KEY_DIR; do vecchia=$(prima "$c" "$n") nuova=$(leggi "$f" "$n"); [ -d "$vecchia" ] || continue; for k in "$vecchia"/*.private-key.pem; do [ -e "$k" ] || continue; if cmp -s "$k" "$nuova/$(basename "$k")"; then rm -- "$k"; else echo "diversa: $k"; fi; done; rmdir "$vecchia" && echo "vuota: $vecchia"; done; done
+   for f in "${insieme[@]}"; do [ "$f" = "$resta" ] && continue; c=$(copia "$f"); home=$(leggi "$f" DEVLOOP_HOME) state=$(leggi "$f" STATE_PATH) gruppo=$(leggi "$f" COORDINATION_GROUP); for n in SUPERVISOR_USER COORDINATOR_USER; do u=$(prima "$c" "$n"); [ "$u" = "$(leggi "$f" "$n")" ] && { echo "resta: $u"; continue; }; id -u "$u" >/dev/null 2>&1 || continue; setfacl -x "u:$u" "$home" "$state" "$state/config.local.toml" "$state/project.toml" 2>/dev/null; gpasswd -d "$u" "$gruppo" 2>/dev/null; done; done
+   for f in "${insieme[@]}"; do [ "$f" = "$resta" ] && continue; c=$(copia "$f"); for n in SUPERVISOR_KEY_DIR COORDINATOR_KEY_DIR; do vecchia=$(prima "$c" "$n") nuova=$(leggi "$f" "$n"); [ "$(realpath -m -- "$vecchia")" = "$(realpath -m -- "$nuova")" ] && { echo "resta: $vecchia"; continue; }; [ -d "$vecchia" ] || continue; for k in "$vecchia"/*.private-key.pem; do [ -e "$k" ] || continue; if cmp -s "$k" "$nuova/$(basename "$k")"; then rm -- "$k"; else echo "diversa: $k"; fi; done; rmdir "$vecchia" && echo "vuota: $vecchia"; done; done
    ```
 
-   La seconda riga stampa `vuota:` per ogni `key_dir` di prima. Se stampa `diversa:`, o se un
-   `rmdir` fallisce, nella `key_dir` di prima resta una chiave che non è una copia di quella
-   dell'insieme: ci si ferma, senza copiare né cancellare altro, e si chiede all'operatore.
+   La seconda riga stampa `vuota:` per ogni `key_dir` di prima che cambia, e `resta:` per una che
+   è già quella dell'insieme. Se stampa `diversa:`, o se un `rmdir` fallisce, nella `key_dir` di
+   prima resta una chiave che non è una copia di quella dell'insieme: ci si ferma, senza copiare
+   né cancellare altro, e si chiede all'operatore.
 
 7. **Verifica.** `check-host.sh` di ogni progetto dell'insieme non dà nessun `ERRORE`: gli utenti
    dell'insieme, le loro `key_dir` con le chiavi, il gruppo di ogni casella con i soli ruoli del
@@ -3060,7 +3071,8 @@ tutti i progetti dell'insieme (quelli con lo stesso `APP_PREFIX`), compreso quel
    `sudo bash <checkout>/ops/host/start-role.sh --params <parametri> supervisor` e `coordinator`.
    Le sessioni hanno gli stessi nomi di prima, `devloop-<ruolo>-<progetto>`, con l'utente
    dell'insieme; il coordinatore parte dal suo clone del repository gestito. Nessun login nuovo:
-   gli utenti dell'insieme li hanno già.
+   gli utenti dell'insieme li hanno già. Un ruolo che al passo 4 stampava `resta:` ha ancora la
+   sua sessione, e `start-role.sh` dice che esiste già: va bene.
 
 9. **Pulizia, su conferma dell'operatore** che il rollback non serve più: la copia dei parametri
    (`rm -rf -- "$copie"`). Gli utenti di prima dei progetti che passano, con le loro home, i loro
@@ -3077,7 +3089,7 @@ i loro clone e i loro login.
    script, con i parametri di prima, riscrivono sudoers, ACL e watchdog con gli utenti di prima:
 
    ```bash
-   for f in "${insieme[@]}"; do [ "$f" = "$resta" ] && continue; c=$(copia "$f"); for n in SUPERVISOR:SUPERVISOR_KEY_DIR COORDINATOR:COORDINATOR_KEY_DIR; do u=$(prima "$c" "${n%%:*}_USER") vecchia=$(prima "$c" "${n#*:}") nuova=$(leggi "$f" "${n#*:}"); id -u "$u" >/dev/null 2>&1 || continue; install -d -m 700 -o "$u" -g "$(id -gn "$u")" "$vecchia"; for k in "$nuova"/*.private-key.pem; do [ -e "$k" ] && install -m 600 -o "$u" -g "$(id -gn "$u")" "$k" "$vecchia/"; done; done; done
+   for f in "${insieme[@]}"; do [ "$f" = "$resta" ] && continue; c=$(copia "$f"); for n in SUPERVISOR:SUPERVISOR_KEY_DIR COORDINATOR:COORDINATOR_KEY_DIR; do u=$(prima "$c" "${n%%:*}_USER") vecchia=$(prima "$c" "${n#*:}") nuova=$(leggi "$f" "${n#*:}"); [ "$(realpath -m -- "$vecchia")" = "$(realpath -m -- "$nuova")" ] && continue; id -u "$u" >/dev/null 2>&1 || continue; install -d -m 700 -o "$u" -g "$(id -gn "$u")" "$vecchia"; for k in "$nuova"/*.private-key.pem; do [ -e "$k" ] && install -m 600 -o "$u" -g "$(id -gn "$u")" "$k" "$vecchia/"; done; done; done
    for f in "${insieme[@]}"; do cp -p "$(copia "$f")" "$f"; done
    ```
 
@@ -3085,8 +3097,8 @@ i loro clone e i loro login.
    del merge di #643, `setup-supervisor.sh` e `setup-coordinator.sh` (se il progetto ha il
    coordinatore) con `--dry-run` e poi senza; per ogni progetto dell'insieme, l'utente
    dell'insieme tolto dal gruppo della casella dei progetti che passano (`gpasswd -d <utente>
-   <gruppo>`) e le sue ACL sui loro file (`setfacl -x`, come al passo 6); `check-host.sh` di ogni
-   progetto senza `ERRORE`.
+   <gruppo>`) e le sue ACL sui loro file (`setfacl -x`, come al passo 6), tranne dove ne era già
+   l'utente prima (`resta:` al passo 6); `check-host.sh` di ogni progetto senza `ERRORE`.
 3. Le sessioni, dell'operatore, con `start-role.sh` e gli utenti di prima.
 
 ## Letture del supervisore con la sua app (#643)
@@ -3108,10 +3120,37 @@ Il codice di devloop non cambia e il loop resta attivo. Passi per ogni insieme d
    *Checks* e *Commit statuses* in *Read-only*; *Save changes*. Poi, nell'installazione del
    proprietario (*Install App* → l'installazione → *Review request*), si accettano i permessi
    nuovi: finché non sono accettati, un token che li chiede fallisce.
-2. **La prova**, come utente del supervisore, dal clone da cui conia i token (`SUPERVISOR_CLONE`,
+2. **Il clone dei token, a una versione con il #643**, per ogni progetto dell'insieme.
+   `scripts/supervisor-token.py` che il supervisore esegue è quello del clone da cui conia i
+   token, non quello del checkout dell'operatore: uno di prima del #643 rifiuta `actions`,
+   `checks` e `statuses` (`permission actions=read is not allowed`). `<parametri>` è il file di
+   parametri del progetto, `leggi` quella del passo 1 di [Utenti dei ruoli per insieme di
+   app](#utenti-dei-ruoli-per-insieme-di-app-643).
+   - **Senza `SOURCE_REPO`** il clone è `SUPERVISOR_CLONE`, un clone del repository gestito, che
+     contiene devloop. Come utente del supervisore, si porta in avanti fino a
+     `origin/<DEFAULT_BRANCH>`, solo se è su quel ramo e senza commit suoi:
+
+     ```bash
+     u=$(leggi <parametri> SUPERVISOR_USER) clone=$(leggi <parametri> SUPERVISOR_CLONE) ramo=$(leggi <parametri> DEFAULT_BRANCH)
+     [ "$(sudo -u "$u" -H git -C "$clone" symbolic-ref --short HEAD)" = "$ramo" ] && echo "sul ramo $ramo"
+     sudo -u "$u" -H git -C "$clone" fetch origin
+     sudo -u "$u" -H git -C "$clone" merge --ff-only "origin/$ramo"
+     ```
+
+     La seconda riga stampa `sul ramo …`, e `merge` riesce. Un clone su un altro ramo, con
+     modifiche o con commit che `origin` non ha, è lavoro del supervisore: ci si ferma, senza
+     cambiarlo, e si chiede all'operatore.
+   - **Con `SOURCE_REPO`** il clone è `SUPERVISOR_SOURCE_CLONE`, al tag `SOURCE_REF` del
+     progetto, a cui `setup-supervisor.sh` lo riporta a ogni esecuzione. Se `SOURCE_REF` è un
+     tag di prima del #643 (la prova del passo 3 lo dice), questa migrazione per quel progetto
+     aspetta la versione nuova: l'operatore fissa un tag che contiene il #643 e lo scrive in
+     `SOURCE_REF`, come per ogni versione nuova di devloop ([guida
+     rapida](../../docs/devloop/quickstart.md#later)), poi `setup-project.sh` del progetto, prima
+     con `--dry-run`, porta al tag il clone di ogni ruolo. Questa procedura non cambia
+     `SOURCE_REF`: con il tag cambia anche l'avviatore del progetto, che è un pin dell'operatore.
+3. **La prova**, come utente del supervisore, dal clone da cui conia i token (`SUPERVISOR_CLONE`,
    o `SUPERVISOR_SOURCE_CLONE` con `SOURCE_REPO`), con la sua `key_dir` e lo `state_dir` del
-   progetto. `<parametri>` è il file di parametri del progetto, `leggi` quella del passo 1 di
-   [Utenti dei ruoli per insieme di app](#utenti-dei-ruoli-per-insieme-di-app-643):
+   progetto:
 
    ```bash
    clone=$(leggi <parametri> SUPERVISOR_CLONE); [ -z "$(leggi <parametri> SOURCE_REPO)" ] || clone=$(leggi <parametri> SUPERVISOR_SOURCE_CLONE)
@@ -3119,8 +3158,10 @@ Il codice di devloop non cambia e il loop resta attivo. Passi per ogni insieme d
    ```
 
    Stampa un numero. Un errore `403` vuol dire che i permessi del passo 1 non sono ancora
-   accettati nell'installazione: ci si ferma e si chiede all'operatore.
-3. **Il token personale, tolto.** Come utente del supervisore (e del coordinatore, se ne aveva
+   accettati nell'installazione, `permission actions=read is not allowed` che il clone dei token
+   è ancora di prima del #643 (passo 2): in entrambi i casi ci si ferma, con il token personale
+   ancora al suo posto, e si chiede all'operatore. Il passo 4 viene solo dopo una prova riuscita.
+4. **Il token personale, tolto.** Come utente del supervisore (e del coordinatore, se ne aveva
    uno), il login di `gh` si chiude; l'operatore cancella poi i token su GitHub (*Settings* →
    *Developer settings* → *Personal access tokens* → *Fine-grained tokens* → *Delete*):
 
@@ -3131,7 +3172,7 @@ Il codice di devloop non cambia e il loop resta attivo. Passi per ogni insieme d
 
    `gh auth status` dice che non c'è nessun login. Un utente senza login dà già `not logged in`
    al primo comando: va bene.
-4. **Le sessioni del supervisore** ripartono con `start-role.sh` (dell'operatore), che dà al
+5. **Le sessioni del supervisore** ripartono con `start-role.sh` (dell'operatore), che dà al
    primo messaggio la `key_dir` e il clone dei token del supervisore; il runbook dice come
    leggere con l'app.
 

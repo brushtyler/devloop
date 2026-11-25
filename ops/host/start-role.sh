@@ -74,6 +74,9 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$ROLE" ] || { usage >&2; exit 2; }
 
+# Il coordinatore che si avvia si verifica fra gli utenti dell'host anche se l'overlay non lo
+# dichiara (ops_check_host_users).
+[ "$ROLE" = coordinator ] && OPS_WITH_COORDINATOR=1
 ops_load_params
 ops_check_platform
 

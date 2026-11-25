@@ -33,6 +33,9 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# Il coordinatore che lo script predispone si verifica fra gli utenti dell'host anche se l'overlay
+# non lo dichiara ancora (ops_check_host_users).
+OPS_WITH_COORDINATOR=1
 ops_load_params
 ops_check_platform
 require_root

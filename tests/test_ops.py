@@ -1263,6 +1263,169 @@ class RoleSetsMigrationGuideTests(unittest.TestCase):
             # The copies keep the parameters of before, for the rollback.
             self.assertNotIn('SUPERVISOR_USER', (tmp / 'copie/params-gadget.env').read_text())
 
+    def s1_script(self, tmp, files, wanted):
+        """The commands of the steps ``wanted`` of the section S1 (``(prefix, count)`` pairs:
+        the ``count`` commands from the first that starts with ``prefix``), with the
+        placeholders filled for the files ``files`` (the first is the project that stays) and
+        the copies under ``tmp``."""
+        commands = RootStepsGuideTests.commands(self.section(self.S1), inline=False)
+        lines = []
+        for prefix, count in wanted:
+            start = commands.index(next(c for c in commands if c.startswith(prefix)))
+            lines += commands[start:start + count]
+        script = []
+        for line in lines:
+            line = line.replace('<checkout>/ops', str(OPS))
+            line = line.replace('<parametri del progetto che resta>', str(files[0]))
+            line = line.replace('<parametri di ogni progetto dell\'insieme>',
+                                ' '.join(str(f) for f in files))
+            if line.startswith('copie='):
+                line = f'copie={tmp}/copie'
+            script.append(line)
+        return '\n'.join(script)
+
+    STEP1 = ('ops=', 8)
+    STEP2 = ('for f in "${insieme[@]}"; do for n in', 3)
+    STEP3 = ('r=$(copia "$resta")', 4)
+    STEP6 = ('for f in "${insieme[@]}"; do [ "$f" = "$resta" ] && continue; c=$(copia "$f"); '
+             'home=', 2)
+
+    def test_the_cleanup_touches_only_the_users_and_the_key_dirs_that_change(self):
+        # R1-1: steps 2 and 6 role by role. Already shared: step 2 says so, and step 6 keeps the
+        # keys, the ACLs and the groups of the users that stay. To bring together: step 6
+        # removes only the copies of the keys in the key_dirs of before, and the ACLs and the
+        # groups of the users of before.
+        for shared in (True, False):
+            with self.subTest(shared=shared), tempfile.TemporaryDirectory() as tmp:
+                tmp = Path(tmp)
+                bin_dir = tmp / 'bin'
+                bin_dir.mkdir()
+                calls = tmp / 'calls'
+                for name in ('setfacl', 'gpasswd'):
+                    (bin_dir / name).write_text(f'#!/bin/sh\necho "{name} $*" >> {calls}\n')
+                    (bin_dir / name).chmod(0o755)
+                (bin_dir / 'id').write_text('#!/bin/sh\n[ "$1" = -u ] && exit 0\n'
+                                            'exec /usr/bin/id "$@"\n')
+                (bin_dir / 'id').chmod(0o755)
+                keys = {'SUPERVISOR_KEY_DIR': ('sup', 'acme-supervisor'),
+                        'COORDINATOR_KEY_DIR': ('coord', 'acme-coordinator')}
+                for name, (directory, app) in keys.items():
+                    (tmp / 'keys' / directory).mkdir(parents=True)
+                    (tmp / 'keys' / directory / f'{app}.2026-11-24.private-key.pem').write_text(
+                        f'key of {app}\n')
+                files = []
+                for project in ('widget', 'gadget'):
+                    path = tmp / f'params-{project}.env'
+                    lines = [f'REPO=acme/{project}', 'APP_PREFIX=acme-', f'PROJECT={project}']
+                    if shared or project == 'widget':
+                        if shared:
+                            lines += ['SUPERVISOR_USER=supervisor-widget',
+                                      'COORDINATOR_USER=coordinator-widget']
+                        lines += [f'{name}={tmp}/keys/{directory}'
+                                  for name, (directory, _) in keys.items()]
+                    else:
+                        # The users of #629, with key_dirs of their own holding copies.
+                        for name, (directory, app) in keys.items():
+                            old = tmp / 'old' / directory
+                            old.mkdir(parents=True)
+                            shutil.copyfile(
+                                tmp / 'keys' / directory / f'{app}.2026-11-24.private-key.pem',
+                                old / f'{app}.2026-11-24.private-key.pem')
+                            lines.append(f'{name}={old}')
+                    path.write_text('\n'.join(lines) + '\n')
+                    files.append(path)
+                steps = [self.STEP1, self.STEP2] + ([] if shared else [self.STEP3]) + [self.STEP6]
+                env = dict(os.environ, LC_ALL='C.UTF-8', SYSTEMD_DIR=str(tmp / 'systemd'),
+                           PATH=f'{bin_dir}:{os.environ.get("PATH", "/usr/bin:/bin")}')
+                done = subprocess.run([BASH, '-c', self.s1_script(tmp, files, steps)],
+                                      capture_output=True, text=True, env=env,
+                                      stdin=subprocess.DEVNULL, timeout=120)
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                out = done.stdout
+                # The keys of the set stay, always.
+                self.assertEqual(len(list((tmp / 'keys').glob('*/*.private-key.pem'))), 2)
+                acted = calls.read_text() if calls.exists() else ''
+                if shared:
+                    self.assertIn("già dell'insieme\n", out)
+                    self.assertNotIn('da riunire', out)
+                    self.assertIn('resta: supervisor-widget\n', out)
+                    self.assertIn(f'resta: {tmp}/keys/sup\n', out)
+                    self.assertNotIn('vuota:', out)
+                    self.assertEqual(acted, '')
+                else:
+                    self.assertIn('da riunire\n', out)
+                    self.assertIn(f'vuota: {tmp}/old/sup\n', out)
+                    self.assertIn(f'vuota: {tmp}/old/coord\n', out)
+                    self.assertFalse((tmp / 'old/sup').exists())
+                    self.assertNotIn('diversa:', out)
+                    for user in ('supervisor-gadget', 'coordinator-gadget'):
+                        self.assertIn(f'setfacl -x u:{user} ', acted)
+                        self.assertIn(f'gpasswd -d {user} ', acted)
+                    self.assertNotIn('widget', acted.replace('/params-widget', ''))
+
+    def test_the_clone_of_the_tokens_moves_forward_only_on_its_branch(self):
+        # R1-4: S2, step 2, without SOURCE_REPO: the supervisor's clone of before #643 moves to
+        # origin/<DEFAULT_BRANCH>, only forward and only on that branch.
+        section = self.section(self.S2)
+        commands = RootStepsGuideTests.commands(section, inline=False)
+        start = commands.index(next(c for c in commands if c.startswith('u=$(leggi')))
+        step = commands[start:start + 4]
+        self.assertTrue(step[-1].endswith('merge --ff-only "origin/$ramo"'), step)
+        s1 = RootStepsGuideTests.commands(self.section(self.S1), inline=False)
+        leggi = next(c for c in s1 if c.startswith('leggi()'))
+        git_env = dict(os.environ, LC_ALL='C.UTF-8', GIT_AUTHOR_NAME='t',
+                       GIT_AUTHOR_EMAIL='t@example.invalid', GIT_COMMITTER_NAME='t',
+                       GIT_COMMITTER_EMAIL='t@example.invalid', GIT_CONFIG_GLOBAL='/dev/null',
+                       GIT_CONFIG_NOSYSTEM='1')
+
+        def git(*args, cwd):
+            return subprocess.run(['git', *args], cwd=cwd, env=git_env, capture_output=True,
+                                  text=True, check=True, timeout=60).stdout.strip()
+
+        for case in ('behind', 'diverged', 'other branch'):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                tmp = Path(tmp)
+                origin, work, clone = tmp / 'origin.git', tmp / 'work', tmp / 'clone'
+                git('init', '-q', '--bare', '-b', 'main', str(origin), cwd=tmp)
+                git('clone', '-q', str(origin), str(work), cwd=tmp)
+                (work / 'f').write_text('before #643\n')
+                git('add', 'f', cwd=work)
+                git('commit', '-q', '-m', 'before', cwd=work)
+                git('push', '-q', 'origin', 'HEAD:main', cwd=work)
+                git('clone', '-q', str(origin), str(clone), cwd=tmp)
+                (work / 'f').write_text('with #643\n')
+                git('commit', '-q', '-am', 'with', cwd=work)
+                git('push', '-q', 'origin', 'HEAD:main', cwd=work)
+                if case == 'diverged':
+                    (clone / 'g').write_text('of the supervisor\n')
+                    git('add', 'g', cwd=clone)
+                    git('commit', '-q', '-m', 'local', cwd=clone)
+                elif case == 'other branch':
+                    git('checkout', '-q', '-b', 'look', cwd=clone)
+                params = tmp / 'params.env'
+                params.write_text(f'REPO=acme/widget\nAPP_PREFIX=acme-\nPROJECT=widget\n'
+                                  f'SUPERVISOR_CLONE={clone}\n')
+                script = [f'ops={OPS}', leggi] + [
+                    line.replace('<parametri>', str(params)).replace('sudo -u "$u" -H ', '')
+                    for line in step]
+                results = []
+                for end in range(3, len(script) + 1):
+                    done = subprocess.run([BASH, '-c', '\n'.join(script[:end])],
+                                          capture_output=True, text=True, env=git_env,
+                                          stdin=subprocess.DEVNULL, timeout=120)
+                    results.append(done)
+                check, merge = results[1], results[-1]
+                if case == 'other branch':
+                    self.assertNotIn('sul ramo', check.stdout)
+                    continue
+                self.assertIn('sul ramo main\n', check.stdout)
+                if case == 'behind':
+                    self.assertEqual(merge.returncode, 0, merge.stderr)
+                    self.assertEqual((clone / 'f').read_text(), 'with #643\n')
+                else:
+                    self.assertNotEqual(merge.returncode, 0)
+                    self.assertEqual((clone / 'f').read_text(), 'before #643\n')
+
     def test_the_steps_on_the_host_and_their_checks(self):
         section = ' '.join(self.section(self.S1).split())
         for phrase in ('sudo bash <checkout>/ops/host/setup-project.sh --params "$f" --dry-run',
@@ -2300,8 +2463,12 @@ class DryRunTests(OpsTestCase):
         params = self.params(DEVLOOP_USER='opsdry-nouser', COORDINATOR_USER='coordinator',
                              COORDINATOR_OPS_DIR=self.root_copy())
         # #643: the coordinator of another project is this project's only if the two belong to
-        # the same set of apps. Here no overlay declares [apps.coordinator]: the check stops,
-        # but a dry run, or a script that does not touch the users of the roles, only warns.
+        # the same set of apps. Here this project has the coordinator, and the other overlay
+        # does not declare [apps.coordinator]: the check stops, but a dry run, or a script that
+        # does not touch the users of the roles, only warns.
+        overlay = Path(self.resolved(params, 'STATE_PATH')['STATE_PATH']) / 'config.local.toml'
+        overlay.parent.mkdir(parents=True, exist_ok=True)
+        overlay.write_text('[apps.coordinator]\napp_id = 12\nslug = "x-coordinator"\n')
         shared = ("COORDINATOR_USER 'coordinator' è già l'utente coordinator di un'altra "
                   f"installazione di devloop dell'host ({sudoers}/devloop-coordinator-gadget)")
         done = self.run_script('host/check-host.sh', '--no-apps', '--params', str(params))
@@ -2417,6 +2584,66 @@ class DryRunTests(OpsTestCase):
         self.assertNotEqual(done.returncode, 0)
         self.assertIn('APP_SET, il nome dell\'insieme di app', done.stderr)
         self.assertEqual(self.mutating_calls(), [])
+
+    def test_a_project_without_the_coordinator_shares_a_set_with_one_that_has_it(self):
+        # #643, R1-2: in a set where another project has the coordinator, a project without it
+        # resolves the same default COORDINATOR_USER, and gives it nothing: no script stops on
+        # it. The check comes back where the coordinator gets its accesses: setup-coordinator.sh
+        # and start-role.sh coordinator, even before the overlay declares it.
+        sudoers = self.tmp / 'sudoers.d'
+        sudoers.mkdir()
+        (sudoers / 'devloop-supervisor-gadget').write_text(
+            'supervisor-acme ALL=(devloop-gadget) NOPASSWD: \\\n    /usr/bin/true\n')
+        (sudoers / 'devloop-coordinator-gadget').write_text(
+            'coordinator-acme ALL=(devloop-gadget) NOPASSWD: \\\n    /usr/bin/true\n')
+        gadget = self.tmp / 'state-gadget'
+        gadget.mkdir()
+        dropin = self.tmp / 'systemd/devloop@gadget.service.d/project.conf'
+        dropin.parent.mkdir(parents=True)
+        dropin.write_text('[Service]\nUser=devloop-gadget\nGroup=devloop-gadget\n'
+                          f'StandardOutput=append:{gadget}/run.log\n')
+        (gadget / 'config.local.toml').write_text(
+            '[apps.supervisor]\napp_id = 11\nslug = "acme-supervisor"\n\n'
+            '[apps.coordinator]\napp_id = 12\nslug = "acme-coordinator"\n')
+        state = self.home / 'devloop/widget/.devloop'
+        state.mkdir(parents=True)
+        (state / 'config.local.toml').write_text(
+            '[apps.supervisor]\napp_id = 11\nslug = "acme-supervisor"\n')
+        params = self.params(APP_PREFIX='acme-', SUPERVISOR_USER='', COORDINATOR_USER='',
+                             PROJECT='widget', REPO='acme/widget',
+                             COORDINATOR_OPS_DIR=self.root_copy(),
+                             SERVICE_NAME='', SUDOERS_FILE=str(sudoers / 'devloop-supervisor-w'),
+                             AGENT_SUDOERS_FILE=str(sudoers / 'devloop-agent-w'),
+                             COORDINATOR_SUDOERS_FILE=str(sudoers / 'devloop-coordinator-w'))
+        self.assertEqual(self.resolved(params, 'COORDINATOR_USER'),
+                         {'COORDINATOR_USER': 'coordinator-acme'})
+        shared = "COORDINATOR_USER 'coordinator-acme' è già l'utente coordinator"
+        # Not even a warning; without --dry-run the check stops where it applies.
+        self.fake_host('classic sudo')
+        for script, args in (('host/check-host.sh', ('--dry-run',)),
+                             ('host/setup-supervisor.sh', ()),
+                             ('host/start-role.sh', ('supervisor',))):
+            with self.subTest(script=script):
+                done = self.run_script(script, *args, '--params', str(params))
+                self.assertNotIn(shared, done.stdout + done.stderr)
+        for script, args in (('host/setup-coordinator.sh', ()),
+                             ('host/start-role.sh', ('coordinator',))):
+            with self.subTest(script=script):
+                done = self.run_script(script, *args, '--params', str(params))
+                self.assertNotEqual(done.returncode, 0)
+                self.assertIn(f'{shared} di un\'altra installazione di devloop dell\'host '
+                              f'({sudoers}/devloop-coordinator-gadget): si condivide solo fra '
+                              'progetti dello stesso insieme di app', done.stderr)
+        # Declared, with the app of the set: accepted by the scripts of the coordinator too.
+        (state / 'config.local.toml').write_text(
+            '[apps.supervisor]\napp_id = 11\nslug = "acme-supervisor"\n\n'
+            '[apps.coordinator]\napp_id = 12\nslug = "acme-coordinator"\n')
+        done = self.run_script('host/setup-coordinator.sh', '--dry-run', '--params', str(params))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertNotIn(shared, done.stdout + done.stderr)
+        # Only the reads of check-host.sh on the service.
+        self.assertEqual([c for c in self.mutating_calls()
+                          if not c.startswith(('systemctl is-', 'systemctl show '))], [])
 
     def test_setup_agent_user_dry_run_prints_the_user_the_acls_and_the_sudoers(self):
         # #415: the agent user traverses the home of devloop and state_dir, writes only in the
@@ -4924,6 +5151,31 @@ exec "$@"''')
         self.assertNotIn('$STATE_DIR', verbose.stdout)
         # The same lines, in the same order: only the values change.
         self.assertEqual(len(done.stdout.splitlines()), len(verbose.stdout.splitlines()))
+
+    def test_the_clone_of_the_coordinator_is_a_parameter_unless_verbose(self):
+        # #643, R1-3: COORDINATOR_CLONE, where the coordinator's session starts, may lie out of
+        # its home: its path is an installation's detail too.
+        self.declare_coordinator()
+        self.fake_host('classic sudo', users=(FAKE_AGENT, FAKE_SUPERVISOR, FAKE_COORDINATOR))
+        clone = self.tmp / 'example-private-clones/coordinator-widget'
+        params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=FAKE_SUPERVISOR,
+                             AGENT_USER=FAKE_AGENT, COORDINATOR_CLONE=str(clone))
+        self.assertEqual(json.loads(self.redactions(params))['paths']['COORDINATOR_CLONE'],
+                         str(clone))
+        done = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params),
+                               redacted=True)
+        self.assertNotIn(str(clone), done.stdout + done.stderr)
+        self.assertIn('  ERRORE: $COORDINATOR_CLONE non è un clone: la sessione del coordinatore '
+                      'parte da lì (setup-coordinator.sh)\n', done.stdout)
+        verbose = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params))
+        self.assertIn(f'  ERRORE: {clone} non è un clone: la sessione del coordinatore parte da lì '
+                      '(setup-coordinator.sh)\n', verbose.stdout)
+        self.assertNotIn('$COORDINATOR_CLONE', verbose.stdout)
+        (clone / '.git').mkdir(parents=True)
+        done = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params),
+                               redacted=True)
+        self.assertIn('  ok: $COORDINATOR_CLONE è un clone\n', done.stdout)
+        self.assertNotIn(str(clone), done.stdout + done.stderr)
 
     def test_the_service_name_is_a_parameter_unless_verbose(self):
         # #583, R1-3: a service name that is not the default is an installation's detail too,
