@@ -1,0 +1,126 @@
+#!/bin/bash
+# Il comando devloop dell'host (ops/host/devloop-command, #588). setup-devloop.sh lo installa in
+# DEVLOOP_COMMAND (default /usr/local/bin/devloop), 755 di root, sostituendo il segnaposto della
+# directory dei progetti con DEVLOOP_PROJECTS_DIR; check-host.sh verifica che coincida.
+#
+# Esegue il launcher di un progetto come la sua unità systemd: come l'utente devloop del progetto
+# (sudo -u … -H), nel suo clone, con il suo PATH e il suo LAUNCHER_CMD, quindi la copia fissata del
+# servizio e lo --state-dir del progetto. Sottocomando e argomenti arrivano al launcher così come
+# sono: devloop pin origin/main, devloop status, devloop follow issue-<N>. Nessun sottocomando è
+# di questo involucro, che ha solo l'opzione --project prima del sottocomando.
+#
+# I progetti sono i file params-<progetto>.env della directory dei progetti (params-_default.env
+# per l'installazione senza PROJECT), che setup-devloop.sh scrive da ops/host/devloop-command-project:
+# questo script li legge riga per riga, non li esegue. Senza --project usa il solo progetto
+# installato; con più progetti rifiuta e li elenca. Rimuovere il file di un progetto lo toglie dal
+# comando.
+#
+# Va eseguito come root: un altro utente lo riesegue con sudo. Non sostituisce i sudoers di
+# supervisore e coordinatore, che usano i comandi esatti del launcher.
+set -euo pipefail
+
+PROJECTS_DIR=@DEVLOOP_PROJECTS_DIR@
+
+die() { printf 'devloop: %s\n' "$*" >&2; exit 2; }
+
+usage() {
+    cat <<'EOF'
+Uso: devloop [--project NOME] <sottocomando> [argomenti...]
+
+Esegue il launcher di devloop del progetto come la sua unità systemd (utente, clone, copia fissata,
+state_dir), passandogli sottocomando e argomenti così come sono:
+
+  devloop status
+  devloop pin origin/main
+  devloop --project widget follow issue-12
+
+  --project NOME  il progetto (params-NOME.env dei progetti installati; _default è
+                  l'installazione senza PROJECT). Senza, il solo progetto installato.
+  -h, --help      questo aiuto; l'aiuto di devloop è `devloop <sottocomando> --help`
+EOF
+}
+
+case ${1:-} in
+    -h | --help) usage; exit 0 ;;
+esac
+# Come root: i file dei progetti e sudo verso l'utente di ciascun progetto.
+if [ "$(id -u)" != 0 ]; then
+    exec sudo -- "$0" "$@"
+fi
+
+project=''
+while [ $# -gt 0 ]; do
+    case $1 in
+        --project)
+            [ $# -ge 2 ] || die '--project vuole il nome di un progetto'
+            project=$2
+            shift 2
+            ;;
+        --project=*) project=${1#--project=}; shift ;;
+        -h | --help) usage; exit 0 ;;
+        --) shift; break ;;
+        *) break ;;
+    esac
+done
+[ $# -gt 0 ] || { usage >&2; exit 2; }
+
+# Di root e non scrivibile dal gruppo né dagli altri: chi potesse cambiare un file dei progetti
+# sceglierebbe che cosa esegue root.
+trusted() {
+    local owner mode
+    read -r owner mode < <(stat -c '%u %a' "$1") || return 1
+    [ "$owner" = 0 ] && ! (( 8#$mode & 8#022 ))
+}
+
+if ! [ -d "$PROJECTS_DIR" ] || [ -L "$PROJECTS_DIR" ]; then
+    die "nessun progetto installato: $PROJECTS_DIR non esiste (setup-devloop.sh)"
+fi
+trusted "$PROJECTS_DIR" || die "$PROJECTS_DIR deve essere di root e non scrivibile da altri"
+projects=()
+for file in "$PROJECTS_DIR"/params-*.env; do
+    [ -f "$file" ] && ! [ -L "$file" ] || continue
+    name=${file##*/params-}
+    projects+=("${name%.env}")
+done
+list=${projects[*]:-nessuno}
+list=${list// /, }
+
+if [ -n "$project" ]; then
+    [[ $project =~ ^(_default|[a-z0-9]([a-z0-9-]{0,14}[a-z0-9])?)$ ]] \
+        || die "nome di progetto non valido: '$project'"
+    found=0
+    for name in "${projects[@]}"; do
+        [ "$name" = "$project" ] && found=1
+    done
+    [ "$found" = 1 ] || die "il progetto $project non è installato (progetti: $list)"
+elif [ ${#projects[@]} -eq 0 ]; then
+    die "nessun progetto installato in $PROJECTS_DIR (setup-devloop.sh)"
+elif [ ${#projects[@]} -gt 1 ]; then
+    die "più progetti installati ($list): sceglierne uno con --project NOME"
+else
+    project=${projects[0]}
+fi
+
+file=$PROJECTS_DIR/params-$project.env
+trusted "$file" || die "$file deve essere di root e non scrivibile da altri"
+DEVLOOP_USER='' DEVLOOP_CLONE='' DEVLOOP_PATH='' LAUNCHER_CMD=''
+while IFS= read -r line || [ -n "$line" ]; do
+    case $line in '' | '#'*) continue ;; esac
+    key=${line%%=*}
+    case $key in
+        DEVLOOP_USER | DEVLOOP_CLONE | DEVLOOP_PATH | LAUNCHER_CMD) printf -v "$key" '%s' "${line#*=}" ;;
+        *) die "$file: riga non riconosciuta: $key (rieseguire setup-devloop.sh)" ;;
+    esac
+done <"$file"
+# Le forme che ops/lib.sh ammette per questi parametri; mai root.
+[[ $DEVLOOP_USER =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] && [ "$DEVLOOP_USER" != root ] \
+    || die "$file: DEVLOOP_USER non valido: '$DEVLOOP_USER'"
+[[ $DEVLOOP_CLONE =~ ^/[A-Za-z0-9._/-]*$ ]] || die "$file: DEVLOOP_CLONE non valido: '$DEVLOOP_CLONE'"
+[[ $DEVLOOP_PATH =~ ^[A-Za-z0-9._/:-]+$ ]] || die "$file: DEVLOOP_PATH non valido: '$DEVLOOP_PATH'"
+[[ $LAUNCHER_CMD =~ ^/[A-Za-z0-9._/\ -]+$ ]] || die "$file: LAUNCHER_CMD non valido: '$LAUNCHER_CMD'"
+read -r -a launcher <<<"$LAUNCHER_CMD"
+
+# Nel clone, come WorkingDirectory dell'unità: sudo tiene la directory corrente.
+cd "$DEVLOOP_CLONE" || die "$DEVLOOP_CLONE non è accessibile"
+exec sudo -u "$DEVLOOP_USER" -H -- /usr/bin/env PATH="$DEVLOOP_PATH" PYTHONUNBUFFERED=1 \
+    "${launcher[@]}" "$@"

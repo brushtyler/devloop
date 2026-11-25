@@ -8,7 +8,7 @@
 # istruzioni, configurazione e binari delle sue CLI, agy si fida al più della directory dei
 # worktree, #572; l'ambiente dei turni gli arriva con sudo -E,
 # che sudo-rs ignora), il lock per repository (directory comune, gruppo, overlay; ADR 0006, R8),
-# servizio, CLI degli agent (--version, e un `git --version` con il loro strumento di shell,
+# servizio, comando devloop dell'host e file del progetto (#588), CLI degli agent (--version, e un `git --version` con il loro strumento di shell,
 # #494) e `devloop apps`, e il coordinatore, se l'overlay del progetto lo dichiara (#571; key_dir e chiave della sua app, ACL e lettura dell'overlay, #549;
 # sudoers e copia di root di questo script, #530; il suo clone, #643), e Claude Code dei ruoli
 # senza aggiornamenti automatici (#643). Con più progetti sullo stesso host si esegue una volta
@@ -943,6 +943,35 @@ killmode=$(systemctl show -p KillMode --value "$SERVICE_NAME" 2>/dev/null)
 if [ -n "$killmode" ] && [ "$killmode" != mixed ]; then
     fail "KillMode=$killmode: deve essere mixed"
 fi
+
+# Il comando devloop dell'host (#588): l'involucro e il file di questo progetto, come li genera
+# setup-devloop.sh. Senza, il servizio gira lo stesso: un avviso. Root li esegue e li legge: un
+# file o una directory che altri possono cambiare è un errore.
+step "Comando devloop: $DEVLOOP_COMMAND, progetto $OPS_INSTANCE (#588)"
+check_generated() {
+    local file=$1 template=$2 mode=$3 actual
+    if ! [ -f "$file" ] || [ -L "$file" ]; then
+        warn "$file non esiste o è un link: il comando devloop non c'è per questo progetto (setup-devloop.sh)"
+        return
+    fi
+    actual=$(stat -c '%a %U' "$file")
+    [ "$actual" = "$mode root" ] || fail "$file è $actual, deve essere $mode root (setup-devloop.sh)"
+    if cmp -s "$file" <(render "$OPS_DIR/host/$template"); then
+        ok "$file coincide con ops/host/$template"
+    else
+        warn "$file è diverso da ops/host/$template con questi parametri: rieseguire setup-devloop.sh"
+    fi
+}
+if [ -d "$DEVLOOP_PROJECTS_DIR" ] && ! [ -L "$DEVLOOP_PROJECTS_DIR" ]; then
+    read -r owner mode < <(stat -c '%U %a' "$DEVLOOP_PROJECTS_DIR")
+    if [ "$owner" != root ] || (( 8#$mode & 8#022 )); then
+        fail "$DEVLOOP_PROJECTS_DIR è $mode $owner: deve essere di root e non scrivibile dal gruppo né dagli altri"
+    else
+        ok "$DEVLOOP_PROJECTS_DIR è di root, non scrivibile da altri"
+    fi
+fi
+check_generated "$DEVLOOP_COMMAND" devloop-command 755
+check_generated "$DEVLOOP_PROJECT_FILE" devloop-command-project 644
 
 # shell_tool CLI ARG...: la CLI di AGENT_USER, con ARG, esegue come AGENT_USER `git --version`
 # con il suo strumento di shell (#494): un --version non lo avvia, e una CLI che al primo comando

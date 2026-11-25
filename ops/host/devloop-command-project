@@ -1,0 +1,10 @@
+# Un progetto del comando devloop dell'host (ops/host/devloop-command-project, #588).
+# setup-devloop.sh lo scrive in DEVLOOP_PROJECTS_DIR/params-<progetto>.env (params-_default.env senza PROJECT), 644
+# di root, con i parametri risolti del progetto, e lo riscrive a ogni esecuzione. Il comando
+# devloop (ops/host/devloop-command) lo legge riga per riga, non lo esegue: sono i valori della
+# drop-in o dell'unità del servizio. Rimuovere il file toglie il progetto dal comando devloop;
+# il servizio e l'installazione restano.
+DEVLOOP_USER=@DEVLOOP_USER@
+DEVLOOP_CLONE=@DEVLOOP_CLONE@
+DEVLOOP_PATH=@DEVLOOP_PATH@
+LAUNCHER_CMD=@LAUNCHER_CMD@

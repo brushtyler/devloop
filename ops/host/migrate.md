@@ -53,8 +53,9 @@ glieli chiede.
    leggono con le loro app (#643).
 10. **Verifica finale**: `sudo bash <checkout>/ops/host/check-host.sh`, nessun errore (fra
     l'altro: l'ACL `user:supervisor:r--` sull'overlay e sul file di progetto, la casella e il
-    gruppo, il coordinatore e la sua copia), poi `devloop-pinned status` e `tick --dry-run` come
-    `devloop` ([ops/README.md](../README.md#8-verifica)). L'agent riporta all'operatore cosa ha
+    gruppo, il coordinatore e la sua copia, il comando `devloop`), poi `devloop status` e
+    `devloop tick --dry-run`, il comando dell'host
+    ([Comando devloop dell'host](#comando-devloop-dellhost-588); [ops/README.md](../README.md#8-verifica)). L'agent riporta all'operatore cosa ha
     eseguito, come quale utente, e il codice di uscita.
 11. **Avvio**, dell'operatore: il servizio (`systemctl start devloop@devloop`, ed `enable`), poi le
     sessioni dei ruoli con `ops/host/start-role.sh supervisor` e `coordinator`
@@ -86,7 +87,7 @@ glieli chiede.
    `pgrep -u devloop -af 'm devloop'` non trovi più nulla.
 3. **Copiare** i file elencati sotto, conservando proprietario e permessi.
 4. **Ricreare** quello che non si copia (sotto).
-5. **Verificare** con `sudo bash ops/host/check-host.sh` e `devloop-pinned status`, poi **avviare** sulla
+5. **Verificare** con `sudo bash ops/host/check-host.sh` e `devloop status`, poi **avviare** sulla
    macchina nuova: `sudo systemctl start devloop@devloop` (e `enable`, se deve ripartire al boot).
 
 ### Da copiare
@@ -556,8 +557,9 @@ l'agent dell'host, che l'operatore lancia con `start-role.sh host` di questa dir
 versione su `main` dopo il merge. devloop mergia la
 PR come le altre, ma con `[pin] auto = true` **non fa il pin automatico** di quel commit né dei
 successivi: scrive un allarme con il passo su `[run].alert_issue` e mette `agent:needs-operator`
-sull'issue chiusa. Dopo il passo, a loop fermo, il pin a mano (`scripts/devloop-pinned pin
-origin/main`, oppure il pin con il codice nuovo come nelle sezioni qui sotto) fissa la copia e
+sull'issue chiusa. Dopo il passo, a loop fermo, il pin a mano (`devloop pin origin/main`, il
+[comando dell'host](#comando-devloop-dellhost-588), o `devloop --project <progetto> pin
+origin/main` con più progetti; oppure il pin con il codice nuovo come nelle sezioni qui sotto) fissa la copia e
 fa riprendere il pin automatico ([docs/devloop/guide.md](../../docs/devloop/guide.md#step-on-the-host)).
 All'avvio, e a ogni rilettura, devloop scrive nel log, e una volta su `[run].alert_issue`, le
 tabelle del file di progetto che la copia in uso conosce e che la configurazione non ha
@@ -3137,3 +3139,57 @@ Il codice di devloop non cambia e il loop resta attivo. Passi per ogni insieme d
 `ops/github/tokens.md` prima di #643 e installato con `gh auth login --with-token` come utente del
 supervisore. I permessi in più dell'app possono restare: nessuno li usa senza un `--perm`
 esplicito.
+
+## Comando devloop dell'host (#588)
+
+Dal #588 `setup-devloop.sh` installa il comando `devloop` dell'host, l'involucro del launcher
+([`devloop-command`](devloop-command)), in `DEVLOOP_COMMAND` (`/usr/local/bin/devloop`, 755 di
+root), e il file del progetto `params-<progetto>.env` (`params-_default.env` senza `PROJECT`; 644
+di root, da [`devloop-command-project`](devloop-command-project)) nella directory di root
+`DEVLOOP_PROJECTS_DIR` (`/etc/devloop/projects`). `devloop <sottocomando>` esegue il launcher del
+progetto come la sua unità: l'utente `DEVLOOP_USER`, il clone, la copia fissata del servizio e lo
+`--state-dir` del progetto ([ops/README.md](../README.md#4-host-di-devloop)). Con più progetti
+sull'host vuole `--project <progetto>` prima del sottocomando. `check-host.sh` verifica i due file:
+un avviso se mancano, un errore se non sono di root o se altri possono scriverli. I sudoers di
+supervisore e coordinatore non cambiano.
+
+Il codice di devloop non ha bisogno del comando: gli avvisi di un pin automatico sospeso lo
+nominano (`devloop pin`, o `devloop --project <nome> pin` con più progetti), e finché manca il pin a
+mano resta il comando lungo dell'unità. Il passo non ferma il loop.
+
+### Comandi
+
+Come root, dal checkout dell'operatore aggiornato (`git -C <checkout> fetch origin` e
+`git -C <checkout> checkout --detach origin/main`), **per ogni progetto dell'host**, con il suo
+file di parametri `<parametri>`:
+
+1. **lo script**, prima con `--dry-run`: l'elenco delle azioni deve contenere, oltre a quanto
+   lo script già ricorda come da fare a mano, solo la directory dei progetti (al primo progetto),
+   il file del progetto e il comando, e la mappa delle sostituzioni (`redactions.json`), che dal
+   #588 nomina anche `DEVLOOP_COMMAND` e `DEVLOOP_PROJECTS_DIR`. Un'altra azione (un'unità, un
+   sudoers, un utente) vuol dire che l'host non corrisponde ai parametri: ci si ferma e si chiede
+   all'operatore.
+
+   ```bash
+   sudo bash <checkout>/ops/host/setup-devloop.sh --params <parametri> --dry-run
+   sudo bash <checkout>/ops/host/setup-devloop.sh --params <parametri>
+   ```
+
+2. **la verifica**: `check-host.sh` non dà nessun `ERRORE` e, nel passo *Comando devloop*, due
+   righe `ok: … coincide con ops/host/devloop-command` e `… devloop-command-project`:
+
+   ```bash
+   sudo bash <checkout>/ops/host/check-host.sh --params <parametri> --no-apps
+   ```
+
+3. **la prova**, in sola lettura: `devloop status` (con più progetti `devloop --project <progetto>
+   status`) stampa lo stato del progetto, come il comando lungo dell'unità. Con più progetti,
+   `devloop status` senza `--project` si ferma ed elenca i progetti installati.
+
+**Togliere un progetto** dal comando: come root, `rm <DEVLOOP_PROJECTS_DIR>/params-<progetto>.env`.
+Il servizio e l'installazione del progetto restano; un `setup-devloop.sh` successivo lo rimette.
+
+**Rollback.** Come root, `rm <DEVLOOP_COMMAND>` e i file `params-*.env` di `DEVLOOP_PROJECTS_DIR`,
+poi `rmdir <DEVLOOP_PROJECTS_DIR>`. Il servizio non li usa; gli avvisi di devloop nominano ancora
+`devloop pin`, che senza il comando si fa con il comando lungo dell'unità (`ExecStart` dell'unità o
+della drop-in del progetto, senza `run`, come `DEVLOOP_USER`).

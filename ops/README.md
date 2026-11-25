@@ -164,6 +164,9 @@ ops/
     devloop@.service         unità template, per più progetti sullo stesso host (PROJECT)
     devloop-project.conf     drop-in di un progetto per devloop@<progetto> (con segnaposto)
     tmpfiles-devloop-repos.conf  directory dei lock per repository, comune all'host
+    devloop-command          il comando devloop dell'host: il launcher di un progetto come la
+                             sua unità, scelto con --project (con segnaposto)
+    devloop-command-project  il file di un progetto per il comando devloop (con segnaposto)
     sudoers-agent            sudoers con cui devloop avvia CLI e test come utente degli agent
     sudoers-supervisor       sudoers minimale del supervisore (con segnaposto @NOME@)
     sudoers-coordinator      sudoers del coordinatore, solo comandi di lettura (con segnaposto)
@@ -447,6 +450,30 @@ Prepara anche il **lock per repository** (ADR 0006, R8): il gruppo `REPO_LOCK_GR
 `TMPFILES_FILE` (`/etc/tmpfiles.d/devloop-repos.conf`). Non usa una directory che esiste già, non
 è vuota e non è di `root:<gruppo>`. L'overlay deve avere `repo_lock_dir` con lo stesso valore: lo
 script lo ricorda finché manca ([Più progetti sullo stesso host](#più-progetti-sullo-stesso-host)).
+
+Installa infine il **comando `devloop`** dell'host (#588): l'involucro del launcher
+[`host/devloop-command`](host/devloop-command), in `DEVLOOP_COMMAND` (`/usr/local/bin/devloop`,
+755 di root), e il file del progetto `params-<progetto>.env` (`params-_default.env` senza
+`PROJECT`; 644 di root) nella directory di root `DEVLOOP_PROJECTS_DIR` (`/etc/devloop/projects`),
+con l'utente, il clone, il `PATH` e il comando del launcher dell'unità
+([`host/devloop-command-project`](host/devloop-command-project)); entrambi si riscrivono a ogni
+esecuzione. `devloop <sottocomando> [argomenti]` esegue il launcher del progetto come la sua
+unità: come l'utente `devloop` (`sudo -u devloop -H`), nel clone, con la copia fissata del servizio e
+lo `--state-dir` del progetto, e gli passa sottocomando e argomenti così come sono:
+
+```bash
+devloop status
+devloop pin origin/main
+devloop follow issue-<N>
+devloop --project widget status     # con più progetti sull'host
+```
+
+Gira come root: un altro utente lo riesegue con `sudo`. Senza `--project` usa il solo progetto
+installato; con più progetti si ferma e li elenca. Legge i file dei progetti riga per riga, senza
+eseguirli, e rifiuta un file o una directory che non sono di root o che altri possono scrivere.
+Per togliere un progetto dal comando si rimuove il suo file da `DEVLOOP_PROJECTS_DIR`. Non
+sostituisce i sudoers di supervisore e coordinatore, che usano i comandi esatti del launcher (passi
+7 e 10). Il comando non ha sottocomandi suoi: ogni sottocomando è di devloop.
 
 Per ssdlc servono anche il **file di progetto** e le chiavi che l'overlay riceve con l'ADR 0006,
 R3 e R6: lo script non li crea. L'operatore copia [`ssdlc/project.toml`](host/ssdlc/project.toml) in
@@ -789,7 +816,8 @@ di root, 3770, del gruppo `devloop-repos`; `devloop` nel gruppo, `devloop-agent`
 fuori; `devloop-agent` che non vi entra; il file di `tmpfiles.d`; `repo_lock_dir` nell'overlay);
 l'unità (uguale a quella generata, `KillMode=mixed`; con `PROJECT` l'unità template e la drop-in),
 che nessun'altra unità di devloop dell'host gestisca lo stesso repository, e lo stato del
-servizio; che `devloop-agent` scriva le voci di `AGENT_CLI_WRITABLE`; `--version` di ogni CLI
+servizio; il comando `devloop` e il file del progetto (#588: uguali a quelli generati, 755 e 644 di
+root, in una directory di root non scrivibile da altri; un avviso se mancano); che `devloop-agent` scriva le voci di `AGENT_CLI_WRITABLE`; `--version` di ogni CLI
 come `devloop-agent` e, sempre come `devloop-agent`, un prompt che le fa eseguire `git --version`
 con il loro strumento di shell (#494: passa dal modello, con la rete e il login della CLI; un
 errore se non risponde con `git version` o se nell'output c'è un `permission denied`); e
@@ -808,11 +836,12 @@ il suo sudoers e la copia di root di `check-host.sh` (passo 10), con un errore s
 altrimenti lo dice in una riga (`nessun coordinatore per questo progetto`), senza errore, anche
 se l'host ha il coordinatore di un altro progetto.
 
-Poi, come in [docs/devloop/guide.md](../docs/devloop/guide.md#installation-as-a-dedicated-user):
+Poi, come in [docs/devloop/guide.md](../docs/devloop/guide.md#installation-as-a-dedicated-user),
+con il comando `devloop` del passo 4:
 
 ```bash
-sudo -u devloop -H python3 /home/devloop/devloop/scripts/devloop-pinned status
-sudo -u devloop -H python3 /home/devloop/devloop/scripts/devloop-pinned tick --dry-run
+devloop status
+devloop tick --dry-run
 ```
 
 ### 9. Avvio
@@ -1110,8 +1139,9 @@ sudo -u devloop -H sh -c 'cd ~/widget && PYTHONPATH=~/devloop-source python3 -P 
     --local-config /var/lib/devloop/widget/config.local.toml pin v1.2.0'
 ```
 
-Il pin dopo un merge resta spento: un nuovo tag si fissa a mano, con `devloop-pinned
---state-dir … pin <tag>`. I dati del progetto nei prompt (le istruzioni da leggere, il comando
+Il pin dopo un merge resta spento: un nuovo tag si fissa a mano, con il comando dell'host
+(`devloop --project widget pin <tag>`, passo 4), che chiama l'avviatore con lo `--state-dir` del
+progetto. I dati del progetto nei prompt (le istruzioni da leggere, il comando
 di un solo modulo di test, le regole sugli ADR) stanno nella tabella `[prompts]` del file di
 progetto (ADR 0006, R4, [docs/devloop/reference.md](../docs/devloop/reference.md#project-data-in-the-prompts)):
 senza, i prompt tolgono le frasi che li citano. I test locali e la lettura della CI seguono
@@ -1264,7 +1294,20 @@ progetto:
 | `LAUNCHER_DIR` | `/usr/local/lib/devloop/widget`: l'avviatore del tag `SOURCE_REF` del progetto, che nessun altro progetto sovrascrive (#573) |
 
 `REPO_LOCK_DIR`, `REPO_LOCK_GROUP` e `TMPFILES_FILE` sono gli stessi per tutti i progetti
-dell'host. Un `params.env` senza `PROJECT` continua a installare `devloop.service` come prima.
+dell'host, come `DEVLOOP_COMMAND` e `DEVLOOP_PROJECTS_DIR`. Un `params.env` senza `PROJECT`
+continua a installare `devloop.service` come prima.
+
+**Comando `devloop`** (#588). Ogni `setup-devloop.sh` scrive il file del suo progetto,
+`params-<progetto>.env`, in `DEVLOOP_PROJECTS_DIR` (passo 4): con più progetti il comando vuole
+`--project` prima del sottocomando, e senza si ferma ed elenca i progetti installati.
+
+```bash
+devloop --project widget status
+devloop --project widget pin origin/main
+devloop --project=widget follow issue-12
+```
+
+Rimuovere `params-<progetto>.env` toglie il progetto dal comando, senza toccare il servizio.
 
 **Ruoli per progetto, utenti per insieme di app** (#629, #643; ADR 0002, precisazioni del
 2026-11-24 [sui ruoli per progetto](../docs/adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-24-ruoli-per-progetto-629)
