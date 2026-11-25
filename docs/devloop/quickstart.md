@@ -485,12 +485,9 @@ devloop works on the issues of `acme/widget` that a user of `trusted_users` labe
 
 ## Later
 
-- **A new version of devloop** is a new tag of `brushtyler/devloop`, pinned by hand: the pin after a merge is
-  off when the installation has its own source. Pin with the launcher (`pin <tag>` instead of
-  `apps` in the commands of step 8), then restart the service
-  ([Installation source](guide.md#installation-source), [Rollback](guide.md#rollback)). With the
-  new tag in `SOURCE_REF`, `setup-project.sh` (its `setup-supervisor.sh` and, if the project has
-  the coordinator, `setup-coordinator.sh`) moves the clone of the source of each role to that tag.
+- **A new version of devloop** is a new tag of `brushtyler/devloop`
+  ([Releases of devloop](guide.md#releases-of-devloop)): move the project to it with
+  [Un progetto con la sorgente a un tag nuovo](../../ops/host/migrate.md#un-progetto-con-la-sorgente-a-un-tag-nuovo-666).
 - **A change of the parameters** (for example `APPS`) makes the root copies of the parameters of
   the roles differ, and `check-host.sh` says so: run `setup-project.sh` again.
 - **The direction of the project** (#604), when the operator wants the coordinator to order the

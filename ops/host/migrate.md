@@ -3405,3 +3405,145 @@ checkout della versione di prima; poi, come root, `rm <SYSTEMD_DIR>/devloop-fail
 `systemctl daemon-reload`. `[notify]` e `operator_mentions` si tolgono dall'overlay **prima** del
 pin della copia di prima, che li rifiuta (`unknown key`). Il bot si revoca con `@BotFather`
 (`/revoke` o `/deletebot`), e il file del token si rimuove.
+
+## Un progetto con la sorgente a un tag nuovo (#666)
+
+La procedura per portare un progetto con la sorgente a parte (`SOURCE_REPO` e `SOURCE_REF`,
+[docs/devloop/guide.md](../../docs/devloop/guide.md#installation-source)) da un tag di devloop a
+uno nuovo, su qualunque host. Non è un passo da eseguire una volta: si ripete a ogni tag nuovo, e
+per ogni progetto che lo vuole. Non riguarda un'installazione senza `SOURCE_REPO`, come quella del
+repository di devloop, che segue `main` con il pin dopo un merge. Come si sceglie e si annuncia un
+tag è in [Releases of devloop](../../docs/devloop/guide.md#releases-of-devloop).
+
+Qui `<progetto>` è il `PROJECT` del progetto, `<parametri>` il suo file di parametri, `<checkout>`
+il checkout dell'operatore di `brushtyler/devloop`, `<tag di prima>` il tag di `SOURCE_REF` di
+oggi e `<tag nuovo>` quello da fissare; `SERVICE_NAME`, `SUPERVISOR_USER` e `COORDINATOR_USER`
+sono i valori che gli script ricavano da `<parametri>` (`ops/params.env.example`). Si esegue come
+root, con l'[agent dell'host](../../docs/devloop/roles/host.md), dal checkout dell'operatore
+aggiornato (`git -C <checkout> fetch origin --tags` e
+`git -C <checkout> checkout --detach origin/main`). I passi che chiedono una persona (l'avvio
+delle sessioni) li fa l'operatore.
+
+Due checkout, per due usi. Le migrazioni dei passi 3 e 4 si eseguono da `<checkout>`, su
+`origin/main`, come ogni sezione di questo file. Le sessioni del passo 7 partono invece da
+`<checkout del tag>`, un worktree di `<checkout>` fermo su `<tag nuovo>`: `start-role.sh` dà alla
+sessione il runbook (`docs/devloop/roles/<ruolo>.md`) e la configurazione dei ruoli
+(`devloop/config.toml`) del checkout da cui gira, e su `main` possono essere già più avanti del
+tag. Il worktree si crea la prima volta e poi si riusa:
+
+```bash
+git -C <checkout> worktree add --detach <checkout del tag> '<tag nuovo>'   # la prima volta
+git -C <checkout del tag> checkout --detach '<tag nuovo>'                  # le volte successive
+git -C <checkout del tag> describe --tags --exact-match HEAD
+git -C <checkout del tag> status --porcelain
+```
+
+`describe` stampa `<tag nuovo>`; `status` non stampa nulla.
+
+### Comandi
+
+1. **Fermare il loop** del progetto: `systemctl stop <SERVICE_NAME>`. Le sessioni dei ruoli
+   restano attive fino al passo 7.
+
+2. **Il tag nuovo nei parametri**: in `<parametri>`, `SOURCE_REF=<tag nuovo>` al posto di
+   `SOURCE_REF=<tag di prima>`.
+
+3. **Le sezioni introdotte fra i due tag.** Sono i titoli `## ` di questo file nel tag nuovo che
+   il tag di prima non ha, nell'ordine del file; il messaggio del tag nuovo li elenca già
+   ([Releases of devloop](../../docs/devloop/guide.md#releases-of-devloop)). Il comando li stampa
+   dai due tag, senza questa sezione:
+
+   ```bash
+   git -C <checkout> show '<tag nuovo>:ops/host/migrate.md' | grep '^## ' \
+       | grep -vxF -f <(git -C <checkout> show '<tag di prima>:ops/host/migrate.md' | grep '^## ') \
+       | grep -vxF '## Un progetto con la sorgente a un tag nuovo (#666)'
+   ```
+
+   Si eseguono le sezioni stampate, una alla volta e nell'ordine del file, per il solo
+   `<progetto>`. Molte sono scritte per l'installazione del repository di devloop e ne nominano i
+   valori (il checkout, il clone, l'utente, lo `state_dir`, il servizio): i loro comandi non si
+   eseguono come sono, ma riportati al progetto, con queste regole.
+
+   - **Ogni script di `ops/host/`** si lancia da `<checkout>` con `--params <parametri>`. Senza,
+     legge `ops/params.env` del checkout, cioè i parametri dell'installazione di devloop, e agisce
+     su quella.
+   - **I valori dell'installazione di devloop** che una sezione scrive per esteso diventano quelli
+     di `<parametri>`: il checkout diventa `<checkout>`, il clone `DEVLOOP_CLONE`, l'utente
+     `DEVLOOP_USER`, lo `state_dir` lo `STATE_DIR` del progetto (relativo a `DEVLOOP_CLONE`), il
+     servizio `<SERVICE_NAME>`; lo stesso per gli utenti, le home e le directory dei ruoli
+     (`SUPERVISOR_USER`, `COORDINATOR_USER`, …). Dove una sezione dice "per ogni progetto
+     dell'host" vale il solo `<parametri>`.
+   - **Il pin e l'avvio del servizio** che chiudono alcune sezioni non si fanno lì: li fanno i
+     passi 5 e 6. Un comando del launcher dal clone di devloop (`python3 scripts/devloop-pinned
+     <sottocomando>`) diventa `devloop --project <progetto> <sottocomando>` e, se vuole la copia
+     nuova, si esegue dopo il passo 5 e prima del 6.
+   - **Un passo dell'installazione di devloop**, che porta il suo clone a `origin/main`, si salta:
+     il progetto resta al tag.
+   - **Il `--dry-run`** che precede uno script nomina solo i valori di `<parametri>`. Un percorso,
+     un utente o un servizio di un'altra installazione vuol dire un comando non riportato al
+     progetto: ci si ferma e si chiede all'operatore.
+
+   Da v0.2.0 a v0.3.0, per esempio, [Mappa delle sostituzioni dei testi
+   pubblicati](#mappa-delle-sostituzioni-dei-testi-pubblicati-583) diventa: ai suoi passi 1–4
+   `test -f <parametri>`, `setup-devloop.sh --params <parametri>` (prima con `--dry-run`), `stat
+   -c '%a %U'` sul `redactions.json` dello `state_dir` del progetto, che stampa
+   `600 <DEVLOOP_USER>`, `setup-coordinator.sh --params <parametri>` se il progetto ha il
+   coordinatore e `check-host.sh --params <parametri> --no-apps`; il suo passo 5 lo fanno i passi
+   5 e 6 di qui. [Autorizzazione del coordinatore](#autorizzazione-del-coordinatore-607) diventa
+   `setup-coordinator.sh --params <parametri>` e `check-host.sh --params <parametri> --no-apps`,
+   e dopo il pin del passo 5 `devloop --project <progetto> setup`, che crea la label
+   `agent:needs-coordinator`.
+
+   Una sezione stampata che non descrive un passo ma una procedura a richiesta (come questa, o
+   [Spostare una key_dir](#spostare-una-key_dir-582)) si salta: lo dice la sua introduzione.
+
+   Queste sezioni rilanciano `setup-project.sh`. Se il comando non stampa nulla, o se nessuna
+   delle sezioni stampate lo rilancia, si rilancia comunque, perché porti al tag nuovo i clone
+   della sorgente dei ruoli (`SUPERVISOR_SOURCE_CLONE`, `COORDINATOR_SOURCE_CLONE`) e l'avviatore
+   (`LAUNCHER_DIR`), con `--coordinator` se il progetto ha il coordinatore:
+
+   ```bash
+   sudo bash <checkout>/ops/host/setup-project.sh --params <parametri> --dry-run
+   sudo bash <checkout>/ops/host/setup-project.sh --params <parametri>
+   ```
+
+4. **La verifica**: `check-host.sh` non dà nessun `ERRORE`:
+
+   ```bash
+   sudo bash <checkout>/ops/host/check-host.sh --params <parametri>
+   ```
+
+5. **Il pin del tag nuovo**, con il [comando devloop dell'host](#comando-devloop-dellhost-588):
+   `devloop --project <progetto> pin <tag nuovo>` (con un solo progetto sull'host `devloop pin
+   <tag nuovo>`). Il pin finisce con lo smoke test della copia nuova
+   ([Pin](../../docs/devloop/guide.md#pin)); `devloop: invalid config: …` nomina una chiave
+   dell'overlay o del file di progetto che il tag nuovo legge diversamente: la descrive una delle
+   sezioni del passo 3.
+
+6. **L'avvio del servizio**: `systemctl start <SERVICE_NAME>`.
+
+7. **Le sessioni dei ruoli**, perché leggano i runbook del tag nuovo: da `<checkout del tag>`, non
+   da `<checkout>`. Prima, `describe` conferma che il worktree è ancora su `<tag nuovo>`; il
+   `diff` mostra quanto i runbook di `main` sono già oltre il tag (vuoto se coincidono). Poi
+   l'operatore chiude la sessione del supervisore e la riavvia, e quella del coordinatore se il
+   progetto lo ha:
+
+   ```bash
+   git -C <checkout del tag> describe --tags --exact-match HEAD
+   git -C <checkout> diff --stat '<tag nuovo>' origin/main -- docs/devloop/roles/ devloop/config.toml
+   sudo -u <SUPERVISOR_USER> -H tmux kill-session -t '=devloop-supervisor-<progetto>'
+   sudo bash <checkout del tag>/ops/host/start-role.sh --params <parametri> supervisor
+   sudo -u <COORDINATOR_USER> -H tmux kill-session -t '=devloop-coordinator-<progetto>'
+   sudo bash <checkout del tag>/ops/host/start-role.sh --params <parametri> coordinator
+   ```
+
+   Il primo messaggio di ogni sessione nomina il checkout del suo runbook (`… of the checkout
+   <checkout del tag>`): con `<checkout>` la sessione ha i runbook di `main`, e va riavviata da
+   `<checkout del tag>`.
+
+**Rollback.** A loop fermo: il rollback di ciascuna sezione eseguita al passo 3, dall'ultima alla
+prima; `SOURCE_REF=<tag di prima>` in `<parametri>`; `setup-project.sh` e `check-host.sh` come ai
+passi 3 e 4; il pin del tag di prima (`devloop --project <progetto> pin <tag di prima>`, che
+riusa la sua copia se c'è ancora, [Rollback](../../docs/devloop/guide.md#rollback)); poi il passo
+6, `git -C <checkout del tag> checkout --detach '<tag di prima>'` e il passo 7 con `<tag di prima>`
+al posto di `<tag nuovo>`, perché le sessioni tornino ai runbook del tag di prima.

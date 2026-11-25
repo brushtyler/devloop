@@ -1461,6 +1461,146 @@ class RoleSetsMigrationGuideTests(unittest.TestCase):
             self.assertIn(phrase, section)
 
 
+class TagUpgradeGuideTests(unittest.TestCase):
+    """ops/host/migrate.md, "Un progetto con la sorgente a un tag nuovo (#666)", and the releases
+    of devloop in the guide: the steps in their order, the links, and the command that lists the
+    sections of migrate.md added between two tags."""
+
+    HEADING = '## Un progetto con la sorgente a un tag nuovo (#666)'
+    ANCHOR = 'migrate.md#un-progetto-con-la-sorgente-a-un-tag-nuovo-666'
+
+    def section(self):
+        return RootStepsGuideTests().section(self.HEADING)
+
+    def releases(self):
+        text = (ROOT / 'docs/devloop/guide.md').read_text(encoding='utf-8')
+        start = text.index('\n#### Releases of devloop\n')
+        return text[start:text.index('\n#### ', start + 1)]
+
+    def test_the_steps_are_in_order(self):
+        section = ' '.join(self.section().split())
+        steps = ['1. **Fermare il loop**', 'systemctl stop <SERVICE_NAME>',
+                 '2. **Il tag nuovo nei parametri**', 'SOURCE_REF=<tag nuovo>',
+                 '3. **Le sezioni introdotte fra i due tag.**',
+                 'ops/host/setup-project.sh --params <parametri>',
+                 '4. **La verifica**', 'ops/host/check-host.sh --params <parametri>',
+                 '5. **Il pin del tag nuovo**', '`devloop --project <progetto> pin <tag nuovo>`',
+                 '6. **L\'avvio del servizio**', 'systemctl start <SERVICE_NAME>',
+                 '7. **Le sessioni dei ruoli**',
+                 'ops/host/start-role.sh --params <parametri> supervisor',
+                 'ops/host/start-role.sh --params <parametri> coordinator', '**Rollback.**']
+        positions = [section.index(step) for step in steps]
+        self.assertEqual(positions, sorted(positions))
+
+    def test_the_sections_of_step_3_are_brought_to_the_project(self):
+        # The sections written for the installation of devloop (#583, #607) are not run as they
+        # are: the scripts with --params, the values of the parameters, no pin or start there.
+        section = ' '.join(self.section().split())
+        step3 = section[section.index('3. **Le sezioni introdotte'):section.index('4. **La verifica')]
+        for phrase in ('non si eseguono come sono', 'con `--params <parametri>`',
+                       'cioè i parametri dell\'installazione di devloop',
+                       '`DEVLOOP_CLONE`', '`DEVLOOP_USER`', '`<SERVICE_NAME>`',
+                       '`devloop --project <progetto> <sottocomando>`',
+                       '(#mappa-delle-sostituzioni-dei-testi-pubblicati-583)',
+                       '(#autorizzazione-del-coordinatore-607)',
+                       '`devloop --project <progetto> setup`', 'ci si ferma'):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, step3)
+        self.assertNotIn('come quel file le ha', step3)
+
+    def test_the_roles_start_from_a_checkout_of_the_tag(self):
+        # start-role.sh reads the runbook of its own checkout: the sessions start from a worktree
+        # at the new tag, and the rollback brings it back to the earlier tag.
+        section = ' '.join(self.section().split())
+        self.assertIn("git -C <checkout> worktree add --detach <checkout del tag> '<tag nuovo>'",
+                      section)
+        step7 = section[section.index('7. **Le sessioni dei ruoli**'):]
+        for phrase in ('git -C <checkout del tag> describe --tags --exact-match HEAD',
+                       "diff --stat '<tag nuovo>' origin/main -- docs/devloop/roles/",
+                       'sudo bash <checkout del tag>/ops/host/start-role.sh --params <parametri> '
+                       'supervisor',
+                       'sudo bash <checkout del tag>/ops/host/start-role.sh --params <parametri> '
+                       'coordinator',
+                       "git -C <checkout del tag> checkout --detach '<tag di prima>'"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, step7)
+        self.assertNotIn('<checkout>/ops/host/start-role.sh', section)
+
+    def test_the_section_has_no_value_of_a_real_host(self):
+        section = self.section()
+        for value in ('/home/', '/var/lib/', '/etc/', '/root/', '/usr/local/', 'widget'):
+            with self.subTest(value=value):
+                self.assertNotIn(value, section)
+
+    def test_the_documents_link_the_section_and_the_releases(self):
+        quickstart = (ROOT / 'docs/devloop/quickstart.md').read_text(encoding='utf-8')
+        later = quickstart[quickstart.index('\n## Later\n'):]
+        first = later[later.index('- **A new version of devloop**'):]
+        first = first[:first.index('\n- ')]
+        self.assertIn(f'(../../ops/host/{self.ANCHOR})', first)
+        self.assertIn('(guide.md#releases-of-devloop)', first)
+        self.assertNotIn('step 8', first)
+        guide = (ROOT / 'docs/devloop/guide.md').read_text(encoding='utf-8')
+        for heading in ('#### Installation source', '#### Rollback', '#### Releases of devloop'):
+            start = guide.index(f'\n{heading}\n')
+            with self.subTest(heading=heading):
+                self.assertIn(f'(../../ops/host/{self.ANCHOR})',
+                              guide[start:guide.index('\n#### ', start + 1)])
+        self.assertIn('(../../docs/devloop/guide.md#releases-of-devloop)', self.section())
+
+    def test_the_releases_say_who_when_and_how(self):
+        releases = ' '.join(self.releases().split())
+        for phrase in ('The operator creates and pushes the tag', 'no `contents` permission',
+                       'at least an hour', 'no `Traceback` and no `ALERT:` in `run.log`',
+                       '`v0.MINOR.PATCH`', 'The tag is annotated',
+                       "git tag -a '<new tag>' <commit> -F <message file>",
+                       "git push origin '<new tag>'", 'notes the new tag in the project\'s journal'):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, releases)
+
+    @unittest.skipIf(BASH is None or shutil.which('git') is None, 'bash or git is not installed')
+    def test_the_command_lists_the_sections_added_between_two_tags(self):
+        # The command of step 3 of the procedure and that of the releases, on a repository with
+        # two tags: the titles the new tag adds, in the order of its file, without the procedure.
+        def command(text, start):
+            block = next(b for b in re.findall(r'```bash\n(.*?)```', text, re.S)
+                         if 'grep -vxF -f' in b)
+            block = re.sub(r'\\\n\s*', '', block)
+            line = next(line for line in block.splitlines() if line.strip().startswith(start))
+            return re.sub(r'\s+#[^\']*$', '', line.strip())
+
+        old = '# Migrazione\n\n## Primo passo (#1)\n\ntesto\n\n## Secondo passo (#2)\n'
+        new = ('# Migrazione\n\n## Primo passo (#1)\n\n## Nuovo passo (#5)\n\n'
+               '## Secondo passo (#2)\n\n### Comandi\n\n' + self.HEADING + '\n\n'
+               '## Altro passo (#7)\n')
+        env = {**os.environ, 'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@example.invalid',
+               'GIT_COMMITTER_NAME': 't', 'GIT_COMMITTER_EMAIL': 't@example.invalid',
+               'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_NOSYSTEM': '1'}
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            git = lambda *args: subprocess.run(['git', '-C', str(repo), *args], env=env,
+                                               check=True, capture_output=True)
+            git('init', '-q')
+            (repo / 'ops/host').mkdir(parents=True)
+            for text, tag in ((old, 'v0.1.0'), (new, 'v0.2.0')):
+                (repo / 'ops/host/migrate.md').write_text(text, encoding='utf-8')
+                git('add', '.')
+                git('commit', '-q', '-m', tag)
+                git('tag', '-a', tag, '-m', tag)
+            procedure = command(self.section(), 'git -C <checkout> show').replace(
+                '<checkout>', shlex.quote(str(repo))).replace('<tag nuovo>', 'v0.2.0').replace(
+                '<tag di prima>', 'v0.1.0')
+            release = command(self.releases(), "git show '<commit>").replace(
+                '<commit>', 'v0.2.0').replace('<earlier tag>', 'v0.1.0')
+            for name, line, cwd in (('procedure', procedure, tmp), ('release', release, repo)):
+                with self.subTest(command=name):
+                    result = subprocess.run([BASH, '-c', line], cwd=cwd, env=env,
+                                            capture_output=True, text=True)
+                    self.assertEqual(result.stderr, '')
+                    self.assertEqual(result.stdout.splitlines(),
+                                     ['## Nuovo passo (#5)', '## Altro passo (#7)'])
+
+
 class CoordinatorGuideTests(unittest.TestCase):
     """ops/README.md and ops/host/migrate.md describe the installation of the coordinator (#530):
     the script run as root from the operator's checkout, the reading commands of its sudoers with

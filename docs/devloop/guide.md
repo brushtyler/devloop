@@ -3560,12 +3560,72 @@ state_dir = "/var/lib/devloop/widget"
   later pins go through the launcher, with the
   [devloop command of the host](#the-devloop-command-of-the-host) (`devloop --project widget pin
   <tag>`, which passes it `--state-dir /var/lib/devloop/widget`).
+- A [new tag](#releases-of-devloop) is more than a pin: with the loop stopped, the new tag goes
+  in `SOURCE_REF`, the sections of `ops/host/migrate.md` added since the earlier tag run, and
+  `setup-project.sh` moves the launcher and the clones of the roles to the tag, before the pin;
+  then the service starts and the sessions of the roles restart. The steps, in their order, are
+  in [Un progetto con la sorgente a un tag nuovo](../../ops/host/migrate.md#un-progetto-con-la-sorgente-a-un-tag-nuovo-666),
+  with its rollback.
 
 The facts of the project (`test_cmd`, `[docs.map]`, …) and the restrictions it adds go in the
 [project file](reference.md#project-file) `DIR/project.toml` (ADR 0006, R2), on the host; the
 trust keys stay in the overlay. The whole installation of such a project, step by step, is in the
 [quick start for a new project](quickstart.md). The prompts and the selection of the tests are still those of
 ssdlc.
+
+#### Releases of devloop
+
+A version of devloop is an annotated tag of `brushtyler/devloop`, which the projects with their
+own [installation source](#installation-source) pin. devloop's own installation follows `main`
+with the [pin after a merge](#pin-after-a-merge) and needs no tag. This is the practice followed
+for v0.3.0 (#666); it gives no role new powers.
+
+- **Who.** The operator creates and pushes the tag, with their own account: the apps of the roles
+  have no `contents` permission, and the agent of the host does not write on GitHub
+  ([ADR 0002](../adr/0002-ruoli-e-responsabilita.md), [Privileges](roles/host.md#privileges)).
+- **When.** On the commit that devloop's own installation has pinned, after its pin (the copy
+  `current` of its `state_dir` points at, `pinned-<sha12>`, [Pin](#pin)), once the loop has run
+  well on it for at least an hour: no `Traceback` and no `ALERT:` in `run.log`, and
+  `check-host.sh` without errors.
+- **Numbers.** `v0.MINOR.PATCH` until there is a 1.0. MINOR goes up when, since the earlier tag,
+  at least one section of `ops/host/migrate.md` was added (a step on the host) or the behaviour
+  of the roles or of the configuration changed. PATCH goes up for fixes alone, with no step on
+  the host.
+- **Message.** The tag is annotated. Its message lists the main issues since the earlier tag and
+  the titles of the sections of `ops/host/migrate.md` added since then, in the order of the
+  file: the same titles a project runs in step 3 of
+  [Un progetto con la sorgente a un tag nuovo](../../ops/host/migrate.md#un-progetto-con-la-sorgente-a-un-tag-nuovo-666).
+- **How the projects learn of it.** From the message of the tag, which is enough for that
+  procedure. The coordinator of devloop's repository notes the new tag in the project's journal;
+  it has no channel with the projects devloop serves, which follow the releases as anyone does.
+
+The commands of the operator, in a checkout of `brushtyler/devloop`, with `<commit>` the pinned
+commit, `<earlier tag>` the last `v*` tag it contains and `<new tag>` the new one:
+
+```bash
+git fetch origin --tags
+git describe --tags --abbrev=0 --match 'v*' <commit>             # the earlier tag
+git log --oneline --first-parent '<earlier tag>'..<commit>      # the merges since: the main issues
+git show '<commit>:ops/host/migrate.md' | grep '^## ' \
+    | grep -vxF -f <(git show '<earlier tag>:ops/host/migrate.md' | grep '^## ') \
+    | grep -vxF '## Un progetto con la sorgente a un tag nuovo (#666)'   # the sections added
+git tag -a '<new tag>' <commit> -F <message file>
+git push origin '<new tag>'
+```
+
+The message file, for example:
+
+```text
+devloop v0.4.0
+
+Issue principali da v0.3.0: #N, #M, …
+
+Sezioni di ops/host/migrate.md introdotte:
+## <title of the first section added>
+## <…>
+```
+
+With no section added, the message says `Sezioni di ops/host/migrate.md introdotte: nessuna`.
 
 #### Several projects on one host
 
@@ -3770,7 +3830,10 @@ rollback is not undone by the next tick. A running `devloop run` keeps the code 
 stop it and start it again ([Starting and stopping the loop](#starting-and-stopping-the-loop))
 to run the earlier copy. With `[pin] auto = true` the next [merge that requests a
 pin](#pin-after-a-merge) pins `origin/main` again: to stay on the earlier copy, set
-`auto = false` in the overlay before starting the loop again.
+`auto = false` in the overlay before starting the loop again. For a project with its own
+[installation source](#installation-source), going back to the earlier tag also takes back
+`SOURCE_REF` and the steps on the host run for the new one: the rollback of
+[Un progetto con la sorgente a un tag nuovo](../../ops/host/migrate.md#un-progetto-con-la-sorgente-a-un-tag-nuovo-666).
 
 #### Pin after a merge
 
