@@ -93,6 +93,10 @@ PENDING = 'pin-pending.json'
 # The merges of PRs that declared a step on the host (#462): while it exists no auto-pin runs,
 # and only a pin by hand (``devloop pin``, ``release``) removes it.
 HELD = 'pin-held.json'
+# The pin by hand the warnings of a held auto-pin name (#588): the devloop command of the host,
+# which ops/host/setup-devloop.sh installs, with the project before the subcommand when the host
+# has several.
+HAND_PIN = 'devloop pin, or devloop --project <name> pin on a host with several projects'
 # Serializes the changes to ``HELD`` (#462): each one reads the steps and writes them again.
 HELD_LOCK = 'pin-held.lock'
 # The head of origin/<base_branch> the last tick saw (#430): an advance from it requests a pin.

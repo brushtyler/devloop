@@ -28,13 +28,13 @@ VERIFIED_ARCH=aarch64
 OPS_STATE_DIR=.devloop
 
 # I segnaposto @NOME@ che `render` sostituisce nei file dichiarativi (unità, sudoers).
-OPS_TEMPLATE_VARS='REPO DEVLOOP_USER SUPERVISOR_USER AGENT_USER COORDINATOR_USER DEVLOOP_HOME AGENT_HOME DEVLOOP_CLONE STATE_DIR STATE_PATH LAUNCHER_CMD DEVLOOP_PATH AGENT_PATH SERVICE_NAME REPO_LOCK_DIR REPO_LOCK_GROUP COORDINATOR_OPS_DIR COORDINATION_DIR WATCHDOG_USER WATCHDOG_OPS_DIR'
+OPS_TEMPLATE_VARS='REPO DEVLOOP_USER SUPERVISOR_USER AGENT_USER COORDINATOR_USER DEVLOOP_HOME AGENT_HOME DEVLOOP_CLONE STATE_DIR STATE_PATH LAUNCHER_CMD DEVLOOP_PATH AGENT_PATH SERVICE_NAME REPO_LOCK_DIR REPO_LOCK_GROUP COORDINATOR_OPS_DIR COORDINATION_DIR WATCHDOG_USER WATCHDOG_OPS_DIR DEVLOOP_PROJECTS_DIR'
 
 # I file di ops/ che check-host.sh legge (#530): setup-coordinator.sh li copia, con i parametri
 # (params.env), nella directory di root COORDINATOR_OPS_DIR, da cui il coordinatore esegue come
 # root `check-host.sh --read-only`, mai dal clone di devloop né da un checkout scrivibile. Con
 # loro il risveglio dei ruoli (role-wait.sh, #602) e il suo involucro coordinator-wait.sh (#543).
-OPS_COORDINATOR_FILES='lib.sh host/check-host.sh host/role-wait.sh host/coordinator-wait.sh host/role-watchdog.sh host/sudoers-supervisor host/sudoers-agent host/sudoers-coordinator host/tmpfiles-devloop-repos.conf host/devloop.service host/devloop@.service host/devloop-project.conf host/devloop-role-watchdog@.service host/devloop-role-watchdog@.timer host/devloop-role-watchdog-failed@.service host/role-watchdog-project.conf'
+OPS_COORDINATOR_FILES='lib.sh host/check-host.sh host/role-wait.sh host/coordinator-wait.sh host/role-watchdog.sh host/sudoers-supervisor host/sudoers-agent host/sudoers-coordinator host/tmpfiles-devloop-repos.conf host/devloop.service host/devloop@.service host/devloop-project.conf host/devloop-role-watchdog@.service host/devloop-role-watchdog@.timer host/devloop-role-watchdog-failed@.service host/role-watchdog-project.conf host/devloop-command host/devloop-command-project'
 # Il risveglio del supervisore (#602): setup-supervisor.sh copia questi file, con i parametri,
 # nella directory di root SUPERVISOR_OPS_DIR, da cui il supervisore lo esegue.
 OPS_SUPERVISOR_FILES='lib.sh host/role-wait.sh'
@@ -394,7 +394,7 @@ ops_devloop_keys() {
 # per valore un percorso, sostituiti dal più lungo (STATE_DIR è STATE_PATH, lo state_dir risolto),
 # e quelli che sono nomi di utenti dei ruoli, sostituiti solo da soli e solo se non sono i default
 # documentati (OPS_PUBLIC_USERS, come PUBLIC_USERS di devloop/redact.py).
-OPS_REDACT_PATHS='STATE_DIR DEVLOOP_KEY_DIR SUPERVISOR_KEY_DIR COORDINATOR_KEY_DIR DEVLOOP_HOME AGENT_HOME SUPERVISOR_HOME COORDINATOR_HOME COORDINATION_DIR COORDINATOR_OPS_DIR SUPERVISOR_OPS_DIR WATCHDOG_OPS_DIR LAUNCHER_DIR REPO_LOCK_DIR SYSTEMD_DIR SUDOERS_FILE AGENT_SUDOERS_FILE COORDINATOR_SUDOERS_FILE TMPFILES_FILE'
+OPS_REDACT_PATHS='STATE_DIR DEVLOOP_KEY_DIR SUPERVISOR_KEY_DIR COORDINATOR_KEY_DIR DEVLOOP_HOME AGENT_HOME SUPERVISOR_HOME COORDINATOR_HOME COORDINATION_DIR COORDINATOR_OPS_DIR SUPERVISOR_OPS_DIR WATCHDOG_OPS_DIR LAUNCHER_DIR REPO_LOCK_DIR SYSTEMD_DIR SUDOERS_FILE AGENT_SUDOERS_FILE COORDINATOR_SUDOERS_FILE TMPFILES_FILE DEVLOOP_PROJECTS_DIR DEVLOOP_COMMAND'
 OPS_REDACT_USERS='DEVLOOP_USER AGENT_USER SUPERVISOR_USER COORDINATOR_USER WATCHDOG_USER'
 # Gli altri nomi dell'installazione, sostituiti da soli e nei nomi dei percorsi e delle unità
 # ($SYSTEMD_DIR/$SERVICE_NAME.service), alle condizioni degli utenti.
@@ -633,6 +633,10 @@ ops_load_params() {
     : "${SUPERVISOR_OPS_DIR:=/usr/local/lib/devloop-supervisor}"
     : "${WATCHDOG_OPS_DIR:=/usr/local/lib/devloop-role-watchdog}"
     : "${WATCHDOG_USER:=role-watchdog}"
+    # Il comando devloop dell'host (#588): l'involucro del launcher, e la directory di root con un
+    # file per progetto da cui sceglie il progetto. Gli stessi per tutti i progetti dell'host.
+    : "${DEVLOOP_PROJECTS_DIR:=/etc/devloop/projects}"
+    : "${DEVLOOP_COMMAND:=/usr/local/bin/devloop}"
     # Il periodo del risveglio dei ruoli (#602), un'ora; per il coordinatore
     # COORDINATOR_WAIT_PERIOD, se params.env lo scrive (#543).
     : "${ROLE_WAIT_PERIOD:=3600}"
@@ -646,6 +650,8 @@ ops_load_params() {
     WATCHDOG_UNIT=devloop-role-watchdog@$WATCHDOG_INSTANCE
     WATCHDOG_DROPIN=$SYSTEMD_DIR/$WATCHDOG_UNIT.service.d/project.conf
     WATCHDOG_FAILED_DROPIN=$SYSTEMD_DIR/devloop-role-watchdog-failed@$WATCHDOG_INSTANCE.service.d/project.conf
+    # Il file del progetto per il comando devloop (#588), con il nome dell'istanza.
+    DEVLOOP_PROJECT_FILE=$DEVLOOP_PROJECTS_DIR/params-$OPS_INSTANCE.env
 
     [[ $REPO =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$ ]] || die "REPO deve essere owner/nome: '$REPO'"
     [[ $APP_PREFIX =~ ^[a-z0-9-]*$ ]] || die "APP_PREFIX ammette solo minuscole, cifre e '-': '$APP_PREFIX'"
@@ -761,9 +767,10 @@ ops_load_params() {
     done
     _require_name COORDINATION_GROUP
     # Le copie di root del risveglio del supervisore e del watchdog dei ruoli (#602), come quella
-    # del coordinatore: fuori dalle home, dallo state_dir e dalla casella.
+    # del coordinatore, e il comando devloop con i file dei progetti (#588), che root esegue e
+    # legge: fuori dalle home, dallo state_dir e dalla casella.
     local copy
-    for copy in SUPERVISOR_OPS_DIR WATCHDOG_OPS_DIR; do
+    for copy in SUPERVISOR_OPS_DIR WATCHDOG_OPS_DIR DEVLOOP_PROJECTS_DIR DEVLOOP_COMMAND; do
         [[ ${!copy} =~ ^/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+$ ]] && ! [[ ${!copy}/ =~ /\.\.?/ ]] \
             || die "$copy deve essere un percorso assoluto di almeno due livelli, senza spazi né '.' o '..': '${!copy}'"
         for inside in "$DEVLOOP_HOME" "$SUPERVISOR_HOME" "$AGENT_HOME" "$COORDINATOR_HOME" \

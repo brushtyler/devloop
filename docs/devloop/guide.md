@@ -2934,6 +2934,10 @@ From the beginning to the end, as root or with `sudo`:
    sudo -u devloop -H python3 /home/devloop/devloop/scripts/devloop-pinned tick --dry-run
    ```
 
+   On a host prepared with the ops guide the same checks are `devloop apps`, `devloop status` and
+   `devloop tick --dry-run`, with the
+   [devloop command of the host](#the-devloop-command-of-the-host).
+
 7. **Start.** `devloop run` in the background, with an unbuffered log
    ([Starting and stopping the loop](#starting-and-stopping-the-loop)), or as a systemd unit
    ([Continuous loop](#continuous-loop)).
@@ -3289,6 +3293,29 @@ directory given to the launcher, DIR` when the `state_dir` of its configuration 
 directory, so that pins and state never end up where the launcher does not look. The agents and
 the test commands do not get that variable. Without `--state-dir` nothing changes.
 
+#### The devloop command of the host
+
+On a host prepared with the [ops guide](../../ops/README.md#4-host-di-devloop), the operator does
+not write the launcher's command by hand: `setup-devloop.sh` installs `devloop`
+(`/usr/local/bin/devloop`, root's; #588), a wrapper that runs the launcher of a project as its
+systemd unit does, as the project's `devloop` user (`sudo -u … -H`), in its clone, with the pinned
+copy of the service and the project's `--state-dir`, and passes subcommand and arguments as they
+are:
+
+```bash
+devloop status
+devloop pin origin/main
+devloop follow issue-12
+devloop --project widget pin v1.2.0   # with several projects on the host
+```
+
+The projects are the files `params-<project>.env` that `setup-devloop.sh` writes in a directory
+of root (`/etc/devloop/projects`; `_default` for an installation without `PROJECT`). Without
+`--project` the wrapper takes the only one; with several it stops and lists them. It runs as
+root, and another user's call runs it again through `sudo`. It has no subcommand of its own, and
+does not replace the sudoers of the supervisor and the coordinator, which keep the exact commands
+of the launcher. `check-host.sh` verifies it.
+
 #### Installation source
 
 The **installation's source** is the clone `devloop pin` takes the code from; the **managed
@@ -3325,8 +3352,9 @@ state_dir = "/var/lib/devloop/widget"
       --local-config /var/lib/devloop/widget/config.local.toml pin v1.2.0
   ```
 
-  later pins go through the launcher (`devloop-pinned --state-dir /var/lib/devloop/widget pin
-  <tag>`).
+  later pins go through the launcher, with the
+  [devloop command of the host](#the-devloop-command-of-the-host) (`devloop --project widget pin
+  <tag>`, which passes it `--state-dir /var/lib/devloop/widget`).
 
 The facts of the project (`test_cmd`, `[docs.map]`, …) and the restrictions it adds go in the
 [project file](reference.md#project-file) `DIR/project.toml` (ADR 0006, R2), on the host; the
@@ -3341,7 +3369,9 @@ clone, `state_dir`, `key_dir` with the keys of its set of apps, and service (ADR
 decision D6). The [ops guide](../../ops/README.md) does it with one parameters file per project
 and `PROJECT`: the template unit `devloop@.service`, an instance `devloop@<project>` per project
 with its parameters in a drop-in, a sudoers of the supervisor per unit, a clone and a `key_dir`
-of the supervisor per project, and `check-host.sh` run once per project. The scripts refuse a
+of the supervisor per project, and `check-host.sh` run once per project. The
+[devloop command of the host](#the-devloop-command-of-the-host) then wants `--project <project>`
+before the subcommand (`devloop --project widget status`). The scripts refuse a
 user that another installation of devloop on the host already has, in any role: only the
 supervisor is the same for every project. A value written in `params.env` stands with `PROJECT`
 too: the host of this repository became the instance `devloop@devloop` keeping its users, its
@@ -3524,7 +3554,7 @@ copy was removed is pinned again from `origin`, with a new copy and its smoke te
 
 ```bash
 sudo -u devloop -H ls /home/devloop/devloop/.devloop/                  # the pinned-<sha12> copies
-sudo -u devloop -H python3 /home/devloop/devloop/scripts/devloop-pinned pin 1a2b3c4d5e6f   # an earlier sha12
+devloop pin 1a2b3c4d5e6f   # an earlier sha12, with the devloop command of the host
 ```
 
 Any pin, by hand or after a merge, also drops a pin requested by a merge and not yet done, so a
@@ -3670,10 +3700,13 @@ while a pin is fetching writes its hold first, so a commit that contains it is n
 While the hold stays, no auto-pin runs, of that commit nor of later ones:
 a pending request (of a later merge, or of an advance of `origin/main`) waits, and the log says
 `auto-pin of origin/main held: the step on the host of #<N> waits for the operator, who pins by
-hand after it (devloop pin)`; `devloop status` shows `auto-pin held: …` and, for each hold, its
-PR, its merge commit, whether its alert went out, and its step. The operator does the
-step with the loop stopped, then pins by hand (`devloop pin`, also through the
-[launcher](#launcher)): that pin releases, under the lock of the pins, the holds whose merge the
+hand after it (devloop pin, or devloop --project <name> pin on a host with several projects)`;
+`devloop status` shows `auto-pin held: …` and, for each hold, its
+PR, its merge commit, whether its alert went out, and its step. The warnings and the alert name
+the [devloop command of the host](#the-devloop-command-of-the-host) (#588), which the ops guide
+installs. The operator does the
+step with the loop stopped, then pins by hand (`devloop pin origin/main` with that command, or
+through the [launcher](#launcher)): that pin releases, under the lock of the pins, the holds whose merge the
 pinned commit contains (`auto-pin resumed: the hold after the step on the host of #<N> is
 released`) and drops the pending request, and the auto-pin resumes with the next merge. A hold
 whose merge the pinned commit does not contain, such as after a rollback to an older commit or

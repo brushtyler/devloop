@@ -104,22 +104,25 @@ class HostStepMergeTests(unittest.TestCase):
         # No pin requested: the auto-pin is held with the step.
         self.assertEqual(self.pinner.requests, [])
         self.assertEqual(self.pinner.holds, [(100, SHA1, STEP)])
-        self.assertIn('  auto-pin held: #100 declares a step on the host; pin by hand after it',
-                      self.logs)
+        # The warning names the devloop command of the host (#588).
+        self.assertIn('  auto-pin held: #100 declares a step on the host; pin by hand after it '
+                      '(devloop pin, or devloop --project <name> pin on a host with several '
+                      'projects)', self.logs)
         # The alarm with the step on alert_issue, and the operator's label on the issue.
         alerts = [body for number, body in gh.comments if number == ALERT_ISSUE]
         self.assertEqual(len(alerts), 1)
         self.assertIn('## Passo sull\'host da fare prima del pin', alerts[0])
         self.assertIn('> ' + STEP, alerts[0])
         self.assertIn('#100', alerts[0])
-        self.assertIn('`devloop pin`', alerts[0])
+        self.assertIn('`devloop pin`, o `devloop --project <nome> pin` su un host con più '
+                      'progetti', alerts[0])
         self.assertIn(CFG.labels.needs_operator, gh.labels[META['issue']])
         # Nor a later request: the next tick does not pin while the hold stays.
         self.pinner.request(101, 'b' * 40)
         d._auto_pin(False)
         self.assertEqual(self.pinner.pins, [])
         self.assertIn('auto-pin of origin/main held: the step on the host of #100 waits for the '
-                      'operator, who pins by hand after it (devloop pin)', self.logs)
+                      f'operator, who pins by hand after it ({pin.HAND_PIN})', self.logs)
 
     def test_without_a_step_the_merge_requests_the_pin(self):
         gh = HostStepGH(step='')
@@ -304,8 +307,8 @@ class AlertRetryTests(unittest.TestCase):
         self.assertIn(f'  the alert of the step on the host on #{ALERT_ISSUE} could not be '
                       'published (RuntimeError)', self.logs)
         self.assertFalse(any('ghs_secret' in line for line in self.logs))
-        self.assertIn('  auto-pin held: #100 declares a step on the host; pin by hand after it',
-                      self.logs)
+        self.assertIn('  auto-pin held: #100 declares a step on the host; pin by hand after it '
+                      f'({pin.HAND_PIN})', self.logs)
         # The next tick tries the comment and the label again: both go out now.
         d._auto_pin(False)
         alert, = self.alerts(gh)
@@ -391,7 +394,7 @@ class HeldPinTests(GitCase):
         self.assertEqual(pin.pending(self.state)['pr'], 100)  # the request waits
         self.assertEqual(pin.held(self.state)[0]['step'], STEP)
         self.assertIn('auto-pin of origin/main held: the step on the host of #100 waits for the '
-                      'operator, who pins by hand after it (devloop pin)', self.logs)
+                      f'operator, who pins by hand after it ({pin.HAND_PIN})', self.logs)
         # Another merge meanwhile: still no pin.
         later = self.push('merged later', 'devloop/later.txt', 'later\n')
         pin.request(self.state, 101, later)
@@ -439,7 +442,7 @@ class HeldPinTests(GitCase):
         self.assertEqual(pin.pending(self.state)['pr'], 101)  # the request waits
         self.assertEqual(pin.held(self.state)[0]['pr'], 102)
         self.assertIn('auto-pin of origin/main held: the step on the host of #102 waits for the '
-                      'operator, who pins by hand after it (devloop pin)', self.logs)
+                      f'operator, who pins by hand after it ({pin.HAND_PIN})', self.logs)
         self.assertEqual(snapshots, [1])
 
     def test_an_uncertain_hold_is_settled_once(self):
@@ -542,7 +545,7 @@ class OutsideMergeTests(GitCase):
         self.assertTrue(hold['outside'])
         self.assertIs(hold['alerted'], True)
         self.assertIn('auto-pin of origin/main held: the step on the host of #200 waits for the '
-                      'operator, who pins by hand after it (devloop pin)', self.logs)
+                      f'operator, who pins by hand after it ({pin.HAND_PIN})', self.logs)
         self.assertIn('auto-pin: #200, merged outside devloop, declares a step on the host: it '
                       'holds the auto-pin', self.logs)
         alert, = self.alerts(gh)
