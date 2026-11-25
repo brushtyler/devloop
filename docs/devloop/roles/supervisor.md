@@ -122,7 +122,8 @@ the default of devloop, `watch-state.json` of the `state_dir`. The coordinator d
 your watch: its wake-up has a state file of its own, so it never takes your events. With
 `[roles.coordinator]` your watch shows the issues the coordinator's app opens and its comments,
 its `/devloop` commands included, as those of the agents' apps (#648): you see an issue of the
-coordinator as soon as it is opened, before anyone queues it.
+coordinator as soon as it is opened, before anyone queues it. Its issues still open from
+before are reported once, at the first run with `[roles.coordinator]`, as `issue #N author now trusted`.
 
 Each start writes your heartbeat in `heartbeat/supervisor` of the mailbox: keep the wake-up
 running. A timer of the host, the watchdog of the roles, reads the heartbeats every 5 minutes

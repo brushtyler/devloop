@@ -905,6 +905,95 @@ class CoordinatorAuthorTest(unittest.TestCase):
         self.assertNotIn(TEXT[0], '\n'.join(h.out) + h.path.read_text())
 
 
+def previous_trust():
+    """The trust of the watch before #648: the coordinator admits, but is not trusted."""
+    trust = roles_trust()
+    trust.apps = trust.apps - {COORD}
+    return trust
+
+
+class TrustChangeTest(unittest.TestCase):
+    """A state written with other trusted authors (#648): by the version before the coordinator's
+    app was trusted, which did not record them, or before ``[roles.coordinator]``."""
+
+    def upgrade(self, h, versioned):
+        """Run the watch again on the state of ``h`` with the coordinator trusted: the state as
+        the previous version wrote it (no ``authors``), or as this one did with other authors."""
+        state = json.loads(h.path.read_text())
+        if not versioned:
+            del state['authors']
+        h.path.write_text(json.dumps(state))
+        self.assertTrue(watch.valid_state(state))
+        h.trust = roles_trust()
+        h.out.clear()
+
+    def test_an_open_issue_of_the_coordinator_becomes_trusted(self):
+        for versioned in (False, True):
+            with self.subTest(versioned=versioned):
+                h = Harness(self, trust=previous_trust())
+                h.gh.add_issue(620, author=COORD, labels=('agent:needs-supervisor',),
+                               title=TEXT[0])
+                h.gh.add_pr(11, author=COORD, labels=())
+                h.run(timeout=1)
+                saved = json.loads(h.path.read_text())
+                self.assertFalse(saved['issues']['620']['trusted'])
+                self.assertFalse(saved['issues']['620']['admitted'])
+                self.upgrade(h, versioned)
+                self.assertEqual(h.run(timeout=1)[0], 0)
+                self.assertEqual(h.err, [])
+                self.assertEqual(h.lines(), ['PR #11 author now trusted [] PR 11',
+                                             'issue #620 author now trusted '
+                                             f'[agent:needs-supervisor] {TEXT[0]}'])
+                self.assertTrue(json.loads(h.path.read_text())['issues']['620']['trusted'])
+                # From then on it is followed as a trusted one.
+                h.out.clear()
+                h.gh.set_labels(620, 'agent:ready')
+                h.gh.comment(801, 620, COORD, '/devloop authorize')
+                self.assertEqual(h.run(timeout=1)[0], 0)
+                self.assertEqual(h.lines(), [
+                    'issue #620 labels +agent:ready -agent:needs-supervisor',
+                    f'issue #620 comment by {COORD}: /devloop authorize'])
+
+    def test_a_closed_issue_of_the_coordinator_is_read_again(self):
+        for versioned in (False, True):
+            with self.subTest(versioned=versioned):
+                h = Harness(self, trust=previous_trust())
+                h.run(timeout=1)
+                # Closed before the baseline: an operator's comment caches it as external.
+                h.gh.authors[620] = (COORD, False)
+                h.gh.comment(801, 620, OPERATOR, 'ok')
+                self.assertEqual(h.run(timeout=1)[0], 3)
+                self.assertEqual(json.loads(h.path.read_text())['closed']['620'],
+                                 watch.EXTERNAL)
+                self.upgrade(h, versioned)
+                h.gh.comment(802, 620, COORD, '/devloop retry')
+                self.assertEqual(h.run(timeout=1)[0], 0)
+                self.assertEqual(h.lines(), [f'issue #620 comment by {COORD}: /devloop retry'])
+                self.assertEqual(json.loads(h.path.read_text())['closed']['620'], 'issue')
+
+    def test_an_issue_closed_in_the_round_of_the_change_is_read_again(self):
+        h = Harness(self, trust=previous_trust())
+        h.gh.add_issue(620, author=COORD)
+        h.run(timeout=1)
+        self.upgrade(h, versioned=False)
+        del h.gh.issues[620]
+        h.gh.authors[620] = (COORD, False)
+        h.gh.comment(801, 620, COORD, '/devloop retry')
+        self.assertEqual(h.run(timeout=1)[0], 0)
+        self.assertEqual(h.lines(), [f'issue #620 comment by {COORD}: /devloop retry'])
+
+    def test_the_same_authors_keep_what_was_read(self):
+        h = Harness(self, trust=roles_trust())
+        h.run(timeout=1)
+        h.gh.authors[30] = (STRANGER, False)
+        h.gh.comment(801, 30, OPERATOR, 'ok')
+        h.run(timeout=1)
+        h.gh.comment(802, 30, OPERATOR, 'again')
+        h.run(timeout=1)
+        self.assertEqual(h.gh.calls.count('issue_author'), 1)
+        self.assertEqual(json.loads(h.path.read_text())['authors'], h.trust.authors)
+
+
 class StateTest(unittest.TestCase):
     def test_a_restart_does_not_repeat_lines(self):
         h = Harness(self)
@@ -955,6 +1044,7 @@ class StateTest(unittest.TestCase):
                              (('issues', '6', 'by'), ['x']),
                              (('issues', 'x'), {'trusted': True, 'labels': [], 'title': ''}),
                              (('closed', '3'), 'wiki'),
+                             (('authors',), 'brushtyler'),
                              (('comments', 'seen'), ['1']),
                              (('comments', 'floor'), True),
                              (('comments', 'since'), 'yesterday')):

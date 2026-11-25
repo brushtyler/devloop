@@ -2537,7 +2537,12 @@ reported whoever changed them; comments and reviews only when their author is tr
 devloop app. A trusted comment on an issue or PR outside the open listings (closed before the
 baseline, say) is reported too: the watcher reads its author once and remembers it. On such an
 external issue the admission can change while it stays closed, so the watcher reads its latest
-`agent:ready` again in every round with a new trusted comment on it.
+`agent:ready` again in every round with a new trusted comment on it. The state records the
+trusted authors: when they change (`trusted_users`, `[roles.coordinator]` added or removed, or a
+state written before #648), the authors read for the objects outside the open listings are read
+again, and an open issue or PR whose author has become trusted is reported once as `issue #N
+author now trusted [labels] title` (or `PR #N`, with its reviews), then followed as any trusted
+one.
 
 Two modes:
 

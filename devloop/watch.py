@@ -31,6 +31,11 @@ devloop's apps. A trusted comment on an
 issue or PR outside the open listings (closed before the baseline) is reported too: its author
 is read once; on an external issue the latest ``agent:ready`` is read again in each round
 with a new trusted comment on it, since the admission can change while the issue stays closed.
+The state records the trusted authors (``Trust.authors``): when they change (the coordinator's
+app added with ``[roles.coordinator]``, or a state of a version that did not record them), the
+types and authors read for the issues and PRs outside the open listings are forgotten and read
+again, and an open issue or PR whose author has become trusted is reported as ``<type> #N author
+now trusted`` with its labels and title, its reviews as new.
 
 Rounds compare states, so a change undone between two reads (a label added and removed) is not
 seen. Comments and reviews have persistent ids: each one still there is seen.
@@ -206,6 +211,12 @@ class Trust:
     def trusted(self, login):
         return bool(login) and (login in self.users or login in self.apps)
 
+    @property
+    def authors(self):
+        """The trusted authors, sorted, as the state records them: what was read with others
+        does not hold (#648)."""
+        return sorted(self.users | self.apps)
+
     def wrote(self, login, actor):
         """Whether ``login`` may write records for ``actor``: its app, else a trusted user.
         Nobody writes records for the ``merger``."""
@@ -313,6 +324,8 @@ def valid_state(state):
             and all(kind in ('PR', 'issue', EXTERNAL, None) for kind in closed.values())):
         return False
     seen, since = comments.get('seen'), comments.get('since')
+    if 'authors' in state and not _is_strings(state['authors']):
+        return False
     if not (_is_int(comments.get('floor')) and isinstance(seen, list)
             and all(_is_int(cid) for cid in seen) and isinstance(since, str)):
         return False
@@ -557,6 +570,7 @@ class Watcher:
         comments = self._read_comments(_stamp(started - COMMENT_MARGIN))
         seen = [c['id'] for c in comments]
         state = {'version': STATE_VERSION, 'prs': prs, 'issues': issues, 'closed': {},
+                 'authors': self.trust.authors,
                  'comments': {'floor': max(seen, default=0), 'seen': [],
                               'since': _stamp(started - COMMENT_MARGIN)}}
         return state, f'watch baseline: {len(prs)} open PRs, {len(issues)} open issues'
@@ -566,20 +580,28 @@ class Watcher:
         prs = self._read_prs()
         issues = self._read_issues(old['issues'])
         comments = self._read_comments(old['comments']['since'])
-        closed = dict(old['closed'])
+        # Read with other trusted authors (#648), or by a version that did not record them: the
+        # types and authors outside the listings are read again.
+        authors = self.trust.authors
+        same = old.get('authors') == authors
+        closed = dict(old['closed']) if same else {}
         lines = []
         lines += self._pr_lines(old['prs'], prs)
         lines += self._issue_lines(old['issues'], issues)
         lines += self._closed_lines('PR', old['prs'], prs, closed)
         lines += self._closed_lines('issue', old['issues'], issues, closed)
+        # For the comments, so are those of the previous round's untrusted ones no longer open.
+        before = old if same else {
+            kind: {number: entry for number, entry in old[kind].items() if entry['trusted']}
+            for kind in ('prs', 'issues')}
         comment_lines, comment_state = self._comment_lines(old['comments'], comments,
-                                                           old, prs, issues, closed)
+                                                           before, prs, issues, closed)
         lines += comment_lines
         comment_state['since'] = _stamp(started - COMMENT_MARGIN)
         while len(closed) > MAX_CLOSED:
             closed.pop(min(closed, key=int))
         return lines, {'version': STATE_VERSION, 'prs': prs, 'issues': issues, 'closed': closed,
-                       'comments': comment_state}
+                       'authors': authors, 'comments': comment_state}
 
     def _pr_lines(self, old, new):
         lines = []
@@ -591,6 +613,12 @@ class Watcher:
                     continue
                 # Opened since the previous round: its reviews are new too.
                 lines.append(f'new PR #{number} {_labels(cur["labels"])} {cur["title"]}')
+                lines += _review_lines(number, cur, ())
+                continue
+            if cur['trusted'] and not prev['trusted']:
+                # Its author has become trusted (#648): reported as a new one would be.
+                lines.append(f'PR #{number} author now trusted {_labels(cur["labels"])} '
+                             f'{cur["title"]}')
                 lines += _review_lines(number, cur, ())
                 continue
             if not (cur['trusted'] and prev['trusted']):
@@ -620,7 +648,11 @@ class Watcher:
                 continue
             if not _visible(cur):
                 continue
-            if _visible(prev):
+            if cur['trusted'] and not _visible(prev):
+                # Its author has become trusted (#648): never reported, nor admitted.
+                lines.append(f'issue #{number} author now trusted {_labels(cur["labels"])} '
+                             f'{cur["title"]}')
+            elif _visible(prev):
                 lines += _label_change('issue', number, prev['labels'], cur['labels'])
             else:
                 lines.append(f'issue #{number} admitted with {self.trust.ready_label} by '
