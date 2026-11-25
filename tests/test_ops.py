@@ -2211,8 +2211,9 @@ class DryRunTests(OpsTestCase):
                 # #543: the mailbox, with the coordinator in its group; the wake-up in the copy,
                 # and its read of GitHub in the sudoers, with its own state file.
                 self.assertIn(f'[dry-run] usermod -aG {GROUP} {FAKE_COORDINATOR}\n', out)
-                self.assertIn(f'[dry-run] install -d -m 2770 -o root -g {GROUP} '
-                              f'{self.tmp}/coordination/to-coordinator/done\n', out)
+                for path in ('to-coordinator/done', 'to-operator', 'to-operator/done'):
+                    self.assertIn(f'[dry-run] install -d -m 2770 -o root -g {GROUP} '
+                                  f'{self.tmp}/coordination/{path}\n', out)
                 self.assertIn('host/coordinator-wait.sh', files)
                 watch = WAIT_WATCH.replace('@LAUNCHER_CMD@', launcher).replace('@STATE_PATH@',
                                                                               state)
@@ -2227,7 +2228,7 @@ class DryRunTests(OpsTestCase):
         # #543: the supervisor reads the overlay and the project file through an ACL r--, which
         # the script adds when missing (a file replaced with install loses it), and the mailbox
         # between supervisor and coordinator is made: the group, the supervisor in it, the
-        # directories root's, 2770.
+        # directories root's, 2770; to-operator/ too, with the same permissions (#663).
         state = self.home / 'devloop/devloop/.devloop'
         state.mkdir(parents=True)
         files = [state / 'config.local.toml', state / 'project.toml']
@@ -2238,7 +2239,8 @@ class DryRunTests(OpsTestCase):
                              AGENT_USER=FAKE_AGENT)
         self.fake_host('classic sudo', users=(FAKE_AGENT, FAKE_SUPERVISOR))
         box = self.tmp / 'coordination'
-        dirs = [box] + [box / name / sub for name in ('to-coordinator', 'to-supervisor')
+        dirs = [box] + [box / name / sub
+                        for name in ('to-coordinator', 'to-supervisor', 'to-operator')
                         for sub in ('', 'done')]
         done = self.run_script('host/setup-supervisor.sh', '--dry-run', '--params', str(params))
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
@@ -2331,6 +2333,9 @@ class DryRunTests(OpsTestCase):
             # The directories do not exist in the dry run: the script says to run it again.
             self.assertIn(f'  ATTENZIONE: {path} non esiste o è un link: crearlo, poi rieseguire '
                           'questo script\n', out)
+        # #663: the operator's to-operator/ is not the watchdog's, which gets no ACL there.
+        self.assertNotIn(f'ATTENZIONE: {box}/to-operator non esiste', out)
+        self.assertNotIn(f'{box}/to-operator\n', out.split('useradd', 1)[1])
         self.assertNotIn(f'usermod -aG {GROUP} {FAKE_WATCHDOG}', out)
         watchdog = self.tmp / 'lib/devloop-role-watchdog'
         for name in ('lib.sh', 'host/role-watchdog.sh'):
@@ -4490,9 +4495,10 @@ class CheckHostTests(OpsTestCase):
         path.chmod(0o755)
 
     def box_dirs(self):
-        """The directories of the mailbox (#543): the box, each destination and its done/, and
-        the heartbeats of the roles (#602)."""
-        return [self.box] + [self.box / name / sub for name in ('to-coordinator', 'to-supervisor')
+        """The directories of the mailbox (#543): the box, each destination and its done/, the
+        operator's to-operator/ included (#663), and the heartbeats of the roles (#602)."""
+        return [self.box] + [self.box / name / sub
+                             for name in ('to-coordinator', 'to-supervisor', 'to-operator')
                              for sub in ('', 'done')] + [self.box / 'heartbeat']
 
     def acl(self, entry, reads=f'user:{ME}:r--'):
@@ -7674,6 +7680,53 @@ class RoleRunbookTests(unittest.TestCase):
                        'Never ask the operator for a decision and never give them a command'):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, prohibitions)
+
+    def test_the_roles_write_to_the_operator_in_to_operator(self):
+        # #663: the coordinator writes there what it left in the summary of its session, the
+        # supervisor only in the two cases in which it writes to the operator directly; only the
+        # operator reads it. The roles are unchanged: the supervisor still talks with the
+        # coordinator.
+        coordinator = ' '.join(ROLE_RUNBOOKS['coordinator'].read_text().split())
+        channel = self.part(coordinator, 'Channel with the operator')
+        folder = channel.split(" ### The operator's folder (#663) ")[1].split(' ### ')[0]
+        for phrase in ('next to `to-supervisor/` and `to-coordinator/`',
+                       'box=/var/lib/devloop-coordination/to-operator',
+                       'used to leave in the summary of your session',
+                       'a question, a choice with its options, a report',
+                       'your role and the project', 'the issue or the pull request',
+                       'stay on GitHub', 'no token, key or secret, nor the details of a '
+                       'vulnerability', 'only the operator', '`to-operator/done/`',
+                       'You never read it'):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, folder)
+        self.assertIn('report it to the operator in your summary (`to-operator/`)',
+                      self.part(coordinator, 'Other projects'))
+        supervisor = ' '.join(ROLE_RUNBOOKS['supervisor'].read_text().split())
+        channel = self.part(supervisor, 'Channel with the coordinator')
+        folder = channel.split("**The operator's folder** (#663)")[1]
+        for phrase in ('box=/var/lib/devloop-coordination/to-operator',
+                       'You write there only in the two exceptions above',
+                       'everything else still goes to the coordinator in `to-coordinator/`',
+                       'your role and the project', 'stay on GitHub',
+                       'nor the details of a vulnerability', '`to-operator/done/`',
+                       'you never read it'):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, folder)
+        # The step for a host with the roles already installed, from the operator's checkout.
+        step = RootStepsGuideTests().section('## Cartella to-operator della casella (#663)')
+        commands = RootStepsGuideTests.commands(step, inline=False)
+        for script in ('setup-supervisor.sh', 'setup-coordinator.sh'):
+            for dry in (' --dry-run', ''):
+                self.assertIn(f'sudo bash <checkout>/ops/host/{script} --params <parametri>{dry}',
+                              commands)
+        self.assertIn('sudo bash <checkout>/ops/host/check-host.sh --params <parametri> --no-apps',
+                      commands)
+        flat = ' '.join(step.split())
+        for phrase in ('il pin a mano', '`to-operator/done/`', 'Nessun ruolo legge quella cartella',
+                       '**Rollback**'):
+            self.assertIn(phrase, flat)
+        self.assertIn('(host/migrate.md#cartella-to-operator-della-casella-663)',
+                      (OPS / 'README.md').read_text())
 
     def test_the_roles_serve_one_project_and_have_no_channel_with_other_projects(self):
         # #629: the rule of the operator of 2026-11-24 in ADR 0002, cited by ADR 0006, the

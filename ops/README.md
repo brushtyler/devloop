@@ -102,13 +102,23 @@ sorveglia ciascuno e cosa fa all'avvio:
   GitHub, nel diario del progetto (#76 per ssdlc) e nelle issue, mai in un file locale;
 - **la casella**, per gli avvisi rapidi, sempre disponibile anche senza GitHub:
   `COORDINATION_DIR` (`/var/lib/devloop-coordination`; con `PROJECT`,
-  `/var/lib/devloop-coordination-<progetto>`), con `to-coordinator/` e `to-supervisor/`, ciascuna
+  `/var/lib/devloop-coordination-<progetto>`), con `to-coordinator/`, `to-supervisor/` e
+  `to-operator/` (#663), ciascuna
   con `done/`, tutte `root:devloop-roles` (`COORDINATION_GROUP`; con `PROJECT`,
   `devloop-roles-<progetto>`) 2770. Nel gruppo ci sono solo il supervisore e il coordinatore del
   progetto, non `devloop` né `devloop-agent` né i ruoli di altri progetti. Un file per messaggio, con un
   nome univoco (data e ora UTC più un suffisso casuale), pubblicato con una rinomina atomica da
   un file temporaneo che comincia con `.`; il destinatario lo legge, poi lo sposta in `done/` o
   lo rimuove. La casella serve solo per gli avvisi, non per lo stato;
+- **la cartella dell'operatore** (#663), `to-operator/` della casella: i ruoli ci lasciano le
+  comunicazioni per l'operatore che non vanno su GitHub (domande, scelte con le opzioni,
+  segnalazioni), ciascuna con il ruolo, il progetto e l'issue o la PR a cui si riferisce. Ci
+  scrive il coordinatore; il supervisore solo quando scrive all'operatore direttamente (il
+  coordinatore non ha letto un suo messaggio da 15 minuti, o un'emergenza di sicurezza). La legge
+  solo l'operatore, dalla sua shell come root, che sposta i messaggi letti in `to-operator/done/`
+  o li rimuove; nessun ruolo la legge, e il risveglio dei ruoli non la guarda. Su un host con i
+  ruoli già installati la si aggiunge come in
+  [host/migrate.md](host/migrate.md#cartella-to-operator-della-casella-663);
 - **la sorveglianza**: il supervisore segue il flusso continuo (`devloop watch` con il suo file di
   stato), il coordinatore solo i suoi eventi e un controllo periodico, ciascuno con il risveglio
   dei ruoli `ops/host/role-wait.sh --role supervisor|coordinator` (#602; per il coordinatore
@@ -734,8 +744,8 @@ dell'overlay e del file di progetto** dello `state_dir` con un'ACL, se manca (`s
 u:supervisor:r-- <state_dir>/config.local.toml` e `<state_dir>/project.toml`, #543: i due file
 dell'operatore sono di solito 600, e `scripts/supervisor-token.py` legge l'overlay), prepara la
 **casella fra supervisore e coordinatore** (il gruppo `devloop-roles` con dentro `supervisor`, e
-`/var/lib/devloop-coordination` con `to-coordinator/`, `to-supervisor/` e le loro `done/`, di
-root, del gruppo, 2770, e `heartbeat/` per i battiti dei ruoli, #602; [I quattro
+`/var/lib/devloop-coordination` con `to-coordinator/`, `to-supervisor/`, `to-operator/` (#663) e
+le loro `done/`, di root, del gruppo, 2770, e `heartbeat/` per i battiti dei ruoli, #602; [I quattro
 ruoli](#i-quattro-ruoli)), installa il sudoers minimale dopo averlo validato con `visudo -c`,
 installa la **copia di root del risveglio** `role-wait.sh` con `lib.sh` e i parametri in
 `SUPERVISOR_OPS_DIR` (`/usr/local/lib/devloop-supervisor`, 755 e 644, di root; con `PROJECT`,
@@ -823,7 +833,8 @@ i due sudoers (440, root, accettati da `visudo`, uguali a quelli generati); l'AC
 `user:supervisor:r--` sull'overlay e sul file di progetto, e che il supervisore li legga (#543:
 un errore se un file sostituito l'ha persa); la casella (#543: il gruppo `devloop-roles`, con
 dentro `supervisor` e, se il progetto lo ha, `coordinator`, e senza `devloop` né `devloop-agent`;
-`/var/lib/devloop-coordination`, `to-coordinator/`, `to-supervisor/` e le loro `done/`, di root,
+`/var/lib/devloop-coordination`, `to-coordinator/`, `to-supervisor/`, `to-operator/` (#663) e le
+loro `done/`, di root,
 del gruppo, 2770: un errore se manca); che `devloop-agent` non
 legga `key_dir`, lo `state_dir`, l'overlay e il file di progetto, non attraversi `key_dir`, non legga né attraversi le
 altre voci dello `state_dir`, entri senza scriverle in `worktrees`, `agent-shared`,

@@ -361,6 +361,67 @@ Come root, dal checkout dell'operatore aggiornato (`git -C <checkout> fetch orig
 **Rollback**: `systemctl disable --now devloop-role-watchdog@<progetto>.timer` ferma il watchdog;
 i ruoli tornano alla sveglia di prima con `coordinator-wait.sh`, che resta lo stesso comando.
 
+## Cartella to-operator della casella (#663)
+
+Il passo sull'host di #663, su un host con supervisore e coordinatore già installati: non tocca
+devloop né i ruoli. Aggiunge alla casella di ogni progetto (`COORDINATION_DIR`) la cartella
+`to-operator/` con la sua `done/`, di root, del gruppo `$COORDINATION_GROUP`, 2770 come le altre
+cartelle della casella. I ruoli ci lasciano le comunicazioni per l'operatore che non vanno su
+GitHub: il coordinatore quelle che prima lasciava nel riepilogo della sua sessione, il supervisore
+solo nei casi in cui scrive all'operatore direttamente (i runbook del
+[coordinatore](../../docs/devloop/roles/coordinator.md#the-operators-folder-663) e del
+[supervisore](../../docs/devloop/roles/supervisor.md#channel-with-the-coordinator)). Finché la
+cartella manca, `check-host.sh` la segnala come errore. Nei comandi, `<checkout>` è il checkout
+dell'operatore e `<parametri>` il file di parametri del progetto; `$COORDINATION_DIR` e
+`$COORDINATION_GROUP` sono i valori di quel file o i loro default (`ops/params.env.example`).
+
+Il codice di devloop non ne ha bisogno, ma devloop mergia la PR di #663 come le altre e non fa il
+pin automatico di quel commit né dei successivi finché l'operatore non fa il pin a mano dopo il
+passo ([Ogni cambio con un passo sull'host](#ogni-cambio-con-un-passo-sullhost)).
+
+### Comandi
+
+Come root, dal checkout dell'operatore aggiornato (`git -C <checkout> fetch origin` e
+`git -C <checkout> checkout --detach origin/main`, con il merge di #663), **per ogni progetto
+dell'host** con supervisore o coordinatore:
+
+1. **la cartella**, prima con `--dry-run`: le azioni nuove sono le due `install -d -m 2770 -o root
+   -g $COORDINATION_GROUP` di `$COORDINATION_DIR/to-operator` e `$COORDINATION_DIR/to-operator/done`.
+   Un'altra azione che il passo non spiega vuol dire che l'host non corrisponde ai parametri: ci si
+   ferma e si chiede all'operatore. Lo script del supervisore crea la cartella, quello del
+   coordinatore, se c'è, la trova già:
+
+   ```bash
+   sudo bash <checkout>/ops/host/setup-supervisor.sh --params <parametri> --dry-run
+   sudo bash <checkout>/ops/host/setup-supervisor.sh --params <parametri>
+   sudo bash <checkout>/ops/host/setup-coordinator.sh --params <parametri> --dry-run
+   sudo bash <checkout>/ops/host/setup-coordinator.sh --params <parametri>
+   ```
+
+2. **la verifica**: nessun `ERRORE` nel passo `Casella fra supervisore e coordinatore`, con le
+   righe `ok: …/to-operator: 2770, gruppo …` e `ok: …/to-operator/done: 2770, gruppo …`:
+
+   ```bash
+   sudo bash <checkout>/ops/host/check-host.sh --params <parametri> --no-apps
+   ```
+
+3. **le sessioni dei ruoli**: chiuderle e riavviarle con `ops/host/start-role.sh` (passo
+   dell'operatore), perché leggano il runbook che descrive `to-operator/`;
+
+4. **il pin a mano**, a loop fermo, del commit di #663 o di uno successivo, come utente
+   `DEVLOOP_USER`, poi l'avvio: `systemctl stop <SERVICE_NAME>`, `devloop pin origin/main` (con
+   più progetti `devloop --project <progetto> pin origin/main`), `systemctl start
+   <SERVICE_NAME>`. Il pin a mano fa riprendere il pin automatico.
+
+**Leggere i messaggi.** L'operatore li legge dalla sua shell, come root, in
+`$COORDINATION_DIR/to-operator/` (un file per messaggio, con la data e l'ora UTC nel nome), poi li
+sposta in `to-operator/done/` o li rimuove. Nessun ruolo legge quella cartella, e il risveglio dei
+ruoli non la guarda.
+
+**Rollback**: dopo aver letto i messaggi rimasti, `rm -r $COORDINATION_DIR/to-operator`; i ruoli
+tornano a lasciare le comunicazioni per l'operatore nel riepilogo della sessione con il runbook di
+prima.
+
 ## Configurazione di ssdlc nel suo file di progetto
 
 Con l'ADR 0006, R3, `devloop/config.toml` non contiene più i fatti di ssdlc né le restrizioni che

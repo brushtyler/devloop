@@ -102,6 +102,26 @@ The operator's directives of 2026-11-24 (#603):
   ([Escalations to the supervisor](../guide.md#escalations-to-the-supervisor)); for a decision of
   the operator, a plain comment.
 
+### The operator's folder (#663)
+
+`to-operator/` of the mailbox, next to `to-supervisor/` and `to-coordinator/`, holds the roles'
+messages for the operator, in the same format: one file per message, plain text, a unique name,
+published with the command of the mailbox (above) with `box=` set to that folder:
+
+```bash
+box=/var/lib/devloop-coordination/to-operator
+```
+
+- **What you write there**: what you have for the operator outside GitHub and used to leave in
+  the summary of your session (a question, a choice with its options, a report), including what
+  this runbook sends to the operator in your summary. With more projects on the host, the
+  operator reads it from their shell without entering each session.
+- **What a message says**: your role and the project, and, for what must be tracked, the issue or
+  the pull request it refers to: the decisions and the state of the work stay on GitHub. It holds
+  no token, key or secret, nor the details of a vulnerability.
+- **Who reads it**: only the operator, who moves the messages read to `to-operator/done/` or
+  removes them. You never read it, and the wake-up does not watch it.
+
 ### Notices to the operator (from #593)
 
 What goes where is in [Notices to the operator](../guide.md#notices-to-the-operator); for you:
@@ -143,7 +163,7 @@ set and reads their overlays, and only this rule keeps you out of them.
 A project uses another one as anyone would: it opens an issue on its repository and follows its
 releases. When a project that devloop serves shows you, or your supervisor, a defect of devloop
 itself (the engine), do not write to the roles of devloop's repository and do not open the issue
-there: report it to the operator in your summary, with the public links that show it (issues,
+there: report it to the operator in your summary (`to-operator/`), with the public links that show it (issues,
 pull requests, runs of the CI) and what you saw. The operator decides whether to open an issue
 on devloop's repository.
 
@@ -518,7 +538,7 @@ the mailbox.
 - Never run a step on the host: that is the agent of the host's, launched by the operator
   ([host runbook](host.md)).
 - Never write to the roles of another project, devloop's repository included, nor read or write
-  its mailbox: a defect of devloop goes to the operator, in your summary (Other projects).
+  its mailbox: a defect of devloop goes to the operator, in your summary in `to-operator/` (Other projects).
 - Never read or write GitHub with the operator's `gh` login, with a personal token or with the
   supervisor's app, never push.
 - Never print a token, never export one in an assignment.

@@ -76,6 +76,16 @@ has not read one of your messages within 15 minutes (it is stopped: the message 
 `to-coordinator/`, not moved to `done/`), or a security emergency. The journal and the
 escalations on GitHub stay as they are.
 
+**The operator's folder** (#663). `to-operator/` of the mailbox, next to `to-coordinator/` and
+`to-supervisor/`, holds the roles' messages for the operator, in the same format and with the
+same command (with `box=/var/lib/devloop-coordination/to-operator`). You write there only in the
+two exceptions above, when you write to the operator directly; everything else still goes to the
+coordinator in `to-coordinator/`. A message names your role and the project and, for what must
+be tracked, the issue or the pull request it refers to: the decisions and the state of the work
+stay on GitHub. It holds no token, key or secret, nor the details of a vulnerability. Only the
+operator reads it, and moves the messages read to `to-operator/done/` or removes them: you never
+read it, and the wake-up does not watch it.
+
 Move each message of the coordinator to `done/` as soon as you read it: one left in
 `to-supervisor/` after 15 minutes tells the coordinator that you do not answer, and it puts the
 work in the queue itself.
