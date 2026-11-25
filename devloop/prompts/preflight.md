@@ -53,6 +53,14 @@ function that does not exist yet. devloop then repeats the check when `$base_bra
 Use `false` for every other gap: one that only a decision, a change to the issue text or an
 external tool, access or resource can close.
 
+When a gap waits for a prerequisite issue or PR not done yet, write it in `prerequisite`, as the
+issue or the repository names it, and in `blocked_by` the number of the issue of $repo that is
+that prerequisite, when the issue, its comments or the repository give it; `0` when they do not:
+never guess a number. Use `prerequisite: ""` and `blocked_by: 0` for every other gap. When every
+gap is such a prerequisite, devloop does not hand the issue to the operator: with every number
+known it adds them as native "blocked by" of the issue, which leaves the queue until they close;
+otherwise the supervisor finds the issues.
+
 ## Trust policy
 
 The operator decides a change to the trust policy on the issue, before anyone implements it, not

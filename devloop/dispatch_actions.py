@@ -43,8 +43,8 @@ from .config import foreign, provider_quorum, same_agent
 from .planning import (BASE_CHANGED, FIX_COMMAND, RESYNC_AFTER_APPROVAL, RESYNC_CONFLICTS,
                        carried_resync, ci_joins_round, closed_by_first, counted_rounds,
                        findings_reviewers, implementer_choice, next_requested, pending_reviewers,
-                       preflight_state, voided_approval, waived_rounds, waiver,
-                       waiting_reviewers)
+                       preflight_state, prerequisite_list, prerequisite_number, voided_approval,
+                       waived_rounds, waiver, waiting_reviewers)
 from .policy import (PARALLEL_CANCEL, SEQUENTIAL, ZERO_LEVEL, another_model, distinct,
                      independent, profile_of)
 from .ports import summarize_checks
@@ -52,7 +52,7 @@ from .review import (FINDINGS_ONLY, ci_failure_review, current_round, findings_o
                      flow_verdict, last_round, normalize_review, open_findings, owner_of,
                      round_verdict)
 from .review import TEXTS as REVIEW_TEXTS
-from .supervision import SYNC_FAILED, TOOL_FAILURE
+from .supervision import ESCALATE, PREREQUISITE, RETRY, SYNC_FAILED, TOOL_FAILURE
 from .workspace import TransientPushError, WorkspaceError
 
 
@@ -682,7 +682,16 @@ class ActionsMixin:
             exc.key = key
             raise
         if result['status'] == 'blocked':
-            return self._blocked(number, used, result['blocked_reason'], remove=[lb.working],
+            reason = result['blocked_reason']
+            if (result.get('prerequisite') or '').strip():
+                # A missing prerequisite (#672): a "blocked by", or an escalation the supervisor
+                # decides, in place of the block to the operator; failing that, the block.
+                handled, why = self._implement_prerequisite(number, result, key, name)
+                if handled:
+                    return None
+                if why:
+                    reason = reason.rstrip() + '\n\n' + self._texts()('prereq_stopped', why=why)
+            return self._blocked(number, used, reason, remove=[lb.working],
                                  on_pr=False, step='implement', head=start, conclave=decision)
         if isinstance(failure, HostTests):
             # The host's failure (#497): to the operator, no wait for the base branch.
@@ -718,6 +727,37 @@ class ActionsMixin:
         if self._push_vetoed(pending):
             return
         self._push_step(pending, auth=auth)
+
+    def _implement_prerequisite(self, number, result, key, name):
+        """An implementer that stopped as ``blocked`` for a missing ``prerequisite`` (#672):
+        ``(handled, why)``. With the number of its issue (``blocked_by``) the dispatcher adds it
+        as "blocked by" (``_add_prerequisites``): the issue keeps ``agent:working``, its
+        worktree ``name`` is removed, and the implementation starts again once the block is
+        closed (``_prerequisite_wait``). Without a number, a ``prerequisite`` escalation the
+        supervisor decides in merge mode "auto" (``_supervised``, bound to the input ``key`` of
+        the turn), with the agent's reason. ``handled`` False: the agent's block to the
+        operator stays, and ``why`` says why no "blocked by" was added ('' when none was
+        asked)."""
+        lb = self.cfg.labels
+        wanted = prerequisite_number(result)
+        if wanted:
+            added, why = self._add_prerequisites(number, [wanted], 'implement')
+            if not added:
+                self.log(f'  the prerequisite is not added as "blocked by": {why}')
+                return False, why
+            self.ws.remove(name)
+            return True, ''
+        supervised, why = self._supervised(number, PREREQUISITE, 'implement', key=key)
+        if not supervised:
+            if why:
+                self.log(f'  the prerequisite stays with the operator: {why}')
+            return False, ''
+        t = self._texts()
+        self._escalate(number, t('prerequisite_implement', listed=prerequisite_list([result]))
+                       + ' ' + t('prerequisite_supervisor', retry=RETRY, escalate=ESCALATE),
+                       result.get('blocked_reason') or '', remove=[lb.working],
+                       cls=PREREQUISITE, supervised=supervised)
+        return True, ''
 
     def _pr_request(self, number, agent, used, result, local, decision, attempt, generated):
         """The PR of the implementation of issue ``number``, with the marker and the body of its

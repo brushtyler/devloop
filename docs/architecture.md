@@ -61,7 +61,11 @@ issue, with the state of each blocking issue, the reason of its closure (`stateR
 the open PRs GitHub links to it as closing it (`closedByPullRequestsReferences`, #671) and who
 added each block, read with GraphQL (one query, more only when the events of an open
 block, or of one closed for a reason other than completed, are older than the latest 100)
-([Dependencies between issues](devloop/guide.md#dependencies-between-issues)).
+([Dependencies between issues](devloop/guide.md#dependencies-between-issues)). Since #672 it
+has `issue_target`, the REST id, the state and the kind (issue or PR) of an issue number, and
+`add_blocked_by`, which adds a "blocked by" with the REST API of the issue dependencies: the
+dispatcher adds a missing prerequisite named by its number
+([Missing prerequisites](devloop/guide.md#missing-prerequisites)).
 
 `Tracker.open_issue_numbers` (#656) lists the numbers of every open issue, page by page with no
 limit on their count, and `Tracker.comments_since` reads the

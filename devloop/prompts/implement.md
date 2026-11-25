@@ -54,6 +54,12 @@ Return only the structured result:
   hand, after the step. The reviewer checks that the declaration is there when it is needed and
   empty otherwise, and that its reference names such a section or script.
 - `blocked_reason`: empty unless `status` is `blocked`.
+- `prerequisite`: only when `status` is `blocked` because the issue needs another issue or PR
+  done first, that prerequisite as the issue or the repository names it; otherwise empty.
+- `blocked_by`: with a `prerequisite`, the number of the issue of $repo that is that
+  prerequisite, when the issue, its comments or the repository give it; otherwise `0`. Never
+  guess a number: devloop adds it as a native "blocked by" of the issue, which waits until it
+  closes.
 
 ## Acceptance criteria
 

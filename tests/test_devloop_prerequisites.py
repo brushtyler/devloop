@@ -1,0 +1,397 @@
+"""devloop: a missing prerequisite becomes a native "blocked by" of the dispatcher, or a
+``prerequisite`` escalation to the supervisor, in place of an escalation to the operator (#672)."""
+
+import unittest
+
+import test_devloop_supervision as sup
+from devloop import markdown, schema, supervision
+from devloop.dispatcher import (MAX_ACTIVE_PREREQUISITES, MAX_ADDED_PREREQUISITES, Dispatcher)
+from devloop.markdown import read_marker, render_prerequisite
+from devloop.planning import PREREQUISITES_CLOSED, plan, preflight_state
+from helpers.devloop_fakes import FakeIdentities, at
+from test_devloop import CFG, FakeRunner, FakeWS, implemented
+from test_devloop_dependencies import DCFG, REPO, DependencyGH, block, ready
+from test_devloop_preflight import PCFG, IssueGH, checked, gap
+
+DISPATCHER_LOGIN = FakeIdentities.LOGINS['dispatcher']
+READY, WORKING = 'agent:ready', 'agent:working'
+NEEDS_OPERATOR = 'agent:needs-operator'
+
+
+def record(*numbers, step='preflight'):
+    """The dispatcher's comment of the "blocked by" it adds for a prerequisite."""
+    return render_prerequisite({'step': step, 'added': list(numbers)})
+
+
+class PrerequisiteGH(DependencyGH):
+    """``DependencyGH`` whose comments keep their author (``writer`` at the time of the write)
+    and whose "blocked by" added by the dispatcher join the blocks of the issue, added by
+    ``writer``."""
+
+    def __init__(self, issues, blocks=None, writer='brushtyler'):
+        super().__init__(issues, blocks)
+        self.writer = writer
+        self.writers = []
+
+    def say(self, number, body, who):
+        self.comments.append((number, body))
+        self.writers.append(who)
+
+    def comment(self, number, body):
+        self.say(number, body, self.writer)
+
+    def pr_comments(self, number):
+        return [{'author': {'login': self.writers[i]}, 'body': body, 'created_at': at(2 * i)}
+                for i, (n, body) in enumerate(self.comments) if n == number]
+
+    def add_blocked_by(self, number, issue_id):
+        super().add_blocked_by(number, issue_id)
+        self.blocks.setdefault(number, []).append(block(issue_id - 100000, by=self.writer))
+
+    def prerequisites(self, number):
+        return [r for n, body in self.comments
+                if n == number and (r := read_marker(body, 'prerequisite'))]
+
+
+class BlockTests(unittest.TestCase):
+    def make(self, blocks=None, identities=False, cfg=DCFG):
+        self.gh = PrerequisiteGH(ready(2), blocks,
+                                 writer=DISPATCHER_LOGIN if identities else 'brushtyler')
+        self.logs = []
+        return Dispatcher(cfg, self.gh, FakeWS(), FakeRunner(), log=self.logs.append,
+                          identities=FakeIdentities(self.gh) if identities else None)
+
+    def blocked_by(self, d, number=2):
+        return d._dependency_view([number])[number]['blocked_by']
+
+    def test_a_block_of_the_dispatcher_counts_only_with_its_record(self):
+        d = self.make({2: [block(1, by=DISPATCHER_LOGIN)]}, identities=True)
+        self.assertEqual(self.blocked_by(d), [])
+        self.assertTrue(any('ignored the block by #1' in line for line in self.logs))
+        # A record of another identity, or one that names another issue, does not count.
+        self.gh.say(2, record(1), 'stranger')
+        self.gh.say(2, record(3), DISPATCHER_LOGIN)
+        self.assertEqual(self.blocked_by(d), [])
+        self.gh.say(2, record(1, step='implement'), DISPATCHER_LOGIN)
+        self.assertEqual(self.blocked_by(d), ['#1'])
+        # The record makes only the dispatcher's own block count, never anyone else's.
+        self.gh.blocks = {2: [block(1, by='stranger')]}
+        self.assertEqual(self.blocked_by(d), [])
+
+    def test_the_record_is_written_first_then_the_blocks(self):
+        d = self.make(identities=True)
+        self.assertEqual(d._add_prerequisites(2, [5, 4, 5], 'preflight'), ([4, 5], ''))
+        self.assertEqual(self.gh.prerequisites(2), [{'step': 'preflight', 'added': [4, 5]}])
+        self.assertEqual(self.gh.writers, [DISPATCHER_LOGIN])
+        self.assertEqual(self.gh.added_blocks, [(2, 100004), (2, 100005)])
+        body = self.gh.comments[-1][1]
+        self.assertIn('#4, #5', body)
+        self.assertTrue(body.lstrip().startswith('> [!NOTE]'))
+        # The blocks the dispatcher added count: the issue waits for them.
+        self.assertEqual(self.blocked_by(d), ['#4', '#5'])
+
+    def test_a_condition_that_fails_adds_nothing(self):
+        closed = {'id': 9, 'state': 'CLOSED', 'pull_request': False}
+        cases = {
+            'no number': ([0], {}, {}, ''),
+            'the issue itself': ([2], {}, {}, '#2'),
+            'not found': ([5], {5: None}, {}, '#5'),
+            'a pull request': ([5], {5: {'id': 9, 'state': 'OPEN', 'pull_request': True}}, {},
+                               'pull request'),
+            'closed': ([5], {5: closed}, {}, '#5'),
+            'already a block': ([5], {}, {2: [block(5, by='stranger')]}, '#5'),
+            # #5 is blocked by #2 already: #2 blocked by #5 would close a cycle.
+            'a cycle': ([5], {}, {5: [block(2)]}, '#2, #5'),
+        }
+        for name, (wanted, targets, blocks, text) in cases.items():
+            with self.subTest(case=name):
+                d = self.make(blocks)
+                self.gh.targets = targets
+                added, why = d._add_prerequisites(2, wanted, 'implement')
+                self.assertEqual(added, [])
+                self.assertIn(text, why)
+                self.assertEqual(self.gh.comments, [])
+                self.assertEqual(getattr(self.gh, 'added_blocks', []), [])
+
+    def test_the_caps_of_the_blocks_of_one_issue(self):
+        self.assertEqual((MAX_ACTIVE_PREREQUISITES, MAX_ADDED_PREREQUISITES), (3, 5))
+        # Three blocks of the dispatcher open together: a fourth is refused.
+        d = self.make({2: [block(11), block(12), block(13)]})
+        for n in (11, 12, 13):
+            self.gh.say(2, record(n), 'brushtyler')
+        added, why = d._add_prerequisites(2, [14], 'preflight')
+        self.assertEqual(added, [])
+        self.assertIn('3', why)
+        # One closed as completed leaves room for another.
+        self.gh.blocks[2][0] = block(11, state='CLOSED', reason='COMPLETED')
+        self.assertEqual(d._add_prerequisites(2, [14], 'preflight'), ([14], ''))
+        # Five added in all, those added again included: a sixth is refused, even once the
+        # earlier ones are closed or were removed.
+        d = self.make()
+        for _ in range(5):
+            self.gh.say(2, record(11), 'brushtyler')
+        added, why = d._add_prerequisites(2, [11], 'implement')
+        self.assertEqual(added, [])
+        self.assertIn('5', why)
+        d = self.make()
+        for n in (11, 12, 13, 14):
+            self.gh.say(2, record(n), 'brushtyler')
+        self.assertEqual(d._add_prerequisites(2, [15, 16], 'preflight')[0], [])
+        self.assertEqual(d._add_prerequisites(2, [15], 'preflight'), ([15], ''))
+
+
+class PreflightGH(IssueGH):
+    """Issue #7 of the readiness check tests, with its native dependencies: the "blocked by"
+    devloop adds join them, added by the operator's login (the dispatcher's without apps)."""
+
+    def __init__(self, labels=(READY,)):
+        super().__init__(labels)
+        self.blocks = []
+
+    def issue_dependencies(self, number):
+        pairs = self.blocks if number == 7 else []
+        return {'author': 'brushtyler', 'blocked_by': [dict(b) for b, _ in pairs],
+                'added': [dict(e) for _, e in pairs]}
+
+    def add_blocked_by(self, number, issue_id):
+        super().add_blocked_by(number, issue_id)
+        self.blocks.append(block(issue_id - 100000))
+
+    def records(self, kind):
+        return [r for c in self.thread if (r := read_marker(c['body'], kind))]
+
+
+class PreflightPrerequisiteTests(unittest.TestCase):
+    def make(self, *outputs, cfg=PCFG):
+        self.gh, self.ws = PreflightGH(), FakeWS()
+        self.ws.base_head = lambda: 'b' * 40  # the base stays where the check ran
+        self.runner, self.logs = FakeRunner(*outputs), []
+        return Dispatcher(cfg, self.gh, self.ws, self.runner, log=self.logs.append)
+
+    def kinds(self, d):
+        return [(a.kind, a.number) for a in d.tick()]
+
+    def test_prerequisites_with_their_numbers_become_blocks_instead_of_the_operator(self):
+        d = self.make(checked(False, [gap(repository=True, prerequisite='il parser', blocked_by=5),
+                                      gap(repository=True, prerequisite='lo schema',
+                                          blocked_by=6)]))
+        self.assertEqual(self.kinds(d), [('preflight', 7)])
+        self.assertEqual(self.gh.labels[7], {READY})
+        self.assertEqual(self.gh.added_blocks, [(7, 100005), (7, 100006)])
+        self.assertEqual(self.gh.records('prerequisite'), [{'step': 'preflight', 'added': [5, 6]}])
+        outcome = self.gh.records('preflight')[-1]
+        self.assertEqual((outcome['ready'], outcome['blocked'], outcome['class'],
+                          outcome['prerequisites']), (False, False, 'prerequisite', [5, 6]))
+        body = self.gh.thread[-1]['body']
+        self.assertIn('*Prerequisito mancante:* il parser (#5)', body)
+        self.assertIn('"blocked by" nativo #5, #6', body)
+        self.assertNotIn('/devloop recheck', body)
+        # The issue leaves the queue: no check, no implementation, while a block is open.
+        self.assertEqual(self.kinds(d), [])
+        self.assertEqual(self.kinds(d), [])
+        self.assertEqual(len(self.runner.calls), 1)
+        # When they are all closed, the check runs again, without anyone asking for it.
+        self.gh.blocks = [block(5, state='CLOSED', reason='COMPLETED'),
+                          block(6, state='CLOSED', reason='COMPLETED')]
+        self.runner.outputs.append(checked(True))
+        self.assertEqual(self.kinds(d), [('preflight', 7)])
+        self.assertTrue(self.gh.records('preflight')[-1]['ready'])
+        self.assertEqual([a.kind for a in plan(d.snapshot(), PCFG)], ['implement'])
+
+    def test_a_failed_check_with_prerequisites_runs_again_once_unblocked(self):
+        view = {'record': {'ready': False, 'hash': 'h', 'gaps': [], 'prerequisites': [5]},
+                'hash': 'h', 'recheck': False}
+        self.assertEqual(preflight_state(view), ('run', PREREQUISITES_CLOSED))
+        view['record'] = dict(view['record'], prerequisites=[])
+        self.assertEqual(preflight_state(view)[0], 'not_ready')
+
+    def test_other_gaps_or_a_failed_condition_keep_the_operator(self):
+        prerequisite = gap(repository=True, prerequisite='il parser', blocked_by=5)
+        cases = {
+            'another gap': (checked(False, [prerequisite, gap()]), {}, ''),
+            'a split': (checked(False, [prerequisite], 'Dividere in due.'), {}, ''),
+            'the trust policy': (checked(False, [prerequisite], trust='uncovered',
+                                         reason='tocca la fiducia'), {}, ''),
+            'a closed prerequisite': (checked(False, [prerequisite]),
+                                      {5: {'id': 9, 'state': 'CLOSED', 'pull_request': False}},
+                                      'non aggiunge il loro "blocked by": #5 non è aperta'),
+            'no number, not in auto': (checked(False, [gap(prerequisite='il parser')]), {}, ''),
+        }
+        for name, (output, targets, note) in cases.items():
+            with self.subTest(case=name):
+                d = self.make(output)
+                self.gh.targets = targets
+                self.assertEqual(self.kinds(d), [('preflight', 7)])
+                self.assertEqual(self.gh.labels[7], {READY, NEEDS_OPERATOR})
+                self.assertEqual(getattr(self.gh, 'added_blocks', []), [])
+                self.assertEqual(self.gh.records('prerequisite'), [])
+                outcome = self.gh.records('preflight')[-1]
+                self.assertTrue(outcome['blocked'])
+                self.assertEqual(outcome['class'], 'operator_decision')
+                self.assertIn(note, ' '.join(self.gh.thread[-1]['body'].split()))
+
+
+class ImplementGH(PreflightGH):
+    """Issue #7 in the queue, without the readiness check, and in ``agent:working`` once taken."""
+
+    def issues_with_label(self, label):
+        if label in self.labels.get(7, ()):
+            return [{'number': 7, 'title': 'Issue 7', 'author': {'login': 'brushtyler'},
+                     'labels': [{'name': n} for n in sorted(self.labels[7])]}]
+        return []
+
+
+def blocked(number=0, prerequisite='il parser di #5'):
+    """An implementer that stopped for a missing prerequisite."""
+    return dict(implemented('blocked'), blocked_reason='Serve prima il parser.',
+                prerequisite=prerequisite, blocked_by=number)
+
+
+class ImplementPrerequisiteTests(unittest.TestCase):
+    def make(self, *outputs):
+        self.gh, self.ws = ImplementGH(), FakeWS()
+        self.runner, self.logs = FakeRunner(*outputs), []
+        return Dispatcher(CFG, self.gh, self.ws, self.runner, log=self.logs.append)
+
+    def test_the_implementation_waits_for_the_block_then_starts_again(self):
+        d = self.make(blocked(5))
+        d._do_implement(7)
+        self.assertEqual(self.gh.labels[7], {WORKING})
+        self.assertEqual(self.gh.added_blocks, [(7, 100005)])
+        self.assertEqual(self.gh.records('prerequisite'), [{'step': 'implement', 'added': [5]}])
+        self.assertEqual(self.gh.records('notice'), [])  # no escalation, no block notice
+        self.assertIn('issue-7', self.ws.removed)
+        # While the block is open the issue waits in agent:working: not stale, not restarted.
+        snap = d.snapshot()
+        self.assertTrue(snap.base_waits[7]['holds'])
+        self.assertEqual(plan(snap, CFG), [])
+        # Once it closes, the implementation starts again.
+        self.gh.blocks = [block(5, state='CLOSED', reason='COMPLETED')]
+        snap = d.snapshot()
+        self.assertFalse(snap.base_waits[7]['holds'])
+        self.assertEqual([(a.kind, a.number, a.reason) for a in plan(snap, CFG)],
+                         [('implement', 7, PREREQUISITES_CLOSED)])
+        # Closed without being completed, it escalates to the operator instead.
+        self.gh.blocks = [block(5, state='CLOSED', reason='NOT_PLANNED')]
+        snap = d.snapshot()
+        self.assertEqual([(a.kind, a.number) for a in plan(snap, CFG)],
+                         [('prerequisite_dropped', 7)])
+        d._do_prerequisite_dropped(7)
+        self.assertEqual(self.gh.labels[7], {NEEDS_OPERATOR})
+        self.assertEqual(d.snapshot().base_waits, {})
+
+    def test_a_failed_condition_keeps_the_block_of_before_with_why(self):
+        d = self.make(blocked(5))
+        self.gh.targets = {5: {'id': 9, 'state': 'CLOSED', 'pull_request': False}}
+        d._do_implement(7)
+        self.assertEqual(self.gh.labels[7], {NEEDS_OPERATOR})
+        (notice,) = self.gh.records('notice')
+        self.assertEqual(notice['class'], 'blocked')
+        self.assertIn('Serve prima il parser.', notice['reason'])
+        self.assertIn('#5 non è aperta', notice['reason'])
+        self.assertEqual(self.gh.records('prerequisite'), [])
+
+    def test_without_a_number_outside_auto_the_block_goes_to_the_operator(self):
+        d = self.make(blocked())
+        d._do_implement(7)
+        self.assertEqual(self.gh.labels[7], {NEEDS_OPERATOR})
+        self.assertEqual([n['class'] for n in self.gh.records('notice')], ['blocked'])
+        self.assertEqual(getattr(self.gh, 'added_blocks', []), [])
+
+
+class SupervisedPrerequisiteTests(sup.Case):
+    """A prerequisite named only in words goes to the supervisor in "auto"."""
+
+    def blocks(self, *pairs):
+        self.gh.issue_dependencies = lambda number: {
+            'author': 'brushtyler', 'blocked_by': [dict(b) for b, _ in pairs] if number == 7
+            else [], 'added': [dict(e) for _, e in pairs] if number == 7 else []}
+
+    def test_the_check_escalates_and_the_retry_waits_for_the_block_of_the_supervisor(self):
+        d = self.make(sup.PREFLIGHT_AUTO,
+                      checked(False, [gap(repository=True, prerequisite='il nuovo parser')]),
+                      has_pr=False)
+        self.assertEqual(self.tick(d), [('preflight', 7)])
+        self.assertEqual(self.gh.labels[7], {READY, sup.SUPER})
+        (escalation,) = self.escalations(7)
+        self.assertEqual((escalation['class'], escalation['to'], escalation['step']),
+                         ('prerequisite', 'supervisor', 'preflight'))
+        self.assertEqual(self.gh.records(7, 'preflight')[-1]['class'], 'prerequisite')
+        body = ' '.join(self.gh.threads[7][-1]['body'].split())
+        self.assertIn('«il nuovo parser»', body)
+        self.assertIn('/devloop retry', body)
+        # The supervisor adds the block with its app, then asks for a retry: it waits.
+        self.blocks(block(5, by=sup.SUPERVISOR_LOGIN))
+        self.gh.command(7, '/devloop retry')
+        self.assertEqual(self.tick(d), [])
+        self.assertEqual(self.decisions(7), [])
+        # The prerequisite is merged: the block closes and the base advances. The base does not
+        # bind the retry of this class, which runs the check again.
+        self.blocks(block(5, state='CLOSED', reason='COMPLETED', by=sup.SUPERVISOR_LOGIN))
+        self.ws.base = 'f' * 40
+        self.runner.outputs.append(checked(True))
+        self.assertEqual(self.tick(d), [('supervise', 7)])
+        self.assertEqual(self.decisions(7)[-1]['outcome'], 'applied')
+        self.assertEqual(len(self.runner.calls), 2)
+        self.assertEqual(self.gh.labels[7], {READY})
+        self.assertTrue(self.gh.records(7, 'preflight')[-1]['ready'])
+
+    def test_the_implementer_escalates_to_the_supervisor(self):
+        d = self.make(sup.AUTO, blocked(), has_pr=False)
+        self.assertEqual(self.tick(d), [('implement', 7)])
+        self.assertEqual(self.gh.labels[7], {sup.SUPER})
+        (escalation,) = self.escalations(7)
+        self.assertEqual((escalation['class'], escalation['step']), ('prerequisite', 'implement'))
+        body = self.gh.threads[7][-1]['body']
+        self.assertIn('«il parser di #5»', body)
+        self.assertIn('Serve prima il parser.', body)
+
+
+class RecordTests(unittest.TestCase):
+    def test_the_class_is_not_critical_and_its_retry_is_not_bound_to_the_base(self):
+        self.assertFalse(supervision.critical(supervision.PREREQUISITE))
+        self.assertIn(supervision.PREREQUISITE, supervision.RETRY_CLASSES)
+        key = {'step': 'preflight', 'base': 'a' * 40, 'request': 'h'}
+        now = dict(key, base='b' * 40)
+        self.assertEqual(supervision.changed_input(now, key), ['base'])
+        self.assertEqual(supervision.changed_input(now, key, supervision.PREREQUISITE), [])
+        self.assertEqual(supervision.changed_input(dict(now, request='g'), key,
+                                                   supervision.PREREQUISITE), ['request'])
+        self.assertEqual(supervision.retries_done(now, [key]), 0)
+        self.assertEqual(supervision.retries_done(now, [key], supervision.PREREQUISITE), 1)
+        self.assertIn('prerequisit', supervision.describe(supervision.PREREQUISITE, 'it'))
+        self.assertIn('prerequisite', supervision.describe(supervision.PREREQUISITE))
+
+    def test_the_record_of_the_blocks(self):
+        good = {'step': 'implement', 'added': [5, 6]}
+        self.assertEqual(read_marker(render_prerequisite(good), 'prerequisite'), good)
+        for bad in ({'step': 'review', 'added': [5]}, {'step': 'preflight', 'added': []},
+                    {'step': 'preflight', 'added': [0]}, {'step': 'preflight', 'added': ['5']},
+                    {'step': 'preflight', 'added': [True]}, {'step': 'preflight'}):
+            with self.subTest(record=bad):
+                self.assertIsNone(read_marker(markdown.publishable('x', 'prerequisite', bad),
+                                              'prerequisite'))
+
+    def test_the_preflight_record_lists_the_blocks_only_when_failed_and_not_blocked(self):
+        base = {'hash': 'h', 'agent': 'a', 'split': '', 'ready': False, 'blocked': False,
+                'labeled': 0, 'gaps': [gap(prerequisite='x', blocked_by=5)]}
+        self.assertTrue(markdown._valid_preflight(dict(base, prerequisites=[5])))
+        self.assertTrue(markdown._valid_preflight(base))
+        for bad in (dict(base, prerequisites=[5], blocked=True),
+                    dict(base, prerequisites=['5']),
+                    dict(base, gaps=[gap(blocked_by='5')]),
+                    dict(base, gaps=[gap(prerequisite=None)])):
+            with self.subTest(record=bad):
+                self.assertFalse(markdown._valid_preflight(bad))
+
+    def test_an_implementation_written_before_names_no_prerequisite(self):
+        old = {k: v for k, v in implemented().items()}
+        s = schema.load_schema('implement')
+        schema.validate(schema.with_defaults('implement', old), s)
+        self.assertEqual(schema.with_defaults('implement', old)['blocked_by'], 0)
+        with self.assertRaises(schema.SchemaError):
+            schema.validate(dict(old, prerequisite='', blocked_by='5'), s)
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -20,9 +20,10 @@ from .i18n import ENGLISH, Catalog
 from .markdown import (TEXTS, carries_record, read_marker, render_approve_refused,
                        render_escalation, render_preflight, render_recheck)
 from .planning import (RECHECK_COMMAND, label_names, operator_blocked, preflight_state,
+                       prerequisite_gaps, prerequisite_list, prerequisite_number,
                        repository_bound)
-from .supervision import (ACCEPT_DEFAULTS, DECIDE, PREFLIGHT_DEFAULT, command_line, describe,
-                          preflight_class)
+from .supervision import (ACCEPT_DEFAULTS, DECIDE, ESCALATE, PREFLIGHT_DEFAULT, PREREQUISITE,
+                          RETRY, command_line, describe, preflight_class)
 from .workspace import WorkspaceError
 
 # The classes of a failed readiness check (``preflight_class``): a block of one of them, with no
@@ -425,7 +426,11 @@ class PreflightMixin:
         fallback model's included (#148), for the header; the configured agent by default.
         ``request``: the request of a person (``_request``) pending when the check started, if
         any: the turn's ledger record spends a ``/devloop recheck`` before the outcome is
-        recorded (#468). ``refused``: the ``/devloop approve`` the check answers as refused
+        recorded (#468). A failed check whose gaps all name a missing prerequisite
+        (``prerequisite_gaps``, #672), with the label absent, adds no label: with the number of
+        each, the dispatcher adds them as "blocked by" (``_add_prerequisites``) and the record
+        lists them in ``prerequisites``; without, a ``prerequisite`` escalation goes to the
+        supervisor in "auto". When neither applies, the escalation of before. ``refused``: the ``/devloop approve`` the check answers as refused
         (#483), as ``(comment, reason)``: ``render_preflight`` shows them, and the record names
         their ids, so that each is answered once. Escalations and label events are read again here all
         the same."""
@@ -467,16 +472,39 @@ class PreflightMixin:
         # The class of the escalation (#182): in "auto" gaps that are all defaults go to the
         # supervisor, with a dispatcher escalation that carries the key of the check's input.
         record['class'] = cls = preflight_class(outcome)
+        st = SUPERVISION_TEXTS.texts(language)
+        # Gaps that all name a missing prerequisite (#672) hand the issue to no one: with every
+        # number known, the dispatcher adds them as "blocked by" and the issue leaves the queue
+        # until they close; otherwise a ``prerequisite`` escalation, which the supervisor
+        # decides in "auto". When a condition of the blocks fails, the escalation of before.
+        prerequisites = [] if present else prerequisite_gaps(outcome)
+        numbers = [prerequisite_number(g) for g in prerequisites]
+        if prerequisites and all(numbers):
+            added, why = self._add_prerequisites(number, numbers, 'preflight')
+            if added:
+                record['class'], record['prerequisites'] = PREREQUISITE, added
+                author.comment(number, render_preflight(record, head, note, refused,
+                                                        language=language))
+                self.log(f'  not ready: {len(record["gaps"])} gap(s), blocked by '
+                         + ', '.join(f'#{n}' for n in added))
+                return
+            self.log(f'  the prerequisites are not added as "blocked by": {why}')
+            note = note or t('note_no_prerequisite_block', why=why)
+        elif prerequisites:
+            cls = PREREQUISITE
         supervised, why = (None, '') if present else self._supervised(
             number, cls, 'preflight',
             key=self._issue_key('preflight', base, digest) if base else None)
         if supervised:
+            record['class'] = cls
             author.comment(number, render_preflight(record, head, note, refused,
                                                     language=language))
-            self.gh.comment(number, render_escalation(
-                SUPERVISION_TEXTS.texts(language)('preflight_defaults', accept=ACCEPT_DEFAULTS,
-                                                  decide=DECIDE),
-                cls=cls, supervised=supervised, language=language))
+            text = (st('prerequisite_preflight', listed=prerequisite_list(prerequisites)) + ' '
+                    + st('prerequisite_supervisor', retry=RETRY, escalate=ESCALATE)
+                    if cls == PREREQUISITE
+                    else st('preflight_defaults', accept=ACCEPT_DEFAULTS, decide=DECIDE))
+            self.gh.comment(number, render_escalation(text, cls=cls, supervised=supervised,
+                                                      language=language))
             self.gh.edit_labels(number, add=[lb.needs_supervisor])
             self.log(f'  not ready: {len(record["gaps"])} gap(s), to the supervisor')
             return

@@ -23,9 +23,12 @@ PCFG = dataclasses.replace(CFG, preflight=REV)
 NEEDS_OPERATOR, READY = 'agent:needs-operator', 'agent:ready'
 
 
-def gap(kind='operator_decision', default='', repository=False):
+def gap(kind='operator_decision', default='', repository=False, prerequisite='', blocked_by=0):
+    """A gap of a readiness check; ``prerequisite`` and ``blocked_by`` (#672) name a missing
+    prerequisite, in words and by the number of its issue."""
     return {'kind': kind, 'description': 'Quale formato usare?', 'code_refs': ['devloop/x.py:3'],
-            'proposed_default': default, 'repository_dependent': repository}
+            'proposed_default': default, 'repository_dependent': repository,
+            'prerequisite': prerequisite, 'blocked_by': blocked_by}
 
 
 def checked(ready=True, gaps=(), split='', trust='none', reason=''):
@@ -360,6 +363,11 @@ class PreflightTests(unittest.TestCase):
                checked(False, [{k: v for k, v in gap().items()
                                 if k != 'repository_dependent'}]),
                checked(False, [dict(gap(), repository_dependent='yes')]),
+               # #672: the missing prerequisite, in words and by number, is required.
+               checked(False, [{k: v for k, v in gap().items() if k != 'prerequisite'}]),
+               checked(False, [{k: v for k, v in gap().items() if k != 'blocked_by'}]),
+               checked(False, [dict(gap(), blocked_by='#12')]),
+               checked(False, [dict(gap(), blocked_by=True)]),
                # #472: the declaration on the trust policy is required, from a closed list.
                checked(trust='maybe'), checked(trust=''), checked(reason=None),
                {k: v for k, v in checked().items() if k != 'trust_policy'},

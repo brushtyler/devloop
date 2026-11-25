@@ -423,6 +423,10 @@ class BaseMixin:
         position, record = records[-1]
         if record['step'] != step or head is not None and record['head'] != head:
             return None
+        if any(p > position for p, _ in self._dispatcher_records(comments, 'prerequisite')):
+            # The step waits for prerequisites added as "blocked by" since (#672,
+            # ``_prerequisite_wait``), no longer for the base.
+            return None
         notices = self._dispatcher_records(comments, 'notice')
         for index, (p, notice) in enumerate(notices):
             if p > position and not _of_check(notice, [n for _, n in notices[:index]]):

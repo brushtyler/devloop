@@ -1181,7 +1181,8 @@ class FakeRunner:
 def implemented(status='completed', acceptance_map=()):
     return {'status': status, 'summary': 's', 'pr_title': 'fix: x', 'commit_message': 'fix: x',
             'pr_body': 'Why and how.', 'acceptance_map': list(acceptance_map), 'host_step': '',
-            'blocked_reason': 'unclear' if status == 'blocked' else ''}
+            'blocked_reason': 'unclear' if status == 'blocked' else '',
+            'prerequisite': '', 'blocked_by': 0}
 
 
 def fixed(status='completed', acceptance_map=()):
