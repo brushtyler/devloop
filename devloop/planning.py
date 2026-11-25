@@ -282,7 +282,7 @@ class Snapshot:
     # With ``[roles.coordinator]`` (#607), the numbers of the issues with a ``/devloop
     # authorize`` the dispatcher has not recorded yet: those in agent:needs-coordinator, the
     # ready ones whose agent:ready is the supervisor's and (#656) any other open one where the
-    # coordinator wrote one since the previous snapshot. One ``authorize`` action each.
+    # coordinator wrote one. One ``authorize`` action each.
     authorizations: list = field(default_factory=list)
 
 

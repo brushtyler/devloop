@@ -88,6 +88,10 @@ class FakeGH:
     def comments_since(self, since):
         return []
 
+    # The open issues (#656): none by default.
+    def open_issues(self, limit=300):
+        return []
+
     # Native dependencies (#277): none by default.
     def issue_dependencies(self, number):
         return {'author': 'brushtyler', 'blocked_by': [], 'added': []}

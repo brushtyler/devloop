@@ -67,6 +67,17 @@ class SupGH(SnapshotGH):
                  'number': number, 'pull_request': number in prs}
                 for number, thread in self.threads.items() for c in thread]
 
+    def open_issues(self, limit=300):
+        """Every number with a thread or labels but the PRs and the ``closed`` ones, counted in
+        ``open_reads`` (#656)."""
+        self.open_reads = getattr(self, 'open_reads', 0) + 1
+        prs = {raw['number'] for raw in self.open_prs()}
+        numbers = sorted((set(self.threads) | set(self.labels)) - prs
+                         - set(getattr(self, 'closed', ())))
+        return [{'number': n, 'title': f'Issue {n}', 'author': {'login': self.author},
+                 'labels': [{'name': x} for x in sorted(self.labels.get(n, ()))]}
+                for n in numbers][:limit]
+
     def open_prs(self):
         return super().open_prs() if self.has_pr else []
 

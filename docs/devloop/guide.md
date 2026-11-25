@@ -610,9 +610,12 @@ issues whose latest `agent:ready` is the supervisor's and, whatever its labels, 
 where the coordinator's identity wrote a `/devloop authorize` (#656): an issue the coordinator
 opens and authorizes at once, without `agent:needs-coordinator`, gets its record at the next tick,
 and the supervisor queues it once the record is there. To find those commands the dispatcher
-reads, at every tick, only the comments written or edited since the previous one (those of the
-last 24 hours at its first tick, after a start or a pin); a command another identity writes on
-such an issue is recorded, and refused, together with the coordinator's. Who may authorize and
+reads the threads of every open issue at its first tick, after a start or a pin, so that a
+command written while devloop was stopped is found however long ago; at every later tick it reads
+only the comments written or edited since the previous one. An issue found stays watched until
+its command is recorded: one that cannot be recorded at once, because the issue is busy, is
+recorded at the first tick it is free. A command another identity writes on such an issue is
+recorded, and refused, together with the coordinator's. Who may authorize and
 what an authorization is worth do not change. Without `[roles.coordinator]` nothing changes:
 `/devloop authorize` is not read, and the supervisor's labels count as above.
 

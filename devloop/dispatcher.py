@@ -106,8 +106,10 @@ Authorization (#607, with ``[roles.coordinator]``): the coordinator authorizes t
 SHA-256 of the title and the body, removing ``agent:needs-coordinator``; a command of any other
 identity is refused and recorded. The dispatcher looks for the command on the issues in
 ``agent:needs-coordinator``, on the ready ones whose ``agent:ready`` is the supervisor's and
-(#656) on any open issue, whatever its labels, where the coordinator wrote one since the previous
-snapshot (``_coordinator_authorizations``). The supervisor's ``agent:ready`` admits an issue only while an
+(#656) on any open issue, whatever its labels, where the coordinator wrote one: at the first
+snapshot of the process in the threads of every open issue, then in the comments written since
+the previous snapshot, and on an issue found until its command is recorded
+(``_coordinator_authorizations``). The supervisor's ``agent:ready`` admits an issue only while an
 authorization holds for its current text (``_ready_admitters``); otherwise it is ignored and
 logged. A readiness check that declares the trust policy touched on an issue no trusted user
 opened sends it to agent:needs-operator, authorized or not (``_coordinator_gate``), unless a
@@ -257,11 +259,9 @@ from .workspace import TransientPushError, WorkspaceError
 # descriptions, in the project's ``language`` (#635), are ``label_*`` of ``TEXTS``.
 LEVEL_LABEL_COLOR = '5319e7'
 # The coordinator's ``/devloop authorize`` on an issue outside agent:needs-coordinator and the
-# supervisor's agent:ready (#656) is found among the comments written since the previous
-# snapshot, read once per snapshot: the first snapshot of a process reads those of the last
-# ``AUTHORIZE_LOOKBACK`` seconds, each later one from the previous one, ``AUTHORIZE_MARGIN``
-# seconds earlier for the clock of GitHub.
-AUTHORIZE_LOOKBACK = 24 * 3600
+# supervisor's agent:ready (#656): the first snapshot of a process reads the threads of every
+# open issue, however long ago the command was written; each later one reads only the comments
+# written since the previous one, ``AUTHORIZE_MARGIN`` seconds earlier for the clock of GitHub.
 AUTHORIZE_MARGIN = 300
 # How many prerequisites outside the queue a snapshot reads at most to follow the dependencies
 # of the ready issues (#277): beyond them, cycles are not looked for.
@@ -1037,8 +1037,12 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         self.clock = clock
         self._ci_since = {}
         # When the previous snapshot read the coordinator's comments (#656), None before the
-        # first: the next one reads from there (``_coordinator_authorizations``).
+        # first: the next one reads from there (``_coordinator_authorizations``). And the issues
+        # with a command of the coordinator not recorded yet, read again at each snapshot until
+        # it is: one that cannot be recorded now (a busy issue) is not lost once its comment is
+        # older than the reads.
         self._authorize_since = None
+        self._authorize_watch = ()
         # The pushes of a step's branch that failed twice for a transient error of the remote
         # (#645, ``PendingPushes``), by issue or PR, for a retry that pushes the commits of the
         # turn again without a new turn: in ``state_dir`` from ``devloop``, so that a restart
@@ -1335,26 +1339,45 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         """The open issues outside ``known`` where the coordinator's identity (``coordinator``)
         wrote a ``/devloop authorize`` that no record answers yet (#656), whatever their labels:
         an issue it opened and authorized at once is in neither agent:needs-coordinator nor
-        the supervisor's agent:ready. Only the comments written or edited since the previous
-        snapshot are read (``AUTHORIZE_LOOKBACK``, ``AUTHORIZE_MARGIN``), not the threads of
-        every open issue; the two sets of ``snapshot`` recover what a gap leaves out. Pull
-        requests and closed issues are skipped. Who may authorize and what an authorization is
-        worth do not change: ``_do_authorize`` decides, and refuses, as on any other issue."""
+        the supervisor's agent:ready.
+
+        The first snapshot of the process reads the threads of every open issue, so that a
+        command written while devloop was stopped, however long ago, is found; each later one
+        reads only the comments written or edited since the previous one (``AUTHORIZE_MARGIN``),
+        not the threads of every open issue. An issue found stays watched (``_authorize_watch``)
+        and is read again at each snapshot until its command is recorded or it is closed: one
+        ``plan`` cannot record now, because it is busy, is not lost when its comment leaves the
+        reads. Pull requests and closed issues are skipped. Who may authorize and what an
+        authorization is worth do not change: ``_do_authorize`` decides, and refuses, as on any
+        other issue."""
         started = self.clock()
-        since = (started - AUTHORIZE_LOOKBACK if self._authorize_since is None
-                 else self._authorize_since - AUTHORIZE_MARGIN)
-        stamp = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(since))
-        candidates = dict.fromkeys(
-            c['number'] for c in self.gh.comments_since(stamp)
-            if c.get('login') == coordinator and not c.get('pull_request')
-            and isinstance(c.get('number'), int) and c['number'] not in known
-            and not carries_record(c.get('body') or '')
-            and authorize_arguments(c.get('body')) is not None)
-        found = [number for number in candidates
-                 if (self.gh.issue(number).get('state') or '').upper() == 'OPEN'
-                 and self._pending_authorizations(self.gh.issue_comments(number))]
+        if self._authorize_since is None:
+            seen = [raw['number'] for raw in self.gh.open_issues()
+                    if isinstance(raw.get('number'), int)]
+            hinted = set(self._authorize_watch)
+        else:
+            stamp = time.strftime('%Y-%m-%dT%H:%M:%SZ',
+                                  time.gmtime(self._authorize_since - AUTHORIZE_MARGIN))
+            seen = [c['number'] for c in self.gh.comments_since(stamp)
+                    if c.get('login') == coordinator and not c.get('pull_request')
+                    and isinstance(c.get('number'), int)
+                    and not carries_record(c.get('body') or '')
+                    and authorize_arguments(c.get('body')) is not None]
+            hinted = set(self._authorize_watch) | set(seen)
+        found, watch = [], []
+        for number in dict.fromkeys([*self._authorize_watch, *seen]):
+            if number in known:
+                # Read by ``snapshot`` already; watched still, in case it leaves those sets.
+                if number in hinted:
+                    watch.append(number)
+                continue
+            pending = self._pending_authorizations(self.gh.issue_comments(number))
+            if (any((c.get('author') or {}).get('login') == coordinator for c in pending)
+                    and (self.gh.issue(number).get('state') or '').upper() == 'OPEN'):
+                found.append(number)
+                watch.append(number)
         # Only once every read succeeded: a failed one is read again at the next snapshot.
-        self._authorize_since = started
+        self._authorize_since, self._authorize_watch = started, tuple(watch)
         return found
 
     def _authorization(self, history, comments):
@@ -1809,7 +1832,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         skip = set(self.cfg.blocked_labels) | {lb.working, lb.needs_supervisor}
         # The issues with a /devloop authorize to record (#607): those in
         # agent:needs-coordinator, the ready ones whose agent:ready needs an authorization and
-        # (#656) any other open one where the coordinator wrote one since the previous snapshot.
+        # (#656) any other open one where the coordinator wrote one.
         authorizing = []
         coordinator = self._coordinator_login()
         if coordinator is not None:
