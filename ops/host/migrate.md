@@ -3115,11 +3115,20 @@ supervisore.
 Il codice di devloop non cambia e il loop resta attivo. Passi per ogni insieme di app dell'host
 (l'app supervisore è una per insieme), in quest'ordine:
 
-1. **I permessi dell'app, dell'operatore, su GitHub.** Nelle impostazioni dell'app
-   `<APP_PREFIX>supervisor` → *Permissions & events* → *Repository permissions*: *Actions*,
-   *Checks* e *Commit statuses* in *Read-only*; *Save changes*. Poi, nell'installazione del
+1. **I permessi dell'app, dell'operatore, su GitHub.** Il manifest
+   `ops/github/apps/supervisor.json` fa fede (#655): nelle impostazioni dell'app
+   `<APP_PREFIX>supervisor` → *Permissions & events* → *Repository permissions* i permessi devono
+   essere esattamente quelli di `default_permissions` del manifest: *Issues* e *Pull requests* in
+   *Read and write*, *Metadata*, *Actions*, *Checks* e *Commit statuses* in *Read-only*, nessun
+   altro (né *Contents*, né permessi di account o di organizzazione). Si aggiungono *Actions*,
+   *Checks* e *Commit statuses* in *Read-only* e si tolgono (*No access*) quelli in più, che
+   un'app creata a mano prima dei manifest (#402) può avere: chi ha la chiave può chiederli
+   coniando un token senza passare da `scripts/supervisor-token.py`, quindi conta quello che
+   l'app possiede, non i limiti dello script. *Save changes*. Poi, nell'installazione del
    proprietario (*Install App* → l'installazione → *Review request*), si accettano i permessi
-   nuovi: finché non sono accettati, un token che li chiede fallisce.
+   nuovi: finché non sono accettati, un token che li chiede fallisce. Togliere un permesso non
+   chiede di riaccettare l'installazione. Lo stesso confronto per le altre app dell'insieme è in
+   [ops/README.md](../README.md#2-github-app) (*I permessi di un'app che esiste già*).
 2. **Il clone dei token, a una versione con il #643**, per ogni progetto dell'insieme.
    `scripts/supervisor-token.py` che il supervisore esegue è quello del clone da cui conia i
    token, non quello del checkout dell'operatore: uno di prima del #643 rifiuta `actions`,
