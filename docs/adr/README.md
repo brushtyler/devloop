@@ -11,6 +11,7 @@ Questa directory contiene gli ADR del repository: le decisioni di progetto, con 
 | [0005](0005-deleghe-e-ruoli-degli-agent.md) | Deleghe al supervisore, implementer generico e pool dei reviewer |
 | [0006](0006-devloop-su-altri-repository.md) | devloop su altri repository (parità con il motore locale) |
 | [0007](0007-da-ssdlc-a-devloop.md) | Da ssdlc a devloop, motore SSDLC congelato e rinomina del repository |
+| [0008](0008-pool-di-esecuzione.md) | Pool di esecuzione condiviso fra progetti (worker, budget comune, isolamento per job) |
 
 ## Ciclo di un ADR
 
