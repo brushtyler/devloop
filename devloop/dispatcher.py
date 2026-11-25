@@ -208,7 +208,7 @@ from .context import (_cli_state_refused, _describe_bases, _failure_text, label_
                       _open_findings_reason,
                       _render_issue_comments, both_labels_warning, issue_decisions,
                       label_transition, refused_approvals, transition_labels)
-from .dispatch_actions import ActionsMixin, Models, ready_approval, rerun_of
+from .dispatch_actions import ActionsMixin, Models, PendingPushes, ready_approval, rerun_of
 from .dispatch_advisory import AdvisoryFailures, AdvisoryMixin, AdvisoryResults
 from .dispatch_base import BaseMixin, MainAlerts
 from .dispatch_conclave import ConclaveMixin
@@ -286,9 +286,9 @@ TEXTS = Catalog(
                       'them to the agent in the prompt.\n\n'),
         'push_kept': ('\n\nThe push of the branch failed twice for a transient error of GitHub '
                       '(a 5xx answer or a connection lost). The commits of the turn are kept '
-                      '(`{commit}`): `/devloop retry` pushes them again, without a new turn, '
-                      'while the dispatcher that kept them runs; after a restart a retry runs '
-                      'the step again.'),
+                      '(`{commit}`): `/devloop retry` pushes them again, without a new turn, and '
+                      'completes the step; on a PR whose branch got the push anyway, the retry '
+                      'only completes it.'),
         'rounds_more': ' plus {granted} granted',
         'rounds_counted': 'Rounds counted against the limit ({count} of {limit}, '
                           '`max_review_rounds`{more}):',
@@ -463,8 +463,8 @@ TEXTS = Catalog(
         'push_kept': ('\n\nIl push del branch è fallito due volte per un errore temporaneo di '
                       'GitHub (una risposta 5xx o una connessione persa). I commit del turno '
                       'sono conservati (`{commit}`): `/devloop retry` li ripete con un nuovo '
-                      'push, senza un nuovo turno, finché resta attivo il dispatcher che li ha '
-                      'conservati; dopo un riavvio un retry ripete il passo.'),
+                      'push, senza un nuovo turno, e completa il passo; su una PR il cui branch '
+                      'ha ricevuto comunque il push, il retry si limita a completarlo.'),
         'rounds_more': ' più {granted} concessi',
         'rounds_counted': 'Round contati sul limite ({count} di {limit}, '
                           '`max_review_rounds`{more}):',
@@ -1006,7 +1006,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
     def __init__(self, cfg, gh: Backend, ws, runner, log=print, identities=None, activity=None,
                  ledger=None, merger=None, pinner=None, memory=None, clock=time.time,
                  advisory_results=None, advisory_failures=None, housekeeping=None,
-                 main_alerts=None):
+                 main_alerts=None, pending_pushes=None):
         self.cfg = cfg
         # The commit of the base branch whose red CI was last alerted (#459, ``MainAlerts``):
         # in ``state_dir`` from ``devloop``, in memory without it; and the one this process
@@ -1021,10 +1021,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         self.clock = clock
         self._ci_since = {}
         # The pushes of a step's branch that failed twice for a transient error of the remote
-        # (#645, ``PendingPush``), by issue or PR: kept in memory, for a retry that pushes the
-        # commits of the turn again without a new turn. A restart loses them, and a retry then
-        # runs the step again.
-        self._pending_pushes = {}
+        # (#645, ``PendingPushes``), by issue or PR, for a retry that pushes the commits of the
+        # turn again without a new turn: in ``state_dir`` from ``devloop``, so that a restart
+        # does not lose them; in memory without it.
+        self.pending_pushes = (pending_pushes if pending_pushes is not None
+                               else PendingPushes())
         # The pin after a merge (#174, ``pin.AutoPin``), used only with ``[pin] auto = true``.
         self.pinner = pinner
         self.gh = gh

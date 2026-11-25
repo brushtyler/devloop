@@ -1305,6 +1305,8 @@ remote, a 5xx answer (`Internal Server Error`, `Bad Gateway`, `Service Unavailab
 Timeout`) or a connection lost (a host that does not resolve, a connection reset or timed out,
 the remote end that hung up, the push's own time limit), the dispatcher tries the push once
 more, after a short pause (`PUSH_RETRY_PAUSE`, 10 seconds), and its log records both attempts.
+A veto of a conclave written during the pause is checked before the second attempt, as before
+the first: nothing is pushed, and the step is suspended (`conclave_veto`, [Veto](#veto)).
 A push that succeeds at the second attempt opens no escalation. Any other refusal of the remote
 (its permissions, a rule of the branch, a conflict such as a non-fast-forward) is never tried
 again: it stays a `failure`, critical, to the operator, also when its message has a sign of a
@@ -1317,11 +1319,20 @@ comment names the commit kept. `/devloop retry`, of the supervisor, of the coord
 trusted user, then pushes the same commits again, without a new turn of the agent: an issue's
 implementation pushes its branch at once and opens the PR; a PR goes back to the label of its
 step and the next tick pushes the fix, or the sync, and records it. A veto of a conclave written
-in the meantime is checked again before that push. The commits are kept in the memory of the
-dispatcher that made them: after a restart of `devloop run`, or once the step ran again for any
-other reason, a retry runs the step again, with a new turn, as for a `tool_failure`. A push that
-fails again for a transient error is a new `push_failed` escalation, within the same
-`MAX_RETRIES` of the step and key.
+in the meantime is checked again before that push. What the step publishes after the push (the
+PR with its marker, the record of the fix or of the sync) is prepared before it, and kept with
+the commit in `<state_dir>/pending-pushes.json`: a restart of `devloop run`, or a `devloop tick`
+of its own, does not lose it, and the worktree, when it is gone, is recreated at that commit.
+Only a step that runs again for another reason (the operator puts `agent:ready` back by hand, a
+new head of the PR) drops it, and then a retry runs the step again, with a new turn, as for a
+`tool_failure`. A push that fails again for a transient error is a new `push_failed`
+escalation, within the same `MAX_RETRIES` of the step and key.
+
+A connection lost may lose the answer of a push that reached GitHub. On a PR whose head is then
+the commit kept, the retry does not refuse the input as superseded: that head is the step's own
+push, so the retry records the fix, or the sync, without a new push nor a new turn. A head
+that is neither the one the step started from nor the commit kept refuses the retry, as
+before.
 
 **Routing.** With `[merge].mode = "auto"` a non-critical escalation adds
 `agent:needs-supervisor` instead of `agent:needs-operator`, and an issue keeps `agent:ready`. It

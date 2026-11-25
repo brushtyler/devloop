@@ -11,11 +11,14 @@ the methods. The module-level helpers they need (``rerun_of``, ``synced_from``,
 imported from here, not re-exported by ``devloop/dispatcher.py``.
 """
 
+import json
+import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, fields
+from pathlib import Path
 
 from .acceptance import acceptance_criteria, format_criteria, format_map, latest_map, render_map
 from .agents import AgentError, TurnCancelled
@@ -32,7 +35,7 @@ from .github import GitHubError, GitHubUncertain, LogUnreadable, job_id
 from .i18n import Catalog
 from .hoststep import format_step, render_step
 from .hoststep import latest as latest_host_step
-from .ledger import attempt_branch, attempt_marker, fix_register
+from .ledger import FixRegister, attempt_branch, attempt_marker, fix_register
 from .localtests import RUN_TESTS_LOG, failed_modules, select_modules, suite_summary
 from .markdown import (dispatcher_header, publishable, render_fix, render_native_review,
                        render_review, without_attribution)
@@ -214,28 +217,51 @@ REVIEW_RETRY_PAUSE = 5  # seconds before the second attempt
 PUSH_RETRY_PAUSE = 10
 
 
+# The steps whose push a retry repeats (#645), and what each publishes after it.
+PUSH_STEPS = ('implement', 'fix', 'sync')
+
+
 @dataclass
 class PendingPush:
-    """The push of a step's branch (#645): issue or PR ``number``, the ``key`` of the step's input
-    (for an issue the key of its implementation, ``_issue_key``; for a PR ``{'head': ...}``, the
-    head the step started from), the worktree ``name`` at ``path``, the ``commit`` to push to
-    ``branch`` with the app of ``agent`` (``replace``: ``--force``), and ``then``, what the step
-    does after the push. ``check``: run again before the push a retry repeats; true when it
-    stopped the step (a veto of the conclave). ``pr``: the step is a PR's. A push that fails twice
-    for a transient error of the remote is kept by the dispatcher (``_pending_pushes``) until a
-    retry of the same step and key ``armed`` it, or the step runs again."""
+    """The push of a step's branch (#645): ``step`` (``PUSH_STEPS``) of issue or PR ``number``,
+    the ``key`` of the step's input (for an issue the key of its implementation, ``_issue_key``;
+    for a PR ``{'head': ...}``, the head the step started from), the worktree ``name`` at
+    ``path``, the ``commit`` to push to ``branch`` with the app of ``agent`` (``replace``:
+    ``--force``), and ``data``, what the step publishes after the push, prepared before it
+    (``_after_push``) together with what its veto check reads (``_push_vetoed``). Every field is
+    JSON, so that the push survives a restart (``PendingPushes``). A push that fails twice for a
+    transient error of the remote is kept until a retry of the same step and key ``armed`` it,
+    or the step runs again."""
+    step: str
     number: int
     key: dict
     name: str
-    path: object
+    path: str
     commit: str
     branch: str
     agent: str
-    then: object
+    data: dict
     replace: bool = False
-    check: object = None
-    pr: bool = False
     armed: bool = False
+
+    @property
+    def pr(self):
+        """Whether the step is a PR's (a fix or a sync)."""
+        return self.step != 'implement'
+
+    @classmethod
+    def from_entry(cls, entry):
+        """The push kept as ``entry`` (``asdict``), or None when it is not valid."""
+        if not isinstance(entry, dict) or set(entry) != {f.name for f in fields(cls)}:
+            return None
+        pending = cls(**entry)
+        texts = (pending.name, pending.path, pending.commit, pending.branch, pending.agent)
+        if (pending.step not in PUSH_STEPS or not isinstance(pending.number, int)
+                or not isinstance(pending.key, dict) or not isinstance(pending.data, dict)
+                or not all(isinstance(v, str) and v for v in texts)
+                or not isinstance(pending.replace, bool) or not isinstance(pending.armed, bool)):
+            return None
+        return pending
 
     def matches(self, step, key):
         """Whether a retry of ``step`` with ``key`` is the retry of this push: an implementation
@@ -246,6 +272,88 @@ class PendingPush:
         if self.pr:
             return step in ('fix', 'sync') and key.get('head') == self.key.get('head')
         return step == 'implement' and key == self.key
+
+
+class PendingPushes:
+    """The pushes of a step's branch kept after a transient error of the remote (#645), one per
+    issue or PR, in ``state_dir`` (``FILE``), so that a restart does not lose them; without
+    ``state_dir`` they last as long as the process, and so does one that cannot be written (it
+    prevails over the file). A file that cannot be read counts as empty, and an entry that is not
+    valid as missing. Parallel actions (#176) share it under a lock."""
+
+    FILE = 'pending-pushes.json'
+
+    def __init__(self, state_dir=None):
+        self._path = Path(state_dir) / self.FILE if state_dir is not None else None
+        self._memory = {}
+        self._dropped = set()  # dropped in this process, still in a file that was not written
+        self._lock = threading.Lock()
+
+    def _load(self):
+        if self._path is None:
+            return {}
+        try:
+            data = json.loads(self._path.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return {k: v for k, v in data.items() if k not in self._dropped}
+
+    def _store(self, data):
+        """Write ``data``; ``OSError`` when the file cannot be written."""
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._path.with_name(f'.{self._path.name}.{os.getpid()}.tmp')
+        tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+        os.replace(tmp, self._path)
+
+    def get(self, number):
+        """The push kept for issue or PR ``number``, or None."""
+        with self._lock:
+            entry = self._memory.get(str(number)) or self._load().get(str(number))
+        return PendingPush.from_entry(entry)
+
+    def numbers(self):
+        """The issues and PRs with a push kept."""
+        with self._lock:
+            keys = set(self._memory) | set(self._load())
+        return sorted(int(k) for k in keys if k.isdigit())
+
+    def put(self, pending):
+        """Keep ``pending``, in place of the one before of its item. False when it could not be
+        written in ``state_dir``: it is kept in this process only."""
+        number, entry = str(pending.number), asdict(pending)
+        with self._lock:
+            self._dropped.discard(number)
+            if self._path is None:
+                self._memory[number] = entry
+                return True
+            try:
+                data = self._load()
+                data[number] = entry
+                self._store(data)
+            except (OSError, TypeError, ValueError):
+                self._memory[number] = entry
+                return False
+            self._memory.pop(number, None)
+            self._dropped.clear()  # the file written leaves them out
+            return True
+
+    def drop(self, number):
+        """Forget the push kept for issue or PR ``number``. False when the file could not be
+        written: the entry left there counts as missing in this process."""
+        with self._lock:
+            self._memory.pop(str(number), None)
+            data = self._load()
+            if data.pop(str(number), None) is None:
+                return True
+            try:
+                self._store(data)
+            except OSError:
+                self._dropped.add(str(number))
+                return False
+            self._dropped.clear()
+            return True
 
 
 # What the findings-only reviewer (ADR 0005, D8, #416) reads after the review prompt.
@@ -333,18 +441,23 @@ class ActionsMixin:
 
     push_retry_pause = PUSH_RETRY_PAUSE
 
-    def _push(self, path, branch, *, replace=False, auth=None):
+    def _push(self, path, branch, *, replace=False, auth=None, check=None):
         """Push the HEAD of worktree ``path`` to ``branch`` (``Workspace.push``) and record it
-        (``_pushed``). A push that fails for a transient error of the remote (#645,
-        ``TransientPushError``: a 5xx answer, a connection lost) is tried once more after
+        (``_pushed``); True when pushed. A push that fails for a transient error of the remote
+        (#645, ``TransientPushError``: a 5xx answer, a connection lost) is tried once more after
         ``push_retry_pause`` seconds, and the log records both attempts; a second transient error
-        propagates, as does any other failure at once."""
+        propagates, as does any other failure at once. ``check``, run again before the second
+        attempt: when true it stopped the step (a veto of the conclave written during the pause,
+        which it handled), and nothing is pushed (False)."""
         try:
             self.ws.push(path, branch, replace=replace, auth=auth)
         except TransientPushError as exc:
             self.log(f'  push of {branch} failed with a transient error of the remote ({exc}); '
                      f'second attempt in {self.push_retry_pause}s')
             time.sleep(self.push_retry_pause)
+            if check is not None and check():
+                self.log(f'  second attempt of the push of {branch} not made: the step stopped')
+                return False
             try:
                 self.ws.push(path, branch, replace=replace, auth=auth)
             except TransientPushError as again:
@@ -352,61 +465,130 @@ class ActionsMixin:
                 raise
             self.log(f'  push of {branch} done at the second attempt')
         self._pushed(path)
+        return True
 
     def _push_step(self, pending, auth=None):
-        """Push the commit of ``pending`` (``PendingPush``, #645), then do what its step does
-        after the push (``pending.then``). When the push fails twice for a transient error of
-        the remote, the dispatcher keeps ``pending`` for a retry of the step
-        (``_arm_pending_push``) and the error propagates: escalated as ``push_failed``, with the
-        key of an implementation (``exc.key``) so that the escalation records the step to retry.
-        ``auth``: the credentials of the push; None takes them again from the app of
-        ``pending.agent``, since a retry may come after the token of the turn expired."""
-        self._pending_pushes.pop(pending.number, None)
+        """Push the commit of ``pending`` (``PendingPush``, #645), then publish what its step
+        prepared for after the push (``_after_push``). Its veto check (``_push_vetoed``) runs
+        again before a second attempt. When the push fails twice for a transient error of the
+        remote, the dispatcher keeps ``pending`` (``pending_pushes``, in ``state_dir``) for a
+        retry of the step (``_arm_pending_push``) and the error propagates: escalated as
+        ``push_failed``, with the key of an implementation (``exc.key``) so that the escalation
+        records the step to retry. ``auth``: the credentials of the push; None takes them again
+        from the app of ``pending.agent``, since a retry may come after the token of the turn
+        expired, or after a restart."""
+        self.pending_pushes.drop(pending.number)
         if auth is None:
             auth = self._git_auth(pending.agent, IMPLEMENT)
         try:
-            self._push(pending.path, pending.branch, replace=pending.replace, auth=auth)
+            pushed = self._push(Path(pending.path), pending.branch, replace=pending.replace,
+                                auth=auth, check=lambda: self._push_vetoed(pending))
         except TransientPushError as exc:
             pending.armed = False
-            self._pending_pushes[pending.number] = pending
+            if not self.pending_pushes.put(pending):
+                self.log(f'  the push of {pending.commit[:12]} kept is not written in state_dir: '
+                         'a restart loses it, and a retry then runs the step again')
             if not pending.pr:
                 exc.key = pending.key
             exc.kept_push = pending.commit
             raise
-        return pending.then()
+        if not pushed:
+            return None
+        return self._after_push(pending)
+
+    def _push_vetoed(self, pending):
+        """Whether a veto of the conclave decision whose resolution the turn of ``pending`` had
+        (#142) was written since: then nothing it produced is published, and the step is
+        suspended (``_veto_suspend``). Checked before the push, before its second attempt and
+        before the push a retry repeats (#645). A sync has no such decision."""
+        data, lb = pending.data, self.cfg.labels
+        decision = data.get('conclave')
+        if pending.step == 'sync' or decision is None:
+            return False
+        if pending.pr:
+            veto = self._veto_after(data['issue'], pending.number, decision)
+            remove, what = data['remove'], 'veto_fix'
+        else:
+            veto = self._veto_after(pending.number, None, decision)
+            remove, what = [lb.working], 'veto_implement'
+        if veto:
+            self._veto_suspend(pending.number, decision, veto, remove,
+                               TEXTS.texts(self.cfg.language)(what))
+        return bool(veto)
+
+    def _after_push(self, pending):
+        """Publish what the step of ``pending`` prepared for after its push (#645): the PR of an
+        implementation, the record of a fix or of a sync."""
+        if pending.step == 'implement':
+            return self._publish_pr(pending.number, pending.name, pending.branch, pending.agent,
+                                    pending.data['pr'])
+        if pending.step == 'fix':
+            return self._publish_fix_record(pending.number, pending.name, pending.agent,
+                                            pending.data['record'])
+        return self._publish_sync_record(pending.number, pending.name, pending.agent,
+                                         pending.data['record'])
 
     def _arm_pending_push(self, number, step, key):
         """On a retry of ``step`` with ``key`` applied on issue or PR ``number``, arm the push
-        this dispatcher kept for it after a transient error of the remote (#645): the step, when
-        it runs, pushes those commits again instead of starting a new turn."""
-        pending = self._pending_pushes.get(number)
-        if pending is not None and pending.matches(step, key):
-            pending.armed = True
-            self.log(f'  the retry pushes {pending.commit[:12]} again, without a new turn')
+        kept for it after a transient error of the remote (#645), and return it (None when there
+        is none): the step, when it runs, pushes those commits again instead of starting a new
+        turn. The push is kept in ``state_dir``, so a restart in between does not lose it."""
+        pending = self.pending_pushes.get(number)
+        if pending is None or not pending.matches(step, key):
+            return None
+        pending.armed = True
+        if not self.pending_pushes.put(pending):
+            self.log('  the retry of the push kept is not written in state_dir')
+        self.log(f'  the retry pushes {pending.commit[:12]} again, without a new turn')
+        return pending
+
+    def _landed_push(self, number, head):
+        """The push kept for PR ``number`` (#645) when the head of its branch on GitHub, ``head``,
+        is its commit: the connection lost on both attempts lost the answer, not the push. None
+        otherwise."""
+        pending = self.pending_pushes.get(number)
+        if pending is not None and pending.pr and head == pending.commit:
+            return pending
+        return None
+
+    def _complete_landed(self, pending):
+        """Complete the step of ``pending``, armed by a retry, whose push already reached GitHub
+        (``_landed_push``, #645): what it prepared for after the push is published, with no new
+        push and no new turn."""
+        self.pending_pushes.drop(pending.number)
+        self.log(f'  the push of {pending.commit[:12]} had already reached {pending.branch}: '
+                 'the step is recorded, without a new push nor a new turn')
+        return self._after_push(pending)
 
     def _take_pending_push(self, number, head=None):
         """The push kept for issue or PR ``number`` that a retry armed (#645), taken, or None. A
         step that runs again replaces any other kept push of the item: one not armed, or kept
-        for another head of a PR (``head``, the head the step starts from), is dropped."""
-        pending = self._pending_pushes.pop(number, None)
+        for another head of a PR (``head``, the head the step starts from, which may be the
+        commit kept when its push reached GitHub already), is dropped."""
+        pending = self.pending_pushes.get(number)
         if pending is None:
             return None
-        if pending.armed and (head is None or pending.key.get('head') == head):
+        self.pending_pushes.drop(number)
+        if pending.armed and (head is None or head in (pending.key.get('head'), pending.commit)):
             return pending
         self.log(f'  the push of {pending.commit[:12]} kept after a transient error is dropped: '
                  'the step runs again')
         return None
 
-    def _resume_push(self, pending):
+    def _resume_push(self, pending, head=None):
         """Push again the commit of ``pending``, armed by a retry (#645), without a new turn: in
-        its worktree, recreated at that commit when it is gone or moved, after its ``check``."""
+        its worktree, recreated at that commit when it is gone or moved (a restart, a cleanup),
+        after its veto check. A PR whose ``head`` is that commit already got it: the step is only
+        recorded (``_complete_landed``)."""
+        if pending.pr and head == pending.commit:
+            return self._complete_landed(pending)
         try:
-            moved = self.ws.head(pending.path) != pending.commit
+            moved = self.ws.head(Path(pending.path)) != pending.commit
         except WorkspaceError:  # the worktree is gone
             moved = True
         if moved:
-            self.ws.commit_copy(pending.name, pending.commit)
-        if pending.check is not None and pending.check():
+            pending.path = str(self.ws.commit_copy(pending.name, pending.commit))
+        if self._push_vetoed(pending):
             return None
         self.log(f'  retry of the push: {pending.commit[:12]} to {pending.branch}, the commits '
                  'of the turn already done')
@@ -516,33 +698,26 @@ class ActionsMixin:
         if protected:
             return self._escalate_protected(number, protected, remove=[lb.working])
         generated = self._generated(path, start, tested)
-
-        def vetoed():
-            # Nothing produced with a vetoed resolution is published (#142): checked again
-            # before the push a retry repeats (#645).
-            veto = self._veto_after(number, None, decision) if decision is not None else None
-            if veto:
-                self._veto_suspend(number, decision, veto, [lb.working],
-                                   TEXTS.texts(self.cfg.language)('veto_implement'))
-            return bool(veto)
-
-        if vetoed():
+        # The PR is prepared before the push, and kept with the commit when the push fails
+        # twice for a transient error of the remote: a retry pushes it again and opens the PR,
+        # without a new turn, after a restart too (#645).
+        pending = PendingPush(
+            'implement', number, key, name, str(path), commit, branch, agent.key,
+            {'conclave': decision,
+             'pr': self._pr_request(number, agent, used, result, local, decision, attempt,
+                                    generated)},
+            replace=True)
+        # Nothing produced with a vetoed resolution is published (#142): checked again before
+        # a second attempt of the push, and before the push a retry repeats (#645).
+        if self._push_vetoed(pending):
             return
+        self._push_step(pending, auth=auth)
 
-        def opened():
-            self._open_pr(number, name, branch, agent, used, result, local, decision, attempt,
-                          generated)
-
-        # A push that fails twice for a transient error of the remote keeps the commit for a
-        # retry that pushes it again, without a new turn (#645).
-        self._push_step(PendingPush(number, key, name, path, commit, branch, agent.key, opened,
-                                    replace=True, check=vetoed), auth=auth)
-
-    def _open_pr(self, number, name, branch, agent, used, result, local, decision, attempt,
-                 generated):
-        """Open the PR of the implementation of issue ``number`` whose branch ``branch`` was
-        just pushed from worktree ``name``, with the marker and the body of its turn."""
-        cfg, lb = self.cfg, self.cfg.labels
+    def _pr_request(self, number, agent, used, result, local, decision, attempt, generated):
+        """The PR of the implementation of issue ``number``, with the marker and the body of its
+        turn: ``{title, body, attempt}`` (``attempt``: the id of the attempt to bind the PR to,
+        or None), all JSON, for ``_publish_pr`` after the push."""
+        cfg = self.cfg
         # The marker keeps the map the reviewer checks until a fix replaces it (#134). Its
         # reviewer is the first of the pool that is not the implementer's agent (#407); with the
         # reviewer rules of P5-5 (#409), the first of another provider and another tuple.
@@ -579,16 +754,24 @@ class ActionsMixin:
                               if generated else '')
                            + '\n\n' + render_map(result['acceptance_map'], language)
                            + f'\n\nCloses #{number}', 'pr', meta)
-        pr_number, url = self._as(agent.key, IMPLEMENT).create_pr(
-            base=cfg.base_branch, head=branch, title=result['pr_title'], body=body)
+        return {'title': result['pr_title'], 'body': body,
+                'attempt': attempt['attempt'] if attempt is not None else None}
+
+    def _publish_pr(self, number, name, branch, agent_key, request):
+        """Open the PR ``request`` (``_pr_request``) of the implementation of issue ``number``
+        whose branch ``branch`` was just pushed from worktree ``name`` by agent ``agent_key``."""
+        cfg, lb = self.cfg, self.cfg.labels
+        pr_number, url = self._as(agent_key, IMPLEMENT).create_pr(
+            base=cfg.base_branch, head=branch, title=request['title'], body=request['body'])
+        attempt = request.get('attempt')
         if attempt is not None:
             try:
-                self.ledger.journal.bind_pr(attempt['attempt'], pr_number)
+                self.ledger.journal.bind_pr(attempt, pr_number)
             except GitHubError as exc:
                 # The PR is open: the first turn on it records it (``_turn_attempt``), and so
                 # does a new implementation of the issue before resuming the attempt
                 # (``_take_attempt``), whatever the state of the PR by then.
-                self.log(f'  PR #{pr_number} of attempt {attempt["attempt"]} not recorded: {exc}')
+                self.log(f'  PR #{pr_number} of attempt {attempt} not recorded: {exc}')
         self.gh.edit_labels(pr_number, add=[lb.review])
         self.gh.edit_labels(number, remove=[lb.working])
         self.ws.remove(name)
@@ -1293,7 +1476,7 @@ class ActionsMixin:
         if pending is not None:
             # A retry of a push that failed for a transient error of the remote (#645): the
             # commits of the fix, or of the sync it started, pushed again without a new turn.
-            return self._resume_push(pending)
+            return self._resume_push(pending, pr.head_sha)
         if pr.fix_requests:
             return self._do_requested_fix(pr)
         t = TEXTS.texts(cfg.language)
@@ -1416,26 +1599,27 @@ class ActionsMixin:
             return self._escalate(pr.number, failure[0], failure[1], remove=remove,
                                   cls='tests_failed')
 
-        def vetoed():
-            # Checked again before the push a retry repeats (#645).
-            veto = (self._veto_after(pr.issue, pr.number, conclave) if conclave is not None
-                    else None)
-            if veto:
-                self._veto_suspend(pr.number, conclave, veto, remove,
-                                   TEXTS.texts(self.cfg.language)('veto_fix'))
-            return bool(veto)
+        def pending(record=None):
+            # The fix's push (#645): what its veto check reads, and the record it publishes
+            # after the push, prepared before it so that a retry needs no new turn.
+            return PendingPush('fix', pr.number, {'head': pr.head_sha}, name, str(path),
+                               self.ws.head(path), pr.head_ref, agent.key,
+                               {'conclave': conclave, 'issue': pr.issue, 'remove': list(remove),
+                                'record': record})
 
-        if vetoed():
+        # Checked again before a second attempt of the push, and before the push a retry
+        # repeats (#645).
+        if self._push_vetoed(pending()):
             return None
         changes = self.ws.has_changes(path)
         generated = []
 
-        def recorded():
-            self._record_fix(pr, agent, name, path, result, used, local, round_no, extra,
-                             merged, conclave, where, generated)
+        def record():
+            return self._fix_record(agent, path, result, used, local, round_no, extra, merged,
+                                    conclave, where, generated)
 
         if not (changes or merged):
-            return recorded()
+            return self._publish_fix_record(pr.number, name, agent.key, record())
         auth = self._git_auth(agent.key, IMPLEMENT)
         if changes:
             before = self.ws.head(path)
@@ -1449,21 +1633,14 @@ class ActionsMixin:
             generated = self._generated(path, before, tested)
         # A push that fails twice for a transient error of the remote keeps the commits for a
         # retry that pushes them again, without a new turn (#645).
-        return self._push_step(PendingPush(pr.number, {'head': pr.head_sha}, name, path,
-                                           self.ws.head(path), pr.head_ref, agent.key, recorded,
-                                           check=vetoed, pr=True), auth=auth)
+        return self._push_step(pending(record()), auth=auth)
 
-    def _record_fix(self, pr, agent, name, path, result, used, local, round_no, extra, merged,
-                    conclave, where, generated):
-        """Record the fix of round ``round_no`` of ``pr`` in worktree ``path``, pushed when it
-        changed anything, and send the PR back to review (``_publish_fix``)."""
-        lb = self.cfg.labels
-        if merged:
-            # As for a sync without an agent (#133): an event, not a turn, in the fix's
-            # register (#355).
-            self._ledger_event(pr.number, 'sync', register=fix_register(where),
-                               base=merged['base'], head=merged['head'],
-                               previous_head=merged['from'])
+    def _fix_record(self, agent, path, result, used, local, round_no, extra, merged, conclave,
+                    where, generated):
+        """The record of the fix of round ``round_no`` in worktree ``path``, at its head: what
+        ``_publish_fix_record`` publishes, all JSON (#645): ``body``, the comment of the record;
+        ``merged``, the merge of the base made before the turn, and ``register``, the fix
+        register of ``where`` (#355) its ``sync`` event goes to."""
         fix = dict(result, head_sha=self.ws.head(path),
                    profile=self._profile(agent.key, 'write', used), local_tests=local,
                    **skipped_models(used), **(extra or {}))
@@ -1473,10 +1650,28 @@ class ActionsMixin:
             fix['generated_files'] = generated  # pointed out, not left out (#627)
         if conclave is not None:
             fix['conclave'] = conclave
-        self._as(agent.key, PR_COMMENT).comment(
-            pr.number, render_fix(fix, self.runner.header(used), round_no,
-                                  language=self.cfg.language))
-        self.gh.edit_labels(pr.number, add=[lb.review], remove=[lb.changes])
+        register = fix_register(where)
+        return {'body': render_fix(fix, self.runner.header(used), round_no,
+                                   language=self.cfg.language),
+                'merged': merged,
+                'register': asdict(register) if register is not None else None}
+
+    def _publish_fix_record(self, number, name, agent_key, record):
+        """Publish the ``record`` (``_fix_record``) of the fix of PR ``number`` in worktree
+        ``name``, pushed when it changed anything, and send the PR back to review
+        (``_publish_fix``)."""
+        lb = self.cfg.labels
+        merged = record['merged']
+        if merged:
+            # As for a sync without an agent (#133): an event, not a turn, in the fix's
+            # register (#355).
+            register = record['register']
+            self._ledger_event(number, 'sync',
+                               register=FixRegister(**register) if register else None,
+                               base=merged['base'], head=merged['head'],
+                               previous_head=merged['from'])
+        self._as(agent_key, PR_COMMENT).comment(number, record['body'])
+        self.gh.edit_labels(number, add=[lb.review], remove=[lb.changes])
         self.ws.remove(name)
 
     def _do_requested_fix(self, pr):
@@ -1588,7 +1783,7 @@ class ActionsMixin:
         if pending is not None:
             # A retry of a push that failed for a transient error of the remote (#645): the
             # merge already concluded, pushed again without a new turn.
-            return self._resume_push(pending)
+            return self._resume_push(pending, pr.head_sha)
         if pr.meta['implementer'] not in cfg.agents:
             return self._escalate(
                 pr.number, t('sync_unconfigured', branch=cfg.base_branch,
@@ -1667,19 +1862,22 @@ class ActionsMixin:
         if protected:
             return self._escalate_protected(pr.number, protected, remove=remove)
 
-        def synced():
-            self._record_sync(pr, agent, name, target, head, files, listed,
-                              (result, used) if files else (None, None), fix_remove)
+        # The record of the sync is prepared before the push, and kept with the merge when the
+        # push fails twice for a transient error of the remote: a retry pushes it again and
+        # records it, without a new turn, after a restart too (#645).
+        record = self._sync_record(pr, agent, target, head, files, listed,
+                                   (result, used) if files else (None, None), fix_remove)
+        return self._push_step(PendingPush('sync', pr.number, {'head': pr.head_sha}, name,
+                                           str(path), head, pr.head_ref, agent.key,
+                                           {'record': record}), auth=auth)
 
-        # A push that fails twice for a transient error of the remote keeps the merge for a
-        # retry that pushes it again, without a new turn (#645).
-        return self._push_step(PendingPush(pr.number, {'head': pr.head_sha}, name, path, head,
-                                           pr.head_ref, agent.key, synced, pr=True), auth=auth)
-
-    def _record_sync(self, pr, agent, name, target, head, files, listed, turn, fix_remove):
-        """Record the sync of ``pr`` just pushed from worktree ``name``: the merge of ``target``
-        into its branch, new head ``head``, with the conflicts in ``files`` (``listed``) that the
-        agent's ``turn`` (``(result, used)``) resolved; then back to review (``_do_sync``)."""
+    def _sync_record(self, pr, agent, target, head, files, listed, turn, fix_remove):
+        """The record of the sync of ``pr``: the merge of ``target`` into its branch, new head
+        ``head``, with the conflicts in ``files`` (``listed``) that the agent's ``turn``
+        (``(result, used)``) resolved. What ``_publish_sync_record`` publishes after the push,
+        all JSON (#645): ``body``, the comment, the agent's with ``files``, otherwise the
+        dispatcher's with its ledger ``event``; the ``labels`` to change (None when a fix waits
+        for the sync) and the reason to ``supersede`` the receipts of a ready PR, or None."""
         cfg, lb = self.cfg, self.cfg.labels
         t = TEXTS.texts(cfg.language)
         base = f'origin/{cfg.base_branch}'
@@ -1689,28 +1887,42 @@ class ActionsMixin:
                 + t('sync_text', base=base, target=target[:12], head=head[:12], then=then,
                     note=self._sync_rounds_note(pr, bool(files), fix_remove is not None))
                 + '\n\n')
+        record = {'event': None, 'labels': None, 'supersede': None,
+                  'log': f'  merged {base} into {pr.head_ref}: {head[:12]}'}
         if files:
             text += (t('sync_resolved') + f'\n\n{listed}\n\n{result["summary"].strip()}')
             # Who resolved the conflicts wrote code on the PR: the marker keeps its profile,
             # so a later change of configuration cannot make it a reviewer of its own code.
             # ``from``: the head it synced, which a fix waiting for it recognizes (#250).
-            self._as(agent.key, PR_COMMENT).comment(
-                pr.number, publishable(self.runner.header(used) + text, 'sync',
-                                       {'head_sha': head, 'from': pr.head_sha,
-                                        'profile': self._profile(agent.key, 'write', used),
-                                        **skipped_models(used)}))
+            record['body'] = publishable(self.runner.header(used) + text, 'sync',
+                                         {'head_sha': head, 'from': pr.head_sha,
+                                          'profile': self._profile(agent.key, 'write', used),
+                                          **skipped_models(used)})
         else:
             # A sync without an agent is an event, not a turn (#133).
-            self._ledger_event(pr.number, 'sync', base=target, head=head, previous_head=pr.head_sha)
-            self.gh.comment(pr.number, publishable(dispatcher_header() + text
-                                                   + t('sync_clean')))
+            record['event'] = {'base': target, 'head': head, 'previous_head': pr.head_sha}
+            record['body'] = publishable(dispatcher_header() + text + t('sync_clean'))
         if fix_remove is None:
             # A ready PR whose merge is the operator's (#248) loses the dispatcher's label too.
-            self.gh.edit_labels(pr.number, add=[lb.review],
-                                remove=[lb.ready_to_merge, lb.changes, *self._released(pr)])
+            record['labels'] = {'add': [lb.review],
+                                'remove': [lb.ready_to_merge, lb.changes, *self._released(pr)]}
             if lb.ready_to_merge in pr.labels:
                 # The new head voids the receipt of the promotion (#135).
-                self._supersede_receipts(pr.number, self._merge_texts()(
-                    'supersede_sync', head=head[:12]))
+                record['supersede'] = self._merge_texts()('supersede_sync', head=head[:12])
+        return record
+
+    def _publish_sync_record(self, number, name, agent_key, record):
+        """Publish the ``record`` (``_sync_record``) of the sync of PR ``number`` just pushed
+        from worktree ``name``; then back to review (``_do_sync``)."""
+        if record['event'] is None:
+            self._as(agent_key, PR_COMMENT).comment(number, record['body'])
+        else:
+            self._ledger_event(number, 'sync', **record['event'])
+            self.gh.comment(number, record['body'])
+        if record['labels'] is not None:
+            self.gh.edit_labels(number, add=record['labels']['add'],
+                                remove=record['labels']['remove'])
+            if record['supersede'] is not None:
+                self._supersede_receipts(number, record['supersede'])
         self.ws.remove(name)
-        self.log(f'  merged {base} into {pr.head_ref}: {head[:12]}')
+        self.log(record['log'])

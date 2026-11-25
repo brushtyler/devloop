@@ -21,6 +21,7 @@ from .config import (INSTALL_ROOT, PROJECT_CONFIG, ConfigError, Reloader, compos
                      fingerprint, load_config, missing_project_tables, read_sources,
                      repo_lock_name)
 from .context import both_labels_warning, label_transition
+from .dispatch_actions import PendingPushes
 from .dispatch_advisory import AdvisoryFailures, AdvisoryResults
 from .dispatch_base import MainAlerts
 from .dispatcher import (Dispatcher, TickLog, Workers, ensure_labels, pr_counts_line,
@@ -515,6 +516,7 @@ def build(args):
                             advisory_results=AdvisoryResults(state),
                             advisory_failures=AdvisoryFailures(state),
                             main_alerts=MainAlerts(state),
+                            pending_pushes=PendingPushes(state),
                             housekeeping=Housekeeping(state, ws, gh, ledger=ledger,
                                                       log=tick_log))
     # What the trace T1 (ADR 0006, K1) records of the start: the files this configuration came

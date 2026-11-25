@@ -12,7 +12,8 @@ the attribution header:
 - ``/devloop retry``: run the failed step again, without counting a round; at most
   ``MAX_RETRIES`` times per step and input, then the escalation becomes critical. On a
   ``push_failed`` escalation (#645) only the push runs again, with the commits of the turn
-  already done, while the dispatcher that kept them runs;
+  already done, kept in ``state_dir``; on a PR whose branch got that push anyway, the step is
+  only completed;
 - ``/devloop accept-defaults``: accept the defaults the readiness check proposed;
 - ``/devloop decide <text>``: decide the gaps of the readiness check otherwise (#258): the text,
   the rest of the comment, reaches the next check through the dispatcher's record;

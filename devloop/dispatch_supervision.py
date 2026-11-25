@@ -976,9 +976,15 @@ class SupervisionMixin:
     def _current_key(self, number, key, pr):
         """The key ``key`` would have now, for the same step (and reviewer) on issue or PR
         ``number``: a retry of a superseded input is refused (``changed_input``, which leaves
-        out the base of an implementation, #475)."""
+        out the base of an implementation, #475). A PR whose head is the commit of the push kept
+        for the same step and head (#645, ``_landed_push``) has the input of that step: the head
+        moved only because the push reached GitHub although both attempts lost the answer."""
         if pr is not None:
-            current = {'step': key.get('step'), 'head': self.gh.pr_head(number)}
+            head = self.gh.pr_head(number)
+            landed = self._landed_push(number, head)
+            if landed is not None and landed.matches(key.get('step'), key):
+                head = key.get('head')
+            current = {'step': key.get('step'), 'head': head}
             if 'reviewer' in key:
                 current['reviewer'] = key['reviewer']
             return current
@@ -2280,7 +2286,8 @@ class SupervisionMixin:
         the supervisor's and the operator's together (``retries_done``), ``limit(done)`` runs
         instead. A push of the same step and key kept after a transient error of the remote
         (#645, ``_arm_pending_push``) makes the step push those commits again, without a new
-        turn."""
+        turn; on a PR whose branch already got that push (``_landed_push``), the step is
+        completed now, with no new push."""
         lb = self.cfg.labels
         key, step = escalation['key'], escalation['step']
         if not is_pr:
@@ -2297,13 +2304,17 @@ class SupervisionMixin:
             return limit(done)
         trace('applied', self._texts()('retry_applied', step=step, attempt=done + 1,
                                        max=MAX_RETRIES), key=key, attempt=done + 1)
-        # A push that failed for a transient error of the remote (#645) and whose commits this
+        # A push that failed for a transient error of the remote (#645) and whose commits the
         # dispatcher kept: the step, when it runs, pushes them again without a new turn.
-        self._arm_pending_push(number, step, key)
+        pending = self._arm_pending_push(number, step, key)
         if is_pr:
             resume = escalation.get('resume')
             self.gh.edit_labels(number, add=[resume if resume in (lb.review, lb.changes)
                                              else lb.review], remove=remove)
+            if pending is not None and self._landed_push(number, self.gh.pr_head(number)):
+                # The push reached the branch although both attempts lost the answer: the step
+                # is completed now, since the head it left may plan no step at all.
+                self._complete_landed(pending)
             return
         self.gh.edit_labels(number, remove=remove)
         try:
