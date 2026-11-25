@@ -273,6 +273,32 @@ coordinator in the mailbox.
   is useful; the paused themes and the proposals off theme stay out of the queue. A priority
   label the operator put on an issue wins: never replace it. Without `[direction]` the
   priorities are those of the operator's labels.
+- **A prerequisite written in the text becomes a native block** (#670). Before you queue an
+  authorized issue whose text names a prerequisite ("to open after #N is closed", "needs
+  #N"), add the native block towards the issue of the prerequisite with your app, then queue
+  it. A prerequisite written only in words stops nothing: the issue starts, the implementer
+  stops for the missing prerequisite with a `blocked` escalation to the operator, after a run
+  already spent. With the block the issue does not start, and starts by itself once the
+  prerequisite closes ([Dependencies between issues](../guide.md#dependencies-between-issues)).
+  It is a power you already have: the blocks of your app count on the issues you may queue
+  (the same rule as your labels, "Only trusted blocks count" in the guide). `gh` has no command
+  for the blocks: use the REST API of the issue dependencies, which takes the `id` of the
+  blocking issue, not its number. First read the `id` of the prerequisite, then add the block
+  to the issue that waits for it:
+
+  ```bash
+  DEVLOOP_APP_KEY_DIR=<key_dir> python3 scripts/supervisor-token.py --state-dir <state_dir> \
+      --perm issues=read -- gh api 'repos/{owner}/{repo}/issues/<PREREQUISITE>' --jq .id
+  DEVLOOP_APP_KEY_DIR=<key_dir> python3 scripts/supervisor-token.py --state-dir <state_dir> \
+      -- gh api -X POST 'repos/{owner}/{repo}/issues/<ISSUE>/dependencies/blocked_by' \
+      -F issue_id=<ID>
+  ```
+
+  `gh` fills `{owner}/{repo}` from the `GH_REPO` the script passes. The tick log then shows
+  `blocked by #<PREREQUISITE>` in the queue (`devloop status`). When the prerequisite does not
+  translate into the number of an issue (an external tool, a vague reference), do not queue the
+  issue: write to the coordinator in the mailbox, with the issue and the prerequisite, and let
+  it decide.
 - **Every stop of the queue on purpose** goes in the journal at once, with its reason: a likely
   conflict with an open pull request, `main` red, the quota of an agent spent. So the
   coordinator tells a stop on purpose from an accidental one without asking you. When it asks
