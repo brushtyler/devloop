@@ -267,6 +267,13 @@ class GitHub:
         return self._json('issue', 'list', '-R', self.repo, '--state', 'open', '--limit',
                           str(limit), '--json', 'number,title,author,labels')
 
+    def open_issue_numbers(self):
+        """The numbers of every open issue, pull requests excluded, read with REST page by page
+        until the last, without a limit on their count (#656)."""
+        return self._json_lines('api', '--paginate',
+                                f'repos/{self.repo}/issues?state=open&per_page=100',
+                                '--jq', '.[] | select(.pull_request == null) | .number')
+
     def issue_state(self, number):
         """``{state, stateReason}`` of issue ``number``, read fresh: ``state`` OPEN or CLOSED,
         ``stateReason`` (COMPLETED, NOT_PLANNED, ...) or None, both in upper case as `gh issue

@@ -610,7 +610,7 @@ issues whose latest `agent:ready` is the supervisor's and, whatever its labels, 
 where the coordinator's identity wrote a `/devloop authorize` (#656): an issue the coordinator
 opens and authorizes at once, without `agent:needs-coordinator`, gets its record at the next tick,
 and the supervisor queues it once the record is there. To find those commands the dispatcher
-reads the threads of every open issue at its first tick, after a start or a pin, so that a
+reads the threads of every open issue, however many, at its first tick, after a start or a pin, so that a
 command written while devloop was stopped is found however long ago; at every later tick it reads
 only the comments written or edited since the previous one. An issue found stays watched until
 its command is recorded: one that cannot be recorded at once, because the issue is busy, is

@@ -88,8 +88,8 @@ class FakeGH:
     def comments_since(self, since):
         return []
 
-    # The open issues (#656): none by default.
-    def open_issues(self, limit=300):
+    # The numbers of the open issues (#656): none by default.
+    def open_issue_numbers(self):
         return []
 
     # Native dependencies (#277): none by default.

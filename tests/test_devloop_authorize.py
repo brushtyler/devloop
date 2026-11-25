@@ -490,10 +490,10 @@ class UnlabelledTests(Case):
         def fails(*args):
             raise GitHubError('HTTP 502')
         # A failed first read is made again whole at the next snapshot.
-        self.gh.open_issues = fails
+        self.gh.open_issue_numbers = fails
         with self.assertRaises(GitHubError):
             d.snapshot()
-        del self.gh.open_issues
+        del self.gh.open_issue_numbers
         d.snapshot()
         self.assertEqual((self.gh.open_reads, getattr(self.gh, 'since_reads', [])), (1, []))
         now[0] += 60
@@ -565,6 +565,23 @@ class DatedTests(Case):
         self.assertEqual(self.gh.comments_since(day), [])
         self.assertEqual(self.ticked(d), [('authorize', 7)])
         self.assertEqual([(r['by'], r['outcome']) for r in self.records()],
+                         [(COORDINATOR, 'authorized')])
+        self.assertEqual(self.gh.open_reads, 1)
+        self.assertEqual(self.planned(d), [])
+
+    def test_the_first_snapshot_reads_every_open_issue_beyond_the_first_300(self):
+        self.make()
+        # 301 open issues without labels, #7 to #307; the command is on the last one, which a
+        # read of the first 300 (``gh issue list --limit 300``) leaves out.
+        for number in range(8, 308):
+            self.gh.labels[number] = set()
+        self.gh.say(307, COORDINATOR, header() + '\n/devloop authorize')
+        self.assertNotIn(307, [raw['number'] for raw in self.gh.open_issues()])
+        self.gh.minute += 3 * 24 * 60
+        d = Dispatcher(self.cfg, self.gh, self.ws, self.runner, log=self.logs.append,
+                       identities=Identities(self.gh), clock=self.gh.timestamp)
+        self.assertEqual(self.ticked(d), [('authorize', 307)])
+        self.assertEqual([(r['by'], r['outcome']) for r in self.gh.records(307, 'authorize')],
                          [(COORDINATOR, 'authorized')])
         self.assertEqual(self.gh.open_reads, 1)
         self.assertEqual(self.planned(d), [])

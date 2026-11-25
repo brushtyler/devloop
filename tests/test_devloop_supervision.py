@@ -67,13 +67,20 @@ class SupGH(SnapshotGH):
                  'number': number, 'pull_request': number in prs}
                 for number, thread in self.threads.items() for c in thread]
 
-    def open_issues(self, limit=300):
-        """Every number with a thread or labels but the PRs and the ``closed`` ones, counted in
-        ``open_reads`` (#656)."""
+    def open_issue_numbers(self):
+        """Every number with a thread or labels but the PRs and the ``closed`` ones, all of
+        them however many, counted in ``open_reads`` (#656)."""
         self.open_reads = getattr(self, 'open_reads', 0) + 1
         prs = {raw['number'] for raw in self.open_prs()}
-        numbers = sorted((set(self.threads) | set(self.labels)) - prs
-                         - set(getattr(self, 'closed', ())))
+        return sorted((set(self.threads) | set(self.labels)) - prs
+                      - set(getattr(self, 'closed', ())))
+
+    def open_issues(self, limit=300):
+        """The first ``limit`` of ``open_issue_numbers``, as ``gh issue list`` reports them,
+        not counted: the adapter's read with its limit, which the dispatcher must not use."""
+        reads = getattr(self, 'open_reads', 0)
+        numbers = self.open_issue_numbers()
+        self.open_reads = reads
         return [{'number': n, 'title': f'Issue {n}', 'author': {'login': self.author},
                  'labels': [{'name': x} for x in sorted(self.labels.get(n, ()))]}
                 for n in numbers][:limit]

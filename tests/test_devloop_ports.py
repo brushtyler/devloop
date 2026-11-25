@@ -37,7 +37,7 @@ CLIENTS = ('dispatcher.py', 'ledger.py', 'context.py', 'dispatch_supervision.py'
            'dispatch_preflight.py', 'dispatch_merge.py', 'dispatch_actions.py')
 
 EXPECTED = {
-    ports.Tracker: ['issues_with_label', 'open_issues', 'issue', 'issue_history', 'issue_comments',
+    ports.Tracker: ['issues_with_label', 'open_issue_numbers', 'issue', 'issue_history', 'issue_comments',
                     'pr_comments', 'comments_since', 'issue_dependencies', 'labelers', 'label_events', 'labeled_events', 'edit_labels',
                     'comment', 'close_issue', 'edit_comment', 'ensure_label', 'repo_labels',
                     'rename_label'],
@@ -93,7 +93,7 @@ class PortDeclarationTests(unittest.TestCase):
         self.assertEqual((public_methods(GitHub) & called) - declared, set())
         # The adapter's methods outside the ports, documented in devloop/ports.py.
         self.assertEqual(public_methods(GitHub) - declared,
-                         {'last_labeler', 'issue_state',
+                         {'last_labeler', 'open_issues', 'issue_state',
                           'issue_author', 'dated_comments', 'search_prs', 'edit_issue_body',
                           'workflow_runs'})
 

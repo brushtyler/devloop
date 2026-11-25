@@ -47,7 +47,7 @@ The dispatcher reaches GitHub through three ports, declared in `devloop/ports.py
 
 | Port | Methods |
 |---|---|
-| `Tracker` | issues and their history, comments of issues and PRs, labels: `issues_with_label`, `open_issues`, `issue`, `issue_history`, `issue_comments`, `pr_comments`, `comments_since`, `labelers`, `label_events`, `labeled_events`, `edit_labels`, `comment`, `close_issue`, `edit_comment`, `ensure_label`, `repo_labels`, `rename_label` |
+| `Tracker` | issues and their history, comments of issues and PRs, labels: `issues_with_label`, `open_issue_numbers`, `issue`, `issue_history`, `issue_comments`, `pr_comments`, `comments_since`, `labelers`, `label_events`, `labeled_events`, `edit_labels`, `comment`, `close_issue`, `edit_comment`, `ensure_label`, `repo_labels`, `rename_label` |
 | `CodeReview` | PRs and reviews: `open_prs`, `merged_prs`, `find_pr` (#362), `commit_prs` (#473), `branch_prs` (#384), `merge_state` (`clean`, `conflict` or `unknown`), `pr_head`, `pr_state`, `merge_pr`, `pr_reviews`, `create_pr`, `submit_review` |
 | `CI` | checks of a commit: `checks` (summarized by `summarize_checks`), `check_details`, `check_runs`, `failed_log`, `job_log` (#300), `rerun_failed_jobs` (#200) |
 
@@ -61,7 +61,8 @@ issue, with the state of each blocking issue and who added each block, read with
 query, more only when the events of an open block are older than the latest 100)
 ([Dependencies between issues](devloop/guide.md#dependencies-between-issues)).
 
-`Tracker.open_issues` (#656) lists the open issues, and `Tracker.comments_since` reads the
+`Tracker.open_issue_numbers` (#656) lists the numbers of every open issue, page by page with no
+limit on their count, and `Tracker.comments_since` reads the
 comments of every issue and PR written or edited since a time, each with whether it belongs to a
 PR: with `[roles.coordinator]` the dispatcher reads the threads of the open issues at its first
 snapshot, then the comments written since its previous snapshot, to find the coordinator's

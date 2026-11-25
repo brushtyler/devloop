@@ -1341,8 +1341,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         an issue it opened and authorized at once is in neither agent:needs-coordinator nor
         the supervisor's agent:ready.
 
-        The first snapshot of the process reads the threads of every open issue, so that a
-        command written while devloop was stopped, however long ago, is found; each later one
+        The first snapshot of the process reads the threads of every open issue, however many
+        (``open_issue_numbers``, with no limit on their count), so that a command written while
+        devloop was stopped, however long ago, is found; each later one
         reads only the comments written or edited since the previous one (``AUTHORIZE_MARGIN``),
         not the threads of every open issue. An issue found stays watched (``_authorize_watch``)
         and is read again at each snapshot until its command is recorded or it is closed: one
@@ -1352,8 +1353,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         other issue."""
         started = self.clock()
         if self._authorize_since is None:
-            seen = [raw['number'] for raw in self.gh.open_issues()
-                    if isinstance(raw.get('number'), int)]
+            seen = [n for n in self.gh.open_issue_numbers()
+                    if isinstance(n, int) and not isinstance(n, bool)]
             hinted = set(self._authorize_watch)
         else:
             stamp = time.strftime('%Y-%m-%dT%H:%M:%SZ',
