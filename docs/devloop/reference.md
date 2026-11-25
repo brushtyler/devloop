@@ -679,7 +679,14 @@ and no approval depends on them.
 The dispatcher commits everything the writing turn leaves in the worktree, the products of the
 tests included: a project that tracks its bytecode, or does not ignore it in `.gitignore`, sees
 the `__pycache__/` of the tests in the commit (#627). devloop does not leave such files out,
-since a tracked file may be wanted; it points them out:
+since a tracked file may be wanted.
+
+Python bytecode is not written: the local tests and the agents' turns (implement, fix, sync,
+review) run with `PYTHONDONTWRITEBYTECODE=1` in their environment, whatever the operator's value
+(#660), so the tests leave a tracked `__pycache__/` as it is, and the PRs neither rewrite it nor
+conflict on it. Also with an [agent user](#agent-user): the variable reaches it with the rest of
+the environment (`sudo -E`, `SETENV` of `ops/host/sudoers-agent`, unchanged). A project that is
+not Python ignores it. What the tests still change, devloop points out:
 
 - **In the ledger.** A local test that changed files of the worktree (a tracked file it
   rewrote, a file it created that git does not ignore) records them in `changed_by_tests` of its
@@ -1716,7 +1723,9 @@ to `test_timeout_seconds`, so a command that asks for it can run the full suite,
 `BASH_DEFAULT_TIMEOUT_MS` to `agent_command_timeout_seconds` (default ten minutes, at most
 `test_timeout_seconds`), so a command that sets no timeout, such as a wait loop that never ends,
 stops on its own instead of holding the turn for an hour. Values the operator set in the
-environment are kept. This prevents accidental use of the operator's credentials, not
+environment are kept. `PYTHONDONTWRITEBYTECODE=1` is always set, whatever the operator's value
+(#660): the tests a turn or the dispatcher runs write no Python bytecode (see [Generated files in
+the commits](#generated-files-in-the-commits)). This prevents accidental use of the operator's credentials, not
 deliberate access: code running as the same system user can still read files. The isolation
 comes from the [agent user](#agent-user), which cannot read the keys at all.
 
