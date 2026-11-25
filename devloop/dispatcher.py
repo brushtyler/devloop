@@ -3765,9 +3765,10 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         if conclave is not None:
             payload['conclave'] = conclave
         language = self.cfg.language
-        author.comment(number, publishable(
+        # A block asks the operator to decide: the notice mentions them (#593).
+        author.comment(number, self._for_operator(publishable(
             self.runner.header(agent) + f'\n## {TEXTS.texts(language)("blocked_title")}\n\n'
-            + reason.strip() + '\n\n' + resume_text(language), 'notice', payload))
+            + reason.strip() + '\n\n' + resume_text(language), 'notice', payload)))
         self.gh.edit_labels(number, add=[self.cfg.labels.needs_operator], remove=remove)
 
     def _protected_changes(self, path, since=None):

@@ -520,6 +520,21 @@ class DispatcherTests(unittest.TestCase):
         self.assertNotIn("Per l'operatore", self.gh.comments[-1][1])
         self.assertTrue(any('no operator_mentions configured' in line for line in self.lines))
 
+    def test_an_agent_blocked_mentions_the_operator(self):
+        d = self.dispatcher(dataclasses.replace(CFG, operator_mentions=('op-test',)))
+        agent = CFG.agent(CFG.implementer)
+        d._blocked(7, agent, 'Serve una scelta.', remove=[], on_pr=False, step='implement',
+                   head='abc')
+        number, body = self.gh.comments[-1]
+        self.assertEqual(number, 7)
+        self.assertIn("Per l'operatore: @op-test", body)
+        self.assertTrue(body.startswith(d.runner.header(agent)))
+        marker = read_marker(body, 'notice')
+        self.assertEqual((marker['event'], marker['to'], marker['agent'], marker['step']),
+                         ('blocked', 'operator', agent.key, 'implement'))
+        self.assertTrue(body.rstrip().endswith('-->'))
+        self.assertIn(CFG.labels.needs_operator, self.gh.labels[7])
+
     def test_the_supervisor_is_not_the_operator(self):
         d = self.dispatcher(dataclasses.replace(CFG, operator_mentions=('op',)))
         d._escalate(7, 'Decide il supervisore.', cls='failure',

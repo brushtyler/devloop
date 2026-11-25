@@ -1276,8 +1276,8 @@ not change: devloop still reads the implementer from the marker to keep it out o
 
 ## Mentions of the operator
 
-A comment that asks the operator for a decision (#593: an escalation to the operator, a
-`needs_operator` verdict, the round limit, a review level without enough reviewers, a refused
+A comment that asks the operator for a decision (#593: an escalation to the operator, the
+notice of an agent that stops as `blocked`, a `needs_operator` verdict, the round limit, a review level without enough reviewers, a refused
 level 0, a block of the readiness check, a ready PR whose merge is the operator's, the alert of a
 step on the host) ends its readable text with the line `For the operator: @login …` (`Per
 l'operatore:` in Italian), with the logins of `operator_mentions`, before the block of markers,

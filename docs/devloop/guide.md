@@ -2357,7 +2357,8 @@ encrypted for bots: it is private with respect to the repository, not confidenti
 
 `operator_mentions` of the overlay lists the GitHub logins, without `@`, mentioned in the
 comments of the dispatcher that ask the operator for a decision: the escalations to the
-operator (`agent:needs-operator`), a `needs_operator` verdict, the round limit, a level of
+operator (`agent:needs-operator`), the notice of an agent that stops as `blocked`, a
+`needs_operator` verdict, the round limit, a level of
 review without enough reviewers, a level 0 refused, a block of the readiness check, a ready PR
 whose merge is the operator's and the alert of a step on the host. The line `For the operator:
 @login …` (in the project's `language`) ends the readable text, before the markers. It is a list
