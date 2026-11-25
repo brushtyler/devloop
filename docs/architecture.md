@@ -57,8 +57,10 @@ the temporary directory devloop gives it (`tmp_dir`, `<state_dir>/gh-tmp`, mode 
 system's `/tmp`, where the cache of the logs (`gh-cli-cache`) may belong to another user.
 
 `Tracker` also has `issue_dependencies` (#277): the native "blocked by" dependencies of an
-issue, with the state of each blocking issue and who added each block, read with GraphQL (one
-query, more only when the events of an open block are older than the latest 100)
+issue, with the state of each blocking issue, the reason of its closure (`stateReason`, #671),
+the open PRs GitHub links to it as closing it (`closedByPullRequestsReferences`, #671) and who
+added each block, read with GraphQL (one query, more only when the events of an open
+block, or of one closed for a reason other than completed, are older than the latest 100)
 ([Dependencies between issues](devloop/guide.md#dependencies-between-issues)).
 
 `Tracker.open_issue_numbers` (#656) lists the numbers of every open issue, page by page with no

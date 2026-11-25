@@ -36,14 +36,17 @@ _ISSUE_HISTORY = (
 # The most pages ``GitHub.issue_history`` reads (#483): far more than any issue has. Past them
 # the read is incomplete.
 _HISTORY_PAGES = 100
-# Native dependencies of an issue (#277): the issues that block it, with their state (GitHub
-# allows at most 50 per issue), and who added each "blocked by" (the timeline events, read
-# backwards one page at a time, from ``$before``).
+# Native dependencies of an issue (#277): the issues that block it, with their state and the
+# reason of their closure (#671; GitHub allows at most 50 per issue) and the PRs GitHub links to
+# them as closing them (#671, any branch: a closing keyword or the "Development" sidebar), and
+# who added each "blocked by" (the timeline events, read backwards one page at a time, from
+# ``$before``).
 _ISSUE_DEPENDENCIES = (
     'query($owner:String!,$name:String!,$number:Int!,$before:String){'
     'repository(owner:$owner,name:$name){'
     'issue(number:$number){author{__typename login} '
-    'blockedBy(first:50){nodes{number state repository{nameWithOwner}}} '
+    'blockedBy(first:50){nodes{number state stateReason repository{nameWithOwner} '
+    'closedByPullRequestsReferences(first:20){nodes{number state author{__typename login}}}}} '
     'timelineItems(itemTypes:[BLOCKED_BY_ADDED_EVENT],last:100,before:$before){'
     'pageInfo{hasPreviousPage startCursor} nodes{__typename '
     '... on BlockedByAddedEvent{createdAt actor{__typename login} '
@@ -113,6 +116,15 @@ def graphql_login(actor):
     if login and (actor or {}).get('__typename') == 'Bot' and not login.endswith('[bot]'):
         return login + '[bot]'
     return login
+
+
+def dropped_block(state, reason):
+    """Whether a "blocked by" whose issue is in ``state`` with ``reason`` (``stateReason``) was
+    dropped (#671): closed for a reason GitHub gives that is not COMPLETED (NOT_PLANNED,
+    DUPLICATE, ...). A closure without a readable reason releases the block, as a completed
+    one does."""
+    return (state == 'CLOSED' and isinstance(reason, str) and bool(reason)
+            and reason.upper() != 'COMPLETED')
 
 
 def author_login(author):
@@ -375,14 +387,16 @@ class GitHub:
     def issue_dependencies(self, number):
         """The native "blocked by" dependencies of issue ``number`` (#277): ``{author,
         blocked_by, added}``. ``blocked_by`` lists the issues that block it now as ``{repo,
-        number, state}`` (``state`` OPEN or CLOSED, ``repo`` as ``owner/name``); ``added`` the
-        events that added a blocker, oldest first, as ``{repo, number, by, at}``. Logins are in
-        REST form (``graphql_login``).
+        number, state, state_reason}`` (``state`` OPEN or CLOSED, ``state_reason`` as GitHub
+        gives it, such as COMPLETED or NOT_PLANNED, or None, #671; ``repo`` as
+        ``owner/name``) and ``prs``, the open PRs that GitHub links to it as closing it, on any
+        branch, as ``{number, author}`` (#671, the first 20); ``added`` the events that added a blocker, oldest first, as ``{repo,
+        number, by, at}``. Logins are in REST form (``graphql_login``).
 
-        The events are read backwards, 100 at a time, until every open blocker has its latest
-        addition or the timeline is over: an open block missing from ``added`` has no event at
-        all, it is never one cut off by a truncated read. ``author`` and ``blocked_by`` are those
-        of the first read."""
+        The events are read backwards, 100 at a time, until every open blocker, and every
+        dropped one (``dropped_block``), has its latest addition or the timeline is over: such a
+        block missing from ``added`` has no event at all, it is never one cut off by a truncated
+        read. ``author`` and ``blocked_by`` are those of the first read."""
         owner, name = self.repo.split('/', 1)
 
         def where(node):
@@ -402,7 +416,8 @@ class GitHub:
                           and n.get('blockingIssue')])
             found = {where(n['blockingIssue']) for page in pages for n in page}
             missing = {where(n) for n in issue['blockedBy']['nodes']
-                       if n.get('state') == 'OPEN'} - found
+                       if n.get('state') == 'OPEN'
+                       or dropped_block(n.get('state'), n.get('stateReason'))} - found
             info = timeline.get('pageInfo') or {}
             before = info.get('startCursor')
             if not missing or not info.get('hasPreviousPage') or not before:
@@ -410,7 +425,13 @@ class GitHub:
         blocked_by = []
         for node in issue['blockedBy']['nodes']:
             repo, blocker = where(node)
-            blocked_by.append({'repo': repo, 'number': blocker, 'state': node.get('state')})
+            linked = (node.get('closedByPullRequestsReferences') or {}).get('nodes') or []
+            blocked_by.append({'repo': repo, 'number': blocker, 'state': node.get('state'),
+                               'state_reason': node.get('stateReason'),
+                               'prs': [{'number': pr.get('number'),
+                                        'author': graphql_login(pr.get('author'))}
+                                       for pr in linked
+                                       if isinstance(pr, dict) and pr.get('state') == 'OPEN']})
         added = []
         for page in reversed(pages):  # the oldest page was read last
             for node in page:

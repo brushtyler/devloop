@@ -266,6 +266,11 @@ class Snapshot:
     # (the open issues that block them, as ``issue_ref``), ``blocks`` (the numbers of those ready
     # issues they block), ``cycle`` (the issues of the dependency cycle they are on, empty
     # without one) and ``cycle_reported`` (whether the dispatcher already reported that cycle).
+    # Since #671 ``blocked_by`` holds the dropped blocks too, those closed for a reason other
+    # than completed, which ``dropped`` lists as ``[ref, reason]`` (``prerequisite_dropped``);
+    # ``prerequisites``, the numbers of their open blocks of the repository, ``linked``, those of
+    # them with an open PR of a trusted author that GitHub links to them, on any branch, and
+    # ``orphans``, those of them that nobody is doing (``Dispatcher._orphan_prerequisites``).
     ready_issues: list
     working_issues: list  # issue numbers
     # Issues and PRs in agent:needs-supervisor with a supervisor command to apply (#182), or in
@@ -273,7 +278,8 @@ class Snapshot:
     # step, pr, anchor, coordinator}`` (``_supervisor_view``; ``coordinator``, whether the
     # coordinator wrote it, #595), with ``refusal`` for a command only to answer; a command that
     # runs an issue's step (``runs_issue_step``) has ``blocked_by`` too, its open blocks (#277),
-    # and waits while it is not empty.
+    # and waits while it is not empty; and ``dropped`` (#671), its blocks closed without being
+    # completed, with which it does not run and the issue escalates ``prerequisite_dropped``.
     supervised: list = field(default_factory=list)
     # With ``conclave`` (#141), the issues and PRs in agent:needs-operator whose block still
     # needs its conclave: dicts ``{number, calls, reason}``, ``calls`` being the calls left
@@ -475,22 +481,31 @@ def start_order(issue):
 def queue_lines(snapshot):
     """The ready issues in start order, with priority and agent:ready time, as ``status`` and
     ``tick --dry-run`` show them, and their dependencies (#277): the open issues that block
-    them, the ready issues they block, the cycle they are on. Which of them start, and when, is
-    up to ``plan``."""
+    them, the ready issues they block, the cycle they are on, and (#671) the prerequisites closed
+    without being completed; then one line for each prerequisite nobody is doing (``orphans``).
+    Which of them start, and when, is up to ``plan``."""
     def dependencies(issue):
         text = ''
         if issue.get('blocked_by'):
             text += ', blocked by ' + ', '.join(issue['blocked_by'])
+        if issue.get('dropped'):
+            text += ', prerequisite closed without being completed ' + ', '.join(
+                f'{ref} ({reason.lower().replace("_", " ")})' for ref, reason in issue['dropped'])
         if issue.get('blocks'):
             text += ', blocks ' + ', '.join(f'#{n}' for n in issue['blocks'])
         if issue.get('cycle'):
             text += ', dependency cycle ' + ', '.join(issue['cycle'])
         return text
 
+    ordered = sorted(snapshot.ready_issues, key=start_order)
+    # The prerequisites nobody is doing (#671), one line per pair, after the queue.
+    orphans = [f'orphan prerequisite: #{issue["number"]} waits for #{n}, open, which has '
+               'neither agent:ready nor agent:working, nor an open PR, nor an authorization of '
+               'the coordinator' for issue in ordered for n in issue.get('orphans') or ()]
     return [f'ready {position}. #{issue["number"]} priority={issue.get("priority", "normal")} '
             f'agent:ready={issue.get("ready_at") or "?"} labelled by {issue["labeler"]}'
             f'{dependencies(issue)}: {issue["title"]}'
-            for position, issue in enumerate(sorted(snapshot.ready_issues, key=start_order), 1)]
+            for position, issue in enumerate(ordered, 1)] + orphans
 
 
 def zero_labels_hold(pr, rp):
@@ -584,8 +599,14 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None, implement=Tr
         # budget envelope of an issue's refused step (#411), runs that step, and takes a free PR
         # slot as the step itself would; without one it waits for a later tick. While the issue
         # is blocked by an open issue (#277) it waits too, and takes no slot. A command only to
-        # answer (#321) takes no slot.
+        # answer (#321) takes no slot. One whose issue has a prerequisite closed without being
+        # completed (#671) does not run: the issue is escalated to the operator, with no slot.
         if runs_issue_step(item):
+            if item.get('dropped'):
+                actions.append(Action('prerequisite_dropped', item['number'],
+                                      'prerequisite closed without being completed: '
+                                      + ', '.join(ref for ref, _ in item['dropped'])))
+                continue
             if item.get('blocked_by') or free <= 0:
                 continue
             free -= 1
@@ -859,11 +880,17 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None, implement=Tr
                 actions.append(Action('merged_issue', issue['number'], 'resolved by merged PR '
                                       + ', '.join(f'#{n}' for n in issue['merged'])))
     # A ready issue blocked by an open issue (#277) neither is checked nor starts, and takes no
-    # slot; one on a dependency cycle is reported once, on the issue itself.
+    # slot; one on a dependency cycle is reported once, on the issue itself. One whose
+    # prerequisite was closed without being completed (#671) is escalated to the operator.
     for issue in snapshot.ready_issues:
         if issue.get('cycle') and not issue.get('cycle_reported'):
             actions.append(Action('dependency_cycle', issue['number'],
                                   'dependency cycle ' + ', '.join(issue['cycle'])))
+        if issue.get('dropped') and not issue['labels'] & (lb.operator()
+                                                           | {lb.needs_supervisor}):
+            actions.append(Action('prerequisite_dropped', issue['number'],
+                                  'prerequisite closed without being completed: '
+                                  + ', '.join(ref for ref, _ in issue['dropped'])))
         if issue.get('blocked_by'):
             held_back.add(issue['number'])
     # With max_parked_prs reached only priority:high issues start, still within the slots of
