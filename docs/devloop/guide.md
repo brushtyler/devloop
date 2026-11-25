@@ -569,8 +569,11 @@ repository when the issue, its comments or the repository give it (`0` otherwise
   implementation starts again from the current base. A block closed without being completed
   escalates `prerequisite_dropped`, as above.
 - **Conditions.** The dispatcher adds the blocks only when each prerequisite is an open issue
-  of the same repository, not a PR nor the issue itself, nor already among its "blocked by";
-  when the blocks close no dependency cycle; and within its caps for the issue, constants of
+  of the same repository, not a PR nor the issue itself, nor already among its "blocked by"
+  (an issue transferred to another repository is not, even though GitHub still answers for
+  its old number); when the blocks close no dependency cycle, read in full (beyond the 50
+  issues the reading of the dependencies explores, `MAX_DEPENDENCY_READS`, a cycle cannot be
+  ruled out and the blocks are not added); and within its caps for the issue, constants of
   the code: at most **3** of its blocks open together (`MAX_ACTIVE_PREREQUISITES`) and at most
   **5** added in all, those added again included (`MAX_ADDED_PREREQUISITES`), as its records
   count them. When a condition fails, the escalation of before stays: the check's

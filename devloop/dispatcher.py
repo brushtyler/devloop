@@ -2123,12 +2123,14 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         not, up to ``MAX_DEPENDENCY_READS`` issues beyond ``numbers``; an issue of another
         repository blocks as its state says, without reading its own blocks.
 
-        Returns ``(edges, dropped, linked)``: ``dropped`` (#671) maps each issue read to its
+        Returns ``(edges, dropped, linked, complete)``: ``dropped`` (#671) maps each issue read to its
         trusted blocks closed for a reason other than COMPLETED (``dropped_block``), of this
         repository or another, as ``{(repo, number): reason}``. They are no edges: a dropped
         prerequisite is no cycle, nor is it explored. ``linked`` (#671) is the set of the open
         trusted blocks with an open PR that GitHub links to them as closing them, on any branch,
-        opened by a trusted user or by one of devloop's agents (as ``_devloop_pr`` trusts it)."""
+        opened by a trusted user or by one of devloop's agents (as ``_devloop_pr`` trusts it).
+        ``complete`` (#672) is False when the reading stopped at ``MAX_DEPENDENCY_READS`` with
+        issues still to explore: ``edges`` may then miss a cycle."""
         # The repository under its name or a former one (``repo_aliases``, #540).
         home = {name.lower() for name in (self.cfg.repo, *self.cfg.repo_aliases)}
         pr_authors = set(self.cfg.trusted_users) | (
@@ -2141,11 +2143,13 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         todo = [('', number) for number in dict.fromkeys(numbers)]
         seen, edges, dropped, linked = set(todo), {}, {}, set()
         budget = len(todo) + MAX_DEPENDENCY_READS
+        complete = True
         while todo:
             node = todo.pop(0)
             if budget <= 0:
                 self.log(f'  dependencies: more than {MAX_DEPENDENCY_READS} prerequisites to '
                          f'read, {issue_ref(node)} and the others are not explored')
+                complete = False
                 break
             budget -= 1
             read = self.gh.issue_dependencies(node[1])
@@ -2183,14 +2187,14 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                     todo.append(blocker)
             edges[node] = blockers
             dropped[node] = gone
-        return edges, dropped, linked
+        return edges, dropped, linked, complete
 
     def _dependency_view(self, numbers):
         """What planning needs about the dependencies of the ready issues ``numbers``, read now
         from GitHub (#277): for each, ``{blocked_by, blocks, cycle, dropped, prerequisites,
         linked}`` as ``Snapshot`` describes them. A dropped block (#671) is in ``blocked_by``
         too: everything that waits for a block waits for it."""
-        edges, dropped, linked = self._dependency_edges(numbers)
+        edges, dropped, linked, _ = self._dependency_edges(numbers)
         cycles = dependency_cycles(edges)
         ready = set(numbers)
         views = {}
@@ -2223,9 +2227,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         ``[]`` and why none is, in the project's language, when a condition fails: then the
         escalation of before stays.
 
-        Each must be an open issue of the repository, not a PR nor the issue itself, not
-        already among its "blocked by"; the blocks must close no dependency cycle
-        (``dependency_cycles`` on the trusted blocks read now, with the new ones); and the
+        Each must be an open issue of the repository, still there under its number (not one
+        transferred elsewhere, which GitHub still answers for), not a PR nor the issue itself,
+        not already among its "blocked by"; the blocks must close no dependency cycle
+        (``dependency_cycles`` on the trusted blocks read now, with the new ones), read in
+        full: beyond ``MAX_DEPENDENCY_READS`` a cycle cannot be ruled out; and the
         dispatcher's blocks of the issue stay within ``MAX_ACTIVE_PREREQUISITES`` open together
         and ``MAX_ADDED_PREREQUISITES`` added in all, those added again included, as its
         ``prerequisite`` records count them. The record is written first, then the blocks: a
@@ -2253,6 +2259,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                 target = self.gh.issue_target(n)
             except GitHubNotFound:
                 return [], t('prereq_missing', n=n)
+            if (target.get('number') != n
+                    or (target.get('repo') or '').lower() not in home):
+                return [], t('prereq_moved', n=n)
             if target.get('pull_request'):
                 return [], t('prereq_pr', n=n)
             if target.get('state') != 'OPEN' or not isinstance(target.get('id'), int):
@@ -2272,7 +2281,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             return [], t('prereq_active', max=MAX_ACTIVE_PREREQUISITES, active=active)
         if total + len(wanted) > MAX_ADDED_PREREQUISITES:
             return [], t('prereq_total', max=MAX_ADDED_PREREQUISITES, total=total)
-        edges = self._dependency_edges([number, *wanted])[0]
+        edges, _, _, complete = self._dependency_edges([number, *wanted])
+        if not complete:
+            return [], t('prereq_unexplored', max=MAX_DEPENDENCY_READS)
         edges[('', number)] = set(edges.get(('', number), ())) | {('', n) for n in wanted}
         cycle = dependency_cycles(edges).get(('', number))
         if cycle:

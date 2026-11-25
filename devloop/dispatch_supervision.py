@@ -153,6 +153,7 @@ TEXTS = Catalog(
         'prereq_self': '#{n} is this issue itself',
         'prereq_present': '#{n} is already among the "blocked by" of the issue',
         'prereq_missing': '#{n} does not exist in this repository',
+        'prereq_moved': '#{n} was transferred to another repository',
         'prereq_pr': '#{n} is a pull request, not an issue',
         'prereq_closed': '#{n} is not open',
         'prereq_active': ('the issue would have more than {max} "blocked by" of the dispatcher '
@@ -160,6 +161,8 @@ TEXTS = Catalog(
         'prereq_total': ('the dispatcher would add more than {max} "blocked by" to the issue in '
                          'all ({total} added so far)'),
         'prereq_cycle': 'the block would close a dependency cycle among {cycle}',
+        'prereq_unexplored': ('the dependencies are too many to rule out a cycle (more than '
+                              '{max} issues to read)'),
         'prereq_stopped': ('The prerequisite named by the implementer is not added as "blocked '
                            'by": {why}.'),
         'budget_grantable': ('The supervisor may extend the envelope of this story once, in turns '
@@ -524,6 +527,7 @@ TEXTS = Catalog(
         'prereq_self': '#{n} è questa stessa issue',
         'prereq_present': '#{n} è già fra i "blocked by" dell\'issue',
         'prereq_missing': '#{n} non esiste in questo repository',
+        'prereq_moved': '#{n} è stata trasferita in un altro repository',
         'prereq_pr': '#{n} è una pull request, non un\'issue',
         'prereq_closed': '#{n} non è aperta',
         'prereq_active': ('l\'issue avrebbe più di {max} "blocked by" del dispatcher aperti '
@@ -531,6 +535,8 @@ TEXTS = Catalog(
         'prereq_total': ('il dispatcher aggiungerebbe all\'issue più di {max} "blocked by" in '
                          'tutto ({total} aggiunti finora)'),
         'prereq_cycle': 'il blocco chiuderebbe un ciclo di dipendenze fra {cycle}',
+        'prereq_unexplored': ('le dipendenze sono troppe per escludere un ciclo (più di {max} '
+                              'issue da leggere)'),
         'prereq_stopped': ('Il prerequisito indicato dall\'implementer non è aggiunto come '
                            '"blocked by": {why}.'),
         'budget_grantable': ('Il supervisore può estendere una volta l\'envelope di questa '

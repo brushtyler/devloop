@@ -121,9 +121,10 @@ class Tracker(Protocol):
         since #671; see ``GitHub.issue_dependencies``)."""
 
     def issue_target(self, number):
-        """``{id, state, pull_request}`` of issue or PR ``number`` (#672): the id the "blocked
-        by" API takes, OPEN or CLOSED, and whether it is a PR. ``GitHubNotFound`` when it does
-        not exist."""
+        """``{id, repo, number, state, pull_request}`` of issue or PR ``number`` (#672): the id
+        the "blocked by" API takes, the repository and number it is in now (another for an
+        issue transferred elsewhere), OPEN or CLOSED, and whether it is a PR.
+        ``GitHubNotFound`` when it does not exist."""
 
     def labelers(self, number, label):
         """Logins of every ``labeled`` event of ``label`` on ``number``, oldest first."""

@@ -1,11 +1,15 @@
 """devloop: a missing prerequisite becomes a native "blocked by" of the dispatcher, or a
 ``prerequisite`` escalation to the supervisor, in place of an escalation to the operator (#672)."""
 
+import json
 import unittest
+from types import SimpleNamespace
 
 import test_devloop_supervision as sup
 from devloop import markdown, schema, supervision
-from devloop.dispatcher import (MAX_ACTIVE_PREREQUISITES, MAX_ADDED_PREREQUISITES, Dispatcher)
+from devloop.github import GitHub
+from devloop.dispatcher import (MAX_ACTIVE_PREREQUISITES, MAX_ADDED_PREREQUISITES,
+                                MAX_DEPENDENCY_READS, Dispatcher)
 from devloop.markdown import read_marker, render_prerequisite
 from devloop.planning import PREREQUISITES_CLOSED, plan, preflight_state
 from helpers.devloop_fakes import FakeIdentities, at
@@ -102,6 +106,15 @@ class BlockTests(unittest.TestCase):
             'already a block': ([5], {}, {2: [block(5, by='stranger')]}, '#5'),
             # #5 is blocked by #2 already: #2 blocked by #5 would close a cycle.
             'a cycle': ([5], {}, {5: [block(2)]}, '#2, #5'),
+            # GitHub follows the transfer of #5: the issue it answers with is elsewhere.
+            'transferred': ([5], {5: {'id': 900099, 'repo': 'example/other', 'number': 99}},
+                            {}, '#5'),
+            'another number': ([5], {5: {'number': 99}}, {}, '#5'),
+            # #10 -> #11 -> ... -> #70 -> #2: the way back is beyond the issues read, so a
+            # cycle cannot be ruled out.
+            'a cycle beyond the reads': (
+                [10], {}, {**{n: [block(n + 1)] for n in range(10, 70)}, 70: [block(2)]},
+                str(MAX_DEPENDENCY_READS)),
         }
         for name, (wanted, targets, blocks, text) in cases.items():
             with self.subTest(case=name):
@@ -138,6 +151,33 @@ class BlockTests(unittest.TestCase):
             self.gh.say(2, record(n), 'brushtyler')
         self.assertEqual(d._add_prerequisites(2, [15, 16], 'preflight')[0], [])
         self.assertEqual(d._add_prerequisites(2, [15], 'preflight'), ([15], ''))
+
+
+class IssueTargetTests(unittest.TestCase):
+    def target(self, raw):
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            return SimpleNamespace(returncode=0, stdout=json.dumps(raw) + '\n', stderr='')
+
+        found = GitHub('brushtyler/ssdlc', run=run).issue_target(5)
+        self.assertIn('repos/brushtyler/ssdlc/issues/5', calls[-1])
+        return found
+
+    def test_the_repository_and_number_it_is_in_now(self):
+        url = 'https://api.github.com/repos/{}'
+        self.assertEqual(
+            self.target({'id': 7, 'number': 5, 'repository_url': url.format('brushtyler/ssdlc'),
+                         'state': 'open', 'pull_request': False}),
+            {'id': 7, 'repo': 'brushtyler/ssdlc', 'number': 5, 'state': 'OPEN',
+             'pull_request': False})
+        # An issue transferred elsewhere: GitHub follows the transfer.
+        moved = self.target({'id': 900099, 'number': 99, 'state': 'open',
+                             'repository_url': url.format('example/other'),
+                             'pull_request': False})
+        self.assertEqual((moved['repo'], moved['number']), ('example/other', 99))
+        self.assertIsNone(self.target({'id': 7, 'number': 5, 'state': 'open'})['repo'])
 
 
 class PreflightGH(IssueGH):

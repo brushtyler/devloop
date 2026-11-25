@@ -62,7 +62,8 @@ the open PRs GitHub links to it as closing it (`closedByPullRequestsReferences`,
 added each block, read with GraphQL (one query, more only when the events of an open
 block, or of one closed for a reason other than completed, are older than the latest 100)
 ([Dependencies between issues](devloop/guide.md#dependencies-between-issues)). Since #672 it
-has `issue_target`, the REST id, the state and the kind (issue or PR) of an issue number, and
+has `issue_target`, the REST id, the repository and number it is in now (others for an issue
+transferred elsewhere), the state and the kind (issue or PR) of an issue number, and
 `add_blocked_by`, which adds a "blocked by" with the REST API of the issue dependencies: the
 dispatcher adds a missing prerequisite named by its number
 ([Missing prerequisites](devloop/guide.md#missing-prerequisites)).
