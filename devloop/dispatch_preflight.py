@@ -38,33 +38,38 @@ PREFLIGHT_CLASSES = ('operator_decision', PREFLIGHT_DEFAULT)
 # or does not say whether it does, queued by no trusted user (#595, ``_coordinator_gate``).
 # ``authorized_gap``: the same gap on any other issue not opened by a trusted user, such as the
 # supervisor's, with ``[roles.coordinator]`` (#607): the coordinator's authorization does not
-# queue it.
+# queue it. Both say that the operator admits it with ``agent:ready`` or with ``/devloop
+# approve`` (#644).
 GAP_TEXTS = Catalog(
     en={
         'trust_question': 'Do you approve the change to the trust policy described here?',
         'coordinator_gap': ('The issue was opened by the coordinator and the readiness check '
                             'declares the trust policy touched (`trust_policy` other than '
                             '`none`), but the latest `agent:ready` is not a trusted user\'s: '
-                            'only the operator queues it, by adding `agent:ready` again in '
-                            'person.'),
+                            'only the operator admits it, by adding `agent:ready` again in '
+                            'person or by approving the change on the issue with '
+                            '`/devloop approve`.'),
         'authorized_gap': ('The issue was not opened by a trusted user and the readiness check '
                            'declares the trust policy touched (`trust_policy` other than '
                            '`none`), but the latest `agent:ready` is not a trusted user\'s: even '
-                           'if the coordinator authorized it, only the operator queues it, by '
-                           'adding `agent:ready` again in person.'),
+                           'if the coordinator authorized it, only the operator admits it, by '
+                           'adding `agent:ready` again in person or by approving the change on '
+                           'the issue with `/devloop approve`.'),
     },
     it={
         'trust_question': 'Approvi la modifica della policy di fiducia descritta qui?',
         'coordinator_gap': ('L\'issue è stata aperta dal coordinatore e il controllo di '
                             'prontezza dichiara toccata la policy di fiducia (`trust_policy` '
                             'diverso da `none`), ma l\'ultimo `agent:ready` non è di un utente '
-                            'fidato: la mette in coda solo l\'operatore, rimettendo '
-                            '`agent:ready` di persona.'),
+                            'fidato: la ammette solo l\'operatore, rimettendo `agent:ready` di '
+                            'persona oppure approvando la modifica sull\'issue con '
+                            '`/devloop approve`.'),
         'authorized_gap': ('L\'issue non è stata aperta da un utente fidato e il controllo di '
                            'prontezza dichiara toccata la policy di fiducia (`trust_policy` '
                            'diverso da `none`), ma l\'ultimo `agent:ready` non è di un utente '
-                           'fidato: anche se il coordinatore l\'ha autorizzata, la mette in coda '
-                           'solo l\'operatore, rimettendo `agent:ready` di persona.'),
+                           'fidato: anche se il coordinatore l\'ha autorizzata, la ammette solo '
+                           'l\'operatore, rimettendo `agent:ready` di persona oppure approvando '
+                           'la modifica sull\'issue con `/devloop approve`.'),
     })
 
 
@@ -354,8 +359,9 @@ class PreflightMixin:
         if record is not None and record['ready']:
             # A positive check reused holds for the issue's labels now (#595): on a
             # coordinator's issue that touches the trust policy, the latest agent:ready must
-            # still be a trusted user's, or the outcome reads as failed (``preflight_block``).
-            record = self._coordinator_gate(history, record)
+            # still be a trusted user's, or the outcome reads as failed (``preflight_block``),
+            # unless the operator's ``/devloop approve`` admits it (#644).
+            record = self._coordinator_gate(history, record, comments)
         base = None
         if repository_bound(record):
             try:
@@ -541,11 +547,12 @@ class PreflightMixin:
         finally:
             self.ws.remove(name)
         outcome = self._coordinator_gate(history,
-                                         normalize_preflight(raw, language=self.cfg.language))
+                                         normalize_preflight(raw, language=self.cfg.language),
+                                         comments)
         self._publish_preflight(number, outcome, digest, agent.key, base=base,
                                 used=used, request=request, refused=refused)
 
-    def _coordinator_gate(self, history, outcome):
+    def _coordinator_gate(self, history, outcome, comments=()):
         """``outcome`` of a readiness check, not ready with a first gap of kind
         ``operator_decision`` (``coordinator_gap`` of ``GAP_TEXTS``, in the project's language)
         on an issue the coordinator opened
@@ -563,18 +570,51 @@ class PreflightMixin:
         With ``[roles.coordinator]`` the gate holds on every issue not opened by a trusted user
         (#607), such as the supervisor's: its authorization by the coordinator
         (``/devloop authorize``) does not queue a change of the trust policy, which stays the
-        operator's (``authorized_gap``)."""
+        operator's (``authorized_gap``).
+
+        The operator's ``/devloop approve`` admits it too (#644, ``_approved_admission``): with
+        ``trust_policy`` ``covered`` and a command of the issue's ``comments`` that counts
+        (``_issue_decisions``), the latest ``agent:ready`` of the coordinator or of the
+        supervisor queues it, as long as that label admits the issue now
+        (``_ready_admitters``) and, on an issue the coordinator did not open, an authorization
+        of the coordinator holds for the current text, whoever added the label (#607)."""
         author = history['author']
         if (self._coordinator_login() is None or author in self.cfg.trusted_users
                 or outcome.get('trust_policy') == 'none'):
             return outcome
         if ready_approval(history['labeled'], self.cfg.labels.ready, self.cfg.trusted_users):
             return outcome
+        if self._approved_admission(history, outcome, comments):
+            return outcome
         text = GAP_TEXTS.texts(self.cfg.language)(
             'coordinator_gap' if self._is_coordinator(author) else 'authorized_gap')
         gap = {'kind': 'operator_decision', 'description': text,
                'code_refs': [], 'proposed_default': '', 'repository_dependent': False}
         return dict(outcome, ready=False, gaps=[gap, *outcome['gaps']])
+
+    def _approved_admission(self, history, outcome, comments):
+        """Whether the operator's ``/devloop approve`` admits an issue that ``_coordinator_gate``
+        would hold (#644): the check declares ``trust_policy`` ``covered`` (a ``covered`` that
+        rests only on an ADR or on the body of the issue is not enough), at least one command of
+        ``comments`` counts as a decision of the operator (``_issue_decisions``, #483: a trusted
+        user in person, without the header, after the latest change of the text and not
+        changed after the takeover), and the latest ``agent:ready`` is the coordinator's or the
+        supervisor's and admits the issue now (``_ready_admitters``). On an issue the
+        coordinator did not open, such as the supervisor's, a ``/devloop authorize`` of the
+        coordinator must hold for the current text too (``_authorization``, #607), whoever added
+        that label. An approve is written by the operator in person and falls with any change of
+        the text: only the moment of the start is left to the roles."""
+        if outcome.get('trust_policy') != 'covered':
+            return False
+        comments = list(comments)
+        if not self._issue_decisions(comments, history):
+            return False
+        if (not self._is_coordinator(history['author'])
+                and self._authorization(history, comments) is None):
+            return False
+        roles = {self._coordinator_login(), self._supervisor_login()} - {None, ''}
+        admitters = self._ready_admitters(history, comments) & roles
+        return ready_approval(history['labeled'], self.cfg.labels.ready, admitters) is not None
 
     def _log_refused(self, number, refused):
         """Log the ``/devloop approve`` ``refused`` (#483), as ``(comment, reason)``."""

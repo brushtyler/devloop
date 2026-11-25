@@ -521,7 +521,23 @@ latest `agent:ready` is not a trusted user's, the check fails with a gap of kind
 admits it by adding `agent:ready` again in person: a new check runs, and the gap is gone. The
 rule holds for a passed check reused too: if the coordinator or the supervisor adds `agent:ready`
 again after the operator's, the passed check reads as failed with that gap, and the issue goes
-back to `agent:needs-operator` before the implementation. Without
+back to `agent:needs-operator` before the implementation.
+
+The operator's `/devloop approve` admits it too (#644), without the `agent:ready` in person, when
+all of these hold: the check declares `trust_policy: covered`; at least one `/devloop approve` on
+the issue counts by the rules of #483 ("Approval with `/devloop approve`" in
+[Changes to the trust policy](#changes-to-the-trust-policy): a trusted user in person, without
+the attribution header, after the latest change of the title or the body, not changed after the
+takeover); and the latest `agent:ready` is the coordinator's or the supervisor's, and on an issue
+the coordinator did not open, such as the supervisor's, an authorization of the coordinator
+(`/devloop authorize`) holds for the current text, whoever added the label (#607). The approve is
+the operator's own decision on the text of that moment, and falls with any change of it: only
+the moment of the start is left to the roles, which the operator can still stop
+(`/devloop hold`, or removing the label). A `covered` that rests only on an ADR or on the body
+of the issue, without a `/devloop approve`, stays as above: the admission is the operator's. An
+`uncovered` issue stays not ready, and point 3 of the rule and `operator_only_paths` stay the
+operator's at the merge. An approve written after the block changes the hash of the request, so
+the check runs again and admits the issue. Without
 a readiness check (`preflight` not set) nothing would say whether such an issue touches the trust
 policy, so on the coordinator's issues only the trusted users' labels count.
 
@@ -584,7 +600,10 @@ The rules:
   user opened declares the trust policy touched (`trust_policy` other than `none`, or not
   declared) and the latest `agent:ready` is not a trusted user's, the issue goes to
   `agent:needs-operator` even when authorized, as for the coordinator's issues above (#595); the
-  operator admits it by adding `agent:ready` again in person.
+  operator admits it by adding `agent:ready` again in person or, when the check declares
+  `trust_policy: covered`, by approving it with a `/devloop approve` that counts (#644): the
+  coordinator's or the supervisor's `agent:ready` then starts it, while this authorization holds
+  for the current text: without it the approve admits nothing, whoever added the label.
 
 The dispatcher reads the commands on the issues in `agent:needs-coordinator`, and on the ready
 issues whose latest `agent:ready` is the supervisor's; a command elsewhere is recorded once one of
