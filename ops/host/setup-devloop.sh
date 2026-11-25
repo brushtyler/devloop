@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Prepara l'host per devloop: pacchetti, utente dedicato, directory dei lock per repository,
 # clone, state_dir, overlay d'esempio, key_dir 700, impostazioni di Claude Code senza
-# aggiornamenti automatici, unità systemd. Con SOURCE_REPO anche il clone della sorgente
+# aggiornamenti automatici, unità systemd, il comando devloop dell'host con il file del progetto
+# (#588). Con SOURCE_REPO anche il clone della sorgente
 # dell'installazione e l'avviatore dal suo tag. Con PROJECT (ADR 0006, R8) prepara uno dei
 # progetti dell'host: l'unità template devloop@.service e la drop-in della sua istanza.
 # Idempotente: si può rieseguire, fa solo ciò che manca. Non scrive segreti e non avvia il
@@ -206,6 +207,20 @@ if [ "$unit_changed" = 1 ]; then
     run systemctl daemon-reload
 fi
 say "  il servizio non viene avviato né abilitato: lo fa l'operatore (ops/README.md)"
+
+step "Comando devloop: $DEVLOOP_COMMAND, progetto $OPS_INSTANCE (#588)"
+# L'involucro del launcher, comune ai progetti dell'host, e il file di questo progetto nella
+# directory di root da cui l'involucro li elenca: con lo stesso utente, clone, PATH e avviatore
+# dell'unità. Una directory che esiste già non si tocca: l'involucro e check-host.sh rifiutano
+# una directory che non è di root o che altri possono scrivere.
+if [ -d "$DEVLOOP_PROJECTS_DIR" ]; then
+    ok "$DEVLOOP_PROJECTS_DIR esiste"
+else
+    run install -d -m 755 -o root -g root "$DEVLOOP_PROJECTS_DIR"
+fi
+put_file "$DEVLOOP_PROJECT_FILE" 644 root "$(render "$OPS_DIR/host/devloop-command-project")" || true
+put_file "$DEVLOOP_COMMAND" 755 root "$(render "$OPS_DIR/host/devloop-command")" || true
+say "  per togliere il progetto dal comando devloop: rimuovere $DEVLOOP_PROJECT_FILE"
 
 step 'Chiavi delle GitHub App'
 # La chiave dell'implementer, con il default di DEVLOOP_KEYS, solo se l'overlay dichiara

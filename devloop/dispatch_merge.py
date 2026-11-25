@@ -34,7 +34,7 @@ from .ledger import collect as ledger_collect
 from .ledger import timestamp as ledger_timestamp
 from .markdown import (MAX_BODY, carries_record, dispatcher_header, publishable, read_marker,
                        split_markers, with_record)
-from .pin import ScanFailed, merge_known
+from .pin import HAND_PIN, ScanFailed, merge_known
 from .planning import MERGING, label_names, pending_reviewers, touched_by_base, waiver
 from .policy import describe as describe_receipt
 from .policy import (MAX_LISTED_PATHS, ZERO_LEVEL, another_model, changes_requested,
@@ -206,7 +206,8 @@ TEXTS = Catalog(
         # The alarm of a step on the host (``_comment_host_step``).
         'host_title': 'Step on the host to do before the pin',
         'host_held': ('devloop does not pin this commit nor the later ones automatically: the '
-                      'automatic pin resumes after a pin by hand (`devloop pin`) of a commit '
+                      'automatic pin resumes after a pin by hand (`devloop pin`, or `devloop '
+                      '--project <name> pin` on a host with several projects) of a commit '
                       'that contains the merge, to do after the step.'),
         'host_off': 'The automatic pin is off: the pin by hand is to do after the step.',
         'host_outside': ('PR #{pr} was merged outside devloop (merge `{merge}`{issue}) and '
@@ -472,7 +473,8 @@ TEXTS = Catalog(
         'recomputed': 'Ricevuta di policy ricalcolata per il merge:',
         'host_title': 'Passo sull\'host da fare prima del pin',
         'host_held': ('devloop non fa il pin automatico di questo commit né dei successivi: il '
-                      'pin automatico riprende dopo un pin a mano (`devloop pin`) di un commit '
+                      'pin automatico riprende dopo un pin a mano (`devloop pin`, o `devloop '
+                      '--project <nome> pin` su un host con più progetti) di un commit '
                       'che contiene il merge, da fare dopo il passo.'),
         'host_off': 'Il pin automatico è spento: il pin a mano va fatto dopo il passo.',
         'host_outside': ('La PR #{pr} è stata mergiata fuori da devloop (merge `{merge}`'
@@ -1390,7 +1392,7 @@ class MergeMixin:
         self.log(f'  merged {head[:12]} at level {current["level"]} in mode {mode}')
         if holding:
             self.log(f'  auto-pin held: #{pr.number} declares a step on the host; pin by hand '
-                     'after it')
+                     f'after it ({HAND_PIN})')
         elif self.pinner is not None and cfg.pin.auto and cfg.pin.touches(paths):
             # The next tick pins the base with this merge, before planning (#174).
             try:

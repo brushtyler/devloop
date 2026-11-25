@@ -229,8 +229,8 @@ from .markdown import (carries_record, dispatcher_header, publishable, read_mark
                        resume_text)
 from .activity import iso, restart_line
 from .outbox import SENT as PUBLISHED, describe as outbox_describe
-from .pin import (PREFIX, CheckFailed, PinError, PinHeld, Repinned, ScanFailed, SmokeError,
-                  held_prs, public_reason)
+from .pin import (HAND_PIN, PREFIX, CheckFailed, PinError, PinHeld, Repinned, ScanFailed,
+                  SmokeError, held_prs, public_reason)
 from .planning import (BASE_CHANGED, MERGE_LANE, MERGING, RESYNC_AFTER_APPROVAL,
                        RESYNC_CONFLICTS, PullRequest, Snapshot,
                        admit, changes_before_ci, ci_unknown, counted_rounds, issue_priority,
@@ -2347,7 +2347,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         releases the auto-pin. The request stays, and that pin clears it."""
         self.log(f'{"[dry-run] " if dry_run else ""}auto-pin of {ref} held: the step on the '
                  'host of ' + held_prs(steps) + ' waits for the operator, who pins by hand '
-                 'after it (devloop pin)')
+                 f'after it ({HAND_PIN})')
 
     def _alert_refused_pin(self, ref, exc):
         """The alert of a copy refused by the smoke test of an auto-pin (#260, ``SmokeError``)

@@ -1086,7 +1086,7 @@ def main(argv=None):
         steps = pin.held(state)  # #462: a step on the host holds the auto-pin
         if steps:
             log(f'auto-pin held: the step on the host of {pin.held_prs(steps)} waits for a pin '
-                'by hand (devloop pin)')
+                f'by hand ({pin.HAND_PIN})')
             for line in pin.describe_held(steps):  # #473: each hold with its step
                 log(line)
         for line in unavailability.describe(state):

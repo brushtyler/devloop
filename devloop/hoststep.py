@@ -18,15 +18,17 @@ TEXTS = Catalog(
         'unreadable': '(declaration not readable: see the PR)',
         'title': '### Step on the host',
         'intro': 'Before the pin of this code the operator must do, with the loop stopped:',
-        'hold': ('The merge of devloop suspends the auto-pin until a pin by hand (`devloop pin`) '
-                 'after the step.'),
+        'hold': ('The merge of devloop suspends the auto-pin until a pin by hand (`devloop pin`, '
+                 'or `devloop --project <name> pin` on a host with several projects) after the '
+                 'step.'),
     },
     it={
         'unreadable': '(dichiarazione non leggibile: vedere la PR)',
         'title': '### Passo sull\'host',
         'intro': 'Prima del pin di questo codice l\'operatore deve fare, a loop fermo:',
         'hold': ('Il merge di devloop sospende il pin automatico fino a un pin a mano '
-                 '(`devloop pin`) dopo il passo.'),
+                 '(`devloop pin`, o `devloop --project <nome> pin` su un host con più progetti) '
+                 'dopo il passo.'),
     })
 UNREADABLE = TEXTS.texts(ENGLISH)('unreadable')
 
