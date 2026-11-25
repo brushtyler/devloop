@@ -15,8 +15,9 @@ changed into lines ``HH:MM <type> #N <detail>`` (UTC):
 - comments of trusted users and of devloop's apps, those a trusted user wrote in person marked
   ``operator comment``, or ``operator reply`` (#676) when the first line after the attribution
   header is a ``/devloop`` command or the issue or PR has ``agent:needs-operator`` (at the
-  previous read or now): the coordinator's wake-up wakes on a reply, not on every note; ledger
-  records (#133) are left out;
+  previous read or now; read from GitHub for one outside the open listings, closed or beyond
+  their limit): the coordinator's wake-up wakes on a reply, not on every note; ledger records
+  (#133) are left out;
 - issues and PRs opened, closed or merged.
 
 Trust follows AGENTS.md. An issue or PR counts if its author is in ``trusted_users`` or is one of
@@ -698,6 +699,7 @@ class Watcher:
         floor = previous['floor']
         seen = set(previous['seen'])
         approvals = {}  # admissions of closed external issues read in this round
+        read = {}  # labels of the issues and PRs outside the listings read in this round
         lines = []
         for comment in comments:
             cid = comment['id']
@@ -711,11 +713,8 @@ class Watcher:
             kind = self._object_kind(number, old, prs, issues, closed, approvals)
             if kind is None:
                 continue  # an untrusted author's issue or PR, not admitted
-            labels = set()
-            for entry in (prs.get(number), issues.get(number), old['prs'].get(number),
-                          old['issues'].get(number)):
-                labels.update((entry or {}).get('labels') or ())
-            line = self._comment_line(kind, number, login, comment.get('body') or '', labels)
+            line = self._comment_line(kind, number, login, comment.get('body') or '',
+                                      lambda: self._labels_of(number, old, prs, issues, read))
             if line:
                 lines.append(line)
         kept = sorted(seen)
@@ -743,6 +742,24 @@ class Watcher:
             approvals[number] = bool(self._approved(number))
         return 'issue' if approvals[number] else None
 
+    def _labels_of(self, number, old, prs, issues, read):
+        """The labels of issue or PR ``number`` (#676): for one in the open listings, those of
+        the listing now and at the previous read; for one outside them (closed, beyond the
+        listing's limit) those GitHub gives now, read once per round (``read``) and never
+        remembered, since they change after the close too. One GitHub no longer has has none;
+        a failed read fails the round, so the next one asks again."""
+        entries = [entry for entry in (prs.get(number), issues.get(number),
+                                       old['prs'].get(number), old['issues'].get(number))
+                   if entry is not None]
+        if entries:
+            return {name for entry in entries for name in entry.get('labels') or ()}
+        if number not in read:
+            try:
+                read[number] = set(self.gh.issue_labels(int(number)))
+            except GitHubNotFound:
+                read[number] = set()  # deleted or transferred
+        return read[number]
+
     def _resolve(self, number):
         """``PR`` or ``issue`` for issue or PR ``number`` of a trusted author, ``EXTERNAL`` for
         an issue of an untrusted author (its admission is read apart), None for an untrusted
@@ -756,7 +773,9 @@ class Watcher:
             return kind
         return EXTERNAL if kind == 'issue' else None
 
-    def _comment_line(self, kind, number, login, body, labels=()):
+    def _comment_line(self, kind, number, login, body, labels=set):
+        """``labels`` gives the labels of the issue or PR: it is called only for a comment of
+        the operator in person that is no command, since it can read them from GitHub."""
         if (read_marker(body, 'ledger') is not None
                 or first_line(body).startswith(LEDGER_TITLES)):
             return None  # the ledger (#133): recorded on GitHub, too frequent to report
@@ -772,7 +791,7 @@ class Watcher:
         # A reply of the operator (#676): a ``/devloop`` command, read as the dispatcher reads
         # commands (``command_line``), or any comment on an issue or PR handed to the operator.
         if operator and (command_line(body).split()[:1] == ['/devloop']
-                         or self.trust.operator_labels & set(labels)):
+                         or self.trust.operator_labels & set(labels())):
             what = 'operator reply'
         return f'{kind} #{number} {what} by {login}: {clean(first_line(body), TEXT_LEN)}'
 

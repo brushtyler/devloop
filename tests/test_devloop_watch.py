@@ -50,6 +50,7 @@ class FakeGitHub:
         # The text of each issue and its history (#623), as ``issue_history`` reads it, and the
         # comments of each issue as ``issue_comments`` does.
         self.histories, self.threads = {}, {}
+        self.closed_labels = {}
         self.failing = False
         self.calls = []
         self.on_call = None  # run with the name of each read, e.g. to move the clock
@@ -109,6 +110,13 @@ class FakeGitHub:
             raise GitHubNotFound('gh api repos/o/r/issues: Not Found (HTTP 404)')
         login, is_pr = self.authors[number]
         return {'login': login, 'pull_request': is_pr}
+
+    def issue_labels(self, number):
+        # The labels of an issue or PR outside the listings (#676), from ``closed_labels``.
+        self._call('issue_labels')
+        if number not in self.closed_labels and number not in self.authors:
+            raise GitHubNotFound('gh api repos/o/r/issues: Not Found (HTTP 404)')
+        return list(self.closed_labels.get(number, ()))
 
     def issue_history(self, number):
         self._call('issue_history')
@@ -554,6 +562,65 @@ class ChangesTest(unittest.TestCase):
                                        'issue #7 operator reply by brushtyler: done'])
         gh.comment(310, 7, OPERATOR, 'thanks')
         self.assertEqual(self.news(), ['issue #7 operator comment by brushtyler: thanks'])
+        # The labels of the objects in the listings come from them: none is read apart.
+        self.assertNotIn('issue_labels', self.h.gh.calls)
+
+    def test_an_operator_reply_on_an_issue_or_pr_outside_the_listings(self):
+        # #676: closed for a round or more, or never in the listings read (closed before the
+        # baseline, beyond their limit), the issue or PR has its labels read from GitHub.
+        gh = self.h.gh
+        gh.add_issue(7, labels=('agent:needs-operator',))
+        gh.add_pr(11, labels=('agent:needs-operator',))
+        self.news()
+        del gh.issues[7], gh.prs[11]
+        gh.states[7] = {'state': 'CLOSED', 'stateReason': 'NOT_PLANNED'}
+        gh.states[11] = {'state': 'CLOSED'}
+        self.assertEqual(self.news(), ['PR #11 closed: PR 11',
+                                       'issue #7 closed (not_planned): issue 7'])
+        gh.closed_labels.update({7: ['agent:needs-operator'], 11: ['agent:needs-operator']})
+        gh.authors.update({7: (OPERATOR, False), 11: (CLAUDE, True),
+                           40: (OPERATOR, False), 43: (CODEX, True)})
+        gh.closed_labels.update({40: ['agent:needs-operator'], 43: ['agent:review']})
+        gh.comment(401, 7, OPERATOR, 'Yes, go ahead and reopen it')
+        gh.comment(402, 11, OPERATOR, 'ok, merge it')
+        gh.comment(403, 40, OPERATOR, 'reopening later')
+        gh.comment(404, 43, OPERATOR, 'why closed?')
+        gh.comment(405, 7, OPERATOR, 'and the docs too')
+        self.assertEqual(self.news(), [
+            'issue #7 operator reply by brushtyler: Yes, go ahead and reopen it',
+            'PR #11 operator reply by brushtyler: ok, merge it',
+            'issue #40 operator reply by brushtyler: reopening later',
+            'PR #43 operator comment by brushtyler: why closed?',
+            'issue #7 operator reply by brushtyler: and the docs too'])
+        self.assertEqual(gh.calls.count('issue_labels'), 4)  # once per object and round
+        # Never remembered: the label removed after the close counts at the next comment.
+        gh.closed_labels[7] = []
+        gh.comment(406, 7, OPERATOR, 'thanks')
+        self.assertEqual(self.news(), ['issue #7 operator comment by brushtyler: thanks'])
+        self.assertEqual(json.loads(self.h.path.read_text())['closed'],
+                         {'7': 'issue', '11': 'PR', '40': 'issue', '43': 'PR'})
+        # A command, or a comment of an app, needs no labels: none is read.
+        calls = gh.calls.count('issue_labels')
+        gh.comment(407, 7, OPERATOR, '/devloop retry')
+        gh.comment(408, 40, CLAUDE, 'note')
+        self.assertEqual(self.news(), ['issue #7 operator reply by brushtyler: /devloop retry',
+                                       'issue #40 comment by dl-claude[bot]: note'])
+        self.assertEqual(gh.calls.count('issue_labels'), calls)
+        # A failed read fails the round: the next one asks again and reports the reply.
+        gh.comment(409, 40, OPERATOR, 'done')
+        gh.closed_labels[40] = GitHubError('gh api: HTTP 502')
+        real = gh.issue_labels
+
+        def failing(number):
+            value = gh.closed_labels.get(number)
+            if isinstance(value, Exception):
+                gh.closed_labels[number] = ['agent:needs-operator']
+                raise value
+            return real(number)
+
+        gh.issue_labels = failing
+        self.assertEqual(self.news(), [])
+        self.assertEqual(self.news(), ['issue #40 operator reply by brushtyler: done'])
 
     def test_devloop_review_from_its_record_and_trusted_native_reviews(self):
         gh = self.h.gh
@@ -1637,6 +1704,8 @@ class GitHubReadsTest(unittest.TestCase):
         self.assertIn('number,title,author,labels', calls[-1])
         gh.issue_author(3)
         self.assertEqual(calls[-1][1:3], ['api', 'repos/o/r/issues/3'])
+        gh.issue_labels(3)  # #676: the labels of one outside the listings
+        self.assertEqual(calls[-1][1:], ['api', 'repos/o/r/issues/3', '--jq', '[.labels[].name]'])
 
     def test_the_workflow_runs_of_a_head(self):
         # #615: a re-run of failed jobs makes its workflow run queued again.
