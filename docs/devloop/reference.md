@@ -2066,9 +2066,13 @@ the app, the local `gh` login.
 ### The supervisor app
 
 The supervisor has a role app of its own (ADR 0005, P5-4, #408): `brushtyler-devloop-supervisor`,
-created by the operator with `Issues: Read and write`, `Pull requests: Read and write` and
-`Metadata: Read-only`, and **no** `Contents`, because the supervisor neither implements nor
-merges. It signs the supervisor's commands on escalations, its labels (`agent:ready`, priorities,
+created by the operator from the manifest `ops/github/apps/supervisor.json` with `Issues: Read and
+write`, `Pull requests: Read and write`, `Metadata: Read-only` and, read-only since #643, when the
+supervisor reads GitHub with this app, `Actions`, `Checks` and `Commit statuses`, and **no**
+`Contents`, because the supervisor neither implements nor merges. The manifest is the reference:
+an app created by hand before the manifests may hold permissions it does not list, which anyone
+with the key could ask for by minting a token without `scripts/supervisor-token.py`, so the
+operator removes them ([ops/README.md](../../ops/README.md#2-github-app), #655). It signs the supervisor's commands on escalations, its labels (`agent:ready`, priorities,
 dependencies), its issues, the diary and its `/devloop fix` and `/devloop hold` requests, whatever
 agent runs the supervisor. The local overlay of the project declares it:
 
