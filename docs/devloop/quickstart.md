@@ -331,7 +331,11 @@ slug = "acme-widget-devloop-supervisor"
 - `repo`, `state_dir`, `source` and `repo_lock_dir` are those the setup script reminds; without
   `repo` and `trusted_users` devloop does not start.
 - `[merge] mode` is left at `"off"`: devloop merges nothing, and every ready PR is the
-  operator's ([Merge modes](guide.md#merge-modes)). Other keys of the operator, such as
+  operator's ([Merge modes](guide.md#merge-modes)). Moving it later to `"strict"` or `"auto"`
+  leaves the PRs already ready to the operator until the operator removes their
+  `agent:needs-operator`
+  ([Ready PRs whose merge is the operator's](guide.md#ready-prs-whose-merge-is-the-operators)).
+  Other keys of the operator, such as
   `[run] alert_issue`, are in [Starting and stopping the loop](guide.md#starting-and-stopping-the-loop).
 
 ## 5. Agent user and CLI logins
