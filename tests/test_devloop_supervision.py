@@ -58,6 +58,15 @@ class SupGH(SnapshotGH):
 
     issue_comments = pr_comments
 
+    def comments_since(self, since):
+        """Every comment of every thread, whatever ``since`` (kept in ``since_reads``), as the
+        REST read reports them (#656)."""
+        self.since_reads = [*getattr(self, 'since_reads', []), since]
+        prs = {raw['number'] for raw in self.open_prs()}
+        return [{'id': c['id'], 'login': c['author']['login'], 'body': c['body'],
+                 'number': number, 'pull_request': number in prs}
+                for number, thread in self.threads.items() for c in thread]
+
     def open_prs(self):
         return super().open_prs() if self.has_pr else []
 
@@ -67,7 +76,8 @@ class SupGH(SnapshotGH):
 
     def issue(self, number):
         return dict(super().issue(number),
-                    labels=[{'name': n} for n in sorted(self.labels.get(number, ()))])
+                    labels=[{'name': n} for n in sorted(self.labels.get(number, ()))],
+                    state='CLOSED' if number in getattr(self, 'closed', ()) else 'OPEN')
 
     def issue_history(self, number):
         return dict(super().issue_history(number), author=self.author)

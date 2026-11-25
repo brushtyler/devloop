@@ -285,12 +285,13 @@ class GitHub:
 
     def comments_since(self, since):
         """Conversation comments of every issue and PR created or edited at ``since`` (ISO 8601,
-        UTC) or later, as ``{id, login, number, body}``. Read with REST, so an app's login is
-        ``<slug>[bot]``."""
+        UTC) or later, as ``{id, login, number, body, pull_request}``, ``pull_request`` True
+        for a comment of a PR (#656). Read with REST, so an app's login is ``<slug>[bot]``."""
         return self._json_lines('api', '--paginate',
                                 f'repos/{self.repo}/issues/comments?since={since}&per_page=100',
                                 '--jq', '.[] | {id, login: .user.login, body, '
-                                        'number: (.issue_url | split("/") | last | tonumber)}')
+                                        'number: (.issue_url | split("/") | last | tonumber), '
+                                        'pull_request: (.html_url | test("/pull/"))}')
 
     def dated_comments(self, since=None, number=None):
         """Conversation comments with their creation time (#256), oldest first, as ``{id,

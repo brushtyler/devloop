@@ -323,6 +323,10 @@ the mailbox.
   - You may authorize with the same command your issues and those of trusted users. A command of
     any other identity is refused, and so is one on the issue of an untrusted author: such an
     issue starts only with a trusted user's `agent:ready`.
+  - An issue does not need `agent:needs-coordinator` for your command to be recorded (#656): on
+    an issue you open and authorize at once, without labels, the dispatcher records it at its
+    next tick, and the supervisor queues the issue once the record is there. Do not add the label
+    only for that: it is the supervisor's request to you.
   - Your own `agent:ready` needs no authorization: use it only as the reserve of "Stalled work in
     the queue".
   - An issue of the supervisor with neither the label nor an authorization, found at the

@@ -60,9 +60,11 @@ Where a method went, when it was not obvious:
   ``ensure_labels`` renames ``agent:needs-operator`` from its old name, and ``devloop status``
   reports when both names exist.
 - ``GitHub.last_labeler`` is not in any port: the dispatcher no longer calls it.
-- ``GitHub.open_issues``, ``comments_since``, ``issue_state``, ``issue_author`` and
-  ``workflow_runs`` (#615) are not in any port: only the ``watch`` command
-  (``devloop/watch.py``) calls them, not the dispatcher.
+- ``comments_since`` (#656) is in ``Tracker``: with ``[roles.coordinator]`` the dispatcher reads
+  the comments written since its previous snapshot, to find the coordinator's ``/devloop
+  authorize`` on an issue whatever its labels. The ``watch`` command calls it too.
+- ``GitHub.open_issues``, ``issue_state``, ``issue_author`` and ``workflow_runs`` (#615) are not
+  in any port: only the ``watch`` command (``devloop/watch.py``) calls them, not the dispatcher.
 - ``GitHub.dated_comments``, ``search_prs`` and ``edit_issue_body`` are not in any port either:
   only the daily summary (``devloop/report.py``, #256) calls them, with ``issue_history``.
 """
@@ -96,6 +98,11 @@ class Tracker(Protocol):
 
     def pr_comments(self, number):
         """The conversation comments of a pull request, as :meth:`issue_comments`."""
+
+    def comments_since(self, since):
+        """The conversation comments of every issue and pull request created or edited at
+        ``since`` (ISO 8601, UTC) or later, as ``{id, login, number, body, pull_request}``, the
+        login in REST form (#656)."""
 
     def issue_dependencies(self, number):
         """The issues that block issue ``number`` and who added each block (#277): ``{author,

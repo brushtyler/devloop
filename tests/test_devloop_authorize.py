@@ -17,6 +17,7 @@ Without ``[roles.coordinator]`` nothing changes: the supervisor's labels count a
 
 import dataclasses
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 import test_devloop_preflight_recheck as recheck_tests
@@ -24,6 +25,7 @@ from devloop import authorization, markdown, supervision
 from devloop.dispatch_base import BaseBroken
 from devloop.dispatch_preflight import GAP_TEXTS
 from devloop.dispatcher import Dispatcher
+from devloop.github import GitHubError
 from devloop.planning import Snapshot, plan
 from test_devloop import implemented
 from test_devloop_coordinator import COORDINATOR, coordinated, declared, header
@@ -386,6 +388,109 @@ class AuthorizeTests(Case):
         self.assertEqual([(a.kind, a.number) for a in actions],
                          [('authorize', 7), ('authorize', 8)])
         self.assertEqual(plan(Snapshot([], [], [], authorizations=[7]), cfg, busy={7}), [])
+
+
+class UnlabelledTests(Case):
+    """#656: the coordinator's command is recorded on an open issue whatever its labels, found
+    among the comments written since the previous snapshot."""
+
+    def make(self, cfg=CFG, author=COORDINATOR):
+        d = super().make(cfg)
+        self.gh.author = author
+        self.gh.labels[7] = set()
+        return d
+
+    def test_the_coordinators_issue_without_labels_is_authorized_then_queued(self):
+        d = self.make()
+        record = self.authorize(d, 'priority:high')
+        self.assertEqual((record['outcome'], record['by'], record['priority']),
+                         ('authorized', COORDINATOR, 'high'))
+        self.assertEqual(record['hash'], authorization.text_hash('Issue 7', 'Do the thing.'))
+        self.assertIn('Lavoro autorizzato dal coordinatore', self.gh.threads[7][-1]['body'])
+        self.assertEqual(self.gh.labels[7], set())
+        # Recorded once: the next ticks plan nothing, until the supervisor queues it.
+        self.assertEqual(self.planned(d), [])
+        self.gh.ready()
+        self.assertEqual(self.planned(d), [('preflight', 7)])
+        self.assertTrue(self.check(d)['ready'])
+        self.assertEqual(self.planned(d), [('implement', 7)])
+        self.assertEqual(len(self.records()), 1)
+        self.assertEqual(self.ignored(), [])
+
+    def test_a_trusted_users_issue_without_labels_is_authorized(self):
+        d = self.make(author='brushtyler')
+        self.assertEqual(self.authorize(d)['outcome'], 'authorized')
+        self.gh.ready()
+        self.assertEqual(self.planned(d), [('preflight', 7)])
+
+    def test_the_refusals_stay(self):
+        # An issue of an untrusted author.
+        d = self.make(author='stranger')
+        record = self.authorize(d)
+        self.assertEqual(record['outcome'], 'refused')
+        self.assertIn('utente fidato', record['reason'])
+        # A text changed after the command.
+        d = self.make()
+        self.gh.say(7, COORDINATOR, header() + '\n/devloop authorize')
+        self.gh.edit('Do another thing.')
+        self.assertEqual(self.ticked(d), [('authorize', 7)])
+        record = self.records()[-1]
+        self.assertEqual(record['outcome'], 'refused')
+        self.assertIn('cambiati dopo il comando', record['reason'])
+        self.gh.ready()
+        self.assertEqual(self.planned(d), [])
+        # Another identity: only the coordinator's command is looked for on such an issue, and
+        # once it is, the other one is refused there as anywhere else.
+        d = self.make()
+        self.gh.say(7, SUPERVISOR_LOGIN, header() + '\n/devloop authorize')
+        self.assertEqual(self.planned(d), [])
+        self.gh.say(7, COORDINATOR, header() + '\n/devloop authorize')
+        self.assertEqual(self.ticked(d), [('authorize', 7)])
+        self.assertEqual([(r['by'], r['outcome']) for r in self.records()],
+                         [(SUPERVISOR_LOGIN, 'refused'), (COORDINATOR, 'authorized')])
+
+    def test_pull_requests_closed_issues_and_records_are_skipped(self):
+        d = self.make()
+        self.gh.say(7, COORDINATOR, header() + '\n/devloop authorize')
+        reads = self.gh.comments_since
+        self.gh.comments_since = lambda since: [dict(c, pull_request=True) for c in reads(since)]
+        self.assertEqual(self.planned(d), [])
+        self.gh.comments_since = reads
+        self.gh.closed = [7]
+        self.assertEqual(self.planned(d), [])
+        self.gh.closed = []
+        self.assertEqual(self.ticked(d), [('authorize', 7)])
+        # The record quotes no command: nothing more to record.
+        self.assertEqual(self.planned(d), [])
+
+    def test_only_the_comments_since_the_previous_snapshot_are_read(self):
+        start = datetime(2026, 11, 25, 12, 0, tzinfo=timezone.utc).timestamp()
+        now = [start]
+        d = self.make()
+        d.clock = lambda: now[0]
+        d.snapshot()
+        now[0] += 60
+        d.snapshot()
+        # The first from a day before, the next from the previous one, five minutes earlier.
+        self.assertEqual(self.gh.since_reads, ['2026-11-24T12:00:00Z', '2026-11-25T11:55:00Z'])
+        # A failed read is read again from the same time.
+        reads = self.gh.comments_since
+
+        def fails(since):
+            raise GitHubError('HTTP 502')
+        self.gh.comments_since = fails
+        now[0] += 60
+        with self.assertRaises(GitHubError):
+            d.snapshot()
+        self.gh.comments_since = reads
+        d.snapshot()
+        self.assertEqual(self.gh.since_reads[-1], '2026-11-25T11:56:00Z')
+
+    def test_without_the_coordinator_no_comment_is_read(self):
+        d = self.make(recheck_tests.CFG)
+        self.gh.say(7, COORDINATOR, header() + '\n/devloop authorize')
+        self.assertEqual(self.planned(d), [])
+        self.assertFalse(hasattr(self.gh, 'since_reads'))
 
 
 class LabelTests(unittest.TestCase):

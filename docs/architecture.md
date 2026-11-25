@@ -47,7 +47,7 @@ The dispatcher reaches GitHub through three ports, declared in `devloop/ports.py
 
 | Port | Methods |
 |---|---|
-| `Tracker` | issues and their history, comments of issues and PRs, labels: `issues_with_label`, `issue`, `issue_history`, `issue_comments`, `pr_comments`, `labelers`, `label_events`, `labeled_events`, `edit_labels`, `comment`, `close_issue`, `edit_comment`, `ensure_label`, `repo_labels`, `rename_label` |
+| `Tracker` | issues and their history, comments of issues and PRs, labels: `issues_with_label`, `issue`, `issue_history`, `issue_comments`, `pr_comments`, `comments_since`, `labelers`, `label_events`, `labeled_events`, `edit_labels`, `comment`, `close_issue`, `edit_comment`, `ensure_label`, `repo_labels`, `rename_label` |
 | `CodeReview` | PRs and reviews: `open_prs`, `merged_prs`, `find_pr` (#362), `commit_prs` (#473), `branch_prs` (#384), `merge_state` (`clean`, `conflict` or `unknown`), `pr_head`, `pr_state`, `merge_pr`, `pr_reviews`, `create_pr`, `submit_review` |
 | `CI` | checks of a commit: `checks` (summarized by `summarize_checks`), `check_details`, `check_runs`, `failed_log`, `job_log` (#300), `rerun_failed_jobs` (#200) |
 
@@ -60,6 +60,12 @@ system's `/tmp`, where the cache of the logs (`gh-cli-cache`) may belong to anot
 issue, with the state of each blocking issue and who added each block, read with GraphQL (one
 query, more only when the events of an open block are older than the latest 100)
 ([Dependencies between issues](devloop/guide.md#dependencies-between-issues)).
+
+`Tracker.comments_since` (#656) reads the comments of every issue and PR written or edited since a
+time, each with whether it belongs to a PR: with `[roles.coordinator]` the dispatcher reads those
+written since its previous snapshot, to find the coordinator's `/devloop authorize` on an issue
+whatever its labels
+([Authorization by the coordinator](devloop/guide.md#authorization-by-the-coordinator)).
 
 `CodeReview.find_pr` (#362) reads a PR in any state, or None when the number is an issue: the
 dispatcher uses it for a legacy turn imported from `ledger-open-turns.json` whose PR is not among
