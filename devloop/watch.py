@@ -22,10 +22,12 @@ and nothing after it, except an issue that the dispatcher admits (#623): its lat
 ``agent:ready``, still there or replaced since, comes from one of the dispatcher's admitters for
 its author (``Trust.ready_admitters``), a trusted user's always, the supervisor's only with an
 authorization of the coordinator that holds for the current text when the dispatcher asks for one
-(#607). While so its labels, closure and trusted comments are reported, never its title. An issue
-of the coordinator's app is one of these: the app stays outside the trusted authors. Labels,
-heads, CI and closures of trusted objects are reported whoever changed them; comments and
-reviews only when their author is trusted or one of devloop's apps. A trusted comment on an
+(#607). While so its labels, closure and trusted comments are reported, never its title. With
+``[roles.coordinator]`` the coordinator's app is one of devloop's apps for its issues, PRs and
+comments (#648): they are reported as the agents' are, its ``/devloop`` commands included; it
+still writes no record of devloop's. Labels, heads, CI and closures of trusted objects are
+reported whoever changed them; comments and reviews only when their author is trusted or one of
+devloop's apps. A trusted comment on an
 issue or PR outside the open listings (closed before the baseline) is reported too: its author
 is read once; on an external issue the latest ``agent:ready`` is read again in each round
 with a new trusted comment on it, since the admission can change while the issue stays closed.
@@ -125,19 +127,22 @@ def failure_class(exc):
 class Trust:
     """Who counts for the watcher: ``users`` (``trusted_users``) and ``writers``, the app login
     of each actor that has one (agents and the dispatcher). The ``merger`` app (#201) only
-    merges: it is never a writer, so its comments and records are not trusted.
+    merges: it is never a writer, so its comments and records are not trusted. ``apps``, the
+    logins whose issues, PRs and comments are trusted as devloop's: the writers' and the
+    ``coordinator``'s (#648), which writes no record of devloop's, so it is never a writer.
 
     Who admits an issue as the dispatcher does (#623, ``ready_admitters``): ``supervisor`` and
     ``coordinator``, the logins of their identities (None without one), ``devloop``, the logins
     of devloop's apps whose issues count as devloop's (``Dispatcher._devloop_logins``), and
     ``preflight``, whether a readiness check is configured. They decide only which issues of
-    authors outside the trusted ones are followed: the coordinator is never trusted here."""
+    authors outside the trusted ones are followed."""
 
     def __init__(self, users, writers, ready_label, *, supervisor=None, coordinator=None,
                  devloop=(), preflight=False):
         self.users = frozenset(users)
         self.writers = {actor: login for actor, login in dict(writers).items() if actor != MERGER}
-        self.apps = frozenset(self.writers.values())
+        self.apps = frozenset(self.writers.values()) | ({coordinator} if coordinator
+                                                       else frozenset())
         self.ready_label = ready_label
         self.supervisor = supervisor
         self.coordinator = coordinator
@@ -153,8 +158,9 @@ class Trust:
         declares it, nor the coordinator's (#528), which writes no record of devloop's. Each
         agent key writes with the app it declares (``Config.app_of``). The identities of the
         supervisor and of the coordinator, for ``ready_admitters``, as the dispatcher derives
-        them (``Dispatcher._supervisor_login``, ``_coordinator_login``). Only slugs are needed:
-        no private key is read."""
+        them (``Dispatcher._supervisor_login``, ``_coordinator_login``): with
+        ``[roles.coordinator]`` the coordinator's is a trusted author too (#648). Only slugs are
+        needed: no private key is read."""
         identities = Identities(cfg.repo, {actor: AppAuth(app.app_id, app.slug, None, cfg.repo)
                                            for actor, app in cfg.apps.items()
                                            if actor not in (MERGER, COORDINATOR) and (
