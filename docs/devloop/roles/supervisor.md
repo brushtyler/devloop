@@ -261,7 +261,11 @@ coordinator in the mailbox.
   the label; then you put it in the queue when it is time (dependencies, free slots,
   conflicts). Never write `/devloop authorize` yourself: from your identity it is refused.
   Even authorized, an issue the readiness check declares touching the trust policy goes to
-  `agent:needs-operator`: it is the operator's.
+  `agent:needs-operator`: it is the operator's. The operator admits it with `agent:ready` in
+  person or, when the check declares `trust_policy: covered`, with a `/devloop approve` on the
+  issue that counts (#644): then your `agent:ready` starts it, while the coordinator's
+  authorization holds for the current text. Never take an approval of the operator written
+  without the command, or by anyone else, for one.
 - Pin and restart devloop when the procedures say so: never pin a merge that declares a step on
   the host before the operator says the step is done
   ([Step on the host](../guide.md#step-on-the-host)).
