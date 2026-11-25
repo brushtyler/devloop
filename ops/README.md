@@ -389,6 +389,28 @@ proprietario del repository (`GITHUB_OWNER_TYPE=org` per un'organizzazione). Per
    sua chiave sta nella `key_dir` di `devloop` (passo 4), che la legge quando una chiave
    `<agent>-implementer` di `[agents]` la dichiara.
 
+**I permessi di un'app che esiste già** (#655): il manifest fa fede. Un'app creata a mano prima
+dei manifest (#402), o da una loro versione più vecchia, può avere permessi che devloop e gli
+script non usano; chi ha la sua chiave può però coniare un token con tutti i permessi
+dell'installazione, senza passare da devloop né da `scripts/supervisor-token.py` o
+`scripts/coordinator-token.py`: i limiti degli script non bastano, conta quello che l'app
+possiede. Per ogni app dell'insieme creata così (coordinatore, implementer, merger, dispatcher,
+app degli agent, supervisore) si confrontano i permessi con `default_permissions` del suo
+manifest in `ops/github/apps/`:
+
+- **dove leggerli**: nelle impostazioni dell'app su GitHub (*Permissions & events* →
+  *Repository permissions*, e nessun permesso di account o di organizzazione). Per le app di cui
+  devloop legge la chiave (`dispatcher`, `merger`, le app degli agent, `implementer`) anche
+  `python3 -m devloop apps`, che `check-host.sh` esegue, stampa i permessi dell'installazione;
+  per `supervisor` e `coordinator`, di cui devloop non legge la chiave, valgono solo le
+  impostazioni dell'app;
+- **un permesso in più** (che il manifest non ha, o in scrittura dove il manifest lo vuole in
+  lettura) si toglie (*No access*) o si abbassa lì, poi *Save changes*: togliere o ridurre un
+  permesso non chiede di riaccettare l'installazione;
+- **un permesso che manca** si aggiunge allo stesso modo, ma va poi accettato nell'installazione
+  del proprietario (*Install App* → l'installazione → *Review request*): finché non è accettato,
+  un token che lo chiede fallisce.
+
 Se una regola del branch principale limita chi può fare push o merge, aggiungere `merger` fra gli
 ammessi.
 
