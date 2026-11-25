@@ -2335,10 +2335,13 @@ class SupervisionMixin:
             self.ledger.event(issue, 'delegation_grant', delegation='merge_budget', by=by,
                               comment=ident, value=n, day=day, cap=cap)
 
-    def _apply_retry(self, number, is_pr, comments, escalation, remove, trace, limit):
+    def _apply_retry(self, number, is_pr, comments, escalation, remove, trace, limit,
+                     cls=None):
         """Run again the step of ``escalation`` on issue or PR ``number`` (#182), its input
         already checked, removing the labels ``remove``: a PR goes back to the label of its
-        step, an issue's step runs now. An issue blocked by an open issue (#277), read again
+        step, an issue's step runs now. ``cls``: the class the retries are counted by, the
+        escalation's by default; on a supervisor's escalation handed to the operator, the class
+        it was handed from (#672), whose unbound fields do not tell two inputs apart. An issue blocked by an open issue (#277), read again
         now, does not run its step: the command waits, with no record and no attempt spent,
         until the last block closes. After ``MAX_RETRIES`` applied retries for the same key,
         the supervisor's and the operator's together (``retries_done``), ``limit(done)`` runs
@@ -2358,7 +2361,7 @@ class SupervisionMixin:
         done = retries_done(key, [r.get('key') for _, r in
                                   self._dispatcher_records(comments, 'supervision')
                                   if r['command'] == RETRY and r['outcome'] == 'applied'],
-                            escalation.get('class'))
+                            cls or escalation.get('class'))
         if done >= MAX_RETRIES:
             return limit(done)
         trace('applied', self._texts()('retry_applied', step=step, attempt=done + 1,
@@ -2536,8 +2539,12 @@ class SupervisionMixin:
         if merged:
             return refuse(t('merged_why', merged=', '.join(f'#{m["number"]}' for m in merged)),
                           t('merged_resume'))
-        # As for the supervisor, the base of an implementation does not bind its retry (#475).
-        changed = changed_input(self._current_key(number, key, target if is_pr else None), key)
+        # As for the supervisor, the base of an implementation does not bind its retry (#475),
+        # nor the base of a step that waited for a prerequisite (#672), also on a supervisor's
+        # escalation of it handed to the operator: the class it was handed from counts.
+        cls = anchor.get('origin') or record.get('class')
+        changed = changed_input(self._current_key(number, key, target if is_pr else None), key,
+                                cls)
         if changed:
             return refuse(t('superseded', changed=', '.join(f'`{k}`' for k in changed)),
                           resume_)
@@ -2547,7 +2554,8 @@ class SupervisionMixin:
                              stays=stays, resume=resume_), key=key)
 
         self._apply_retry(number, is_pr, comments, record,
-                          sorted(labels & (lb.operator() | {lb.needs_supervisor})), trace, limit)
+                          sorted(labels & (lb.operator() | {lb.needs_supervisor})), trace, limit,
+                          cls)
 
     def _coordinator_findings(self, target, number, labels, fresh, comments, command, trace,
                               refuse):

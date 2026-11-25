@@ -377,6 +377,32 @@ class SupervisedPrerequisiteTests(sup.Case):
         self.assertEqual(self.gh.labels[7], {READY})
         self.assertTrue(self.gh.records(7, 'preflight')[-1]['ready'])
 
+    def test_handed_to_the_operator_the_base_still_does_not_bind_the_retry(self):
+        prerequisite = checked(False, [gap(repository=True, prerequisite='il nuovo parser')])
+        d = self.make(sup.PREFLIGHT_AUTO, prerequisite, has_pr=False)
+        self.assertEqual(self.tick(d), [('preflight', 7)])
+        # A retry of the supervisor on another base: the check finds the prerequisite again.
+        self.ws.base = 'e' * 40
+        self.runner.outputs.append(prerequisite)
+        self.gh.command(7, '/devloop retry')
+        self.assertEqual(self.tick(d), [('supervise', 7)])
+        self.assertEqual(self.decisions(7)[-1]['attempt'], 1)
+        self.assertEqual(self.escalations(7)[-1]['class'], 'prerequisite')
+        self.gh.command(7, '/devloop escalate serve l\'operatore')
+        self.assertEqual(self.tick(d), [('supervise', 7)])
+        self.assertEqual(self.escalations(7)[-1]['class'], 'supervisor_escalated')
+        self.assertEqual(self.gh.labels[7], {READY, NEEDS_OPERATOR})
+        # The prerequisite is merged and the base advances: the operator's retry is not
+        # superseded, and counts the supervisor's retry made on the base of before.
+        self.ws.base = 'f' * 40
+        self.runner.outputs.append(checked(True))
+        self.gh.command(7, '/devloop retry', login='brushtyler')
+        self.assertEqual(self.tick(d), [('supervise', 7)])
+        self.assertEqual((self.decisions(7)[-1]['outcome'], self.decisions(7)[-1]['attempt']),
+                         ('applied', 2))
+        self.assertEqual(len(self.runner.calls), 3)
+        self.assertEqual(self.gh.labels[7], {READY})
+
     def test_the_implementer_escalates_to_the_supervisor(self):
         d = self.make(sup.AUTO, blocked(), has_pr=False)
         self.assertEqual(self.tick(d), [('implement', 7)])
