@@ -151,7 +151,11 @@ class IdentityTests(unittest.TestCase):
     def test_devloop_never_acts_as_the_coordinator(self):
         cfg = coordinated(CFG)
         self.assertFalse(apps.used(cfg, apps.COORDINATOR))
-        self.assertNotIn(COORDINATOR, Trust.from_config(cfg).apps)
+        # The watch trusts its issues and comments (#648), but it writes no record of devloop's.
+        trust = Trust.from_config(cfg)
+        self.assertNotIn(COORDINATOR, trust.writers.values())
+        self.assertFalse(any(trust.wrote(COORDINATOR, actor)
+                             for actor in (*cfg.agents, 'dispatcher', 'coordinator')))
         # devloop token (scripts/agent-token.py) does not expose it.
         with mock.patch.object(cli, 'load') as load, \
                 mock.patch.object(token.subprocess, 'run') as run:
@@ -174,11 +178,13 @@ class IdentityTests(unittest.TestCase):
 
     def test_the_watch_admits_with_the_dispatchers_admitters(self):
         # #623: the watch follows an issue of an untrusted author when the dispatcher admits it,
-        # with the same admitters; the coordinator's app stays outside its trusted authors.
+        # with the same admitters. With [roles.coordinator] the coordinator's app is one of its
+        # trusted authors (#648), never a writer of records; off, it is not.
         checked_cfg = recheck_tests.CFG  # a supervisor with its agent's app, a readiness check
         role = dataclasses.replace(supervisor_tests.ROLE, preflight=checked_cfg.preflight)
         self.assertIsNotNone(checked_cfg.preflight)
-        for name, cfg in (('off', checked_cfg), ('coordinated', coordinated(checked_cfg)),
+        for name, cfg in (('off', checked_cfg), ('declared', declared(checked_cfg)),
+                          ('coordinated', coordinated(checked_cfg)),
                           ('no preflight', coordinated(dataclasses.replace(checked_cfg,
                                                                            preflight=None))),
                           ('no supervisor', coordinated(dataclasses.replace(checked_cfg,
@@ -194,8 +200,8 @@ class IdentityTests(unittest.TestCase):
                 self.assertEqual(trust.supervisor, d._supervisor_login())
                 self.assertEqual(trust.coordinator, d._coordinator_login())
                 self.assertEqual(trust.devloop, d._devloop_logins())
-                self.assertNotIn(COORDINATOR, trust.apps)
-                self.assertFalse(trust.trusted(COORDINATOR))
+                self.assertEqual(trust.trusted(COORDINATOR), name not in ('off', 'declared'))
+                self.assertNotIn(COORDINATOR, trust.writers.values())
                 for author in ('brushtyler', 'stranger', None, COORDINATOR,
                                d._supervisor_login(), *sorted(d._devloop_logins())):
                     self.assertEqual(trust.ready_admitters(author),

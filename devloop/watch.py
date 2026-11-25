@@ -22,13 +22,20 @@ and nothing after it, except an issue that the dispatcher admits (#623): its lat
 ``agent:ready``, still there or replaced since, comes from one of the dispatcher's admitters for
 its author (``Trust.ready_admitters``), a trusted user's always, the supervisor's only with an
 authorization of the coordinator that holds for the current text when the dispatcher asks for one
-(#607). While so its labels, closure and trusted comments are reported, never its title. An issue
-of the coordinator's app is one of these: the app stays outside the trusted authors. Labels,
-heads, CI and closures of trusted objects are reported whoever changed them; comments and
-reviews only when their author is trusted or one of devloop's apps. A trusted comment on an
+(#607). While so its labels, closure and trusted comments are reported, never its title. With
+``[roles.coordinator]`` the coordinator's app is one of devloop's apps for its issues, PRs and
+comments (#648): they are reported as the agents' are, its ``/devloop`` commands included; it
+still writes no record of devloop's. Labels, heads, CI and closures of trusted objects are
+reported whoever changed them; comments and reviews only when their author is trusted or one of
+devloop's apps. A trusted comment on an
 issue or PR outside the open listings (closed before the baseline) is reported too: its author
 is read once; on an external issue the latest ``agent:ready`` is read again in each round
 with a new trusted comment on it, since the admission can change while the issue stays closed.
+The state records the trusted authors (``Trust.authors``): when they change (the coordinator's
+app added with ``[roles.coordinator]``, or a state of a version that did not record them), the
+types and authors read for the issues and PRs outside the open listings are forgotten and read
+again, and an open issue or PR whose author has become trusted is reported as ``<type> #N author
+now trusted`` with its labels and title, its reviews as new.
 
 Rounds compare states, so a change undone between two reads (a label added and removed) is not
 seen. Comments and reviews have persistent ids: each one still there is seen.
@@ -125,19 +132,22 @@ def failure_class(exc):
 class Trust:
     """Who counts for the watcher: ``users`` (``trusted_users``) and ``writers``, the app login
     of each actor that has one (agents and the dispatcher). The ``merger`` app (#201) only
-    merges: it is never a writer, so its comments and records are not trusted.
+    merges: it is never a writer, so its comments and records are not trusted. ``apps``, the
+    logins whose issues, PRs and comments are trusted as devloop's: the writers' and the
+    ``coordinator``'s (#648), which writes no record of devloop's, so it is never a writer.
 
     Who admits an issue as the dispatcher does (#623, ``ready_admitters``): ``supervisor`` and
     ``coordinator``, the logins of their identities (None without one), ``devloop``, the logins
     of devloop's apps whose issues count as devloop's (``Dispatcher._devloop_logins``), and
     ``preflight``, whether a readiness check is configured. They decide only which issues of
-    authors outside the trusted ones are followed: the coordinator is never trusted here."""
+    authors outside the trusted ones are followed."""
 
     def __init__(self, users, writers, ready_label, *, supervisor=None, coordinator=None,
                  devloop=(), preflight=False):
         self.users = frozenset(users)
         self.writers = {actor: login for actor, login in dict(writers).items() if actor != MERGER}
-        self.apps = frozenset(self.writers.values())
+        self.apps = frozenset(self.writers.values()) | ({coordinator} if coordinator
+                                                       else frozenset())
         self.ready_label = ready_label
         self.supervisor = supervisor
         self.coordinator = coordinator
@@ -153,8 +163,9 @@ class Trust:
         declares it, nor the coordinator's (#528), which writes no record of devloop's. Each
         agent key writes with the app it declares (``Config.app_of``). The identities of the
         supervisor and of the coordinator, for ``ready_admitters``, as the dispatcher derives
-        them (``Dispatcher._supervisor_login``, ``_coordinator_login``). Only slugs are needed:
-        no private key is read."""
+        them (``Dispatcher._supervisor_login``, ``_coordinator_login``): with
+        ``[roles.coordinator]`` the coordinator's is a trusted author too (#648). Only slugs are
+        needed: no private key is read."""
         identities = Identities(cfg.repo, {actor: AppAuth(app.app_id, app.slug, None, cfg.repo)
                                            for actor, app in cfg.apps.items()
                                            if actor not in (MERGER, COORDINATOR) and (
@@ -199,6 +210,12 @@ class Trust:
 
     def trusted(self, login):
         return bool(login) and (login in self.users or login in self.apps)
+
+    @property
+    def authors(self):
+        """The trusted authors, sorted, as the state records them: what was read with others
+        does not hold (#648)."""
+        return sorted(self.users | self.apps)
 
     def wrote(self, login, actor):
         """Whether ``login`` may write records for ``actor``: its app, else a trusted user.
@@ -307,6 +324,8 @@ def valid_state(state):
             and all(kind in ('PR', 'issue', EXTERNAL, None) for kind in closed.values())):
         return False
     seen, since = comments.get('seen'), comments.get('since')
+    if 'authors' in state and not _is_strings(state['authors']):
+        return False
     if not (_is_int(comments.get('floor')) and isinstance(seen, list)
             and all(_is_int(cid) for cid in seen) and isinstance(since, str)):
         return False
@@ -551,6 +570,7 @@ class Watcher:
         comments = self._read_comments(_stamp(started - COMMENT_MARGIN))
         seen = [c['id'] for c in comments]
         state = {'version': STATE_VERSION, 'prs': prs, 'issues': issues, 'closed': {},
+                 'authors': self.trust.authors,
                  'comments': {'floor': max(seen, default=0), 'seen': [],
                               'since': _stamp(started - COMMENT_MARGIN)}}
         return state, f'watch baseline: {len(prs)} open PRs, {len(issues)} open issues'
@@ -560,20 +580,26 @@ class Watcher:
         prs = self._read_prs()
         issues = self._read_issues(old['issues'])
         comments = self._read_comments(old['comments']['since'])
-        closed = dict(old['closed'])
+        # Read with other trusted authors (#648), or by a version that did not record them: the
+        # types and authors outside the listings are read again, those of the objects closed in
+        # this round included, as the previous round's classification of them does not hold.
+        authors = self.trust.authors
+        same = old.get('authors') == authors
+        closed = dict(old['closed']) if same else {}
         lines = []
         lines += self._pr_lines(old['prs'], prs)
         lines += self._issue_lines(old['issues'], issues)
-        lines += self._closed_lines('PR', old['prs'], prs, closed)
-        lines += self._closed_lines('issue', old['issues'], issues, closed)
+        lines += self._closed_lines('PR', old['prs'], prs, closed if same else {})
+        lines += self._closed_lines('issue', old['issues'], issues, closed if same else {})
+        before = old if same else {'prs': {}, 'issues': {}}
         comment_lines, comment_state = self._comment_lines(old['comments'], comments,
-                                                           old, prs, issues, closed)
+                                                           before, prs, issues, closed)
         lines += comment_lines
         comment_state['since'] = _stamp(started - COMMENT_MARGIN)
         while len(closed) > MAX_CLOSED:
             closed.pop(min(closed, key=int))
         return lines, {'version': STATE_VERSION, 'prs': prs, 'issues': issues, 'closed': closed,
-                       'comments': comment_state}
+                       'authors': authors, 'comments': comment_state}
 
     def _pr_lines(self, old, new):
         lines = []
@@ -585,6 +611,12 @@ class Watcher:
                     continue
                 # Opened since the previous round: its reviews are new too.
                 lines.append(f'new PR #{number} {_labels(cur["labels"])} {cur["title"]}')
+                lines += _review_lines(number, cur, ())
+                continue
+            if cur['trusted'] and not prev['trusted']:
+                # Its author has become trusted (#648): reported as a new one would be.
+                lines.append(f'PR #{number} author now trusted {_labels(cur["labels"])} '
+                             f'{cur["title"]}')
                 lines += _review_lines(number, cur, ())
                 continue
             if not (cur['trusted'] and prev['trusted']):
@@ -614,7 +646,11 @@ class Watcher:
                 continue
             if not _visible(cur):
                 continue
-            if _visible(prev):
+            if cur['trusted'] and not _visible(prev):
+                # Its author has become trusted (#648): never reported, nor admitted.
+                lines.append(f'issue #{number} author now trusted {_labels(cur["labels"])} '
+                             f'{cur["title"]}')
+            elif _visible(prev):
                 lines += _label_change('issue', number, prev['labels'], cur['labels'])
             else:
                 lines.append(f'issue #{number} admitted with {self.trust.ready_label} by '
