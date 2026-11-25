@@ -758,7 +758,8 @@ class Watcher:
 
     def _closed_lines(self, kind, old, new, closed):
         """Lines for the visible issues or PRs no longer open. One still open but beyond the
-        listing's limit stays in the state as it was. Only GitHub's answer that the object does
+        listing's limit stays in the state as it was, marked ``carried``: its labels are those
+        of an older read (``_labels_of``). Only GitHub's answer that the object does
         not exist (deleted, transferred) gives ``no longer open``; a failed read fails the
         round, so the next one asks again."""
         lines = []
@@ -776,7 +777,7 @@ class Watcher:
             except GitHubNotFound:
                 outcome = 'no longer open'  # deleted or transferred
             if outcome == 'open':
-                new[number] = prev
+                new[number] = dict(prev, carried=True)
                 continue
             title = f': {prev["title"]}' if prev.get('title') else ''
             lines.append(f'{kind} #{number} {outcome or "no longer open"}{title}')
@@ -832,22 +833,26 @@ class Watcher:
         return 'issue' if approvals[number] else None
 
     def _labels_of(self, number, old, prs, issues, read):
-        """The labels of issue or PR ``number`` (#676): for one in the open listings, those of
-        the listing now and at the previous read; for one outside them (closed, beyond the
-        listing's limit) those GitHub gives now, read once per round (``read``) and never
-        remembered, since they change after the close too. One GitHub no longer has has none;
-        a failed read fails the round, so the next one asks again."""
-        entries = [entry for entry in (prs.get(number), issues.get(number),
-                                       old['prs'].get(number), old['issues'].get(number))
-                   if entry is not None]
-        if entries:
-            return {name for entry in entries for name in entry.get('labels') or ()}
+        """The labels of issue or PR ``number`` (#676): those of the open listings now and at
+        the previous read; for one outside the listings now (closed, beyond the listing's
+        limit) also those GitHub gives now, read once per round (``read``) and never
+        remembered, since they change after the close too. The labels of an entry kept in the
+        state beyond the listing's limit (``carried``, ``_closed_lines``) are those of an older
+        read and do not count. One GitHub no longer has has none from GitHub; a failed read
+        fails the round, so the next one asks again."""
+        current = prs.get(number) or issues.get(number)
+        entries = [entry for entry in (current, old['prs'].get(number),
+                                       old['issues'].get(number))
+                   if entry is not None and not entry.get('carried')]
+        labels = {name for entry in entries for name in entry.get('labels') or ()}
+        if current is not None and not current.get('carried'):
+            return labels
         if number not in read:
             try:
                 read[number] = set(self.gh.issue_labels(int(number)))
             except GitHubNotFound:
                 read[number] = set()  # deleted or transferred
-        return read[number]
+        return labels | read[number]
 
     def _resolve(self, number):
         """``PR`` or ``issue`` for issue or PR ``number`` of a trusted author, ``EXTERNAL`` for

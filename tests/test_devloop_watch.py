@@ -637,6 +637,32 @@ class ChangesTest(unittest.TestCase):
         self.assertEqual(self.news(), [])
         self.assertEqual(self.news(), ['issue #40 operator reply by brushtyler: done'])
 
+    def test_an_operator_reply_on_an_issue_or_pr_kept_beyond_the_listing_limit(self):
+        # #676: once listed, still open but beyond the listing's limit, the issue or PR stays
+        # in the state with the labels of an older read: those GitHub gives now count instead.
+        gh = self.h.gh
+        gh.add_issue(7)
+        gh.add_pr(11, labels=('agent:needs-operator',))
+        self.news()
+        del gh.issues[7], gh.prs[11]
+        gh.states[7] = {'state': 'OPEN', 'stateReason': None}
+        gh.states[11] = {'state': 'OPEN'}
+        self.assertEqual(self.news(), [])
+        gh.closed_labels.update({7: ['agent:needs-operator'], 11: []})
+        gh.comment(501, 7, OPERATOR, 'Yes, go ahead')
+        gh.comment(502, 11, OPERATOR, 'later')
+        self.assertEqual(self.news(), [
+            'issue #7 operator reply by brushtyler: Yes, go ahead',
+            'PR #11 operator comment by brushtyler: later'])
+        self.assertEqual(gh.calls.count('issue_labels'), 2)
+        # Back in the listing, its labels come from it again.
+        gh.add_issue(7, labels=('agent:needs-operator',))
+        self.news()
+        gh.closed_labels[7] = []
+        gh.comment(503, 7, OPERATOR, 'ok')
+        self.assertEqual(self.news(), ['issue #7 operator reply by brushtyler: ok'])
+        self.assertEqual(gh.calls.count('issue_labels'), 2)
+
     def test_devloop_review_from_its_record_and_trusted_native_reviews(self):
         gh = self.h.gh
         gh.comment(201, 10, CODEX, review_comment('codex', 'request_changes', 2))
