@@ -1369,7 +1369,11 @@ class RoleSetsMigrationGuideTests(unittest.TestCase):
         section = self.section(self.S2)
         commands = RootStepsGuideTests.commands(section, inline=False)
         start = commands.index(next(c for c in commands if c.startswith('u=$(leggi')))
-        step = commands[start:start + 4]
+        step = commands[start:start + 2]
+        # R2-1: fetch and merge run only when the check of the branch succeeds.
+        self.assertTrue(step[-1].startswith('[ "$(sudo -u "$u" -H git -C "$clone" symbolic-ref'),
+                        step)
+        self.assertIn('&& sudo -u "$u" -H git -C "$clone" fetch origin && ', step[-1])
         self.assertTrue(step[-1].endswith('merge --ff-only "origin/$ramo"'), step)
         s1 = RootStepsGuideTests.commands(self.section(self.S1), inline=False)
         leggi = next(c for c in s1 if c.startswith('leggi()'))
@@ -1408,22 +1412,27 @@ class RoleSetsMigrationGuideTests(unittest.TestCase):
                 script = [f'ops={OPS}', leggi] + [
                     line.replace('<parametri>', str(params)).replace('sudo -u "$u" -H ', '')
                     for line in step]
-                results = []
-                for end in range(3, len(script) + 1):
-                    done = subprocess.run([BASH, '-c', '\n'.join(script[:end])],
-                                          capture_output=True, text=True, env=git_env,
-                                          stdin=subprocess.DEVNULL, timeout=120)
-                    results.append(done)
-                check, merge = results[1], results[-1]
+                head = git('rev-parse', 'HEAD', cwd=clone)
+                tracked = git('rev-parse', 'origin/main', cwd=clone)
+                done = subprocess.run([BASH, '-c', '\n'.join(script)],
+                                      capture_output=True, text=True, env=git_env,
+                                      stdin=subprocess.DEVNULL, timeout=120)
                 if case == 'other branch':
-                    self.assertNotIn('sul ramo', check.stdout)
+                    # The block stops: an error, no fetch, no merge, the clone as it was.
+                    self.assertNotEqual(done.returncode, 0, done.stdout)
+                    self.assertNotIn('sul ramo', done.stdout)
+                    self.assertEqual(git('symbolic-ref', '--short', 'HEAD', cwd=clone), 'look')
+                    self.assertEqual(git('rev-parse', 'HEAD', cwd=clone), head)
+                    self.assertEqual(git('rev-parse', 'origin/main', cwd=clone), tracked)
+                    self.assertEqual((clone / 'f').read_text(), 'before #643\n')
                     continue
-                self.assertIn('sul ramo main\n', check.stdout)
+                self.assertIn('sul ramo main\n', done.stdout)
                 if case == 'behind':
-                    self.assertEqual(merge.returncode, 0, merge.stderr)
+                    self.assertEqual(done.returncode, 0, done.stderr)
                     self.assertEqual((clone / 'f').read_text(), 'with #643\n')
                 else:
-                    self.assertNotEqual(merge.returncode, 0)
+                    self.assertNotEqual(done.returncode, 0)
+                    self.assertEqual(git('rev-parse', 'HEAD', cwd=clone), head)
                     self.assertEqual((clone / 'f').read_text(), 'before #643\n')
 
     def test_the_steps_on_the_host_and_their_checks(self):

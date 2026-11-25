@@ -3132,14 +3132,15 @@ Il codice di devloop non cambia e il loop resta attivo. Passi per ogni insieme d
 
      ```bash
      u=$(leggi <parametri> SUPERVISOR_USER) clone=$(leggi <parametri> SUPERVISOR_CLONE) ramo=$(leggi <parametri> DEFAULT_BRANCH)
-     [ "$(sudo -u "$u" -H git -C "$clone" symbolic-ref --short HEAD)" = "$ramo" ] && echo "sul ramo $ramo"
-     sudo -u "$u" -H git -C "$clone" fetch origin
-     sudo -u "$u" -H git -C "$clone" merge --ff-only "origin/$ramo"
+     [ "$(sudo -u "$u" -H git -C "$clone" symbolic-ref --short HEAD)" = "$ramo" ] && echo "sul ramo $ramo" && \
+       sudo -u "$u" -H git -C "$clone" fetch origin && \
+       sudo -u "$u" -H git -C "$clone" merge --ff-only "origin/$ramo"
      ```
 
-     La seconda riga stampa `sul ramo …`, e `merge` riesce. Un clone su un altro ramo, con
-     modifiche o con commit che `origin` non ha, è lavoro del supervisore: ci si ferma, senza
-     cambiarlo, e si chiede all'operatore.
+     Il secondo comando stampa `sul ramo …`, e `merge` riesce. Su un altro ramo non stampa nulla
+     e termina con un errore, senza `fetch` né `merge`. Un clone su un altro ramo, con modifiche
+     o con commit che `origin` non ha, è lavoro del supervisore: ci si ferma, senza cambiarlo, e
+     si chiede all'operatore.
    - **Con `SOURCE_REPO`** il clone è `SUPERVISOR_SOURCE_CLONE`, al tag `SOURCE_REF` del
      progetto, a cui `setup-supervisor.sh` lo riporta a ogni esecuzione. Se `SOURCE_REF` è un
      tag di prima del #643 (la prova del passo 3 lo dice), questa migrazione per quel progetto
