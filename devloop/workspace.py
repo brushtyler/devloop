@@ -25,6 +25,36 @@ class WorkspaceError(RuntimeError):
     pass
 
 
+# What git reports of a push that failed for a transient error of the remote (#645): a 5xx answer
+# of the server or a connection lost on the way, the push's own time limit included. A push is
+# repeated as it is, so trying once more cannot do what the first attempt would not have done.
+_PUSH_TRANSIENT = re.compile(
+    r'Internal Server Error|Bad Gateway|Service Unavailable|Gateway Time-?out'
+    r'|(?:HTTP|returned error:)\s*50[0-4]\b'
+    r'|Could not resolve host|Connection (?:reset|refused|timed out)|Failed to connect'
+    r'|Operation timed out|remote end hung up unexpectedly|early EOF|unexpected disconnect'
+    r'|Empty reply from server|Recv failure|SSL_ERROR_SYSCALL|GnuTLS recv error'
+    r'|TLS connection was non-properly terminated|timed out after \d+s', re.IGNORECASE)
+# A refusal of the remote, which a second attempt would only repeat: it prevails over any sign of
+# a transient error in the same message. Permissions, the rules of the branch, a conflict.
+_PUSH_REFUSED = re.compile(
+    r'\bGH0\d\d\b|protected branch|rule violation|hook declined|denied|\b40[13]\b'
+    r'|non-fast-forward|fetch first|stale info|refusing to push', re.IGNORECASE)
+
+
+class TransientPushError(WorkspaceError):
+    """A push that failed for a transient error of the remote (#645, ``transient_push``): a 5xx
+    answer or a connection lost. Any other failure of a push stays a ``WorkspaceError``."""
+
+
+def transient_push(message):
+    """Whether ``message``, the error of a failed ``git push``, is a transient error of the remote
+    (#645): a 5xx answer (``Internal Server Error``, ``Bad Gateway``, ``Service Unavailable``) or
+    a connection lost, and no refusal (permissions, the rules of the branch, a conflict)."""
+    text = str(message or '')
+    return bool(_PUSH_TRANSIENT.search(text)) and not _PUSH_REFUSED.search(text)
+
+
 def partial_text(data):
     """Output that ``communicate()`` collected before a timeout: bytes even in text mode."""
     if isinstance(data, bytes):
@@ -915,7 +945,10 @@ class Workspace:
         token travels in the environment of this one command, never in a config file or on the
         command line. No other credential can take part: URL rewrites are refused, only the
         HTTPS transport is allowed, and credential helpers, askpass programs and preconfigured
-        authentication headers are disabled."""
+        authentication headers are disabled.
+
+        A push that fails for a transient error of the remote (``transient_push``, #645) raises
+        ``TransientPushError``; any other failure a ``WorkspaceError``."""
         env, unset, remote = None, (), 'origin'
         if auth:
             remote = auth['url']
@@ -935,8 +968,13 @@ class Workspace:
                         'GIT_ALLOW_PROTOCOL': 'https', 'GIT_SSH_COMMAND': 'false'})
             # `git -c` settings inherited from a parent git are applied after GIT_CONFIG_*.
             unset = ('GIT_CONFIG_PARAMETERS',)
-        self._git('push', *(['--force'] if replace else []), remote,
-                  f'HEAD:refs/heads/{branch}', cwd=path, env=env, unset=unset)
+        try:
+            self._git('push', *(['--force'] if replace else []), remote,
+                      f'HEAD:refs/heads/{branch}', cwd=path, env=env, unset=unset)
+        except WorkspaceError as exc:
+            if transient_push(exc):
+                raise TransientPushError(str(exc)) from exc
+            raise
 
     def _refuse_rewrites(self, path, url):
         """A ``url.<base>.insteadOf`` or ``pushInsteadOf`` rule matching ``url`` could send the

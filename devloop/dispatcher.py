@@ -147,8 +147,8 @@ PR resolved is never checked nor implemented again: it becomes a ``merged_issue`
 non-critical (``_do_merged_issue``).
 
 Escalation classes (#182, ``supervision``): every escalation records its class. In ``auto`` a
-non-critical one (``tool_failure``, ``preflight_default``, ``sync_failed``) goes to
-agent:needs-supervisor, unless something makes it critical (``_supervised``), and the
+non-critical one (``tool_failure``, ``preflight_default``, ``sync_failed``, ``push_failed``)
+goes to agent:needs-supervisor, unless something makes it critical (``_supervised``), and the
 supervisor's identity or a trusted user decides it with ``/devloop retry``, ``/devloop
 accept-defaults``, ``/devloop decide <text>`` or ``/devloop escalate <reason>``
 (``_do_supervise``). Critical and unknown classes always go to agent:needs-operator. On an item
@@ -243,9 +243,9 @@ from .ports import Backend, Tracker, summarize_checks
 from .review import (CI, OPERATOR, UNPROVEN, current_round, finding_commands, finding_key,
                      flow_verdict, open_findings, owner_of, round_verdict, trust_policy_parts)
 from .supervision import (ACCEPT_DEFAULTS, BUDGET_GRANTABLE, COORDINATOR_DELEGATED, DECIDE,
-                          RETRY, ROUND_GRANTABLE, TOOL_FAILURE, UNCERTAIN_TURN,
+                          PUSH_FAILED, RETRY, ROUND_GRANTABLE, TOOL_FAILURE, UNCERTAIN_TURN,
                           operator_rounds_text, supervisor_command)
-from .workspace import WorkspaceError
+from .workspace import TransientPushError, WorkspaceError
 
 # The colours of the labels of the review level, of level 0 and of the priorities; their
 # descriptions, in the project's ``language`` (#635), are ``label_*`` of ``TEXTS``.
@@ -284,6 +284,11 @@ TEXTS = Catalog(
                       'in `{file}` in `{logs}`. A retry of the same step reapplies them to the '
                       'new worktree before starting the agent; if they do not apply, it passes '
                       'them to the agent in the prompt.\n\n'),
+        'push_kept': ('\n\nThe push of the branch failed twice for a transient error of GitHub '
+                      '(a 5xx answer or a connection lost). The commits of the turn are kept '
+                      '(`{commit}`): `/devloop retry` pushes them again, without a new turn, '
+                      'while the dispatcher that kept them runs; after a restart a retry runs '
+                      'the step again.'),
         'rounds_more': ' plus {granted} granted',
         'rounds_counted': 'Rounds counted against the limit ({count} of {limit}, '
                           '`max_review_rounds`{more}):',
@@ -455,6 +460,11 @@ TEXTS = Catalog(
                       'evidenza in `{file}` in `{logs}`. Un retry dello stesso passo le riapplica '
                       'al worktree nuovo prima di avviare l\'agent; se non si applicano, le passa '
                       'all\'agent nel prompt.\n\n'),
+        'push_kept': ('\n\nIl push del branch è fallito due volte per un errore temporaneo di '
+                      'GitHub (una risposta 5xx o una connessione persa). I commit del turno '
+                      'sono conservati (`{commit}`): `/devloop retry` li ripete con un nuovo '
+                      'push, senza un nuovo turno, finché resta attivo il dispatcher che li ha '
+                      'conservati; dopo un riavvio un retry ripete il passo.'),
         'rounds_more': ' più {granted} concessi',
         'rounds_counted': 'Round contati sul limite ({count} di {limit}, '
                           '`max_review_rounds`{more}):',
@@ -1010,6 +1020,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         # the dispatcher's own push, else its commit date, read once.
         self.clock = clock
         self._ci_since = {}
+        # The pushes of a step's branch that failed twice for a transient error of the remote
+        # (#645, ``PendingPush``), by issue or PR: kept in memory, for a retry that pushes the
+        # commits of the turn again without a new turn. A restart loses them, and a retry then
+        # runs the step again.
+        self._pending_pushes = {}
         # The pin after a merge (#174, ``pin.AutoPin``), used only with ``[pin] auto = true``.
         self.pinner = pinner
         self.gh = gh
@@ -2478,7 +2493,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         """Escalate a failed action. Its class (#182): ``tool_failure`` when the agent or its
         model produced no result (``AgentError``: a crash, a timeout, a stall, an unavailable
         model, a denied permission), ``untrusted`` for an issue text no longer trusted,
-        ``failure`` for anything else (``gh``, git, the dispatcher itself).
+        ``push_failed`` for the push of a step's branch that failed twice for a transient error
+        of the remote (``TransientPushError``, #645), ``failure`` for anything else (``gh``, git,
+        the dispatcher itself).
 
         A conclave (#141) is never escalated, whatever failed and however it ran
         (``_run_action``, or ``_run_lane`` for an unexpected error): it runs on an item already
@@ -2515,7 +2532,10 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             reason += t('advisory_held', head=pr.head_sha[:12])
         if _cli_state_refused(exc):
             reason += t('cli_state')
+        if getattr(exc, 'kept_push', None):  # the commits a retry pushes again (#645)
+            reason += t('push_kept', commit=exc.kept_push[:12])
         cls = ('configuration' if _cli_state_refused(exc)  # the CLIs' entries (#517)
+               else PUSH_FAILED if isinstance(exc, TransientPushError)
                else TOOL_FAILURE if isinstance(exc, AgentError)
                else 'untrusted' if isinstance(exc, UntrustedChange)
                else BUDGET if isinstance(exc, BudgetRefused)

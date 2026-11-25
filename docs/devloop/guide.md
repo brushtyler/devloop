@@ -1276,6 +1276,7 @@ next to the review; one for the trust policy gets none (#434, see
 | `tool_failure` | The agent or its model produced no result: a crash, a timeout, a stall with `agent_stall_action = "abort"`, no model available, a denied permission, a block for [background work still running](reference.md#no-background-work-in-a-turn), an agent that [could not start](protocol.md#failed-agent-turns) even after its retry (also in a sync with conflicts on sensitive paths) | No |
 | `preflight_default` | A failed [readiness check](#readiness-check-before-implementation) whose gaps are all `default_available`, with no split | No |
 | `sync_failed` | A [sync](protocol.md#conflicts-with-main) that failed, with no file in conflict under a sensitive path (`sensitive_paths`) or `operator_only_paths`; one whose agent could not start is a `tool_failure` | No |
+| `push_failed` | The push of the branch of an implementation, a fix or a sync that failed twice for a [transient error of GitHub](#transient-errors-of-the-push) (a 5xx answer, a connection lost): the commits of the turn are kept for a retry | No |
 | `merged_issue` | An open issue in `agent:ready` that a merged devloop PR already resolved ([Closing the issue](#closing-the-issue)) | No |
 | `round_grantable` | The limit of review rounds, with `[delegations] rounds` on and every condition of [granting a round](#granting-a-review-round) verified: the supervisor may grant one more | No |
 | `round_limit` | The limit of review rounds, when the supervisor may not grant another one | Yes |
@@ -1284,7 +1285,7 @@ next to the review; one for the trust policy gets none (#434, see
 | `reviewer_decision`, `open_findings` | A reviewer asks for a decision; an approval leaves open findings no agent can close any more, which the operator closes, or the coordinator but for those on the trust policy ([Closing findings as the coordinator](#closing-findings-as-the-coordinator)) (`ci` findings with the head's CI still running, or passed during the review, wait for it instead) | Yes |
 | `review_level`, `level_zero` | Not enough independent reviewers; a level-0 head that cannot be promoted | Yes |
 | `sync_sensitive`, `protected_paths` | A sync conflict on a sensitive or operator-only path; a change to `protected_paths` | Yes |
-| `tests_failed`, `blocked`, `interrupted`, `unattributable`, `lost_meta`, `inconsistent`, `configuration`, `failure` | Tests still failing (or no change), an agent that declared itself blocked, an interrupted implementation, findings without an owner, a lost PR marker, an inconsistent PR state, a configuration to decide (a turn refused for an entry of the directories of the CLIs that is not in the [list](#agent-user), #517, also in a sync), a `gh`, git or dispatcher error | Yes |
+| `tests_failed`, `blocked`, `interrupted`, `unattributable`, `lost_meta`, `inconsistent`, `configuration`, `failure` | Tests still failing (or no change), an agent that declared itself blocked, an interrupted implementation, findings without an owner, a lost PR marker, an inconsistent PR state, a configuration to decide (a turn refused for an entry of the directories of the CLIs that is not in the [list](#agent-user), #517, also in a sync), a `gh`, git or dispatcher error (a push the remote refused, for its permissions, the rules of the branch or a conflict, included) | Yes |
 | `host_tests` | Local tests that fail on the base commit of the branch too, but pass in the CI of that commit: a [failure of the host](#tests-red-on-the-base-too), not of `main` | Yes |
 | `receipt_conflict` | The [receipt of the PR](protocol.md#pr-receipt) contradicts the markers at its promotion | Yes |
 | `retry_limit`, `supervisor_escalated`, `supervisor_refused` | The supervisor's retries are spent, it handed the escalation over, or it gave a command the escalation does not admit | Yes |
@@ -1295,6 +1296,32 @@ next to the review; one for the trust policy gets none (#434, see
 | `budget` | With `[budget] enabled` on, a turn the [budget envelope](reference.md#budget-envelope) of its story does not cover, refused before it starts, when the supervisor may not extend it | Yes |
 
 Any other class, or none (escalations written before #182), is critical.
+
+#### Transient errors of the push
+
+The push of the branch of a step, an implementation, a fix or a sync, goes to GitHub after the
+agent's turn, with its commits already made (#645). When git reports a transient error of the
+remote, a 5xx answer (`Internal Server Error`, `Bad Gateway`, `Service Unavailable`, `Gateway
+Timeout`) or a connection lost (a host that does not resolve, a connection reset or timed out,
+the remote end that hung up, the push's own time limit), the dispatcher tries the push once
+more, after a short pause (`PUSH_RETRY_PAUSE`, 10 seconds), and its log records both attempts.
+A push that succeeds at the second attempt opens no escalation. Any other refusal of the remote
+(its permissions, a rule of the branch, a conflict such as a non-fast-forward) is never tried
+again: it stays a `failure`, critical, to the operator, also when its message has a sign of a
+transient error too.
+
+When the second attempt fails too for a transient error, the escalation is `push_failed`,
+non-critical: to the supervisor in `"auto"` (under the conditions of the routing above), to the
+operator otherwise, with the step and the key of its input recorded as for any retry. Its
+comment names the commit kept. `/devloop retry`, of the supervisor, of the coordinator or of a
+trusted user, then pushes the same commits again, without a new turn of the agent: an issue's
+implementation pushes its branch at once and opens the PR; a PR goes back to the label of its
+step and the next tick pushes the fix, or the sync, and records it. A veto of a conclave written
+in the meantime is checked again before that push. The commits are kept in the memory of the
+dispatcher that made them: after a restart of `devloop run`, or once the step ran again for any
+other reason, a retry runs the step again, with a new turn, as for a `tool_failure`. A push that
+fails again for a transient error is a new `push_failed` escalation, within the same
+`MAX_RETRIES` of the step and key.
 
 **Routing.** With `[merge].mode = "auto"` a non-critical escalation adds
 `agent:needs-supervisor` instead of `agent:needs-operator`, and an issue keeps `agent:ready`. It
@@ -1354,7 +1381,9 @@ dispatcher comment with the reason and how to resume, besides the log line. As f
 it handled and every command before it, and among the commands that wait the latest applicable
 one wins; without one, the latest that does not apply is answered.
 
-- `/devloop retry` runs the failed step again, for `tool_failure` and `sync_failed`. A PR goes
+- `/devloop retry` runs the failed step again, for `tool_failure`, `sync_failed` and
+  `push_failed` (for this one, only the push: [Transient errors of the
+  push](#transient-errors-of-the-push)). A PR goes
   back to the label of its step (`agent:review` for a review or a sync, `agent:changes` for a
   fix, `agent:review` for a [requested fix](#fix-requested-by-the-operator-or-the-supervisor)
   that started there, `agent:changes` for a sync that a fix in `agent:changes` started because
@@ -1455,7 +1484,7 @@ the class does not admit (`accept-defaults` or `decide` on a tool failure, `retr
 `grant-round` on anything but `round_grantable`, `grant-budget` on anything but
 `budget_grantable`, `rereview` on anything but the `tool_failure` of a PR's review) is refused
 and the escalation stays with the supervisor. The answer lists the commands that apply to the
-escalation (`retry` for `tool_failure` and `sync_failed`, `accept-defaults` and `decide` for
+escalation (`retry` for `tool_failure`, `sync_failed` and `push_failed`, `accept-defaults` and `decide` for
 `preflight_default`, `grant-round` for `round_grantable`, `grant-budget` for `budget_grantable`,
 none of them for an input changed since, `escalate` always) and the manual steps without the
 supervisor.
@@ -1830,9 +1859,9 @@ no command applies, and the answer gives the manual steps. The commands valid th
 
 - `/devloop retry`, when that record is an escalation that records the step that failed and the
   key of its input. Every escalation of a failed agent, `gh` or git step (`tool_failure`,
-  `failure`, `untrusted`) and of a sync with conflicts that failed (`sync_failed`,
+  `failure`, `untrusted`, `push_failed`) and of a sync with conflicts that failed (`sync_failed`,
   `sync_sensitive`, `tool_failure`) records it, also when it goes to the operator; so do `supervisor_escalated` and `supervisor_refused`
-  of a `tool_failure`, `sync_failed` or `budget_grantable` escalation, which keep the step of
+  of a `tool_failure`, `sync_failed`, `push_failed` or `budget_grantable` escalation, which keep the step of
   the supervisor's escalation. Their comment says that `/devloop retry` applies. An issue whose readiness check
   failed this way keeps `agent:ready`, so that the check can run again. The
   class may be critical: a retry runs the step again and bypasses none of its checks. The
