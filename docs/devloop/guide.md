@@ -496,15 +496,19 @@ written in the text and the issues that wait for it queued by hand once it is me
   duplicate, for example), it does not release the issue: the issue waits as for an open block,
   and the dispatcher escalates it (`prerequisite_dropped`, a critical class: to the operator in
   every merge mode, also in `"auto"`), without `agent:ready`. The escalation names each
-  prerequisite closed so and its reason; whoever receives it decides: remove the block and add
-  `agent:ready` again, rethink the issue, or close it. Reopening the prerequisite makes the issue
+  prerequisite closed so and its reason; whoever receives it decides: remove the block, then
+  remove `agent:needs-operator` and add `agent:ready` again, as for any escalation; rethink the
+  issue; or close it. The escalation records no step, so `/devloop retry` is refused on it.
+  Reopening the prerequisite makes the issue
   wait for it again. The same holds for a block of another repository whose reason can be read;
   a closure without a reason counts as completed. A supervisor's `/devloop retry` of the
   readiness check or of the implementation, or an extension of the budget envelope that would
   run the step, does not run either: the dispatcher escalates the issue in the same way, with no
   slot taken and no attempt spent, and the escalation spends the command (the tick log says `the
-  retry does not run, prerequisite closed without being completed: #<n>`); after removing the
-  block, the command is written again. Only trusted blocks count, as above; the line
+  retry does not run, prerequisite closed without being completed: #<n>`). The command is not
+  written again: the issue resumes as above, by removing the block and `agent:needs-operator`
+  and adding `agent:ready`, which runs the readiness check or the implementation again from the
+  start. Only trusted blocks count, as above; the line
   of the issue in `devloop status` adds `, prerequisite closed without being completed #<n> (not
   planned)`.
 - **Orphan prerequisites are shown** (#671). When a ready issue is blocked by an open issue of

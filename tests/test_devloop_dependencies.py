@@ -569,6 +569,36 @@ class RetryTests(supervision.Case):
         self.assertEqual(self.tick(d), [])
         self.assertEqual(len(self.runner.calls), 1)
 
+    def test_an_issue_escalated_for_a_dropped_prerequisite_resumes_with_its_labels(self):
+        # #671: the escalation records no step, so the operator's `/devloop retry` after the
+        # block is removed is refused, as its text and the guide say; removing
+        # agent:needs-operator and adding agent:ready again runs the implementation.
+        cfg = dataclasses.replace(supervision.AUTO, max_open_prs=1)
+        d = self.make(cfg, supervision.crash(), implemented(), has_pr=False)
+        self.assertEqual(self.tick(d), [('implement', 7)])
+        self.blocked('CLOSED', 'NOT_PLANNED')
+        self.gh.command(7, '/devloop retry')
+        self.assertEqual(self.tick(d), [('prerequisite_dropped', 7)])
+        notice = markdown.read_marker(self.gh.comments[-1][1], 'notice')
+        self.assertNotIn('step', notice)
+        self.assertNotIn('key', notice)
+        body = self.gh.comments[-1][1]
+        self.assertIn(f'togliere `{supervision.HUMAN}` e aggiungere di nuovo `{READY}`', body)
+        self.assertNotIn('ripetere il comando', body)
+        # The block is removed: a retry of the operator is refused, nothing runs.
+        self.gh.issue_dependencies = lambda n: {'author': 'brushtyler', 'blocked_by': [],
+                                                'added': []}
+        self.gh.command(7, '/devloop retry', login='brushtyler')
+        self.assertEqual(self.tick(d), [('supervise', 7)])
+        self.assertEqual(self.decisions(7)[-1]['outcome'], 'refused')
+        self.assertEqual(self.gh.labels[7], {supervision.HUMAN})
+        self.assertEqual(len(self.runner.calls), 1)
+        # The documented way resumes it: the implementation runs again.
+        self.gh.labels[7] = {READY}
+        self.assertEqual(self.tick(d), [('implement', 7)])
+        self.assertEqual(len(self.runner.calls), 2)
+        self.assertEqual(len(self.gh.created), 1)
+
     def test_a_blocked_retry_takes_no_slot(self):
         d = self.make(supervision.AUTO, supervision.crash(), has_pr=False)
         self.tick(d)

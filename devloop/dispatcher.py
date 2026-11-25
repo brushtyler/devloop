@@ -453,8 +453,10 @@ TEXTS = Catalog(
             'A prerequisite that blocks the issue ("blocked by") was closed without being '
             'completed: {listed}. devloop does not start its work, nor a retry of it, since what '
             'it needs was not done. To decide: remove the block, if the issue no longer needs '
-            'it, and add `{ready}` again (or repeat the command that was waiting); rethink the '
-            'issue; or close it. Reopening the prerequisite makes the issue wait for it again.'),
+            'it, then remove `{needs_operator}` and add `{ready}` again; rethink the issue; or '
+            'close it. A command that was waiting is spent, and this escalation records no step '
+            'that `/devloop retry` can run again. Reopening the prerequisite makes the issue wait '
+            'for it again.'),
         'ci_missing': ('On head `{head}` there is no CI {minutes} minutes after the push, but '
                        '`{branch}` requires the checks {names}: the review does not start '
                        'without the CI. Check that the CI started on the head, or run it '
@@ -640,9 +642,10 @@ TEXTS = Catalog(
             'Un prerequisito che blocca l\'issue ("blocked by") è stato chiuso senza essere '
             'completato: {listed}. devloop non ne avvia il lavoro, né un suo retry, perché ciò '
             'di cui ha bisogno non è stato fatto. Da decidere: togliere il blocco, se l\'issue '
-            'non ne ha più bisogno, e aggiungere di nuovo `{ready}` (o ripetere il comando che '
-            'attendeva); ripensare l\'issue; oppure chiuderla. Riaprire il prerequisito fa di '
-            'nuovo attendere l\'issue.'),
+            'non ne ha più bisogno, poi togliere `{needs_operator}` e aggiungere di nuovo '
+            '`{ready}`; ripensare l\'issue; oppure chiuderla. Un comando che attendeva è '
+            'consumato, e questa escalation non registra un passo che `/devloop retry` possa '
+            'ripetere. Riaprire il prerequisito fa di nuovo attendere l\'issue.'),
         'ci_missing': ('Sul head `{head}` non risulta alcuna CI {minutes} minuti dopo il push, ma '
                        '`{branch}` richiede i check {names}: la review non parte senza la CI. '
                        'Verificare che la CI sia partita sul head, o rilanciarla.'),
@@ -2217,7 +2220,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         (#671), ready or with a retry or an extension that would run its step
         (``_supervised_items``): class ``prerequisite_dropped``, critical, so to the operator in
         every merge mode, without ``agent:ready`` nor ``agent:needs-supervisor``. The command
-        does not run, and the new escalation spends it (``_supervisor_view``). The comment names
+        does not run, and the new escalation spends it (``_supervisor_view``); it records no step,
+        so a later ``/devloop retry`` is refused: the issue resumes once ``agent:needs-operator``
+        is removed and ``agent:ready`` added again. The comment names
         each dropped prerequisite with its reason. The dependencies are read again first: a block
         removed or reopened since escalates nothing."""
         lb = self.cfg.labels
@@ -2228,7 +2233,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         listed = ', '.join(f'{ref} ({reason.lower().replace("_", " ")})'
                            for ref, reason in dropped)
         reason = TEXTS.texts(self.cfg.language)('prerequisite_dropped', ready=lb.ready,
-                                                listed=listed)
+                                                needs_operator=lb.needs_operator, listed=listed)
         self._escalate(number, reason, remove=[lb.ready, lb.needs_supervisor],
                        cls=PREREQUISITE_DROPPED)
         self.log('  prerequisite closed without being completed: ' + listed)

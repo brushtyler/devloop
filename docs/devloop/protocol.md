@@ -709,7 +709,9 @@ there, escalates the issue with an escalation comment of class `prerequisite_dro
 `notice` marker with `critical` true and `to` `operator`, in every merge mode), which lists each
 such prerequisite with its reason, removes `agent:ready` and `agent:needs-supervisor` and adds
 `agent:needs-operator`. The new escalation spends the command: no `supervision` record is
-written and no attempt counted. A block removed or reopened since escalates nothing. A closure without a reason releases the block, as a completed one does. The orphan
+written and no attempt counted. Its `notice` records no `step` nor `key`, so a `/devloop retry`
+written on it is refused (`not_retryable`): the issue resumes when `agent:needs-operator` is
+removed and `agent:ready` added again. A block removed or reopened since escalates nothing. A closure without a reason releases the block, as a completed one does. The orphan
 prerequisites are only shown (`devloop status`, `devloop watch`): no record, no label.
 
 ## Authorization by the coordinator
