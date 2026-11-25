@@ -2144,7 +2144,9 @@ model = "gpt-6.1-sol"
   coordinator may queue, unless its readiness check declares the trust policy touched: then only
   a trusted user's `agent:ready` admits it or, when the check declares `covered`, a
   `/devloop approve` of the operator on the issue that counts (#644), after which the
-  coordinator's or the supervisor's `agent:ready` starts it; without a readiness check only the
+  coordinator's or the supervisor's `agent:ready` starts it (on an issue the coordinator did not
+  open, only while its `/devloop authorize` holds for the current text); without a readiness
+  check only the
   trusted users' labels count on it
   ([Labels from the supervisor](guide.md#labels-from-the-supervisor)). Its
   `agent:ready` and priority labels count where the supervisor's do; its dependency and

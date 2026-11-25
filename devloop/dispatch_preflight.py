@@ -575,8 +575,8 @@ class PreflightMixin:
         ``trust_policy`` ``covered`` and a command of the issue's ``comments`` that counts
         (``_issue_decisions``), the latest ``agent:ready`` of the coordinator or of the
         supervisor queues it, as long as that label admits the issue now
-        (``_ready_admitters``: the supervisor's only with the coordinator's authorization of
-        the current text)."""
+        (``_ready_admitters``) and, on an issue the coordinator did not open, an authorization
+        of the coordinator holds for the current text, whoever added the label (#607)."""
         author = history['author']
         if (self._coordinator_login() is None or author in self.cfg.trusted_users
                 or outcome.get('trust_policy') == 'none'):
@@ -598,16 +598,21 @@ class PreflightMixin:
         ``comments`` counts as a decision of the operator (``_issue_decisions``, #483: a trusted
         user in person, without the header, after the latest change of the text and not
         changed after the takeover), and the latest ``agent:ready`` is the coordinator's or the
-        supervisor's and admits the issue now (``_ready_admitters``: the supervisor's needs the
-        coordinator's ``/devloop authorize`` of the current text, #607). An approve is written
-        by the operator in person and falls with any change of the text: only the moment of the
-        start is left to the roles."""
+        supervisor's and admits the issue now (``_ready_admitters``). On an issue the
+        coordinator did not open, such as the supervisor's, a ``/devloop authorize`` of the
+        coordinator must hold for the current text too (``_authorization``, #607), whoever added
+        that label. An approve is written by the operator in person and falls with any change of
+        the text: only the moment of the start is left to the roles."""
         if outcome.get('trust_policy') != 'covered':
             return False
-        if not self._issue_decisions(list(comments), history):
+        comments = list(comments)
+        if not self._issue_decisions(comments, history):
+            return False
+        if (not self._is_coordinator(history['author'])
+                and self._authorization(history, comments) is None):
             return False
         roles = {self._coordinator_login(), self._supervisor_login()} - {None, ''}
-        admitters = self._ready_admitters(history, list(comments)) & roles
+        admitters = self._ready_admitters(history, comments) & roles
         return ready_approval(history['labeled'], self.cfg.labels.ready, admitters) is not None
 
     def _log_refused(self, number, refused):

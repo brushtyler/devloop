@@ -8,8 +8,9 @@ passes the gate (``_coordinator_gate``) also when all of these hold:
 - the check declares ``trust_policy: covered``;
 - at least one ``/devloop approve`` on the issue counts (#483: a trusted user in person,
   without the header, after the latest change of the text, not changed after the takeover);
-- the latest ``agent:ready`` is the coordinator's or the supervisor's and, the supervisor's,
-  with a ``/devloop authorize`` of the current text (#607).
+- the latest ``agent:ready`` is the coordinator's or the supervisor's and, on an issue the
+  coordinator did not open, a ``/devloop authorize`` of the current text holds, whoever added
+  the label (#607).
 
 A ``covered`` without an approve, an ``uncovered`` and anything else stay as before.
 """
@@ -176,6 +177,39 @@ class AdmissionTests(Case):
         # The coordinator's authorization of the current text makes the approve count.
         self.authorize(d)
         self.assertTrue(self.gate(d)['ready'])
+
+    def test_the_coordinators_ready_on_the_supervisors_issue_needs_authorize(self):
+        # The authorization is the issue's, not the label's: the coordinator's agent:ready on
+        # an issue it did not open admits it only with a /devloop authorize of the current text.
+        d = self.make()
+        self.gh.labels[7] = set()
+        self.gh.ready(COORDINATOR)
+        self.approve()
+        self.assertEqual(self.gh.issue_history(7)['author'], SUPERVISOR_LOGIN)
+        # No authorization.
+        record = self.check(d, 'covered')
+        self.assertFalse(record['ready'])
+        self.assertEqual(self.gap(record), GAP_TEXTS.texts(CFG.language)('authorized_gap'))
+        self.assertFalse(self.gate(d)['ready'])
+
+    def test_the_coordinators_ready_with_a_stale_authorize_does_not_admit(self):
+        d = self.make()
+        self.authorize(d)
+        self.gh.edit('Do another thing.')
+        self.gh.labels[7] = set()
+        self.gh.ready(COORDINATOR)
+        self.approve()
+        self.assertIsNone(d._authorization(self.gh.issue_history(7), self.gh.issue_comments(7)))
+        self.assertFalse(self.gate(d)['ready'])
+
+    def test_the_coordinators_ready_with_a_valid_authorize_admits(self):
+        d = self.make()
+        self.authorize(d)
+        self.gh.labels[7] = set()
+        self.gh.ready(COORDINATOR)
+        self.approve()
+        self.assertTrue(self.check(d, 'covered')['ready'])
+        self.assertEqual(self.planned(d), [('implement', 7)])
 
     def test_an_approve_that_does_not_count_does_not_admit(self):
         cases = (('header', 'brushtyler', supervisor_header() + '\n' + APPROVAL),

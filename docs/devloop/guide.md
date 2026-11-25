@@ -528,8 +528,9 @@ all of these hold: the check declares `trust_policy: covered`; at least one `/de
 the issue counts by the rules of #483 ("Approval with `/devloop approve`" in
 [Changes to the trust policy](#changes-to-the-trust-policy): a trusted user in person, without
 the attribution header, after the latest change of the title or the body, not changed after the
-takeover); and the latest `agent:ready` is the coordinator's or the supervisor's, the latter
-only while an authorization of the coordinator holds for the current text (#607). The approve is
+takeover); and the latest `agent:ready` is the coordinator's or the supervisor's, and on an issue
+the coordinator did not open, such as the supervisor's, an authorization of the coordinator
+(`/devloop authorize`) holds for the current text, whoever added the label (#607). The approve is
 the operator's own decision on the text of that moment, and falls with any change of it: only
 the moment of the start is left to the roles, which the operator can still stop
 (`/devloop hold`, or removing the label). A `covered` that rests only on an ADR or on the body
@@ -601,7 +602,8 @@ The rules:
   `agent:needs-operator` even when authorized, as for the coordinator's issues above (#595); the
   operator admits it by adding `agent:ready` again in person or, when the check declares
   `trust_policy: covered`, by approving it with a `/devloop approve` that counts (#644): the
-  supervisor's `agent:ready` then starts it, while this authorization holds for the current text.
+  coordinator's or the supervisor's `agent:ready` then starts it, while this authorization holds
+  for the current text: without it the approve admits nothing, whoever added the label.
 
 The dispatcher reads the commands on the issues in `agent:needs-coordinator`, and on the ready
 issues whose latest `agent:ready` is the supervisor's; a command elsewhere is recorded once one of
