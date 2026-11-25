@@ -219,6 +219,9 @@ exec {shlex.quote(STAT)} "$@"''')
             'SUPERVISOR_OPS_DIR': str(self.tmp / 'lib' / 'devloop-supervisor'),
             'WATCHDOG_OPS_DIR': str(self.tmp / 'lib' / 'devloop-role-watchdog'),
             'WATCHDOG_USER': FAKE_WATCHDOG,
+            # The devloop command of the host and the directory of its projects (#588).
+            'DEVLOOP_COMMAND': str(self.tmp / 'bin-root' / 'devloop'),
+            'DEVLOOP_PROJECTS_DIR': str(self.tmp / 'etc-devloop' / 'projects'),
         }
         values.update(overrides)
         path = self.tmp / 'params.env'
@@ -280,6 +283,7 @@ class LayoutTests(unittest.TestCase):
                      'host/devloop-role-watchdog@.service', 'host/devloop-role-watchdog@.timer',
                      'host/devloop-role-watchdog-failed@.service',
                      'host/role-watchdog-project.conf',
+                     'host/devloop-command', 'host/devloop-command-project',
                      'github/create-apps.sh', 'github/ruleset-main.json', 'github/tokens.md',
                      *(f'github/apps/{role}.json' for role in REQUIRED)):
             self.assertTrue((OPS / name).is_file(), name)
@@ -1595,9 +1599,46 @@ class DryRunTests(OpsTestCase):
         self.assertIn("le CLI e i loro login sono dell'utente devloop-agent (#415): "
                       'setup-agent-user.sh', out)
         self.assertNotIn('installare claude', out)
+        # #588: the devloop command of the host and the file of the project, root's.
+        projects = self.tmp / 'etc-devloop/projects'
+        self.assertIn(f'[dry-run] install -d -m 755 -o root -g root {projects}\n', out)
+        self.assertIn(f'[dry-run] scriverebbe {projects}/params-_default.env (mode 644, '
+                      'proprietario root):', out)
+        self.assertIn('    | DEVLOOP_USER=opsdry-nouser\n'
+                      f'    | DEVLOOP_CLONE={self.home}/devloop/devloop\n'
+                      f'    | DEVLOOP_PATH={self.home}/devloop/.local/bin:/usr/local/bin:/usr/bin:'
+                      '/bin\n'
+                      f'    | LAUNCHER_CMD=/usr/bin/python3 {self.home}/devloop/devloop/scripts/'
+                      'devloop-pinned\n', out)
+        self.assertIn(f'[dry-run] scriverebbe {self.tmp}/bin-root/devloop (mode 755, proprietario '
+                      'root):', out)
+        self.assertIn(f'    | PROJECTS_DIR={projects}\n', out)
         self.assertNotRegex(out, r'@[A-Z_]+@')
         self.assertEqual(self.mutating_calls(), [])
         self.assertEqual(self.tree(), before)
+
+    def test_setup_devloop_registers_the_project_for_the_devloop_command(self):
+        # #588: with PROJECT the file of the project has its name and the launcher of the unit,
+        # with the state_dir of the project.
+        params = self.params(PROJECT='widget', DEVLOOP_USER='opsdry-nouser',
+                             AGENT_USER=FAKE_AGENT, SUPERVISOR_USER=FAKE_SUPERVISOR,
+                             STATE_DIR='/var/lib/devloop/widget')
+        done = self.run_script('host/setup-devloop.sh', '--dry-run', '--params', str(params))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        out = done.stdout
+        projects = self.tmp / 'etc-devloop/projects'
+        clone = self.home / 'devloop/devloop'
+        self.assertIn(f'==> Comando devloop: {self.tmp}/bin-root/devloop, progetto widget (#588)',
+                      out)
+        self.assertIn(f'[dry-run] scriverebbe {projects}/params-widget.env (mode 644, '
+                      'proprietario root):', out)
+        launcher = (f'/usr/bin/env -C {clone} /usr/bin/python3 {clone}/scripts/devloop-pinned '
+                    '--state-dir /var/lib/devloop/widget')
+        self.assertIn(f'    | LAUNCHER_CMD={launcher}\n', out)
+        self.assertIn(f'    | ExecStart={launcher} run\n', out)
+        self.assertIn('per togliere il progetto dal comando devloop: rimuovere '
+                      f'{projects}/params-widget.env', out)
+        self.assertEqual(self.mutating_calls(), [])
 
     def test_setup_devloop_asks_for_the_implementer_key_only_with_its_app(self):
         # #569: the default DEVLOOP_KEYS knows implementer, but its key is a manual step only
@@ -1680,6 +1721,16 @@ class DryRunTests(OpsTestCase):
             'LAUNCHER_CMD': f'/usr/bin/python3 {clone}/scripts/devloop-pinned',
             'STATE_PATH': f'{clone}/.devloop',
             'DEVLOOP_PATH': f'{devloop}/.local/bin:/usr/local/bin:/usr/bin:/bin'}))
+        # The devloop command of the host and the file of the project (#588), as written.
+        projects = self.tmp / 'etc-devloop/projects'
+        projects.mkdir(parents=True)
+        (projects / 'params-_default.env').write_text(render('host/devloop-command-project', {
+            'DEVLOOP_USER': ME, 'DEVLOOP_CLONE': str(clone),
+            'DEVLOOP_PATH': f'{devloop}/.local/bin:/usr/local/bin:/usr/bin:/bin',
+            'LAUNCHER_CMD': f'/usr/bin/python3 {clone}/scripts/devloop-pinned'}))
+        (self.tmp / 'bin-root').mkdir()
+        (self.tmp / 'bin-root/devloop').write_text(render('host/devloop-command', {
+            'DEVLOOP_PROJECTS_DIR': str(projects)}))
         # #497: the host is simulated (fake_host): the user of the tests is devloop's, the agent
         # user and the supervisor are other users, and sudo is sudo-rs or the classic one.
         params = self.params(DEVLOOP_USER=ME, AGENT_USER=FAKE_AGENT,
@@ -1701,6 +1752,8 @@ class DryRunTests(OpsTestCase):
                     self.assertIn(f"ok: l'utente {ME} esiste", done.stdout)
                     self.assertIn(f'ok: {ME} è nel gruppo {GROUP}', done.stdout)
                     self.assertIn('devloop.service è già aggiornato', done.stdout)
+                    self.assertIn('params-_default.env è già aggiornato', done.stdout)
+                    self.assertIn('bin-root/devloop è già aggiornato', done.stdout)
                     self.assertIn(f"dell'utente {FAKE_AGENT} (#415)", done.stdout)
         self.assertEqual(self.mutating_calls(), [])
 
@@ -3528,6 +3581,190 @@ esac''')
 
 
 @unittest.skipIf(BASH is None, 'bash is not installed')
+class DevloopCommandTests(OpsTestCase):
+    """The devloop command of the host (#588), ops/host/devloop-command as setup-devloop.sh
+    renders it, on a temporary directory of the projects. Fakes: ``id -u`` says ``OPS_TEST_UID``
+    (root by default), ``stat`` shows the directory of the projects and its files as owned by
+    ``OPS_TEST_OWNER`` (root by default) with their real mode, and ``sudo`` records its directory
+    and its arguments instead of running anything."""
+
+    def setUp(self):
+        super().setUp()
+        self.projects = self.tmp / 'projects'
+        self.projects.mkdir()
+        self.projects.chmod(0o755)
+        self.command = self.tmp / 'devloop'
+        self.command.write_text(render('host/devloop-command',
+                                       {'DEVLOOP_PROJECTS_DIR': str(self.projects)}))
+        self.sudo = self.tmp / 'sudo-args'
+        self.shim('id', '[ "$1" = -u ] && echo "${OPS_TEST_UID:-0}"')
+        projects = shlex.quote(str(self.projects))
+        self.shim('stat', f'''if [ "$1" = -c ] && [ "$2" = '%u %a' ] && [ $# -eq 3 ]; then
+    case "$3" in {projects}|{projects}/*)
+        echo "${{OPS_TEST_OWNER:-0}} $({shlex.quote(STAT)} -c %a "$3")"; exit 0 ;;
+    esac
+fi
+exec {shlex.quote(STAT)} "$@"''')
+        self.shim('sudo', f'printf "%s\\0" "$PWD" "$@" > {shlex.quote(str(self.sudo))}')
+
+    def project(self, name, user=None, launcher=None, extra=''):
+        """The file of the project ``name`` as setup-devloop.sh writes it, with its clone."""
+        clone = self.tmp / 'clones' / name
+        clone.mkdir(parents=True)
+        path = self.projects / f'params-{name}.env'
+        path.write_text(render('host/devloop-command-project', {
+            'DEVLOOP_USER': user or f'devloop-{name.strip("_")}', 'DEVLOOP_CLONE': str(clone),
+            'DEVLOOP_PATH': f'/home/devloop-{name}/.local/bin:/usr/bin:/bin',
+            'LAUNCHER_CMD': launcher or f'/usr/bin/python3 {clone}/scripts/devloop-pinned'})
+            + extra)
+        path.chmod(0o644)
+        return clone
+
+    def devloop(self, *args, uid=0, owner=0):
+        self.sudo.unlink(missing_ok=True)
+        env = dict(os.environ, PATH=f'{self.bin}:{os.environ.get("PATH", "/usr/bin:/bin")}',
+                   OPS_TEST_UID=str(uid), OPS_TEST_OWNER=str(owner),
+                   OPS_TEST_CALLS=str(self.calls), LC_ALL='C.UTF-8')
+        return subprocess.run([BASH, str(self.command), *args], capture_output=True, text=True,
+                              env=env, stdin=subprocess.DEVNULL, timeout=60, cwd=self.tmp)
+
+    def sudo_call(self):
+        """The directory sudo ran in, and its arguments; None if it did not run."""
+        if not self.sudo.exists():
+            return None
+        cwd, *args = self.sudo.read_text().split('\0')[:-1]
+        return cwd, args
+
+    def launched(self, clone, user, project, *args):
+        return (str(clone), ['-u', user, '-H', '--', '/usr/bin/env',
+                             f'PATH=/home/devloop-{project}/.local/bin:/usr/bin:/bin',
+                             'PYTHONUNBUFFERED=1', '/usr/bin/python3',
+                             f'{clone}/scripts/devloop-pinned', *args])
+
+    def test_the_command_passes_with_bash_n(self):
+        done = subprocess.run([BASH, '-n', str(self.command)], capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.command.read_text().splitlines()[0], '#!/bin/bash')
+
+    def test_the_only_project_is_the_default(self):
+        clone = self.project('_default', user='devloop')
+        done = self.devloop('pin', 'origin/main')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.sudo_call(),
+                         self.launched(clone, 'devloop', '_default', 'pin', 'origin/main'))
+        # Subcommand and arguments as they are, options of devloop's included.
+        done = self.devloop('follow', 'issue-12', '--project', 'x', '--help')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.sudo_call(), self.launched(
+            clone, 'devloop', '_default', 'follow', 'issue-12', '--project', 'x', '--help'))
+        # And by its name.
+        done = self.devloop('--project', '_default', 'status')
+        self.assertEqual(self.sudo_call(), self.launched(clone, 'devloop', '_default', 'status'))
+
+    def test_the_project_is_chosen_with_project(self):
+        widget = self.project('widget')
+        gadget = self.project('gadget')
+        for args, clone, name in ((('--project', 'widget'), widget, 'widget'),
+                                  (('--project=gadget',), gadget, 'gadget'),
+                                  (('--project', 'widget', '--'), widget, 'widget')):
+            with self.subTest(args=args):
+                done = self.devloop(*args, 'status')
+                self.assertEqual(done.returncode, 0, done.stderr)
+                self.assertEqual(self.sudo_call(),
+                                 self.launched(clone, f'devloop-{name}', name, 'status'))
+
+    def test_several_projects_without_project_are_refused_and_listed(self):
+        self.project('widget')
+        self.project('gadget')
+        done = self.devloop('pin', 'origin/main')
+        self.assertEqual(done.returncode, 2)
+        self.assertEqual(done.stderr, 'devloop: più progetti installati (gadget, widget): '
+                                      'sceglierne uno con --project NOME\n')
+        self.assertIsNone(self.sudo_call())
+        done = self.devloop('--project', 'other', 'status')
+        self.assertEqual(done.returncode, 2)
+        self.assertEqual(done.stderr, 'devloop: il progetto other non è installato (progetti: '
+                                      'gadget, widget)\n')
+        for name in ('../widget', 'Widget', '_x', 'widget '):
+            with self.subTest(name=name):
+                done = self.devloop('--project', name, 'status')
+                self.assertEqual(done.returncode, 2)
+                self.assertIn('nome di progetto non valido', done.stderr)
+        self.assertIsNone(self.sudo_call())
+
+    def test_no_project_is_refused(self):
+        done = self.devloop('status')
+        self.assertEqual(done.returncode, 2)
+        self.assertEqual(done.stderr, f'devloop: nessun progetto installato in {self.projects} '
+                                      '(setup-devloop.sh)\n')
+        self.projects.rmdir()
+        done = self.devloop('status')
+        self.assertEqual(done.returncode, 2)
+        self.assertIn('non esiste (setup-devloop.sh)', done.stderr)
+        self.assertIsNone(self.sudo_call())
+
+    def test_the_launcher_of_the_unit_with_its_state_dir(self):
+        clone = self.tmp / 'clones/widget'
+        launcher = (f'/usr/bin/env -C {clone} /usr/bin/python3 /usr/local/lib/devloop/widget/'
+                    'devloop-pinned --state-dir /var/lib/devloop/widget')
+        self.project('widget', launcher=launcher)
+        done = self.devloop('pin', 'origin/main')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.sudo_call(), (str(clone), [
+            '-u', 'devloop-widget', '-H', '--', '/usr/bin/env',
+            'PATH=/home/devloop-widget/.local/bin:/usr/bin:/bin', 'PYTHONUNBUFFERED=1',
+            *launcher.split(), 'pin', 'origin/main']))
+
+    def test_another_user_runs_it_again_with_sudo(self):
+        self.project('widget')
+        done = self.devloop('--project', 'widget', 'status', uid=1000)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.sudo_call(), (str(self.tmp), [
+            '--', str(self.command), '--project', 'widget', 'status']))
+
+    def test_the_help_and_a_missing_subcommand(self):
+        done = self.devloop('--help', uid=1000)
+        self.assertEqual(done.returncode, 0)
+        self.assertIn('Uso: devloop [--project NOME] <sottocomando> [argomenti...]', done.stdout)
+        self.assertIsNone(self.sudo_call())
+        self.project('widget')
+        done = self.devloop('--project', 'widget')
+        self.assertEqual(done.returncode, 2)
+        self.assertIn('Uso: devloop', done.stderr)
+        self.assertIsNone(self.sudo_call())
+
+    def test_files_that_others_can_change_are_refused(self):
+        # Root runs what they say: a directory or a file not root's, or that others can write.
+        self.project('widget')
+        done = self.devloop('status', owner=1000)
+        self.assertEqual(done.returncode, 2)
+        self.assertIn(f'{self.projects} deve essere di root e non scrivibile da altri',
+                      done.stderr)
+        for path, mode in ((self.projects, 0o775), (self.projects / 'params-widget.env', 0o666)):
+            with self.subTest(path=path):
+                path.chmod(mode)
+                done = self.devloop('status')
+                self.assertEqual(done.returncode, 2)
+                self.assertIn(f'{path} deve essere di root e non scrivibile da altri',
+                              done.stderr)
+                path.chmod(0o755 if path.is_dir() else 0o644)
+        self.assertIsNone(self.sudo_call())
+
+    def test_the_file_of_a_project_is_read_not_run(self):
+        for extra, why in (('DEVLOOP_USER=root\n', "DEVLOOP_USER non valido: 'root'"),
+                           ('touch /tmp/x\n', 'riga non riconosciuta: touch /tmp/x'),
+                           ('PATH=/tmp\n', 'riga non riconosciuta: PATH'),
+                           ('LAUNCHER_CMD=/bin/sh -c "id"\n', 'LAUNCHER_CMD non valido'),
+                           ('DEVLOOP_CLONE=$(id)\n', 'DEVLOOP_CLONE non valido')):
+            with self.subTest(extra=extra):
+                shutil.rmtree(self.tmp / 'clones', ignore_errors=True)
+                self.project('widget', extra=extra)
+                done = self.devloop('status')
+                self.assertEqual(done.returncode, 2)
+                self.assertIn(why, done.stderr)
+                self.assertIsNone(self.sudo_call())
+
+
 class PutFileTests(unittest.TestCase):
     """put_file of ops/lib.sh, called the way the scripts call it: in an `if` or with `|| true`,
     where bash does not apply errexit to the function's body."""
@@ -3916,6 +4153,59 @@ class CheckHostTests(OpsTestCase):
     def test_a_correct_installation_has_no_errors(self):
         done, errors = self.check()
         self.assertEqual(errors, [], done.stdout + done.stderr)
+
+    def test_the_devloop_command_and_the_file_of_the_project_are_checked(self):
+        # #588: as setup-devloop.sh generates them, root's (755 and 644), in a directory of root
+        # that others cannot write. Without them the service runs all the same: a warning.
+        command = self.tmp / 'bin-root/devloop'
+        projects = self.tmp / 'etc-devloop/projects'
+        entry = projects / 'params-_default.env'
+        done, errors = self.check()
+        self.assertEqual(errors, [])
+        self.assertIn(f'==> Comando devloop: {command}, progetto _default (#588)', done.stdout)
+        for path in (command, entry):
+            self.assertIn(f'  ATTENZIONE: {path} non esiste o è un link: il comando devloop non '
+                          "c'è per questo progetto (setup-devloop.sh)", done.stdout)
+        projects.mkdir(parents=True)
+        projects.chmod(0o755)
+        command.parent.mkdir()
+        command.write_text(render('host/devloop-command', {'DEVLOOP_PROJECTS_DIR': str(projects)}))
+        command.chmod(0o755)
+        clone = self.devloop / 'devloop'
+        entry.write_text(render('host/devloop-command-project', {
+            'DEVLOOP_USER': ME, 'DEVLOOP_CLONE': str(clone),
+            'DEVLOOP_PATH': f'{self.devloop}/.local/bin:/usr/local/bin:/usr/bin:/bin',
+            'LAUNCHER_CMD': f'/usr/bin/python3 {clone}/scripts/devloop-pinned'}))
+        entry.chmod(0o644)
+        # Outside root, the files are the user's: an error each, and the contents coincide.
+        done, errors = self.check()
+        self.assertEqual(errors, [
+            f'  ERRORE: {projects} è 755 {ME}: deve essere di root e non scrivibile dal gruppo né '
+            'dagli altri',
+            f'  ERRORE: {command} è 755 {ME}, deve essere 755 root (setup-devloop.sh)',
+            f'  ERRORE: {entry} è 644 {ME}, deve essere 644 root (setup-devloop.sh)'])
+        self.assertIn(f'  ok: {command} coincide con ops/host/devloop-command', done.stdout)
+        self.assertIn(f'  ok: {entry} coincide con ops/host/devloop-command-project', done.stdout)
+        # As root's (a fake stat), no error; a file that others can write is one, and a file
+        # different from the generated one is a warning.
+        roots = '|'.join(shlex.quote(str(p)) for p in (projects, command, entry))
+        self.shim('stat', f'''if [ "$1" = -c ] && [ $# -eq 3 ]; then
+    case "$3" in {roots})
+        mode=$({shlex.quote(STAT)} -c %a "$3")
+        printf '%s\\n' "$2" | sed "s/%U/root/g; s/%a/$mode/g"; exit 0 ;;
+    esac
+fi
+exec {shlex.quote(STAT)} "$@"''')
+        done, errors = self.check()
+        self.assertEqual(errors, [])
+        self.assertIn(f'  ok: {projects} è di root, non scrivibile da altri', done.stdout)
+        projects.chmod(0o777)
+        entry.write_text(entry.read_text() + 'DEVLOOP_USER=root\n')
+        done, errors = self.check()
+        self.assertEqual(errors, [f'  ERRORE: {projects} è 777 root: deve essere di root e non '
+                                  'scrivibile dal gruppo né dagli altri'])
+        self.assertIn(f'  ATTENZIONE: {entry} è diverso da ops/host/devloop-command-project con questi '
+                      'parametri: rieseguire setup-devloop.sh', done.stdout)
         out = done.stdout
         for role in DEVLOOP_KEYS:
             self.assertIn(f'{self.devloop}/.ghapps/{PREFIX}{role}.2026-11-18.private-key.pem: '
