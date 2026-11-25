@@ -33,7 +33,9 @@ The rules that hold for every project (ADR 0006, sections 3.6 and 3.8, decisions
 - **Users of its own.** The project has its own system user, agent user, home, clones,
   `state_dir`, `key_dir` and service; on a host that already serves devloop's own repository or another project,
   this is the only way ([Più progetti sullo stesso host](../../ops/README.md#più-progetti-sullo-stesso-host)).
-  Its agent user has its own logins of the CLIs.
+  Its agent user has its own logins of the CLIs. The users of the supervisor and of the
+  coordinator are of the set of apps instead (#643): a project in an existing set shares them,
+  with their logins and their `key_dir`, and gets its own session, mailbox and clone.
 - **The operator's acts.** Creating and installing the apps (they are credentials), the logins
   of the CLIs, the project file, the overlay and starting the service are the operator's.
 
@@ -58,6 +60,27 @@ The examples use `PROJECT=widget`, from which the scripts derive every name:
 | `key_dir` of devloop's user | `/home/devloop-widget/.ghapps` |
 | launcher, installed from the project's tag | `/usr/local/lib/devloop/widget/devloop-pinned` |
 | service | `devloop@widget` |
+| users of the supervisor and of the coordinator, of the set of apps (`APP_SET`, `APP_PREFIX` without its last `-`) | `supervisor-acme-widget-devloop`, `coordinator-acme-widget-devloop` |
+| `key_dir` of the supervisor, the set's | `/home/supervisor-acme-widget-devloop/.ghapps` |
+
+## Steps by hand
+
+The scripts do everything on the host but the acts of a person: on GitHub (the apps), the logins
+of the CLIs, the operator's two files and the start. No role has a personal token of `gh`: the
+supervisor and the coordinator read GitHub with their apps (#643). How many interactive steps
+are left, with the parameters of this page (six apps, no coordinator):
+
+| | New project in a **new set of apps** | New project in an **existing set** |
+|---|---|---|
+| GitHub | 3 per app: create it from the page, exchange the `code` on the host, install it on `acme/widget`: 18 | 1 per app: add `acme/widget` to its installation: 6 |
+| CLI logins | 4: `claude`, `codex` and `agy` of the agent user, and the CLI of the supervisor | 3: those of the agent user; the users of the roles are the set's, already logged in |
+| Total | **22** | **9** |
+| With the coordinator | 26: its app (3) and its login (1) | 10: its app's installation (1) |
+
+The operator also writes the project file and the overlay (step 4), and starts the service and
+the sessions of the roles (steps 7 and 9), in both cases. In an existing set the keys of devloop's
+apps are copied from a project of the set; those of the supervisor and of the coordinator are
+already in the `key_dir` of the set's users.
 
 ## 1. Parameters
 
@@ -86,7 +109,11 @@ DEVLOOP_KEYS="dispatcher implementer claude-agent codex-agent agy-agent"
   that for every app of `APPS` (with `claude-agent`, the longest role, the prefix has at most 22);
   `create-apps.sh` stops before writing its page otherwise. With a
   [shared set of apps](#a-shared-set-of-apps) it is the set's prefix.
-- `APPS` are the apps `ops/github/create-apps.sh` prepares, `DEVLOOP_KEYS` those whose key goes to
+- `APP_PREFIX` names the set of apps too: with `PROJECT`, the users of the supervisor and of the
+  coordinator are the set's, `<role>-<APP_SET>`, with `APP_SET` by default `APP_PREFIX` without
+  its last `-` (at most 20 characters; otherwise write `APP_SET`), and every project of the set
+  shares them (#643).
+- `APPS` are the apps the page of step 3 creates, `DEVLOOP_KEYS` those whose key goes to
   devloop's `key_dir`: the dispatcher, the implementer (the installation's agents are named by
   role, and `claude-implementer` signs with it) and the reviewers' apps `claude-agent`,
   `codex-agent` and `agy-agent`. The supervisor's `key_dir` gets the keys of `SUPERVISOR_KEYS`
@@ -96,30 +123,51 @@ DEVLOOP_KEYS="dispatcher implementer claude-agent codex-agent agy-agent"
 
 ## 2. Host
 
+One script for the host ([Un solo script per gli script
+dell'host](../../ops/README.md#da-una-vm-vuota-a-devloop-e-supervisore-attivi), #643):
+
 ```bash
-sudo bash ops/host/setup-devloop.sh --params ops/params-widget.env --dry-run   # what it would do
-sudo bash ops/host/setup-devloop.sh --params ops/params-widget.env
+sudo bash ops/host/setup-project.sh --params ops/params-widget.env --dry-run   # what it would do
+sudo bash ops/host/setup-project.sh --params ops/params-widget.env
 ```
 
-It installs the missing packages and creates `devloop-widget`, the clone of `acme/widget`, the
-clone of devloop, the launcher from the tag `SOURCE_REF` (one per project, so projects with
-different tags do not overwrite each other's), the `state_dir` (mode `750`) with `run.log` and a
-fully commented overlay (mode `600`; the supervisor and the coordinator read it through the ACLs
-their scripts add), the `key_dir`, the template unit `devloop@.service` with the drop-in of
-`devloop@widget`, and the directory and group of the repository locks. It does not start the
-service, and it lists what is left to do by hand
+It runs, in order, `setup-devloop.sh`, `setup-agent-user.sh` and `setup-supervisor.sh` (and
+`setup-coordinator.sh`, with `--coordinator` or when the overlay declares the coordinator): first
+every one with `--dry-run`, then, after one confirmation, the real runs, and at the end it lists in
+one block the steps left by hand. `setup-devloop.sh` installs the missing packages and creates
+`devloop-widget`, the clone of `acme/widget`, the clone of devloop, the launcher from the tag
+`SOURCE_REF` (one per project, so projects with different tags do not overwrite each other's),
+the `state_dir` (mode `750`) with `run.log` and a fully commented overlay (mode `600`; the
+supervisor and the coordinator read it through the ACLs their scripts add), the `key_dir`, the
+template unit `devloop@.service` with the drop-in of `devloop@widget`, and the directory and
+group of the repository locks; the others prepare the agent user (step 5) and the supervisor
+(step 7). It does not start the service
 ([4. Host di devloop](../../ops/README.md#4-host-di-devloop),
-[Un altro progetto](../../ops/README.md#un-altro-progetto)).
+[Un altro progetto](../../ops/README.md#un-altro-progetto)). Every script stays, and the single one
+is run again in step 5, after the overlay: it is idempotent.
+
+In an existing set of apps, the users of the supervisor and of the coordinator already serve
+another project of the set, and the scripts share them only when the two overlays declare the
+same `app_id` for the role's app: until step 4 writes `[apps.supervisor]` in this overlay, the
+real run stops at `setup-supervisor.sh` and says so, after `setup-devloop.sh` and
+`setup-agent-user.sh`. That is expected; step 5 completes it.
 
 ## 3. GitHub Apps
 
+Open the page of the apps, `ops/github/create-apps.html` of the repository of devloop, in a
+browser of your computer with the GitHub session of the owner of `acme/widget`. It is static: it
+composes the manifests in the browser, calls GitHub only when you press a button, and reads no
+credential. Fill in the prefix of the set (`acme-widget-devloop-`), the repository
+(`acme/widget`) and the type of owner (`org`); it shows the values of `APP_PREFIX` and `APPS`
+to keep in the parameters, and one button per app. `ops/github/create-apps.sh` generates the same
+buttons on the host from the parameters, for whoever prefers it
+([2. GitHub App](../../ops/README.md#2-github-app)):
+
 ```bash
 bash ops/github/create-apps.sh --params ops/params-widget.env --dry-run   # the apps and their permissions
-bash ops/github/create-apps.sh --params ops/params-widget.env --out ~/create-apps.html
 ```
 
-Open the page in a browser with the GitHub session of the owner of `acme/widget`. For each app,
-as in [2. GitHub App](../../ops/README.md#2-github-app) of the ops guide:
+For each app, as in [2. GitHub App](../../ops/README.md#2-github-app) of the ops guide:
 
 1. create it from its button;
 2. exchange the `code` within one hour, keeping only `id`, `slug` and the private key, never
@@ -166,16 +214,18 @@ With a shared set, steps 1 and 3 change so:
 1. in the parameters, `APP_PREFIX` is the set's prefix, whatever the repository is called (for
    example `APP_PREFIX=acme-devloop-`); `check-host.sh` and the setup scripts look for the keys of
    `<APP_PREFIX><role>`;
-2. no `create-apps.sh` for the apps the set already has. If the project needs one the set lacks
-   (for example `merger`, for a repository where devloop merges), set `APPS` in the parameters to
-   those roles only and run `create-apps.sh` as above: its page has a button for them alone;
+2. no new app for those the set already has. If the project needs one the set lacks (for example
+   `merger`, for a repository where devloop merges), tick in the page of the apps those the set
+   has: it creates only the others, and gives the value of `APPS` for the parameters (or set
+   `APPS` to those roles only and run `create-apps.sh`);
 3. install each app on `acme/widget` too: in the app's settings on GitHub, *Install App* → the
    owner's installation → *Only select repositories* → add `acme/widget`, keeping the others.
    Never *All repositories*: `devloop apps` warns about it (step 8). The merger only where devloop
    merges: with a shared set, choose per app the repositories it is installed on;
-4. copy the keys of the set from the `key_dir` of a project that already uses it, mode `600`,
-   owned by the user that uses them, without printing them: devloop's apps to
-   `/home/devloop-widget/.ghapps`, those of `SUPERVISOR_KEYS` to the supervisor's (step 7):
+4. copy the keys of devloop's apps from the `key_dir` of a project that already uses the set to
+   `/home/devloop-widget/.ghapps`, mode `600`, owned by `devloop-widget`, without printing them.
+   Those of the supervisor and of the coordinator are already in the `key_dir` of the set's users
+   (step 7):
 
 ```bash
 sudo install -o devloop-widget -g devloop-widget -m 600 /home/devloop-other/.ghapps/<slug>.<date>.private-key.pem /home/devloop-widget/.ghapps/
@@ -286,9 +336,13 @@ slug = "acme-widget-devloop-supervisor"
 
 ## 5. Agent user and CLI logins
 
+First the single script again, now that the overlay and the project file are there: it gives the
+agent user and the roles their ACLs on them, and in an existing set it completes the supervisor
+(step 2). Then the logins of the agent user:
+
 ```bash
-sudo bash ops/host/setup-agent-user.sh --params ops/params-widget.env --dry-run
-sudo bash ops/host/setup-agent-user.sh --params ops/params-widget.env
+sudo bash ops/host/setup-project.sh --params ops/params-widget.env --dry-run
+sudo bash ops/host/setup-project.sh --params ops/params-widget.env
 sudo bash ops/host/setup-agent-user.sh --params ops/params-widget.env --unseal
 sudo -iu devloop-widget-agent        # install claude, codex and agy in ~/.local/bin, log in to each
 sudo pkill -u devloop-widget-agent -f 'codex app-server'  # the daemon codex's login leaves running
@@ -335,51 +389,55 @@ sudo -u devloop-widget -H sh -c 'cd ~/widget && PYTHONPATH=~/devloop-source pyth
 
 ## 7. Supervisor
 
-The supervisor is the project's, like the coordinator: one system user per role and per project,
-`supervisor-widget`, with its home, its logins of the CLIs, its sudoers, its clone and its
-`key_dir` (`/home/supervisor-widget/.ghapps-widget`), and no channel with the roles of the other
-projects of the host
+The supervisor serves only this project, with its session, its mailbox, its sudoers and its
+clone, and no channel with the roles of the other projects of the host
 ([ADR 0002](../adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-24-ruoli-per-progetto-629),
-#629). That `key_dir` gets the keys of
-`SUPERVISOR_KEYS` (by default `supervisor` and, until `[roles.supervisor]` is a table in the
-overlay, `claude-agent`), mode `600`, owned by `supervisor-widget`
-([7. Host del supervisore](../../ops/README.md#7-host-del-supervisore)):
-
-```bash
-sudo bash ops/host/setup-supervisor.sh --params ops/params-widget.env --dry-run
-sudo bash ops/host/setup-supervisor.sh --params ops/params-widget.env
-```
+#629). Its system user is the set's (#643,
+[ADR 0002](../adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-24-utenti-dei-ruoli-per-insieme-di-app-643)):
+`supervisor-acme-widget-devloop`, with its home, its login of the CLI and its `key_dir`
+(`/home/supervisor-acme-widget-devloop/.ghapps`), shared by the projects of the set. In a new set
+that `key_dir` gets the keys of `SUPERVISOR_KEYS` (by default `supervisor` and, until
+`[roles.supervisor]` is a table in the overlay, `claude-agent`), mode `600`, owned by
+`supervisor-acme-widget-devloop`; in an existing set they are there already
+([7. Host del supervisore](../../ops/README.md#7-host-del-supervisore)). `setup-supervisor.sh` ran
+in step 2 and 5, from the single script.
 
 `acme/widget` does not contain devloop, so the supervisor's clone of it has no
 `scripts/supervisor-token.py`: the script also clones the source, `brushtyler/devloop`, at the tag
-`SOURCE_REF`, in `/home/supervisor-widget/devloop-source-widget` (`SUPERVISOR_SOURCE_CLONE`), and
-prints the command that mints the tokens of the supervisor's app, as `supervisor-widget`, from that
-clone, with its `key_dir` and the project's `state_dir`:
+`SOURCE_REF`, in `/home/supervisor-acme-widget-devloop/devloop-source-widget`
+(`SUPERVISOR_SOURCE_CLONE`), and prints the command that mints the tokens of the supervisor's
+app, as `supervisor-acme-widget-devloop`, from that clone, with its `key_dir` and the project's
+`state_dir`. The session works in the clone of `acme/widget` and runs the script there with a
+`cd`:
 
 ```bash
-cd /home/supervisor-widget/devloop-source-widget
-DEVLOOP_APP_KEY_DIR=/home/supervisor-widget/.ghapps-widget python3 scripts/supervisor-token.py \
+cd /home/supervisor-acme-widget-devloop/devloop-source-widget
+DEVLOOP_APP_KEY_DIR=/home/supervisor-acme-widget-devloop/.ghapps python3 scripts/supervisor-token.py \
     --state-dir /var/lib/devloop/widget -- gh issue comment <ISSUE> --body-file <FILE>
+DEVLOOP_APP_KEY_DIR=/home/supervisor-acme-widget-devloop/.ghapps python3 scripts/supervisor-token.py \
+    --state-dir /var/lib/devloop/widget --perm issues=read --perm pull_requests=read -- gh pr view <PR>
 ```
 
 The clone's origin is `brushtyler/devloop`, but the command acts on `acme/widget`: the script
 passes it `GH_REPO` with the `repo` of the project's overlay, the only repository its token
 reaches, and refuses a `GH_REPO` of the caller that names another one.
 
-The supervisor of the project needs its own read-only `gh` token, for `acme/widget` only, as
-`supervisor-widget`, and its own login of the CLI of `[roles.supervisor]`
-([Token di sola lettura del supervisore](../../ops/github/tokens.md#token-di-sola-lettura-del-supervisore)).
-Its session is `devloop-supervisor-widget`:
+The supervisor reads GitHub with its app too, asking only the read permissions it needs: it has
+no personal `gh` token ([Token](../../ops/github/tokens.md)). In a new set its user needs the login
+of the CLI of `[roles.supervisor]`; in an existing set it has it already. Its session is
+`devloop-supervisor-widget`:
 `sudo bash ops/host/start-role.sh --params ops/params-widget.env supervisor`
 ([I quattro ruoli](../../ops/README.md#i-quattro-ruoli)).
 
 **Coordinator (optional).** A project has a coordinator only if its overlay declares it, with
 `[apps.coordinator]` or `[roles.coordinator]`; otherwise `check-host.sh` says so in one line. To
 add it: the app `coordinator` in `APPS` of the project's set (step 3), its key in
-`/home/coordinator-widget/.ghapps-widget` (the user `coordinator-widget`), `[apps.coordinator]` in
-the overlay, and
-`sudo bash ops/host/setup-coordinator.sh --params ops/params-widget.env`, which also gives it its
-clone of the source for `scripts/coordinator-token.py`
+`/home/coordinator-acme-widget-devloop/.ghapps` (the user of the set,
+`coordinator-acme-widget-devloop`; in an existing set it is there already), `[apps.coordinator]`
+in the overlay, and the single script again with `--coordinator`,
+`sudo bash ops/host/setup-project.sh --params ops/params-widget.env --coordinator`, which runs
+`setup-coordinator.sh` too: it gives the coordinator its clone of `acme/widget`, where its session
+starts, and its clone of the source for `scripts/coordinator-token.py`
 ([10. Coordinatore (facoltativo)](../../ops/README.md#10-coordinatore-facoltativo)).
 
 ## 8. Checks
@@ -427,8 +485,10 @@ devloop works on the issues of `acme/widget` that a user of `trusted_users` labe
   off when the installation has its own source. Pin with the launcher (`pin <tag>` instead of
   `apps` in the commands of step 8), then restart the service
   ([Installation source](guide.md#installation-source), [Rollback](guide.md#rollback)). With the
-  new tag in `SOURCE_REF`, `setup-supervisor.sh` (and `setup-coordinator.sh`, if the project has
-  the coordinator) moves the clone of the source of its role to that tag.
+  new tag in `SOURCE_REF`, `setup-project.sh` (its `setup-supervisor.sh` and, if the project has
+  the coordinator, `setup-coordinator.sh`) moves the clone of the source of each role to that tag.
+- **A change of the parameters** (for example `APPS`) makes the root copies of the parameters of
+  the roles differ, and `check-host.sh` says so: run `setup-project.sh` again.
 - **The direction of the project** (#604), when the operator wants the coordinator to order the
   work by it: open an issue of `acme/widget` dedicated to it, say `Direzione del progetto`, and
   write the first direction there as a comment of a user of `trusted_users` that starts with the

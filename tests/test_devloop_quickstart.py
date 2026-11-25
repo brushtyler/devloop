@@ -256,21 +256,45 @@ class ParameterTests(QuickstartTestCase):
     def test_the_supervisor_mints_its_tokens_from_the_clone_of_the_source(self):
         # #571: acme/widget does not hold scripts/supervisor-token.py: the supervisor runs it
         # from the clone of the source that setup-supervisor.sh makes, with its key_dir and the
-        # project's state_dir; its read-only token of gh must reach the new repository. #629: the
-        # supervisor is a user of the project, with its own token and its own session.
+        # project's state_dir. #629: the supervisor serves the project, with its own session.
+        # #643: its user is the set's, and it reads GitHub with its app, with no personal token.
         p = self.derived()
-        self.assertEqual(p['SUPERVISOR_USER'], 'supervisor-widget')
+        self.assertEqual(p['SUPERVISOR_USER'], 'supervisor-acme-widget-devloop')
         lines = commands()
         self.assertIn(f'cd {p["SUPERVISOR_SOURCE_CLONE"]}', lines)
         self.assertIn(f'DEVLOOP_APP_KEY_DIR={p["SUPERVISOR_KEY_DIR"]} python3 '
                       f'scripts/supervisor-token.py --state-dir {p["STATE_PATH"]} -- '
                       'gh issue comment <ISSUE> --body-file <FILE>', lines)
-        self.assertIn(f'`{p["SUPERVISOR_SOURCE_CLONE"]}` (`SUPERVISOR_SOURCE_CLONE`)', text())
+        self.assertIn(f'DEVLOOP_APP_KEY_DIR={p["SUPERVISOR_KEY_DIR"]} python3 '
+                      f'scripts/supervisor-token.py --state-dir {p["STATE_PATH"]} --perm '
+                      'issues=read --perm pull_requests=read -- gh pr view <PR>', lines)
+        self.assertIn(f'`{p["SUPERVISOR_SOURCE_CLONE"]}`', text())
         self.assertTrue((ROOT / 'scripts' / 'supervisor-token.py').is_file())
         page = ' '.join(text().split())
-        self.assertIn("The supervisor of the project needs its own read-only `gh` token, for "
-                      f"`acme/widget` only, as `{p['SUPERVISOR_USER']}`", page)
+        self.assertIn('it has no personal `gh` token', page)
+        self.assertNotIn('read-only `gh` token', page)
+        self.assertIn(f'`{p["SUPERVISOR_USER"]}`', page)
         self.assertIn('Its session is `devloop-supervisor-widget`', page)
+
+    def test_it_uses_the_single_script_and_counts_the_steps_by_hand(self):
+        # #643: the page runs the scripts of the host through setup-project.sh, and says how
+        # many interactive steps are left for a new project, in a new set and in an existing one.
+        lines = commands()
+        self.assertIn('sudo bash ops/host/setup-project.sh --params ops/params-widget.env', lines)
+        self.assertIn('sudo bash ops/host/setup-project.sh --params ops/params-widget.env '
+                      '--dry-run', lines)
+        self.assertFalse([line for line in lines
+                          if re.match(r'sudo bash ops/host/setup-(devloop|supervisor|coordinator)',
+                                      line)], lines)
+        page = ' '.join(text().split())
+        p = self.derived()
+        apps = len(p['APPS'].split())
+        self.assertEqual(apps, 6)
+        self.assertIn('## Steps by hand', text())
+        self.assertIn(f'| Total | **{3 * apps + 4}** | **{apps + 3}** |', page)
+        self.assertIn('New project in a **new set of apps**', page)
+        self.assertIn('New project in an **existing set**', page)
+        self.assertIn('`ops/github/create-apps.html`', page)
 
     def test_the_coordinator_is_optional_for_the_project(self):
         # #571: check-host.sh checks the coordinator only if the overlay declares it; the page
@@ -281,8 +305,9 @@ class ParameterTests(QuickstartTestCase):
                       '`[apps.coordinator]` or `[roles.coordinator]`', page)
         self.assertIn('the app `coordinator` in `APPS`', page)
         self.assertIn(f'its key in `{p["COORDINATOR_KEY_DIR"]}`', page)
-        self.assertIn('`sudo bash ops/host/setup-coordinator.sh --params ops/params-widget.env`',
-                      page)
+        # #643: through the single script, which runs setup-coordinator.sh with --coordinator.
+        self.assertIn('`sudo bash ops/host/setup-project.sh --params ops/params-widget.env '
+                      '--coordinator`', page)
         # The example has none: the parameters leave out its app, the overlay its tables.
         self.assertNotIn('coordinator', p['APPS'].split())
         self.assertNotIn('coordinator', example('config.local.toml'))
@@ -291,7 +316,7 @@ class ParameterTests(QuickstartTestCase):
 class CommandTests(unittest.TestCase):
     def test_the_ops_paths_it_cites_exist(self):
         cited = set(re.findall(r'(?<![\w/.~-])ops/[\w./@-]*[\w/]', text()))
-        self.assertIn('ops/host/setup-devloop.sh', cited)
+        self.assertIn('ops/host/setup-project.sh', cited)
         # The parameters file is the one the page has the operator write.
         cited.discard('ops/params-widget.env')
         for path in sorted(cited):

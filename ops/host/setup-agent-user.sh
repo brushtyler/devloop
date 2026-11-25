@@ -44,6 +44,8 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# Gli utenti dei ruoli qui non si toccano (#643; setup-devloop.sh).
+OPS_DEFER_ROLE_USERS=1
 ops_load_params
 ops_check_platform
 require_root

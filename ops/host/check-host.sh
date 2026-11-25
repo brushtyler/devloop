@@ -10,8 +10,9 @@
 # che sudo-rs ignora), il lock per repository (directory comune, gruppo, overlay; ADR 0006, R8),
 # servizio, comando devloop dell'host e file del progetto (#588), CLI degli agent (--version, e un `git --version` con il loro strumento di shell,
 # #494) e `devloop apps`, e il coordinatore, se l'overlay del progetto lo dichiara (#571; key_dir e chiave della sua app, ACL e lettura dell'overlay, #549;
-# sudoers e copia di root di questo script, #530). Con più progetti sullo stesso host si esegue una volta per progetto, con i suoi
-# parametri (--params).
+# sudoers e copia di root di questo script, #530; il suo clone, #643), e Claude Code dei ruoli
+# senza aggiornamenti automatici (#643). Con più progetti sullo stesso host si esegue una volta
+# per progetto, con i suoi parametri (--params).
 # Non cambia nulla, se non le sessioni e le cache che le CLI degli agent scrivono da sé. Delle
 # prove delle CLI riporta solo l'esito e il codice di uscita, mai il loro output né il testo del
 # modello (#530).
@@ -279,6 +280,20 @@ check_dir "$DEVLOOP_HOME/.codex" 700 "$DEVLOOP_USER"
 check_dir "$SUPERVISOR_KEY_DIR" 700 "$SUPERVISOR_USER"
 check_dir "$SUPERVISOR_HOME/.claude" 700 "$SUPERVISOR_USER"
 
+# check_claude_settings USER HOME SETUP: le impostazioni di Claude Code dell'utente di un ruolo
+# senza aggiornamenti automatici (#643), come le scrive lo script SETUP. Un avviso: la CLI del
+# ruolo può non essere claude.
+check_claude_settings() {
+    local why
+    if why=$(claude_no_autoupdate "$2/.claude/settings.json"); then
+        ok "$2/.claude/settings.json: autoUpdates false, DISABLE_AUTOUPDATER=1"
+    else
+        warn "$why: Claude Code di $1 si aggiornerebbe da solo ($3)"
+    fi
+}
+step "Claude Code del supervisore senza aggiornamenti automatici (#643)"
+check_claude_settings "$SUPERVISOR_USER" "$SUPERVISOR_HOME" setup-supervisor.sh
+
 step 'Chiavi delle GitHub App (600)'
 ops_devloop_keys "$STATE_PATH/config.local.toml"
 check_keys "$DEVLOOP_KEY_DIR" "$DEVLOOP_USER" "$DEVLOOP_KEYS_REQUIRED" 0 "$DEVLOOP_KEYS_OPTIONAL"
@@ -542,6 +557,14 @@ else
     check_as "$COORDINATOR_USER" "$COORDINATOR_USER legge $OVERLAY_FILE" \
         /usr/bin/bash -c '[ -r "$1" ]' _ "$OVERLAY_FILE"
     check_sudoers "$COORDINATOR_SUDOERS_FILE" sudoers-coordinator setup-coordinator.sh
+    # Il clone del repository gestito, da cui parte la sua sessione (#643), e Claude Code senza
+    # aggiornamenti automatici, come per il supervisore.
+    if [ -d "$COORDINATOR_CLONE/.git" ]; then
+        ok "$COORDINATOR_CLONE è un clone"
+    else
+        fail "$COORDINATOR_CLONE non è un clone: la sessione del coordinatore parte da lì (setup-coordinator.sh)"
+    fi
+    check_claude_settings "$COORDINATOR_USER" "$COORDINATOR_HOME" setup-coordinator.sh
     check_root_path "$COORDINATOR_OPS_DIR/host"
     for name in $OPS_COORDINATOR_FILES params.env; do
         copy=$COORDINATOR_OPS_DIR/$name

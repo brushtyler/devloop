@@ -13,10 +13,11 @@
 # - host: CLI e modello li sceglie l'operatore al lancio (--cli, --model); la sessione gira con
 #   l'utente dell'operatore che lancia lo script con sudo, quello che ha sudo sull'host.
 #
-# Supervisore e coordinatore partono dal loro clone: SUPERVISOR_CLONE, e per il coordinatore il
-# clone da cui conia i token (#621); senza, lo script si ferma. Sono del progetto (ADR 0002,
-# precisazione del 2026-11-24; #629): la sessione si chiama devloop-<ruolo>-<progetto> con
-# PROJECT, devloop-<ruolo> senza, e il primo messaggio dice che il ruolo serve solo quel progetto.
+# Supervisore e coordinatore partono dal loro clone del repository gestito: SUPERVISOR_CLONE e
+# COORDINATOR_CLONE (#621, #643); senza, o senza il clone da cui coniano i token, lo script si
+# ferma. Servono un solo progetto (ADR 0002, precisazione del 2026-11-24; #629), con un utente per
+# insieme di app (#643): la sessione si chiama devloop-<ruolo>-<progetto> con PROJECT,
+# devloop-<ruolo> senza, e il primo messaggio dice che il ruolo serve solo quel progetto.
 #
 # Non legge segreti: legge i parametri, la configurazione e il runbook, e avvia tmux. Scrive un
 # solo file: il primo messaggio della sessione, nella home dell'utente del ruolo, suo e con modo
@@ -73,6 +74,9 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$ROLE" ] || { usage >&2; exit 2; }
 
+# Il coordinatore che si avvia si verifica fra gli utenti dell'host anche se l'overlay non lo
+# dichiara (ops_check_host_users).
+[ "$ROLE" = coordinator ] && OPS_WITH_COORDINATOR=1
 ops_load_params
 ops_check_platform
 
@@ -122,23 +126,25 @@ case $ROLE in
         table=$(role_table "$ROLE") || die "niente avviato"
         read -r CLI MODEL <<<"$table"
         ok "[roles.$ROLE]: CLI $CLI, modello $MODEL"
+        # La sessione parte dal clone del repository gestito del ruolo: è la directory fidata
+        # della CLI, la home non lo è (#621, decisione dell'operatore del 2026-11-24). I token
+        # dell'app del ruolo si coniano dal clone che contiene gli script dei token (#565): lo
+        # stesso clone o, con la sorgente a parte, il clone della sorgente che prepara lo script
+        # di setup del ruolo (#571), con un cd. Supervisore e coordinatore sono simmetrici (#643).
         if [ "$ROLE" = supervisor ]; then
             ROLE_USER=$SUPERVISOR_USER
             ROLE_HOME=$SUPERVISOR_HOME
             ROLE_DIR=$SUPERVISOR_CLONE
+            ROLE_KEY_DIR=$SUPERVISOR_KEY_DIR
+            TOKEN_CLONE=$SUPERVISOR_CLONE
+            [ -z "$SOURCE_REPO" ] || TOKEN_CLONE=$SUPERVISOR_SOURCE_CLONE
         else
             ROLE_USER=$COORDINATOR_USER
             ROLE_HOME=$COORDINATOR_HOME
-            # Il clone del coordinatore, da cui lancia scripts/coordinator-token.py (#565): nella
-            # sua home, con il nome del repository, come i clone di devloop e del supervisore
-            # senza PROJECT (/home/coordinator/devloop su questo host, ADR 0007).
-            # Con la sorgente a parte, il clone della sorgente che prepara setup-coordinator.sh
-            # (#571): il repository gestito non contiene lo script.
-            TOKEN_CLONE=$COORDINATOR_HOME/${REPO#*/}
+            ROLE_DIR=$COORDINATOR_CLONE
+            ROLE_KEY_DIR=$COORDINATOR_KEY_DIR
+            TOKEN_CLONE=$COORDINATOR_CLONE
             [ -z "$SOURCE_REPO" ] || TOKEN_CLONE=$COORDINATOR_SOURCE_CLONE
-            # La sessione parte dal clone, come quella del supervisore: è la directory fidata
-            # della CLI, la home non lo è (#621, decisione dell'operatore del 2026-11-24).
-            ROLE_DIR=$TOKEN_CLONE
         fi
         ;;
     host)
@@ -176,11 +182,11 @@ if [ -z "$ROLE_HOME" ]; then
     ROLE_HOME=$(getent passwd "$ROLE_USER" | cut -d: -f6) || true
     [[ $ROLE_HOME =~ ^/[A-Za-z0-9._/-]*$ ]] || die "non trovo la home di $ROLE_USER: '$ROLE_HOME'"
 fi
-if [ "$ROLE" = coordinator ] && [ ! -d "$TOKEN_CLONE/.git" ]; then
-    if [ -n "$SOURCE_REPO" ]; then
-        die "manca il clone del coordinatore $TOKEN_CLONE, la sua directory di lavoro: prima setup-coordinator.sh, che lo clona (ops/README.md, passo 10)"
-    fi
-    die "manca il clone del coordinatore $TOKEN_CLONE, la sua directory di lavoro: prima clonare $REPO in $TOKEN_CLONE come $ROLE_USER (ops/README.md, passo 10)"
+if [ "$ROLE" = coordinator ]; then
+    for clone in "$ROLE_DIR" "$TOKEN_CLONE"; do
+        [ -d "$clone/.git" ] \
+            || die "manca il clone $clone di $ROLE_USER: prima setup-coordinator.sh, che lo clona (ops/README.md, passo 10)"
+    done
 fi
 [ -d "$ROLE_DIR" ] || die "manca la directory di lavoro $ROLE_DIR"
 ok "$ROLE_USER, directory di lavoro $ROLE_DIR"
@@ -196,11 +202,12 @@ case $ROLE in
     coordinator) INBOX=to-coordinator OUTBOX=to-supervisor ;;
     host) INBOX='' ;;
 esac
-# Per il coordinatore anche i valori dei token della sua app (#565): la sua key_dir e il clone da
-# cui lancia scripts/coordinator-token.py, così il runbook non contiene percorsi di un host.
+# Per supervisore e coordinatore anche i valori dei token della loro app (#565; il supervisore
+# dal #643, che legge GitHub con la sua app): la key_dir e il clone da cui lanciano lo script dei
+# token, così il runbook non contiene percorsi di un host.
 TOKENS=''
-[ "$ROLE" != coordinator ] \
-    || TOKENS=" For the section \"GitHub\": the key_dir of your app (DEVLOOP_APP_KEY_DIR) is $COORDINATOR_KEY_DIR, and your clone, from which you run scripts/coordinator-token.py, is $TOKEN_CLONE."
+[ "$ROLE" = host ] \
+    || TOKENS=" For the section \"GitHub\": the key_dir of your app (DEVLOOP_APP_KEY_DIR) is $ROLE_KEY_DIR; you work in your clone $ROLE_DIR, and you run scripts/$ROLE-token.py from the clone $TOKEN_CLONE (cd there for each command)."
 if [ -n "$INBOX" ]; then
     CHANNEL="Values of this installation (ops/params.env), for the sections \"At startup\", \"Channel\" and \"Watching\" of the runbook: the state_dir of devloop is $STATE_PATH; the mailbox between supervisor and coordinator is $COORDINATION_DIR (group $COORDINATION_GROUP): your messages are in $COORDINATION_DIR/$INBOX/, yours to the other role go in $COORDINATION_DIR/$OUTBOX/; the wake-up of the supervisor is bash $SUPERVISOR_OPS_DIR/host/role-wait.sh --role supervisor, the wake-up of the coordinator is bash $COORDINATOR_OPS_DIR/host/role-wait.sh --role coordinator.$TOKENS Start now with the section \"At startup\".
 

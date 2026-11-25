@@ -2085,8 +2085,11 @@ model = "claude-opus-5-5"
   read the project file, which cannot hold those keys. It reads only the supervisor's key, from
   `$DEVLOOP_APP_KEY_DIR` or `key_dir`: with a `key_dir` of devloop's user in the overlay, the
   supervisor sets `$DEVLOOP_APP_KEY_DIR` to its own. Without `--perm` the token gets `issues=write` and
-  `pull_requests=write`; only `issues` and `pull_requests` (read or write) and `metadata=read`
-  may be asked for. The token reaches the command through `GH_TOKEN` only, and is never printed.
+  `pull_requests=write`; only `issues` and `pull_requests` (read or write), and `actions`,
+  `checks`, `statuses` and `metadata` read, may be asked for. The supervisor reads GitHub with
+  this script too, asking only the read permissions it needs (`--perm issues=read`, `--perm
+  actions=read`, …): since #643 it has no personal token of `gh`. The token reaches the command
+  through `GH_TOKEN` only, and is never printed.
   Before any key is read, the text the command publishes (`--body`/`-b`, `--title`/`-t`,
   `--body-file`/`-F`, standard input with `-`; for `gh api`, `--input` and the fields of
   `-f`/`-F`, the content of a file read with `-F key=@file` and standard input with `key=@-`;

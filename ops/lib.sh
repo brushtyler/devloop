@@ -394,7 +394,7 @@ ops_devloop_keys() {
 # per valore un percorso, sostituiti dal più lungo (STATE_DIR è STATE_PATH, lo state_dir risolto),
 # e quelli che sono nomi di utenti dei ruoli, sostituiti solo da soli e solo se non sono i default
 # documentati (OPS_PUBLIC_USERS, come PUBLIC_USERS di devloop/redact.py).
-OPS_REDACT_PATHS='STATE_DIR DEVLOOP_KEY_DIR SUPERVISOR_KEY_DIR COORDINATOR_KEY_DIR DEVLOOP_HOME AGENT_HOME SUPERVISOR_HOME COORDINATOR_HOME COORDINATION_DIR COORDINATOR_OPS_DIR SUPERVISOR_OPS_DIR WATCHDOG_OPS_DIR LAUNCHER_DIR REPO_LOCK_DIR SYSTEMD_DIR SUDOERS_FILE AGENT_SUDOERS_FILE COORDINATOR_SUDOERS_FILE TMPFILES_FILE DEVLOOP_PROJECTS_DIR DEVLOOP_COMMAND'
+OPS_REDACT_PATHS='STATE_DIR DEVLOOP_KEY_DIR SUPERVISOR_KEY_DIR COORDINATOR_KEY_DIR COORDINATOR_CLONE DEVLOOP_HOME AGENT_HOME SUPERVISOR_HOME COORDINATOR_HOME COORDINATION_DIR COORDINATOR_OPS_DIR SUPERVISOR_OPS_DIR WATCHDOG_OPS_DIR LAUNCHER_DIR REPO_LOCK_DIR SYSTEMD_DIR SUDOERS_FILE AGENT_SUDOERS_FILE COORDINATOR_SUDOERS_FILE TMPFILES_FILE DEVLOOP_PROJECTS_DIR DEVLOOP_COMMAND'
 OPS_REDACT_USERS='DEVLOOP_USER AGENT_USER SUPERVISOR_USER COORDINATOR_USER WATCHDOG_USER'
 # Gli altri nomi dell'installazione, sostituiti da soli e nei nomi dei percorsi e delle unità
 # ($SYSTEMD_DIR/$SERVICE_NAME.service), alle condizioni degli utenti.
@@ -553,20 +553,30 @@ ops_load_params() {
         : "${SERVICE_NAME:=devloop@$PROJECT}"
         : "${SUDOERS_FILE:=/etc/sudoers.d/devloop-supervisor-$PROJECT}"
         : "${AGENT_SUDOERS_FILE:=/etc/sudoers.d/devloop-agent-$PROJECT}"
-        # Supervisore e coordinatore sono del progetto (ADR 0002, precisazione del 2026-11-24;
-        # #629): un utente per ruolo e per progetto, con i suoi login delle CLI, e il gruppo della
-        # casella del progetto, così la sessione di un progetto non legge la casella né le chiavi
-        # dei ruoli di un altro. Sudoers e copia di check-host.sh del coordinatore sono del progetto.
-        : "${SUPERVISOR_USER:=supervisor-$PROJECT}"
-        : "${COORDINATOR_USER:=coordinator-$PROJECT}"
+        # Supervisore e coordinatore hanno un utente per ruolo e per insieme di app (ADR 0002,
+        # precisazione del 2026-11-24 su #643, che precisa quella di #629): la chiave della loro
+        # app vale per tutti i repository dell'insieme, e utenti per progetto dentro un insieme
+        # proteggerebbero poco. Il nome di default viene dall'insieme (APP_SET), non dal
+        # progetto; utente, home, key_dir (una sola copia della chiave) e login della CLI sono
+        # dell'insieme. Restano del progetto la sessione, la casella con il suo gruppo, lo
+        # state_dir, il clone, i sudoers e la copia di check-host.sh del coordinatore. Un utente
+        # di ruolo si condivide solo fra progetti dello stesso insieme (ops_check_host_users).
+        if [ -z "${SUPERVISOR_USER:-}" ] || [ -z "${COORDINATOR_USER:-}" ]; then
+            : "${APP_SET:=${APP_PREFIX%-}}"
+            [[ $APP_SET =~ ^[a-z0-9]([a-z0-9-]{0,18}[a-z0-9])?$ ]] \
+                || die "APP_SET, il nome dell'insieme di app nei nomi degli utenti dei ruoli, ammette minuscole, cifre e '-' interni, al più 20 caratteri: '$APP_SET' (per default APP_PREFIX senza il '-' finale; scriverlo in params.env, uguale per tutti i progetti dell'insieme)"
+            : "${SUPERVISOR_USER:=supervisor-$APP_SET}"
+            : "${COORDINATOR_USER:=coordinator-$APP_SET}"
+        fi
         : "${COORDINATION_GROUP:=devloop-roles-$PROJECT}"
         : "${COORDINATOR_SUDOERS_FILE:=/etc/sudoers.d/devloop-coordinator-$PROJECT}"
         : "${COORDINATOR_OPS_DIR:=/usr/local/lib/devloop-coordinator-$PROJECT}"
-        # La key_dir e il clone del supervisore, nella sua home, con il nome del progetto.
-        : "${SUPERVISOR_KEY_DIR:=${SUPERVISOR_HOME:-/home/$SUPERVISOR_USER}/.ghapps-$PROJECT}"
+        # La key_dir del supervisore è dell'insieme, nella sua home (una sola copia della chiave);
+        # il suo clone del repository gestito è del progetto.
+        : "${SUPERVISOR_KEY_DIR:=${SUPERVISOR_HOME:-/home/$SUPERVISOR_USER}/.ghapps}"
         : "${SUPERVISOR_CLONE:=${SUPERVISOR_HOME:-/home/$SUPERVISOR_USER}/devloop-$PROJECT}"
-        # Anche il coordinatore: la key_dir della sua app (#549) è del progetto.
-        : "${COORDINATOR_KEY_DIR:=${COORDINATOR_HOME:-/home/$COORDINATOR_USER}/.ghapps-$PROJECT}"
+        # Anche la key_dir della sua app del coordinatore (#549) è dell'insieme.
+        : "${COORDINATOR_KEY_DIR:=${COORDINATOR_HOME:-/home/$COORDINATOR_USER}/.ghapps}"
         # Con SOURCE_REPO, i clone della sorgente da cui supervisore e coordinatore coniano i
         # token delle loro app (#571), al tag SOURCE_REF del progetto.
         : "${SUPERVISOR_SOURCE_CLONE:=${SUPERVISOR_HOME:-/home/$SUPERVISOR_USER}/devloop-source-$PROJECT}"
@@ -598,6 +608,11 @@ ops_load_params() {
     : "${COORDINATOR_HOME:=/home/$COORDINATOR_USER}"
     : "${DEVLOOP_CLONE:=$DEVLOOP_HOME/${REPO#*/}}"
     : "${SUPERVISOR_CLONE:=$SUPERVISOR_HOME/${REPO#*/}}"
+    # Il clone del repository gestito del coordinatore, la directory di lavoro della sua sessione
+    # (#621), che setup-coordinator.sh prepara (#643). Con PROJECT resta il nome del repository:
+    # i progetti di un insieme sono dello stesso proprietario, quindi i loro repository hanno nomi
+    # diversi anche nella stessa home.
+    : "${COORDINATOR_CLONE:=$COORDINATOR_HOME/${REPO#*/}}"
     : "${STATE_DIR:=$OPS_STATE_DIR}"
     : "${DEVLOOP_KEY_DIR:=$DEVLOOP_HOME/.ghapps}"
     : "${SUPERVISOR_KEY_DIR:=$SUPERVISOR_HOME/.ghapps}"
@@ -740,7 +755,7 @@ ops_load_params() {
     done
     local path
     for path in DEVLOOP_HOME SUPERVISOR_HOME AGENT_HOME COORDINATOR_HOME DEVLOOP_CLONE \
-        SUPERVISOR_CLONE DEVLOOP_KEY_DIR SUPERVISOR_KEY_DIR COORDINATOR_KEY_DIR SYSTEMD_DIR \
+        SUPERVISOR_CLONE COORDINATOR_CLONE DEVLOOP_KEY_DIR SUPERVISOR_KEY_DIR COORDINATOR_KEY_DIR SYSTEMD_DIR \
         SUDOERS_FILE \
         AGENT_SUDOERS_FILE COORDINATOR_SUDOERS_FILE TMPFILES_FILE; do
         _require_abs "$path"
@@ -787,7 +802,8 @@ ops_load_params() {
 }
 
 # Gli utenti delle altre installazioni di devloop dell'host (ADR 0006, R8), una riga
-# "<utente> <ruolo> <file>" ciascuno, con ruolo devloop, agent, supervisor o coordinator: dalle
+# "<utente> <ruolo> <file>" ciascuno (con supervisor e coordinator, anche l'utente devloop di
+# quell'installazione: "<utente> <ruolo> <file> <devloop>", #643), con ruolo devloop, agent, supervisor o coordinator: dalle
 # loro unità (User=) e dai loro sudoers (devloop-*: "<devloop> ALL=(<agent>) NOPASSWD:SETENV:" di
 # sudoers-agent, "<supervisore> ALL=(<devloop>) NOPASSWD:" di sudoers-supervisor,
 # "<coordinatore> ALL=(<devloop>) NOPASSWD:" di sudoers-coordinator, #629). Salta i file di questa
@@ -823,26 +839,137 @@ _ops_host_users() {
                     if ($3 ~ /^NOPASSWD:SETENV:/) {
                         print $1 " devloop " file; print target " agent " file
                     } else if (target != "root") {
-                        print $1 " " role " " file; print target " devloop " file
+                        print $1 " " role " " file " " target; print target " devloop " file
                     }
                 }' "$file"
         done
     done
 }
 
+# Le impostazioni di Claude Code degli utenti dei ruoli (~/.claude/settings.json): nessun
+# aggiornamento automatico, che cambierebbe la CLI di una sessione in corso (#643).
+CLAUDE_NO_AUTOUPDATE='{
+  "autoUpdates": false,
+  "env": {
+    "DISABLE_AUTOUPDATER": "1"
+  }
+}'
+
+# claude_no_autoupdate FILE: le impostazioni di Claude Code FILE hanno autoUpdates: false e
+# DISABLE_AUTOUPDATER=1 in env. Torna 1, con il motivo su stdout, se non è così o non si leggono.
+claude_no_autoupdate() {
+    python3 -I -B - "$1" <<'EOF'
+import json, sys
+path = sys.argv[1]
+try:
+    with open(path, 'rb') as fh:
+        data = json.loads(fh.read(1 << 20).decode('utf-8'))
+except FileNotFoundError:
+    print(f'{path} non esiste')
+    sys.exit(1)
+except (OSError, UnicodeDecodeError, ValueError) as exc:
+    print(f'{path} non si legge come JSON ({exc})')
+    sys.exit(1)
+env = data.get('env') if isinstance(data, dict) else None
+if not (isinstance(data, dict) and data.get('autoUpdates') is False
+        and isinstance(env, dict) and env.get('DISABLE_AUTOUPDATER') == '1'):
+    print(f'{path} non imposta autoUpdates: false e DISABLE_AUTOUPDATER=1')
+    sys.exit(1)
+EOF
+}
+
+# ensure_claude_no_autoupdate USER HOME: ~/.claude (700) e settings.json di Claude Code di USER
+# senza aggiornamenti automatici (#643), come per il supervisore: lo scrive se manca; uno che c'è
+# senza i due valori è un passo a mano, perché il file può avere altre impostazioni dell'operatore.
+ensure_claude_no_autoupdate() {
+    local user=$1 home=$2 settings=$2/.claude/settings.json why
+    ensure_dir "$home/.claude" 700 "$user"
+    if ! [ -f "$settings" ]; then
+        put_file "$settings" 600 "$user" "$CLAUDE_NO_AUTOUPDATE" || true
+    elif why=$(claude_no_autoupdate "$settings"); then
+        ok "$settings: autoUpdates false, DISABLE_AUTOUPDATER=1"
+    else
+        todo "$why: aggiungere a mano \"autoUpdates\": false e \"env\": {\"DISABLE_AUTOUPDATER\": \"1\"}"
+    fi
+}
+
+# overlay_app_id FILE ROLE: l'app_id di [apps.ROLE] dell'overlay FILE, o nulla se l'overlay manca,
+# non si legge o non dichiara quell'app.
+overlay_app_id() {
+    [ -f "$1" ] && [ -r "$1" ] && python3 -I -B - "$1" "$2" <<'EOF'
+import sys, tomllib
+try:
+    with open(sys.argv[1], 'rb') as fh:
+        apps = tomllib.load(fh).get('apps')
+except (OSError, tomllib.TOMLDecodeError):
+    sys.exit(0)
+table = apps.get(sys.argv[2]) if isinstance(apps, dict) else None
+value = table.get('app_id') if isinstance(table, dict) else None
+if isinstance(value, int) and not isinstance(value, bool):
+    print(value)
+EOF
+}
+
+# _ops_unit_overlay USER: l'overlay dell'installazione dell'host il cui servizio gira come USER, dal
+# log dell'unità (StandardOutput=append:<state_dir>/run.log), o nulla.
+_ops_unit_overlay() {
+    local file
+    for file in "$SYSTEMD_DIR"/devloop*.service "$SYSTEMD_DIR"/devloop@*.service.d/project.conf; do
+        [ -f "$file" ] && [ -r "$file" ] || continue
+        case $(basename "$file") in devloop-role-watchdog*) continue ;; esac
+        grep -qxF "User=$1" "$file" || continue
+        sed -n 's|^StandardOutput=append:\(/.*\)/run\.log$|\1/config.local.toml|p' "$file" | head -n 1
+        return
+    done
+}
+
 # Rifiuta un utente di questa installazione che sull'host abbia già un ruolo in un'altra (ADR
-# 0006, R8; D6): ogni progetto ha i suoi utenti, che non sono di nessun altro progetto né di un
-# altro ruolo. Anche supervisore e coordinatore sono del progetto (ADR 0002, precisazione del
-# 2026-11-24; #629): un utente condiviso con un altro progetto si separa con ops/host/migrate.md.
+# 0006, R8; D6): ogni progetto ha i suoi utenti devloop, degli agent e del watchdog, che non sono
+# di nessun altro progetto né di un altro ruolo. Supervisore e coordinatore sono per insieme di
+# app (ADR 0002, precisazione del 2026-11-24 su #643): lo stesso utente di ruolo, nello stesso
+# ruolo, si ammette solo se l'overlay di questo progetto e quello dell'altro dichiarano lo stesso
+# app_id per l'app del ruolo ([apps.supervisor], [apps.coordinator]). Con app_id diversi si
+# ferma; se un overlay non lo dichiara ancora (un progetto nuovo), si ferma anche, tranne con
+# --dry-run o negli script che non toccano gli utenti dei ruoli (OPS_DEFER_ROLE_USERS=1), dove
+# avvisa: setup-supervisor.sh, setup-coordinator.sh e check-host.sh lo rifanno.
 ops_check_host_users() {
-    local user role file var hint
-    while read -r user role file; do
+    local user role file target var hint app mine theirs
+    while read -r user role file target; do
         for var in DEVLOOP_USER AGENT_USER SUPERVISOR_USER COORDINATOR_USER WATCHDOG_USER; do
             [ "${!var}" = "$user" ] || continue
+            app=''
+            case $var:$role in
+                SUPERVISOR_USER:supervisor) app=supervisor ;;
+                COORDINATOR_USER:coordinator) app=coordinator ;;
+            esac
+            # Un progetto senza coordinatore non dà nulla al suo COORDINATOR_USER: il nome di
+            # default dell'insieme può essere quello del coordinatore di un altro progetto
+            # dell'insieme, e non lo ferma. Il controllo vale quando l'overlay lo dichiara, o
+            # quando lo script sta per predisporlo o avviarlo (OPS_WITH_COORDINATOR=1:
+            # setup-coordinator.sh, start-role.sh coordinator), prima di dargli accessi.
+            if [ "$app" = coordinator ] && [ "${OPS_WITH_COORDINATOR:-0}" != 1 ] \
+                && ! overlay_declares_coordinator "$STATE_PATH/config.local.toml"; then
+                continue
+            fi
+            if [ -n "$app" ]; then
+                mine=$(overlay_app_id "$STATE_PATH/config.local.toml" "$app" || true)
+                theirs=''
+                [ -z "$target" ] \
+                    || theirs=$(overlay_app_id "$(_ops_unit_overlay "$target" || true)" "$app" || true)
+                [ -n "$mine" ] && [ "$mine" = "$theirs" ] && continue
+                if [ -n "$mine" ] && [ -n "$theirs" ]; then
+                    die "$var '$user' è già l'utente $role di un'altra installazione di devloop dell'host ($file), di un altro insieme di app: app_id $theirs in [apps.$app] del suo overlay, $mine in quello di questo progetto. Un utente di ruolo si condivide solo fra progetti dello stesso insieme (#643): scegliere un altro $var"
+                fi
+                if [ "$DRY_RUN" = 1 ] || [ "${OPS_DEFER_ROLE_USERS:-0}" = 1 ]; then
+                    warn "$var '$user' è già l'utente $role di un'altra installazione di devloop dell'host ($file): si condivide solo se i due overlay dichiarano lo stesso app_id in [apps.$app] (#643), e uno dei due non lo dichiara ancora. setup-$app.sh e check-host.sh si fermano finché non lo dichiarano"
+                    continue
+                fi
+                die "$var '$user' è già l'utente $role di un'altra installazione di devloop dell'host ($file): si condivide solo fra progetti dello stesso insieme di app, con lo stesso app_id in [apps.$app] dei due overlay (#643), e uno dei due non lo dichiara. Scrivere [apps.$app] dell'insieme nell'overlay $STATE_PATH/config.local.toml, o scegliere un altro $var"
+            fi
             hint=''
             case $var in
                 SUPERVISOR_USER | COORDINATOR_USER)
-                    hint=' (supervisore e coordinatore sono per progetto, #629: ops/host/migrate.md, "Utenti dei ruoli per progetto")' ;;
+                    hint=' (supervisore e coordinatore si condividono solo nello stesso ruolo, fra progetti dello stesso insieme di app, #643)' ;;
             esac
             die "$var '$user' è già l'utente $role di un'altra installazione di devloop dell'host ($file): ogni progetto ha i suoi utenti$hint"
         done

@@ -110,7 +110,9 @@ the coordinator of that project only ([ADR 0002, precisazione of
 2026-11-24](../../adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-24-ruoli-per-progetto-629),
 #629). You have no channel with the roles of other projects, on this host or elsewhere: you
 never read or write the mailbox of another project, and you never write to its supervisor or its
-coordinator, nor take their messages, alerts or summaries as yours.
+coordinator, nor take their messages, alerts or summaries as yours. With a shared set of apps
+your system user is the set's (#643): it is in the groups of the mailboxes of every project of the
+set and reads their overlays, and only this rule keeps you out of them.
 
 A project uses another one as anyone would: it opens an issue on its repository and follows its
 releases. When a project that devloop serves shows you, or your supervisor, a defect of devloop
@@ -175,16 +177,18 @@ You have no `gh` login of your own: every read and every write on GitHub goes th
 of the coordinator's app, `[apps.coordinator]`, that `scripts/coordinator-token.py` mints for
 one command (AGENTS.md, "Identità GitHub degli agent";
 [ops/README.md](../../../ops/README.md#10-coordinatore-facoltativo), step 10). Run it always as
-your user and from your clone, with `DEVLOOP_APP_KEY_DIR` set to your key_dir
+your user and from the clone that holds it, with `DEVLOOP_APP_KEY_DIR` set to your key_dir
 (`COORDINATOR_KEY_DIR` of `ops/params.env`) and `--state-dir` on devloop's `state_dir`: the
-first message of your session gives the three values, which win over the placeholders here.
+first message of your session gives the values, which win over the placeholders here.
 Without `DEVLOOP_APP_KEY_DIR` the script looks for the key in devloop's key_dir and does not
-find it. `gh` acts on the `repo` of that `state_dir`, which the script passes in `GH_REPO`, not
-on the origin of your clone: with the source of devloop apart, your clone is of the source, not
-of the project (#571). Do not set `GH_REPO` to another repository: the script refuses it.
+find it. You work in your clone of the managed repository, as the supervisor does (#643); with
+the source of devloop apart the script is in your clone of the source (#571), and you `cd` there
+for each command. `gh` acts on the `repo` of that `state_dir`, which the script passes in
+`GH_REPO`, not on the origin of the clone. Do not set `GH_REPO` to another repository: the
+script refuses it.
 
 ```bash
-cd <your clone>
+cd <your clone of the token script>
 # Reads: ask only the read permissions you need.
 DEVLOOP_APP_KEY_DIR=<key_dir> python3 scripts/coordinator-token.py --state-dir <state_dir> \
     --perm issues=read --perm pull_requests=read -- gh pr view <PR> --comments

@@ -1,6 +1,6 @@
 {
   "name": "supervisor",
-  "description": "devloop: il supervisore. Commenti, review e label; nessun accesso ai contenuti.",
+  "description": "devloop: il supervisore. Commenti, review e label; letture con la sua app, CI in sola lettura; nessun accesso ai contenuti.",
   "url": "https://github.com/@REPO@",
   "hook_attributes": {
     "url": "https://github.com/@REPO@",
@@ -10,9 +10,12 @@
   "public": false,
   "request_oauth_on_install": false,
   "default_permissions": {
+    "actions": "read",
+    "checks": "read",
     "issues": "write",
     "metadata": "read",
-    "pull_requests": "write"
+    "pull_requests": "write",
+    "statuses": "read"
   },
   "default_events": []
 }
