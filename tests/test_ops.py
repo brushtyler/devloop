@@ -1492,6 +1492,40 @@ class TagUpgradeGuideTests(unittest.TestCase):
         positions = [section.index(step) for step in steps]
         self.assertEqual(positions, sorted(positions))
 
+    def test_the_sections_of_step_3_are_brought_to_the_project(self):
+        # The sections written for the installation of devloop (#583, #607) are not run as they
+        # are: the scripts with --params, the values of the parameters, no pin or start there.
+        section = ' '.join(self.section().split())
+        step3 = section[section.index('3. **Le sezioni introdotte'):section.index('4. **La verifica')]
+        for phrase in ('non si eseguono come sono', 'con `--params <parametri>`',
+                       'cioè i parametri dell\'installazione di devloop',
+                       '`DEVLOOP_CLONE`', '`DEVLOOP_USER`', '`<SERVICE_NAME>`',
+                       '`devloop --project <progetto> <sottocomando>`',
+                       '(#mappa-delle-sostituzioni-dei-testi-pubblicati-583)',
+                       '(#autorizzazione-del-coordinatore-607)',
+                       '`devloop --project <progetto> setup`', 'ci si ferma'):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, step3)
+        self.assertNotIn('come quel file le ha', step3)
+
+    def test_the_roles_start_from_a_checkout_of_the_tag(self):
+        # start-role.sh reads the runbook of its own checkout: the sessions start from a worktree
+        # at the new tag, and the rollback brings it back to the earlier tag.
+        section = ' '.join(self.section().split())
+        self.assertIn("git -C <checkout> worktree add --detach <checkout del tag> '<tag nuovo>'",
+                      section)
+        step7 = section[section.index('7. **Le sessioni dei ruoli**'):]
+        for phrase in ('git -C <checkout del tag> describe --tags --exact-match HEAD',
+                       "diff --stat '<tag nuovo>' origin/main -- docs/devloop/roles/",
+                       'sudo bash <checkout del tag>/ops/host/start-role.sh --params <parametri> '
+                       'supervisor',
+                       'sudo bash <checkout del tag>/ops/host/start-role.sh --params <parametri> '
+                       'coordinator',
+                       "git -C <checkout del tag> checkout --detach '<tag di prima>'"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, step7)
+        self.assertNotIn('<checkout>/ops/host/start-role.sh', section)
+
     def test_the_section_has_no_value_of_a_real_host(self):
         section = self.section()
         for value in ('/home/', '/var/lib/', '/etc/', '/root/', '/usr/local/', 'widget'):
