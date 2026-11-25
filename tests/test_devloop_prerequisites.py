@@ -1,6 +1,7 @@
 """devloop: a missing prerequisite becomes a native "blocked by" of the dispatcher, or a
 ``prerequisite`` escalation to the supervisor, in place of an escalation to the operator (#672)."""
 
+import dataclasses
 import json
 import unittest
 from types import SimpleNamespace
@@ -13,7 +14,7 @@ from devloop.dispatcher import (MAX_ACTIVE_PREREQUISITES, MAX_ADDED_PREREQUISITE
 from devloop.markdown import read_marker, render_prerequisite
 from devloop.planning import PREREQUISITES_CLOSED, plan, preflight_state
 from helpers.devloop_fakes import FakeIdentities, at
-from test_devloop import CFG, FakeRunner, FakeWS, implemented
+from test_devloop import CFG, REV, FakeRunner, FakeWS, implemented
 from test_devloop_dependencies import DCFG, REPO, DependencyGH, block, ready
 from test_devloop_preflight import PCFG, IssueGH, checked, gap
 
@@ -385,6 +386,71 @@ class SupervisedPrerequisiteTests(sup.Case):
         body = self.gh.threads[7][-1]['body']
         self.assertIn('«il parser di #5»', body)
         self.assertIn('Serve prima il parser.', body)
+
+
+class RestartEscalationTests(sup.Case):
+    """An escalation of the readiness check that restarts an implementation waiting for its
+    prerequisites keeps the wait and ``agent:working``, as for a wait for the base: the issue is
+    never ``stale``, and resumes once the escalation is answered."""
+
+    def waiting(self, cfg, *outputs):
+        """Issue 7 in ``agent:working`` whose implementation waits for #5, closed already."""
+        d = self.make(cfg, *outputs, has_pr=False)
+        self.gh.labels[7] = {WORKING}
+        self.assertEqual(d._add_prerequisites(7, [5], 'implement'), ([5], ''))
+        closed = block(5, state='CLOSED', reason='COMPLETED')
+        self.gh.issue_dependencies = lambda number: {
+            'author': 'brushtyler', 'blocked_by': [dict(closed[0])] if number == 7 else [],
+            'added': [dict(closed[1])] if number == 7 else []}
+        return d
+
+    def planned(self, d):
+        return [(a.kind, a.number) for a in plan(d.snapshot(), self.cfg)]
+
+    def implemented(self, d):
+        self.assertEqual(self.planned(d), [('implement', 7)])
+        self.runner.outputs.append(implemented())
+        self.assertEqual(self.tick(d), [('implement', 7)])
+        self.assertEqual(len(self.gh.created), 1)
+
+    def test_defaults_to_the_supervisor_wait_for_its_decision(self):
+        d = self.waiting(sup.PREFLIGHT_AUTO, checked(False, [gap('default_available',
+                                                                 'JSON')]))
+        self.assertEqual(self.tick(d), [('preflight', 7)])
+        self.assertEqual(self.gh.labels[7], {WORKING, sup.SUPER})
+        self.assertEqual(self.escalations(7)[-1]['class'], 'preflight_default')
+        # Not stale: the issue waits for the supervisor.
+        self.assertEqual(self.planned(d), [])
+        self.gh.command(7, '/devloop accept-defaults')
+        self.assertEqual(self.tick(d), [('supervise', 7)])
+        self.assertEqual(self.gh.labels[7], {WORKING})
+        # The check runs again with the decision, then the implementation.
+        self.runner.outputs.append(checked(True))
+        self.assertEqual(self.tick(d), [('preflight', 7)])
+        self.assertEqual(self.gh.labels[7], {WORKING})
+        self.implemented(d)
+
+    def test_a_failed_check_keeps_the_issue_and_a_retry_resumes_it(self):
+        for cfg, label, by in [(dataclasses.replace(CFG, preflight=REV), NEEDS_OPERATOR,
+                                'brushtyler'),
+                               (sup.PREFLIGHT_AUTO, sup.SUPER, sup.SUPERVISOR_LOGIN)]:
+            with self.subTest(label):
+                d = self.waiting(cfg, sup.crash())
+                self.assertEqual(self.tick(d), [('preflight', 7)])
+                self.assertEqual(self.gh.labels[7], {WORKING, label})
+                self.assertEqual(self.escalations(7)[-1]['step'], 'preflight')
+                self.assertEqual(self.planned(d), [])
+                self.runner.outputs.append(checked(True))
+                self.gh.command(7, '/devloop retry', login=by)
+                self.assertEqual(self.tick(d), [('supervise', 7)])
+                self.assertEqual(self.decisions(7)[-1]['outcome'], 'applied')
+                self.assertEqual(self.gh.labels[7], {WORKING})
+                self.implemented(d)
+
+    def test_an_escalation_of_the_implementation_ends_the_wait(self):
+        d = self.waiting(sup.PREFLIGHT_AUTO)
+        d._escalate(7, 'altro', remove=[WORKING], cls='blocked')
+        self.assertIsNone(d._prerequisite_wait(self.gh.issue_comments(7)))
 
 
 class RecordTests(unittest.TestCase):

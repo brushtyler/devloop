@@ -687,7 +687,7 @@ supervisor's and the operator's.
 supervisor does, the step that failed, the key of its input and, for a PR, the label a retry
 resumes from, when the step is one a retry runs again (#321). A supervisor's escalation handed to
 the operator (`supervisor_escalated`, `supervisor_refused`) keeps them only for `tool_failure`,
-`sync_failed`, `push_failed` (#645) and `budget_grantable` (#411), whose step the operator may retry as on a `budget`
+`sync_failed`, `push_failed` (#645), `prerequisite` (#672) and `budget_grantable` (#411), whose step the operator may retry as on a `budget`
 escalation: the key of a `preflight_default` or `merged_issue` escalation only routes it.
 
 ## Dependency cycles
@@ -742,10 +742,12 @@ prerequisite in words, and `blocked_by`, the number of its issue or `0` (records
 #672 lack both, and are read as naming none). Such a failed outcome does not hold once the issue
 is checked again: the issue is not checked while a block is open, and when they are all closed
 the check runs again. The record of an implementation is the wait: an issue in `agent:working`
-whose latest `prerequisite` record of the dispatcher has no `notice` nor `basebroken` record of
-the dispatcher after it waits, as one whose tests failed on the base too
+whose latest `prerequisite` record of the dispatcher has no `basebroken` record of the dispatcher
+after it, nor a `notice` other than one of the readiness check that restarts the implementation
+(as for a wait for the base), waits, as one whose tests failed on the base too
 ([Base broken records](#base-broken-records)), until its blocks are closed, then starts again;
-a later `prerequisite` record ends a wait for the base in the same way.
+an escalation of that check keeps `agent:working` and the wait, and its retry or its decided gaps
+resume it. A later `prerequisite` record ends a wait for the base in the same way.
 
 Without the number of an issue, the escalation is of class `prerequisite`, non-critical: a
 `notice` with `to` `supervisor`, the `step` and the `key` of its input in `"auto"`, and the

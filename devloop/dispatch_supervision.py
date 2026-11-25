@@ -2524,10 +2524,11 @@ class SupervisionMixin:
                 or anchor.get('origin') in (PREFLIGHT_DEFAULT, MERGED_ISSUE)):
             return refuse(t('not_step', where=self._where(is_pr)))
         key, step = record['key'], record['step']
-        # The check that restarts an implementation waiting for its base (#459) runs on an
-        # issue in agent:working, which keeps it.
+        # The check that restarts an implementation waiting for its base (#459) or for its
+        # prerequisites (#672) runs on an issue in agent:working, which keeps it.
         if step == 'preflight' and lb.ready not in labels and not (
-                lb.working in labels and self._base_wait(comments, 'implement')):
+                lb.working in labels and (self._base_wait(comments, 'implement')
+                                          or self._prerequisite_wait(comments))):
             return refuse(t('preflight_ready', ready=lb.ready),
                           t('preflight_ready_resume', operator=lb.needs_operator,
                             ready=lb.ready))

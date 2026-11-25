@@ -1551,9 +1551,10 @@ dispatcher comment with the reason and how to resume, besides the log line. As f
 it handled and every command before it, and among the commands that wait the latest applicable
 one wins; without one, the latest that does not apply is answered.
 
-- `/devloop retry` runs the failed step again, for `tool_failure`, `sync_failed` and
+- `/devloop retry` runs the failed step again, for `tool_failure`, `sync_failed`,
   `push_failed` (for this one, only the push: [Transient errors of the
-  push](#transient-errors-of-the-push)). A PR goes
+  push](#transient-errors-of-the-push)) and `prerequisite` ([Missing
+  prerequisites](#missing-prerequisites)). A PR goes
   back to the label of its step (`agent:review` for a review or a sync, `agent:changes` for a
   fix, `agent:review` for a [requested fix](#fix-requested-by-the-operator-or-the-supervisor)
   that started there, `agent:changes` for a sync that a fix in `agent:changes` started because
@@ -1572,7 +1573,9 @@ one wins; without one, the latest that does not apply is answered.
   The base does not bind the retry of an **implementation** (#475): with automatic merges `main`
   moves every few minutes, and the step starts again from the current base anyway, with the work
   its timed-out turn saved reapplied ([timeouts](protocol.md)); only its request binds it, for
-  the refusal and for the count of retries. The base of a readiness check still does.
+  the refusal and for the count of retries. The base of a readiness check still does, except on
+  a `prerequisite` escalation (#672): the merge of the prerequisite advances the base, so the
+  base binds the retry of neither step there.
   The retries are counted per reviewer: when several reviewers fail together and later only
   some of them, each keeps the retries it already had. A retry whose input has changed
   since (a new head, base or request) is refused, and the escalation stays with the supervisor.
@@ -1654,7 +1657,7 @@ the class does not admit (`accept-defaults` or `decide` on a tool failure, `retr
 `grant-round` on anything but `round_grantable`, `grant-budget` on anything but
 `budget_grantable`, `rereview` on anything but the `tool_failure` of a PR's review) is refused
 and the escalation stays with the supervisor. The answer lists the commands that apply to the
-escalation (`retry` for `tool_failure`, `sync_failed` and `push_failed`, `accept-defaults` and `decide` for
+escalation (`retry` for `tool_failure`, `sync_failed`, `push_failed` and `prerequisite`, `accept-defaults` and `decide` for
 `preflight_default`, `grant-round` for `round_grantable`, `grant-budget` for `budget_grantable`,
 none of them for an input changed since, `escalate` always) and the manual steps without the
 supervisor.
@@ -2031,7 +2034,7 @@ no command applies, and the answer gives the manual steps. The commands valid th
   key of its input. Every escalation of a failed agent, `gh` or git step (`tool_failure`,
   `failure`, `untrusted`, `push_failed`) and of a sync with conflicts that failed (`sync_failed`,
   `sync_sensitive`, `tool_failure`) records it, also when it goes to the operator; so do `supervisor_escalated` and `supervisor_refused`
-  of a `tool_failure`, `sync_failed`, `push_failed` or `budget_grantable` escalation, which keep the step of
+  of a `tool_failure`, `sync_failed`, `push_failed`, `prerequisite` or `budget_grantable` escalation, which keep the step of
   the supervisor's escalation. Their comment says that `/devloop retry` applies. An issue whose readiness check
   failed this way keeps `agent:ready`, so that the check can run again. The
   class may be critical: a retry runs the step again and bypasses none of its checks. The

@@ -233,7 +233,7 @@ from .context import (_cli_state_refused, _describe_bases, _failure_text, label_
                       label_transition, refused_approvals, transition_labels)
 from .dispatch_actions import ActionsMixin, Models, PendingPushes, ready_approval, rerun_of
 from .dispatch_advisory import AdvisoryFailures, AdvisoryMixin, AdvisoryResults
-from .dispatch_base import BaseMixin, MainAlerts
+from .dispatch_base import BaseMixin, MainAlerts, _of_check
 from .dispatch_conclave import ConclaveMixin
 from .dispatch_merge import MergeMixin
 from .dispatch_preflight import PreflightMixin
@@ -2299,18 +2299,23 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
     def _prerequisite_wait(self, comments):
         """The ``prerequisite`` record of an implementation in ``agent:working`` that waits for
         its prerequisites (#672) in ``comments``, or None: the latest the dispatcher signed,
-        with no notice nor ``basebroken`` record of the dispatcher after it. Its step is
-        ``implement``, or ``preflight`` for the check that restarts an implementation waiting
-        for its base (#459). The issue keeps ``agent:working`` and starts again once its blocks
-        are closed, as after a wait for the base branch (``Snapshot.base_waits``)."""
+        with no ``basebroken`` record of the dispatcher after it, nor a notice other than one
+        of the readiness check that restarts the implementation (``_of_check``), as for a wait
+        for the base (``_base_wait``): its escalation keeps ``agent:working`` and the wait, and
+        its retry or its decided gaps resume it. Its step is ``implement``, or ``preflight``
+        for the check that restarts an implementation waiting for its base (#459). The issue
+        keeps ``agent:working`` and starts again once its blocks are closed, as after a wait
+        for the base branch (``Snapshot.base_waits``)."""
         records = self._dispatcher_records(comments, 'prerequisite')
         if not records:
             return None
         position = records[-1][0]
-        later = (self._dispatcher_records(comments, 'notice')
-                 + self._dispatcher_records(comments, 'basebroken'))
-        if any(p > position for p, _ in later):
+        if any(p > position for p, _ in self._dispatcher_records(comments, 'basebroken')):
             return None
+        notices = self._dispatcher_records(comments, 'notice')
+        for index, (p, notice) in enumerate(notices):
+            if p > position and not _of_check(notice, [n for _, n in notices[:index]]):
+                return None
         return records[-1][1]
 
     def _orphan_prerequisites(self, issues, ready, working, pr_issues, coordinator):
