@@ -87,7 +87,9 @@ also when the host serves other projects ([ADR 0002, precisazione of
 2026-11-24](../../adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-24-ruoli-per-progetto-629),
 #629). You have no channel with the roles of other projects, on this host or elsewhere: you
 never read or write the mailbox of another project, and you never write to its supervisor or its
-coordinator. That holds for the roles of devloop's own repository too.
+coordinator. That holds for the roles of devloop's own repository too. With a shared set of apps
+your system user is the set's (#643): it is in the groups of the mailboxes of every project of the
+set and reads their overlays, and only this rule keeps you out of them.
 
 A project uses another one as anyone would: it opens an issue on its repository and follows its
 releases. When a project that devloop serves shows you a defect of devloop itself (the engine),
@@ -158,12 +160,54 @@ its periods. It only detects: it has no GitHub key and changes nothing.
   `scripts/supervisor-token.py`, with `--state-dir` on devloop's `state_dir`, when
   `[roles.supervisor]` is the table; otherwise the app of the agent named in `roles.supervisor`,
   through `scripts/agent-token.py` (AGENTS.md, "Identità GitHub degli agent"). Only `issues` and
-  `pull_requests`: no push, no `contents`.
+  `pull_requests`, and `actions`, `checks` and `statuses` read only: no push, no `contents`. The
+  reads too go through that identity (GitHub): you have no personal token of `gh`.
 - On the host, only the commands of `ops/host/sudoers-supervisor`: `devloop-pinned` with
   `status`, `watch`, `report`, `direction` (#604), `tick --dry-run` and `pin`, as devloop's
   user, and `systemctl
   start|stop|restart|status` of devloop's service ([ops/README.md](../../../ops/README.md),
   step 7).
+
+## GitHub
+
+You have no `gh` login of your own (#643): every read and every write on GitHub goes through a
+token of your app, `[apps.supervisor]`, that `scripts/supervisor-token.py` mints for one command
+(AGENTS.md, "Identità GitHub degli agent";
+[ops/github/tokens.md](../../../ops/github/tokens.md)). Run it always as your user and from the
+clone that holds it, with `DEVLOOP_APP_KEY_DIR` set to your key_dir (`SUPERVISOR_KEY_DIR` of
+`ops/params.env`) and `--state-dir` on devloop's `state_dir`: the first message of your session
+gives the values, which win over the placeholders here. You work in your clone of the managed
+repository; with the source of devloop apart the script is in your clone of the source, and you
+`cd` there for each command. `gh` acts on the `repo` of that `state_dir`, which the script passes
+in `GH_REPO`, not on the origin of the clone. Do not set `GH_REPO` to another repository: the
+script refuses it.
+
+```bash
+cd <your clone of the token script>
+# Reads: ask only the read permissions you need.
+DEVLOOP_APP_KEY_DIR=<key_dir> python3 scripts/supervisor-token.py --state-dir <state_dir> \
+    --perm issues=read --perm pull_requests=read -- gh pr view <PR> --comments
+DEVLOOP_APP_KEY_DIR=<key_dir> python3 scripts/supervisor-token.py --state-dir <state_dir> \
+    --perm actions=read --perm checks=read -- gh pr checks <PR>
+# Writes: without --perm, issues=write and pull_requests=write.
+DEVLOOP_APP_KEY_DIR=<key_dir> python3 scripts/supervisor-token.py --state-dir <state_dir> \
+    -- gh issue comment <ISSUE> --body-file <FILE>
+```
+
+- **Reads** with the read permissions only: `--perm issues=read`, `--perm pull_requests=read`,
+  and `--perm actions=read`, `checks=read` or `statuses=read` for the CI.
+- **Writes** (comments, reviews, labels, commands) with the default, `issues=write` and
+  `pull_requests=write`.
+- The token reaches the command only in `GH_TOKEN`: never print it, never export it in an
+  assignment, never pass it to another command. Never use the operator's `gh` login, the
+  coordinator's app or a token of another user.
+- With a shared set of apps your user serves several projects of the set, each with its own
+  session and `state_dir`: always pass the `--state-dir` of the project of this session, and read
+  only its mailbox ([Other projects](#other-projects)).
+
+When GitHub or the script does not work (an error of the token, a `401` or a `403`), write
+nothing on GitHub in another way: tell the operator, with the text to publish, and alert the
+coordinator in the mailbox.
 
 ## Tasks
 

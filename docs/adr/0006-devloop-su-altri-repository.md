@@ -399,7 +399,7 @@ Alternative per i login delle CLI e per l'utente di sistema:
 
 **Decisione dell'operatore del 2026-11-19 (D6):** fiducia per progetto nell'overlay; un utente di sistema, o un container, per progetto; un progetto di terzi sullo stesso host di ssdlc solo con utenti o container separati. Con D3 l'utente o il container di un progetto legge solo la `key_dir` di quel progetto: gli agent di un repository non arrivano alle chiavi degli altri.
 
-**Ruoli per progetto** (decisione dell'operatore del 2026-11-24, #629): supervisore e coordinatore sono anch'essi per progetto, con un utente di sistema per ruolo e per progetto, e non c'è nessun canale fra i ruoli di progetti diversi, nemmeno sullo stesso host. La regola è scritta come [precisazione dell'ADR 0002](0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-24-ruoli-per-progetto-629).
+**Ruoli per progetto** (decisione dell'operatore del 2026-11-24, #629): supervisore e coordinatore sono anch'essi per progetto, con un utente di sistema per ruolo e per progetto, e non c'è nessun canale fra i ruoli di progetti diversi, nemmeno sullo stesso host. La regola è scritta come [precisazione dell'ADR 0002](0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-24-ruoli-per-progetto-629). La decisione dell'operatore su #643 la precisa: l'utente di sistema di ciascun ruolo è per insieme di app, condiviso solo fra progetti dello stesso insieme ([precisazione dell'ADR 0002](0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-24-utenti-dei-ruoli-per-insieme-di-app-643)).
 
 **Esclusione per repository.** Alternative:
 

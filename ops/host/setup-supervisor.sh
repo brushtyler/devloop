@@ -6,7 +6,9 @@
 # key_dir 700, impostazioni di Claude Code senza aggiornamenti automatici; con SOURCE_REPO anche un
 # clone della sorgente al tag SOURCE_REF, da cui lanciare scripts/supervisor-token.py (#571).
 # Idempotente: si può rieseguire, fa solo ciò che manca. Non scrive segreti. Claude Code, il suo
-# login, la chiave dell'app e il token di sola lettura per gh restano passi manuali (ops/README.md).
+# login e la chiave dell'app restano passi manuali (ops/README.md); nessun token personale di gh:
+# il supervisore legge GitHub con la sua app (#643). L'utente è dell'insieme di app (#643): con
+# più progetti dello stesso insieme si esegue per ciascun progetto, con i suoi parametri.
 # Va eseguito dopo setup-devloop.sh.
 
 OPS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -151,29 +153,21 @@ fi
 
 step 'Directory private (700)'
 ensure_dir "$SUPERVISOR_KEY_DIR" 700 "$SUPERVISOR_USER"
-ensure_dir "$SUPERVISOR_HOME/.claude" 700 "$SUPERVISOR_USER"
 ensure_dir "$SUPERVISOR_HOME/.local" 755 "$SUPERVISOR_USER"
 ensure_dir "$SUPERVISOR_HOME/.local/bin" 755 "$SUPERVISOR_USER"
 
 step 'Claude Code senza aggiornamenti automatici'
-SETTINGS="$SUPERVISOR_HOME/.claude/settings.json"
-if [ -f "$SETTINGS" ]; then
-    ok "$SETTINGS esiste: verificare a mano autoUpdates: false e DISABLE_AUTOUPDATER=1"
-else
-    put_file "$SETTINGS" 600 "$SUPERVISOR_USER" '{
-  "autoUpdates": false,
-  "env": {
-    "DISABLE_AUTOUPDATER": "1"
-  }
-}' || true
-fi
+ensure_claude_no_autoupdate "$SUPERVISOR_USER" "$SUPERVISOR_HOME"
 if [ -x "$SUPERVISOR_HOME/.local/bin/claude" ]; then
     ok "$SUPERVISOR_HOME/.local/bin/claude presente"
 else
     todo "installare Claude Code come $SUPERVISOR_USER in $SUPERVISOR_HOME/.local/bin/claude e fare il login"
 fi
 
-step 'Chiavi e token (passi manuali)'
+# Il supervisore legge e scrive GitHub con i token della sua app (#643, scelta S2): nessun token
+# personale di gh. Con un insieme di app condiviso, la key_dir è dell'utente dell'insieme, una per
+# tutti i progetti dell'insieme.
+step 'Chiavi (passi manuali)'
 for role in $SUPERVISOR_KEYS; do
     if compgen -G "$SUPERVISOR_KEY_DIR/$APP_PREFIX$role.*.private-key.pem" >/dev/null 2>&1; then
         ok "chiave di $APP_PREFIX$role presente"
@@ -184,7 +178,7 @@ done
 # key_dir di [apps] nell'overlay è quella di devloop: il supervisore indica la propria (#571).
 say "  i token della sua app si coniano come $SUPERVISOR_USER, dal clone $TOKEN_CLONE, con la sua key_dir e lo state_dir del progetto:"
 say "  DEVLOOP_APP_KEY_DIR=$SUPERVISOR_KEY_DIR python3 scripts/supervisor-token.py --state-dir $STATE_PATH -- <comando>"
-todo "token fine-grained di sola lettura per gh, come $SUPERVISOR_USER, con accesso a $REPO: il supervisore è del progetto, con il suo utente e il suo token (#629; ops/github/tokens.md)"
+say "  anche le letture, con i soli permessi di lettura (per esempio --perm issues=read --perm pull_requests=read): nessun token personale di gh (#643)"
 
 step 'Fatto'
 say "Poi: ops/host/check-host.sh per verificare utenti, permessi, ACL, sudoers e servizio."

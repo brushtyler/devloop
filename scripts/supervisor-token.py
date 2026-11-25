@@ -22,8 +22,15 @@ supervisor's system user ($DEVLOOP_APP_KEY_DIR, else apps.key_dir of the configu
 devloop's.
 
 Without --perm the token gets issues=write and pull_requests=write: enough for comments and
-labels. Only issues and pull_requests (read or write) and metadata=read may be asked for: the
-supervisor neither implements nor merges, and its app has no contents permission.
+labels. Only issues and pull_requests (read or write), and actions, checks, statuses and metadata
+read, may be asked for: the supervisor neither implements nor merges, and its app has no contents
+permission. The supervisor reads GitHub with this script too, asking only the read permissions it
+needs (#643): it has no personal token of gh.
+
+    python3 scripts/supervisor-token.py --state-dir <state_dir> \\
+        --perm issues=read --perm pull_requests=read -- gh pr view 76 --comments
+    python3 scripts/supervisor-token.py --state-dir <state_dir> \\
+        --perm actions=read --perm checks=read -- gh pr checks 76
 
 The token reaches the command through GH_TOKEN only; it is never printed.
 
@@ -56,7 +63,11 @@ from devloop.config import (DEFAULT_CONFIG, ConfigError, apply_overlay, parse_co
 from devloop.redact import allow_option, publication_check  # noqa: E402
 
 DEFAULT = {'issues': 'write', 'pull_requests': 'write'}
+# The permissions of ops/github/apps/supervisor.json, none above its level. actions, checks and
+# statuses are read only, and only with an explicit --perm (#643): the supervisor reads GitHub
+# with its app, with no personal token.
 ALLOWED = {'issues': {'read', 'write'}, 'pull_requests': {'read', 'write'},
+           'actions': {'read'}, 'checks': {'read'}, 'statuses': {'read'},
            'metadata': {'read'}}
 # The launcher's default state_dir, of this clone.
 STATE = REPO_ROOT / '.devloop'

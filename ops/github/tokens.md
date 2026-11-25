@@ -1,58 +1,27 @@
-# Token da creare a mano
+# Token
 
-GitHub non ha un'API per creare i token fine-grained: si creano dall'interfaccia web, con
-l'account dell'operatore, e non entrano mai nel repository.
+Nessun ruolo di devloop ha un token personale di GitHub da creare a mano: devloop, il supervisore
+e il coordinatore agiscono con le loro GitHub App, con token d'installazione coniati per ogni
+azione o comando dalle chiavi nelle loro `key_dir`, con i soli permessi che servono.
 
-## Token di sola lettura del supervisore
+## Supervisore e coordinatore
 
-Serve al supervisore per le **letture** di `gh` (issue, PR, commenti, CI) dal suo utente di
-sistema. Le sue **scritture** (commenti, review, label) non passano da questo token ma da una
-GitHub App, con `scripts/agent-token.py`, che conia un token d'installazione con i soli permessi
-dell'azione.
+Dal #643 (scelta S2 dell'operatore) il supervisore **legge** GitHub con la sua app, come il
+coordinatore: `scripts/supervisor-token.py` con i soli permessi di lettura che servono
+(`--perm issues=read`, `--perm pull_requests=read`, e `--perm actions=read`, `checks=read` o
+`statuses=read` per la CI), e senza `--perm` per le scritture (commenti, review, label). Il
+coordinatore fa lo stesso con `scripts/coordinator-token.py`
+([runbook del supervisore](../../docs/devloop/roles/supervisor.md#github),
+[runbook del coordinatore](../../docs/devloop/roles/coordinator.md#github)).
 
-**Non** si usa un login admin né un token classico: un token così potrebbe scrivere, fare merge o
-cambiare le impostazioni del repository.
+Nessuno dei due ha un login `gh` né un token fine-grained: nessun passo sul sito per ogni utente
+di ruolo, nessuna scadenza da rinnovare. La chiave dell'app è l'unica credenziale del ruolo, e
+sta solo nella `key_dir` del suo utente (700, la chiave 600). Un host che aveva il token di sola
+lettura del supervisore o del coordinatore lo toglie con
+[migrate.md, "Letture del supervisore con la sua app"](../host/migrate.md#letture-del-supervisore-con-la-sua-app-643).
 
-Creazione: *Settings → Developer settings → Personal access tokens → Fine-grained tokens →
-Generate new token*.
-
-| Campo | Valore |
-|---|---|
-| Token name | per esempio `supervisor-<host>-readonly` |
-| Expiration | una scadenza, per esempio 90 giorni; segnarla per rinnovarlo |
-| Resource owner | il proprietario del repository (`REPO` in `params.env`) |
-| Repository access | *Only select repositories*: solo il repository gestito |
-| Repository permissions | `Metadata: Read-only`, `Contents: Read-only`, `Issues: Read-only`, `Pull requests: Read-only`, `Actions: Read-only` |
-| Account permissions | nessuno |
-
-Nient'altro: nessun permesso in scrittura, nessun altro repository.
-
-Installazione, come utente del supervisore, senza che il token finisca nella cronologia della
-shell o in un file del repository:
-
-```bash
-sudo -iu supervisor
-gh auth login --hostname github.com --with-token   # incollare il token, poi Ctrl-D
-gh auth status                                      # il login con il token
-gh issue list --repo <owner>/<nome> --limit 1       # una lettura riesce
-```
-
-I permessi del token si controllano nella sua pagina su GitHub: `gh api repos/<owner>/<nome>`
-mostra in `permissions` quelli dell'account, non quelli del token.
-
-`gh` lo conserva nella propria configurazione dell'utente del supervisore (`~/.config/gh`).
-
-**Un altro progetto sullo stesso host** (#571, #629). Supervisore e coordinatore sono del
-progetto, con un utente per ruolo e per progetto (`supervisor-<progetto>`,
-`coordinator-<progetto>`; [ops/README.md](../README.md#più-progetti-sullo-stesso-host)): ognuno ha
-il **suo** token, generato come sopra con il solo repository del suo progetto e conservato nella
-configurazione di `gh` del suo utente. Un token non si estende al repository di un altro progetto,
-né si copia da un utente all'altro. Lo stesso vale per il token di sola lettura del coordinatore,
-se il progetto lo ha.
-
-**Rinnovo:** prima della scadenza si genera un token nuovo con gli stessi permessi (*Regenerate
-token*) e si ripete `gh auth login --with-token`. **Revoca:** dalla stessa pagina, *Delete*, se il
-token è finito altrove o se l'host viene dismesso.
+**Non** si usa un login admin né un token classico per un ruolo: un token così potrebbe
+scrivere, fare merge o cambiare le impostazioni del repository.
 
 ## Nessun token per devloop
 

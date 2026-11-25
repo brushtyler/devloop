@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; form-action https://github.com">
+<title>GitHub App di devloop</title>
+<style>
+body { font-family: sans-serif; max-width: 52rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.4; }
+label { display: block; margin: .4rem 0; }
+input[type=text] { width: 22rem; font-family: monospace; }
+code, pre { background: #f3f3f3; }
+pre { padding: .6rem; overflow-x: auto; }
+.error { color: #b00020; font-weight: bold; }
+table { border-collapse: collapse; }
+td, th { border: 1px solid #ccc; padding: .2rem .5rem; text-align: left; vertical-align: top; }
+</style>
+</head>
+<body>
+<!--
+ops/github/create-apps.html (#643): la pagina generica delle GitHub App di devloop. È statica e
+non ha bisogno dell'host: si apre nel browser del computer dell'operatore, con la sessione GitHub
+del proprietario del repository, e compone nel browser i manifest di ops/github/apps/<ruolo>.json,
+che contiene qui sotto (tests/test_ops.py verifica che siano uguali ai file). Non chiama GitHub,
+non legge credenziali e non usa altri file: ogni pulsante invia a GitHub il manifest di un'app
+(flusso "manifest"). Lo scambio del `code` resta sull'host, dove va la chiave privata
+(ops/README.md, "2. GitHub App"). ops/github/create-apps.sh genera dai parametri una pagina con gli
+stessi pulsanti, per chi preferisce.
+-->
+<h1>GitHub App di devloop</h1>
+
+<p>Una pagina per creare le GitHub App di un insieme di devloop (ops/README.md, «2. GitHub App»).
+Si compilano i tre campi; la pagina mostra i valori da scrivere nei parametri del progetto e un
+pulsante per ogni app che manca. Nessuna chiamata a GitHub prima del clic su un pulsante, nessuna
+credenziale letta.</p>
+
+<form id="fields" onsubmit="return false">
+<label>Prefisso dell'insieme (<code>APP_PREFIX</code>), per esempio <code>acme-devloop-</code>:
+  <input type="text" id="prefix" autocomplete="off" spellcheck="false"></label>
+<label>Repository di ritorno (<code>REPO</code>, <code>owner/nome</code>), il repository gestito:
+  <input type="text" id="repo" autocomplete="off" spellcheck="false"></label>
+<label>Proprietario del repository (<code>GITHUB_OWNER_TYPE</code>):
+  <select id="owner"><option value="user">user: account personale</option>
+  <option value="org">org: organizzazione</option></select></label>
+</form>
+
+<h2>App dell'insieme</h2>
+<p>Per un insieme nuovo si lasciano tutte da creare. Per un insieme che esiste già si segnano
+quelle che ha (le si vede nelle impostazioni delle GitHub App del proprietario): la pagina crea
+solo le altre. <code>coordinator</code> solo se il progetto ha il coordinatore (passo 10),
+<code>merger</code> solo se devloop mergia (<code>[merge] mode</code> <code>strict</code> o
+<code>auto</code>).</p>
+<table id="roles"><thead><tr><th>Ruolo</th><th>L'insieme l'ha già</th><th>Permessi</th></tr></thead>
+<tbody></tbody></table>
+
+<h2>Valori dei parametri</h2>
+<p id="problems" class="error"></p>
+<p>Da scrivere nel file dei parametri del progetto (<code>ops/params.env</code> o quello di
+<code>--params</code>), uguali a quelli dell'insieme: con un errore di battitura le app avrebbero
+nomi che <code>check-host.sh</code> e l'overlay non trovano.</p>
+<pre id="params"></pre>
+
+<h2>App da creare</h2>
+<p>Per ciascuna: <strong>Crea</strong>, conferma su GitHub, poi entro un'ora lo <strong>scambio del
+<code>code</code> sull'host</strong> (ops/README.md, «2. GitHub App», punto 2: la risposta contiene
+la chiave privata, che va direttamente nella <code>key_dir</code>, mai stampata né copiata
+altrove), infine <em>Install App</em> → <em>Only select repositories</em> → il solo repository
+gestito. Le app che l'insieme ha già si installano anche sul repository nuovo, dalle loro
+impostazioni (ops/README.md, «Insieme di app per repository o condiviso»).</p>
+<div id="buttons"></div>
+
+<script type="application/json" id="devloop-manifests">
+{
+ "agy-agent": {"name": "agy-agent", "description": "devloop: l'agent Antigravity. Implementazione, review e commenti.", "url": "https://github.com/@REPO@", "hook_attributes": {"url": "https://github.com/@REPO@", "active": false}, "redirect_url": "https://github.com/@REPO@", "public": false, "request_oauth_on_install": false, "default_permissions": {"actions": "read", "checks": "read", "contents": "write", "issues": "write", "metadata": "read", "pull_requests": "write", "statuses": "read"}, "default_events": []},
+ "claude-agent": {"name": "claude-agent", "description": "devloop: l'agent Claude Code. Implementazione, review e commenti.", "url": "https://github.com/@REPO@", "hook_attributes": {"url": "https://github.com/@REPO@", "active": false}, "redirect_url": "https://github.com/@REPO@", "public": false, "request_oauth_on_install": false, "default_permissions": {"actions": "read", "checks": "read", "contents": "write", "issues": "write", "metadata": "read", "pull_requests": "write", "statuses": "read"}, "default_events": []},
+ "codex-agent": {"name": "codex-agent", "description": "devloop: l'agent Codex. Implementazione, review e commenti.", "url": "https://github.com/@REPO@", "hook_attributes": {"url": "https://github.com/@REPO@", "active": false}, "redirect_url": "https://github.com/@REPO@", "public": false, "request_oauth_on_install": false, "default_permissions": {"actions": "read", "checks": "read", "contents": "write", "issues": "write", "metadata": "read", "pull_requests": "write", "statuses": "read"}, "default_events": []},
+ "coordinator": {"name": "coordinator", "description": "devloop: il coordinatore. Comandi, commenti e label; diagnosi della CI in sola lettura; nessun accesso ai contenuti.", "url": "https://github.com/@REPO@", "hook_attributes": {"url": "https://github.com/@REPO@", "active": false}, "redirect_url": "https://github.com/@REPO@", "public": false, "request_oauth_on_install": false, "default_permissions": {"actions": "read", "checks": "read", "issues": "write", "metadata": "read", "pull_requests": "write", "statuses": "read"}, "default_events": []},
+ "dispatcher": {"name": "dispatcher", "description": "devloop: il dispatcher. Letture, label, commenti, escalation, rilancio dei job CI falliti (#200).", "url": "https://github.com/@REPO@", "hook_attributes": {"url": "https://github.com/@REPO@", "active": false}, "redirect_url": "https://github.com/@REPO@", "public": false, "request_oauth_on_install": false, "default_permissions": {"actions": "write", "checks": "read", "contents": "read", "issues": "write", "metadata": "read", "pull_requests": "write", "statuses": "read"}, "default_events": []},
+ "implementer": {"name": "implementer", "description": "devloop: l'implementer come app a sé (ADR 0005). Mai il permesso workflows.", "url": "https://github.com/@REPO@", "hook_attributes": {"url": "https://github.com/@REPO@", "active": false}, "redirect_url": "https://github.com/@REPO@", "public": false, "request_oauth_on_install": false, "default_permissions": {"contents": "write", "issues": "write", "metadata": "read", "pull_requests": "write"}, "default_events": []},
+ "merger": {"name": "merger", "description": "devloop: solo i merge delle modalità strict e auto (#201). Nient'altro.", "url": "https://github.com/@REPO@", "hook_attributes": {"url": "https://github.com/@REPO@", "active": false}, "redirect_url": "https://github.com/@REPO@", "public": false, "request_oauth_on_install": false, "default_permissions": {"contents": "write", "metadata": "read", "pull_requests": "write"}, "default_events": []},
+ "supervisor": {"name": "supervisor", "description": "devloop: il supervisore. Commenti, review e label; letture con la sua app, CI in sola lettura; nessun accesso ai contenuti.", "url": "https://github.com/@REPO@", "hook_attributes": {"url": "https://github.com/@REPO@", "active": false}, "redirect_url": "https://github.com/@REPO@", "public": false, "request_oauth_on_install": false, "default_permissions": {"actions": "read", "checks": "read", "issues": "write", "metadata": "read", "pull_requests": "write", "statuses": "read"}, "default_events": []}
+}
+</script>
+<script>
+'use strict';
+// Le stesse regole di ops/lib.sh (APP_PREFIX, REPO, APP_SET) e di create-apps.sh (34 caratteri).
+const NAME_MAX = 34;
+const PREFIX_RE = /^[a-z0-9-]*$/;
+const REPO_RE = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
+const SET_RE = /^[a-z0-9]([a-z0-9-]{0,18}[a-z0-9])?$/;
+// L'ordine di APPS in ops/params.env.example.
+const ORDER = ['dispatcher', 'merger', 'claude-agent', 'codex-agent', 'agy-agent', 'implementer',
+               'supervisor', 'coordinator'];
+const MANIFESTS = JSON.parse(document.getElementById('devloop-manifests').textContent);
+const $ = (id) => document.getElementById(id);
+
+function permissions(role) {
+  const granted = MANIFESTS[role].default_permissions;
+  return Object.keys(granted).sort().map((k) => k + ': ' + granted[k]).join(', ');
+}
+
+function buildRoles() {
+  const body = $('roles').tBodies[0];
+  for (const role of ORDER) {
+    const row = body.insertRow();
+    row.insertCell().textContent = role;
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.id = 'has-' + role;
+    box.addEventListener('change', update);
+    row.insertCell().appendChild(box);
+    row.insertCell().textContent = permissions(role);
+  }
+}
+
+function manifestFor(role, prefix, repo) {
+  const text = JSON.stringify(MANIFESTS[role]).split('@REPO@').join(repo);
+  const manifest = JSON.parse(text);
+  manifest.name = prefix + role;
+  return manifest;
+}
+
+function update() {
+  const prefix = $('prefix').value.trim();
+  const repo = $('repo').value.trim();
+  const owner = $('owner').value;
+  const missing = ORDER.filter((role) => !$('has-' + role).checked);
+  const problems = [];
+  if (!PREFIX_RE.test(prefix)) problems.push("APP_PREFIX ammette solo minuscole, cifre e '-'.");
+  if (!REPO_RE.test(repo)) problems.push('REPO deve essere owner/nome.');
+  const long = missing.filter((role) => (prefix + role).length > NAME_MAX)
+                      .map((role) => prefix + role + ' (' + (prefix + role).length + ')');
+  if (long.length) {
+    problems.push('GitHub accetta nomi di al più ' + NAME_MAX + ' caratteri: ' + long.join(', ')
+                  + '. Accorciare APP_PREFIX.');
+  }
+  const appSet = prefix.replace(/-$/, '');
+  const lines = ['APP_PREFIX=' + prefix, 'APPS="' + missing.join(' ') + '"',
+                 'GITHUB_OWNER_TYPE=' + owner];
+  if (SET_RE.test(appSet)) {
+    lines.push('# Con PROJECT gli utenti dei ruoli sono dell\'insieme (#643): supervisor-' + appSet
+               + ' e coordinator-' + appSet + ' (APP_SET=' + appSet + ', il default).');
+  } else {
+    lines.push('# APP_SET=<nome dell\'insieme>  # da scrivere con PROJECT: il prefisso non lo dà'
+               + ' (minuscole, cifre e \'-\' interni, al più 20 caratteri)');
+  }
+  $('params').textContent = lines.join('\n');
+  $('problems').textContent = problems.join(' ');
+  const buttons = $('buttons');
+  buttons.replaceChildren();
+  if (problems.length || !prefix || !repo) {
+    buttons.textContent = problems.length ? 'Nessun pulsante finché i valori non vanno.'
+                                          : 'Compilare il prefisso e il repository.';
+    return;
+  }
+  if (!missing.length) {
+    buttons.textContent = "L'insieme ha già tutte le app: nessuna da creare.";
+    return;
+  }
+  const ownerName = repo.split('/')[0];
+  const action = owner === 'org'
+    ? 'https://github.com/organizations/' + encodeURIComponent(ownerName) + '/settings/apps/new'
+    : 'https://github.com/settings/apps/new';
+  for (const role of missing) {
+    const form = document.createElement('form');
+    form.action = action;
+    form.method = 'post';
+    form.target = '_blank';
+    const field = document.createElement('input');
+    field.type = 'hidden';
+    field.name = 'manifest';
+    field.value = JSON.stringify(manifestFor(role, prefix, repo));
+    const button = document.createElement('button');
+    button.type = 'submit';
+    button.textContent = 'Crea ' + prefix + role;
+    const p = document.createElement('p');
+    p.append(button, ' ', Object.assign(document.createElement('code'),
+                                        {textContent: permissions(role)}));
+    form.append(field, p);
+    buttons.appendChild(form);
+  }
+}
+
+buildRoles();
+for (const id of ['prefix', 'repo', 'owner']) $(id).addEventListener('input', update);
+update();
+</script>
+</body>
+</html>

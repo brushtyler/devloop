@@ -283,9 +283,14 @@ class SupervisorTokenTests(unittest.TestCase):
         self.assertEqual(self.script.parse(['--state-dir', '/srv/p', '--', 'gh', 'x']),
                          (Path('/srv/p'), {'issues': 'write', 'pull_requests': 'write'},
                           ['gh', 'x']))
+        # #643: the supervisor reads the CI with its app, read only and only when asked.
+        self.assertEqual(self.script.parse(['--perm', 'actions=read', '--perm', 'checks=read',
+                                            '--perm', 'statuses=read', '--', 'gh', 'x']),
+                         (state, {'actions': 'read', 'checks': 'read', 'statuses': 'read'},
+                          ['gh', 'x']))
         # The supervisor neither implements nor merges: no contents, no other permission.
-        for perm in ('contents=read', 'contents=write', 'actions=write', 'checks=read',
-                     'administration=write', 'metadata=write'):
+        for perm in ('contents=read', 'contents=write', 'actions=write', 'checks=write',
+                     'statuses=write', 'administration=write', 'metadata=write'):
             with self.subTest(perm=perm), self.assertRaisesRegex(SystemExit, 'not allowed'):
                 self.script.parse(['--perm', perm, '--', 'gh', 'x'])
         for argv in ([], ['--'], ['--help'], ['gh', 'x'], ['--perm', '--', 'gh']):

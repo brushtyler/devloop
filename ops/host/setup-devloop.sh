@@ -25,6 +25,9 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# Gli utenti dei ruoli, che si condividono fra i progetti di un insieme di app (#643), qui non si
+# toccano: un overlay che non dichiara ancora l'app del ruolo è un avviso, non un arresto.
+OPS_DEFER_ROLE_USERS=1
 ops_load_params
 ops_check_platform
 require_root
