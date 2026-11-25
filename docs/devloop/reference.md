@@ -701,7 +701,14 @@ not Python ignores it. What the tests still change, devloop points out:
   the commit` (`File generati nel commit` in Italian) of the PR body or of the fix comment, and to `generated_files` of the `pr` or `fix`
   marker (`{path, reasons}`, `reasons` among `generated`, `binary` and `tests`). Information
   only: no receipt nor approval depends on it, and the commit is pushed as it is. A sync is not
-  checked: its commit is the merge of the base.
+  checked for them: its commit is the merge of the base.
+- **In the sync comment.** A sync whose conflicts the implementer resolved points out, in the
+  same section and in `generated_files` of its `sync` marker (reason `restored`), the files the
+  base branch removed after the synced head and the new head still has (#662): for instance a
+  file the base took out of the index and put in `.gitignore`, kept by the resolution. Before the
+  local tests of a sync the dispatcher records the resolution in the index, so a file the agent
+  deleted and the tests create again stays out of the commit when `.gitignore` excludes it
+  ([conflicts with `main`](protocol.md#conflicts-with-main)).
 - **Within the limit of a GitHub text.** The section, the marker and `changed_by_tests` keep the
   same files: at most 30, and at most 12000 characters of the body spent on them. A path counts
   as it is published: its readable line and its form in the marker, where JSON escapes every

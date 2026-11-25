@@ -24,7 +24,12 @@ commits of `main` that changed it, and resolves them keeping the behaviour of bo
 agent edits the files only: the dispatcher then checks that the merge is still the one it started
 (head unchanged, same `MERGE_HEAD`) and that no conflict marker (`<<<<<<<`, `>>>>>>>`) is left,
 runs the test command (with the usual retry), commits the merge with the implementer's identity
-and pushes it. A merge without local conflicts (GitHub's state was older than `main`) is
+and pushes it. Before the test command, after each attempt of the agent, the dispatcher records
+the resolution in the index (`git add -A`, #662): a file the agent resolved by deleting it leaves
+the index, so a file the tests create again is an untracked file, which `.gitignore` keeps out of
+the commit. A file still unmerged after that fails the sync. The sync comment points out, as the
+[generated files](reference.md#generated-files-in-the-commits) of a commit, the files `main`
+removed that the resolution keeps (`restored`). A merge without local conflicts (GitHub's state was older than `main`) is
 committed and pushed without an agent; a branch that already contains `origin/main` is left
 alone until GitHub recomputes. As for any push, the merge must not differ from `main` under
 `protected_paths`.
@@ -44,7 +49,7 @@ approves, so the PR is ready again without a `round_limit` escalation; if it ope
 findings it **counts**, and the comment says which round it would be or, with none left, that
 the PR goes to `round_limit`. Otherwise the review counts as it would have without the sync,
 and the comment shows the round in the same way. A
-sync that fails (the implementer is blocked, tests still fail, markers are left, the merge was
+sync that fails (the implementer is blocked, tests still fail, markers or unmerged files are left, the merge was
 concluded or aborted by the agent, or the agent run failed) goes to `agent:needs-operator` with a
 comment that lists the files in conflict and their commits.
 

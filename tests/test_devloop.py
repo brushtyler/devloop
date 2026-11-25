@@ -1109,6 +1109,18 @@ class FakeWS:
     def merge_head(self, path):
         return self.merging
 
+    # The paths still unmerged once the agent's resolution is staged (#662): none by default.
+    unresolved = ()
+
+    def stage_merge(self, path):
+        return None if self.merging is None else list(self.unresolved)
+
+    # The files the base removed that the synced head keeps (#662): none by default.
+    restored = ()
+
+    def restored_files(self, path, since):
+        return list(self.restored)
+
     def base_commits(self, path, name):
         return ['abc1234 fix: main changed it']
 
@@ -1615,8 +1627,12 @@ class DispatcherTests(unittest.TestCase):
                 test.ws.merging = None  # e.g. `git merge --abort`
                 return super().run(*args)
 
+        unmerged = FakeWS()
+        unmerged.unresolved = ['devloop/agents.py']  # still unmerged before the tests (#662)
         cases = {
             'blocked': (FakeRunner(self.synced('blocked')), FakeWS(), 'needs a product call'),
+            'unmerged': (FakeRunner(self.synced()), unmerged,
+                         'restano nell\'indice file non risolti: `devloop/agents.py`'),
             'tests': (FakeRunner(self.synced(), self.synced()), FakeWS(tests=(False, False)),
                       'FAILED test_x'),
             'agent': (FakeRunner(agents.AgentError('claude exited with 1')), FakeWS(),
@@ -1638,6 +1654,8 @@ class DispatcherTests(unittest.TestCase):
                 self.assertIn('`devloop/agents.py`', body)
                 self.assertIn('`abc1234`', body)
                 self.assertIn('rimuovere `agent:needs-operator`', body)
+                if case == 'unmerged':
+                    self.assertEqual(ws.commands, [])  # no test on an unresolved merge
 
     def test_a_sync_whose_agent_starts_on_the_retry_goes_on(self):
         # The sync of #217: claude was updating itself when the turn started (#218).

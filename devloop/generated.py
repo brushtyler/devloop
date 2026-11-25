@@ -17,23 +17,27 @@ TEXTS = Catalog(
     en={
         'title': '### Generated files in the commit',
         'intro': ('The commit holds files that look generated (cache or bytecode, such as '
-                  '`__pycache__/` and `*.pyc`), binary files or files the local tests run by '
-                  'devloop changed. devloop does not leave them out, since a tracked file may be '
-                  'wanted: whoever reviews the change checks that the issue asks for them.'),
+                  '`__pycache__/` and `*.pyc`), binary files, files the local tests run by '
+                  'devloop changed or files the base branch removed and the branch keeps. devloop '
+                  'does not leave them out, since a tracked file may be wanted: whoever reviews '
+                  'the change checks that the issue asks for them.'),
         'reason_generated': 'cache or bytecode',
         'reason_binary': 'binary',
         'reason_tests': 'changed by the local tests',
+        'reason_restored': 'removed by the base branch, kept by the branch',
         'more': '- … and {more} more',
     },
     it={
         'title': '### File generati nel commit',
         'intro': ('Il commit contiene file che sembrano generati (cache o bytecode, come '
-                  '`__pycache__/` e `*.pyc`), file binari o file che i test locali eseguiti da '
-                  'devloop hanno modificato. devloop non li esclude, perché un file tracciato può '
-                  'essere voluto: chi rivede la modifica verifichi che l\'issue li richieda.'),
+                  '`__pycache__/` e `*.pyc`), file binari, file che i test locali eseguiti da '
+                  'devloop hanno modificato o file che il branch principale ha tolto e il branch '
+                  'mantiene. devloop non li esclude, perché un file tracciato può essere voluto: '
+                  'chi rivede la modifica verifichi che l\'issue li richieda.'),
         'reason_generated': 'cache o bytecode',
         'reason_binary': 'binario',
         'reason_tests': 'modificato dai test locali',
+        'reason_restored': 'tolto dal branch principale, mantenuto dal branch',
         'more': '- … e altri {more}',
     })
 

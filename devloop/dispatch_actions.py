@@ -1871,16 +1871,22 @@ class ActionsMixin:
         # The record of the sync is prepared before the push, and kept with the merge when the
         # push fails twice for a transient error of the remote: a retry pushes it again and
         # records it, without a new turn, after a restart too (#645).
+        # A file the base removed and the resolution keeps is pointed out (#662).
+        restored = self.ws.restored_files(path, pr.head_sha) if files else []
         record = self._sync_record(pr, agent, target, head, files, listed,
-                                   (result, used) if files else (None, None), fix_remove)
+                                   (result, used) if files else (None, None), fix_remove,
+                                   restored=restored)
         return self._push_step(PendingPush('sync', pr.number, {'head': pr.head_sha}, name,
                                            str(path), head, pr.head_ref, agent.key,
                                            {'record': record}), auth=auth)
 
-    def _sync_record(self, pr, agent, target, head, files, listed, turn, fix_remove):
+    def _sync_record(self, pr, agent, target, head, files, listed, turn, fix_remove,
+                     restored=()):
         """The record of the sync of ``pr``: the merge of ``target`` into its branch, new head
         ``head``, with the conflicts in ``files`` (``listed``) that the agent's ``turn``
-        (``(result, used)``) resolved. What ``_publish_sync_record`` publishes after the push,
+        (``(result, used)``) resolved, and the files the base removed that the resolution keeps
+        (``restored``, #662), pointed out as the generated files of #627. What
+        ``_publish_sync_record`` publishes after the push,
         all JSON (#645): ``body``, the comment, the agent's with ``files``, otherwise the
         dispatcher's with its ledger ``event``; the ``labels`` to change (None when a fix waits
         for the sync) and the reason to ``supersede`` the receipts of a ready PR, or None."""
@@ -1897,13 +1903,16 @@ class ActionsMixin:
                   'log': f'  merged {base} into {pr.head_ref}: {head[:12]}'}
         if files:
             text += (t('sync_resolved') + f'\n\n{listed}\n\n{result["summary"].strip()}')
+            kept = [{'path': name, 'reasons': ['restored']} for name in restored]
+            if kept:
+                text += '\n\n' + render_generated(kept, cfg.language)
             # Who resolved the conflicts wrote code on the PR: the marker keeps its profile,
             # so a later change of configuration cannot make it a reviewer of its own code.
             # ``from``: the head it synced, which a fix waiting for it recognizes (#250).
             record['body'] = publishable(self.runner.header(used) + text, 'sync',
                                          {'head_sha': head, 'from': pr.head_sha,
                                           'profile': self._profile(agent.key, 'write', used),
-                                          **skipped_models(used)})
+                                          **skipped_models(used), **generated_record(kept)})
         else:
             # A sync without an agent is an event, not a turn (#133).
             record['event'] = {'base': target, 'head': head, 'previous_head': pr.head_sha}
