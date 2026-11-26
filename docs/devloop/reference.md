@@ -319,7 +319,8 @@ cannot write it. No key configures it.
 Each line is one `write` of an append-only descriptor, written before the state of the
 loop's watcher (`run-watch-state.json`) is saved: an interruption in between repeats an event at
 the next read, never loses it. A reader takes only the lines that end with a newline; a line left
-half-written by a crash is removed at the next start. The files are created 640, the directory
+half-written by a crash is removed at the next start, and one left by a write that failed (a full
+disk) is cut back at once, or before the next write, so the next line never joins it. The files are created 640, the directory
 750, of devloop's user. `setup-supervisor.sh` and `setup-coordinator.sh` give the user of the
 role a read-only ACL on the directory (`r-x`, and the default `r--` that each new segment
 inherits) and on its files, per project: a role user shared by several projects (#643) gets it

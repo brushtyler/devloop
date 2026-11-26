@@ -12,7 +12,8 @@ The stream is the directory ``events/`` of the state_dir (``Stream``):
   ``<seq> <YYYY-MM-DDTHH:MM:SSZ> <line>``, with a number that grows by one at each event and
   goes on across the segments, and the UTC time it was written. Each line is one ``write`` of
   an ``O_APPEND`` descriptor: a reader takes only the lines that end with a newline, and a line
-  left half-written by a crash, which no reader has taken, is removed at the next start.
+  left half-written by a crash, which no reader has taken, is removed at the next start; one
+  left by a write that failed (a full disk) is cut back at once, or before the next write.
 - ``events.log.1``, the previous segment: before a line would take the current one past
   ``MAX_SEGMENT`` bytes (10 MiB) the current one becomes the previous, which replaces the one
   before it. At most two segments, about 20 MiB, are kept.
@@ -127,29 +128,47 @@ class Stream:
         self._seq = seq or 0
 
     def _write(self, data):
+        """``data``, one line, at the end of the current segment. A write that fails after
+        part of the line is cut back to where the line began: the next line never joins a
+        half-written one."""
         fd = os.open(self.current, os.O_WRONLY | os.O_APPEND | os.O_CREAT, FILE_MODE)
         try:
+            begin = os.fstat(fd).st_size  # the only writer: where this line begins
             view = memoryview(data)
-            while view:
-                view = view[os.write(fd, view):]
+            try:
+                while view:
+                    view = view[os.write(fd, view):]
+            except BaseException:
+                if len(view) < len(data):
+                    try:
+                        os.ftruncate(fd, begin)
+                    except OSError:
+                        pass  # ``append`` has the next one ``open`` again, which removes it
+                raise
         finally:
             os.close(fd)
 
     def append(self, lines):
-        """Each of ``lines`` as an event, with its number and the time; ``open`` first, once."""
+        """Each of ``lines`` as an event, with its number and the time; ``open`` first, once,
+        and again after a write that failed: it removes a half-written line that could not be
+        cut back, and takes the number of the last event written."""
         if self._seq is None:
             self.open()
         stamp = self._now().strftime('%Y-%m-%dT%H:%M:%SZ')
-        for line in lines:
-            data = f'{self._seq + 1} {stamp} {one_line(line)}\n'.encode('utf-8')
-            try:
-                size = self.current.stat().st_size
-            except FileNotFoundError:
-                size = 0
-            if size and size + len(data) > self.max_bytes:
-                os.replace(self.current, self.previous)  # the segment before it goes
-            self._write(data)
-            self._seq += 1
+        try:
+            for line in lines:
+                data = f'{self._seq + 1} {stamp} {one_line(line)}\n'.encode('utf-8')
+                try:
+                    size = self.current.stat().st_size
+                except FileNotFoundError:
+                    size = 0
+                if size and size + len(data) > self.max_bytes:
+                    os.replace(self.current, self.previous)  # the segment before it goes
+                self._write(data)
+                self._seq += 1
+        except BaseException:
+            self._seq = None
+            raise
 
     def alive(self):
         """The sign of life: the time of the read that just succeeded."""

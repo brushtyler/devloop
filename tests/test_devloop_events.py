@@ -1,5 +1,6 @@
 """devloop: the stream of the events written by ``devloop run`` (#683), its producer."""
 
+import contextlib
 import os
 import re
 import shutil
@@ -242,6 +243,47 @@ class ProducerTests(StreamCase):
         self.assertEqual([line[2] for line in self.lines()],
                          ['PR #5 labels +agent:needs-operator -agent:review'])
         self.assertTrue((self.dir / 'alive').exists())
+
+    def test_a_write_that_fails_halfway_leaves_no_half_line_for_the_next_one(self):
+        # #689: a write of 8 bytes, then ENOSPC. The read is not confirmed; once the stream can
+        # be written again, the same producer writes the event on a line of its own, which a
+        # reader takes, and not after the 8 bytes. Also when the cut back fails: the next
+        # append opens the stream again, which removes the half line.
+        for cut_fails in (False, True):
+            with self.subTest(cut_fails=cut_fails):
+                shutil.rmtree(self.dir, ignore_errors=True)
+                (self.tmp / 'run-watch-state.json').unlink(missing_ok=True)
+                gh = FakeGitHub()
+                gh.add_pr(5)
+                producer = self.producer(self.watcher(gh))
+                producer.step()
+                producer.stream.append(['PR #5 CI pass @abc1234'])
+                gh.set_labels(5, 'agent:needs-operator')
+                real = os.write
+                calls = []
+
+                def write(fd, data):
+                    calls.append(len(data))
+                    if len(calls) == 1:
+                        return real(fd, bytes(data[:8]))
+                    raise OSError(28, 'No space left on device')
+                patches = [mock.patch.object(events.os, 'write', write)]
+                if cut_fails:
+                    patches.append(mock.patch.object(events.os, 'ftruncate',
+                                                     side_effect=OSError(28, 'x')))
+                with contextlib.ExitStack() as stack:
+                    for patch in patches:
+                        stack.enter_context(patch)
+                    self.assertIsNone(producer.step())
+                self.assertEqual(
+                    (self.dir / 'events.log').read_bytes().endswith(b'\n'), not cut_fails)
+                self.assertEqual(producer.step(),
+                                 ['PR #5 labels +agent:needs-operator -agent:review'])
+                # Each line parses: a reader takes both events, numbered without gaps.
+                self.assertEqual([line[::2] for line in self.lines()], [
+                    ('1', 'PR #5 CI pass @abc1234'),
+                    ('2', 'PR #5 labels +agent:needs-operator -agent:review')])
+                self.assertEqual(producer.step(), [])
 
     def test_an_alarm_that_cannot_be_written_is_tried_again(self):
         producer = self.producer(FailingWatcher([None] * 5 + [[]]))
