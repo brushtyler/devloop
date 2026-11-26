@@ -2747,6 +2747,13 @@ repository every `--interval` seconds (default 60) and prints one line per chang
 HH:MM <type> #N <detail>
 ```
 
+On a host installed with `ops/` the wake-ups of the supervisor and of the coordinator
+(`ops/host/role-wait.sh`) no longer run `devloop watch` (#683): the [continuous
+loop](#continuous-loop) reads GitHub once for everyone and writes the same lines to the
+[stream of the events](reference.md#the-stream-of-the-events) of the `state_dir`, which each
+wake-up reads as its role, with a cursor of its own. `devloop watch` stays on GitHub, with its
+options and its state file, for an interactive session or an agent outside the host.
+
 The time is UTC. A line carries no secret and no local path, and is a single line: titles and
 comment text are cut short and control characters removed. What it reports:
 
@@ -2867,7 +2874,7 @@ comment.
 
 1. it runs a tick;
 2. if the tick ran at least one action, the next tick starts at once;
-3. otherwise it waits for news on GitHub, as `devloop watch --until-change` does
+3. otherwise it waits for news on GitHub
    ([Waking the supervising agent](#waking-the-supervising-agent)), for at most
    `--idle-timeout` seconds (default 900, 15 minutes); at the first news, or at the timeout, it
    runs the next tick.
@@ -2876,19 +2883,28 @@ With `max_parallel_actions` above 1 the loop runs in [continuous mode](#continuo
 starts its actions without waiting for them, and while some run the loop waits for one to end
 or, with a slot free, for news on GitHub; either way the next tick plans at once.
 
-The wait reads GitHub every 60 seconds (less when `--idle-timeout` is shorter), with the same
-identity as the ticks' reads, and keeps its state in `state_dir/run-watch-state.json`, apart from
-the state of a `devloop watch` of the supervising agent. The first wait records the starting
-state; a later one compares with the state of the previous wait, so changes made by ticks with
-actions in between count as news and cost at most one more tick. A wait that fails waits the
-rest of the timeout. `--interval <seconds>`, the option of the loop before #177, is a deprecated
-alias of `--idle-timeout`: it still works, with a warning in the log, and the two together are
-refused.
+**One reader of GitHub (#683).** A thread of the loop reads GitHub every 60 seconds from the
+start of the loop to its end, during a long action and with every slot taken too, as `devloop
+watch` does, with the same identity as the ticks' reads and its state in
+`state_dir/run-watch-state.json`, apart from the state of a `devloop watch` of the supervising
+agent. The first read records the starting state; after a restart the reads go on from the
+saved state, so what changed while the loop was stopped is news too. Each read writes what
+changed, the lines of `devloop watch`, to the [stream of the
+events](reference.md#the-stream-of-the-events) of the `state_dir`, and the time of the read to
+its sign of life; a read whose events cannot be written is not confirmed, and its events come
+again at the next read. The wake-ups of the roles read that
+stream instead of reading GitHub themselves. A wait for news ends at once when a read found news
+since the previous wait, so changes made by ticks with actions in between count as news and
+cost at most one more tick; three failed reads in a row are news too (`watch error:`). A read
+that fails is logged with the class of its error and retried after the interval: the wait goes
+on until the timeout. `--interval <seconds>`, the option of the loop before #177, is a
+deprecated alias of `--idle-timeout`: it still works, with a warning in the log, and the two
+together are refused.
 
 **Clean stop.** `SIGTERM` or `SIGINT` (Ctrl-C), or the file `state_dir/STOP`
 (`.devloop/STOP` of the main checkout), stop the loop: the tick in progress ends, no other
-starts, and a wait in progress ends at once (after the read of GitHub in progress, if any: no
-other read starts). A stop requested during a tick that ends with a new
+starts, and a wait in progress ends at once; the reader of GitHub ends with the loop (after the
+read of GitHub in progress, if any: no other read starts). A stop requested during a tick that ends with a new
 [pin after a merge](#pin-after-a-merge) ends the loop too, without the restart from the new copy;
 the next start runs the new copy. The exit code is 0. Agent turns and tests
 run in process groups of their own, so the signal reaches only devloop and the tick finishes its

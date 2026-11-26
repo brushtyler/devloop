@@ -3,7 +3,9 @@
 # delle app (600, del proprietario giusto, solo quelle attese, nessuna rimasta nella key_dir di
 # default quando il parametro ne indica un'altra, #582), ACL sulla home di devloop,
 # sudoers, la lettura dell'overlay e del file di progetto per il supervisore (ACL r--, #543), la
-# casella fra supervisore e coordinatore (gruppo, directory 2770 di root, #543), l'utente degli agent (non legge key_dir né state_dir, non scrive .git né le directory
+# casella fra supervisore e coordinatore (gruppo, directory 2770 di root, #543), il flusso degli
+# eventi (scrivibile solo da devloop, leggibile dai ruoli con le loro ACL, e nessuna regola dei
+# sudoers dei ruoli per devloop-pinned watch, #683), l'utente degli agent (non legge key_dir né state_dir, non scrive .git né le directory
 # che contengono worktree e turni, è nell'overlay, esegue git nei worktree di devloop, non cambia
 # istruzioni, configurazione e binari delle sue CLI, agy si fida al più della directory dei
 # worktree, #572; l'ambiente dei turni gli arriva con sudo -E,
@@ -695,6 +697,79 @@ else
     check_root_files "$WATCHDOG_OPS_DIR" 'setup-supervisor.sh o setup-coordinator.sh' fail \
         $OPS_WATCHDOG_FILES
 fi
+
+# Il flusso degli eventi (#683): devloop run lo scrive nello state_dir, le sveglie dei ruoli lo
+# leggono come sé stesse. Scrivibile solo da devloop (di DEVLOOP_USER, nessuna scrittura per il
+# gruppo, gli altri o un'ACL), leggibile dai ruoli del progetto con le ACL di sola lettura di
+# setup-supervisor.sh e setup-coordinator.sh, anche di default per i segmenti nuovi.
+step "Flusso degli eventi: $STATE_PATH/$EVENTS_DIR (#683)"
+EVENTS_PATH=$STATE_PATH/$EVENTS_DIR
+# check_events_writer PATH: PATH di DEVLOOP_USER, senza scrittura per altri, nemmeno con un'ACL.
+check_events_writer() {
+    local path=$1 owner mode writers
+    read -r owner mode < <(stat -c '%U %a' "$path")
+    if [ "$owner" != "$DEVLOOP_USER" ] || (( 8#$mode & 8#022 )); then
+        fail "$path è $mode $owner: il flusso è di $DEVLOOP_USER e solo devloop lo scrive"
+        return
+    fi
+    if command -v getfacl >/dev/null; then
+        writers=$(getfacl -p --omit-header "$path" 2>/dev/null \
+                      | grep -Ev '^(default:|user::|mask::|#)' \
+                      | awk -F: '$3 ~ /w/ { print $1 ":" $2 ":" $3 }' || true)
+        if [ -n "$writers" ]; then
+            fail "$path ha un'ACL di scrittura ($(tr '\n' ' ' <<<"$writers" | sed 's/ $//')): solo devloop scrive il flusso"
+            return
+        fi
+    fi
+    ok "$path: $mode, $owner, scritto solo da devloop"
+}
+if [ -L "$EVENTS_PATH" ] || { [ -e "$EVENTS_PATH" ] && ! [ -d "$EVENTS_PATH" ]; }; then
+    fail "$EVENTS_PATH non è una directory: le sveglie dei ruoli non leggono gli eventi"
+elif ! [ -d "$EVENTS_PATH" ]; then
+    warn "$EVENTS_PATH non esiste: le sveglie dei ruoli non hanno eventi finché setup-supervisor.sh (o setup-coordinator.sh) non lo crea e devloop run non lo scrive"
+else
+    check_events_writer "$EVENTS_PATH"
+    for file in "$EVENTS_PATH"/*; do
+        [ -f "$file" ] && ! [ -L "$file" ] || continue
+        check_events_writer "$file"
+    done
+    readers="$SUPERVISOR_USER:setup-supervisor.sh"
+    [ "$PROJECT_COORDINATOR" = 1 ] && user_exists "$COORDINATOR_USER" \
+        && readers="$readers $COORDINATOR_USER:setup-coordinator.sh"
+    for reader in $readers; do
+        user=${reader%%:*}
+        setup=${reader#*:}
+        if command -v getfacl >/dev/null; then
+            entries=$(getfacl -p --omit-header "$EVENTS_PATH" 2>/dev/null | sed 's/[[:space:]].*//' || true)
+            for wanted in "user:$user:r-x" "default:user:$user:r--"; do
+                if grep -qx "$wanted" <<<"$entries"; then
+                    ok "ACL $wanted su $EVENTS_PATH"
+                else
+                    fail "su $EVENTS_PATH serve l'ACL $wanted, non '$(grep "^${wanted%:*}:" <<<"$entries" | head -n 1 || true)' ($setup)"
+                fi
+            done
+            for file in "$EVENTS_PATH"/*; do
+                [ -f "$file" ] && ! [ -L "$file" ] || continue
+                check_read_acl "$user" "$file" "$setup"
+            done
+        fi
+        if [ -f "$EVENTS_PATH/$EVENTS_ALIVE" ]; then
+            check_as "$user" "$user legge $EVENTS_PATH/$EVENTS_ALIVE" \
+                /usr/bin/bash -c '[ -r "$1" ]' _ "$EVENTS_PATH/$EVENTS_ALIVE"
+        fi
+    done
+fi
+# La regola dei sudoers dei ruoli per devloop-pinned watch (#683) non c'è più: le sveglie leggono
+# il flusso. Un sudoers che la contiene ancora è di prima: si riesegue lo script del ruolo.
+for installed in "$SUDOERS_FILE:setup-supervisor.sh" "$COORDINATOR_SUDOERS_FILE:setup-coordinator.sh"; do
+    file=${installed%:*}
+    [ -f "$file" ] && [ -r "$file" ] || continue
+    if grep -Eq 'devloop-pinned[^,]* watch([ ,]|$)' "$file"; then
+        fail "$file contiene ancora la regola dei sudoers per devloop-pinned watch, tolta dal #683: rieseguire ${installed##*:} (ops/host/migrate.md, \"Il flusso degli eventi per le sveglie dei ruoli (#683)\")"
+    else
+        ok "$file non ha la regola dei sudoers per devloop-pinned watch (#683)"
+    fi
+done
 
 step "Utente degli agent $AGENT_USER (#415)"
 STATE="$STATE_PATH"

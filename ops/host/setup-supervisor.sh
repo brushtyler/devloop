@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Prepara l'host per il supervisore di devloop: utente, ACL di solo attraversamento sulla home
 # di devloop (per leggere i log) e di sola lettura sull'overlay e sul file di progetto dello
-# state_dir (#543), la casella fra supervisore e coordinatore (#543), sudoers minimale, la copia
+# state_dir (#543) e sul flusso degli eventi del progetto (#683), che la sveglia legge come utente
+# del supervisore, la casella fra supervisore e coordinatore (#543), sudoers minimale, la copia
 # di root del risveglio role-wait.sh e il watchdog dei ruoli (#602), clone,
 # key_dir 700, impostazioni di Claude Code senza aggiornamenti automatici; con SOURCE_REPO anche un
 # clone della sorgente al tag SOURCE_REF, da cui lanciare scripts/supervisor-token.py (#571).
@@ -96,6 +97,10 @@ for file in "$STATE_PATH/config.local.toml" "$STATE_PATH/project.toml"; do
     step "Lettura di $(basename "$file"): ACL u:$SUPERVISOR_USER:r-- su $file"
     ensure_read_acl "$SUPERVISOR_USER" "$file"
 done
+# Il flusso degli eventi del progetto (#683), che la sveglia del supervisore legge come sé
+# stessa al posto di devloop watch: sola lettura sulla directory e sui segmenti, anche futuri.
+step "Lettura del flusso degli eventi: ACL u:$SUPERVISOR_USER:r-x e d:u:$SUPERVISOR_USER:r-- su $STATE_PATH/$EVENTS_DIR (#683)"
+ensure_events_acl "$SUPERVISOR_USER"
 
 step "Casella fra supervisore e coordinatore: $COORDINATION_DIR, gruppo $COORDINATION_GROUP (#543)"
 ensure_coordination "$SUPERVISOR_USER"

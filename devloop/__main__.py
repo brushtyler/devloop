@@ -12,8 +12,8 @@ import time
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
-from . import (activity, direction, follow, notify, pin, redact, report, runloop, token,
-               unavailability, watch)
+from . import (activity, direction, events, follow, notify, pin, redact, report, runloop,
+               token, unavailability, watch)
 from .agents import AgentRunner, isolated_env
 from .agentuser import GH_CONFIG, SHARED_DIR, WORKTREES_DIR, AgentUser, AgentUserError, SharedDir
 from .agentuser import check as check_isolation
@@ -881,7 +881,8 @@ def attention_lines(cfg):
 
 def run_loop(cfg, state, dispatcher, timeout, reloader=None):
     """``devloop run`` (#177): ``runloop.Loop`` with the dispatcher's ticks, a watcher with the
-    identity of the ticks' reads (as ``devloop watch``) on a state file of its own, and the
+    identity of the ticks' reads (as ``devloop watch``) on a state file of its own, read every
+    minute by the producer of the stream of the events (#683, ``events.Producer``), and the
     alert on ``[run].alert_issue`` as the dispatcher. With ``max_parallel_actions`` above 1 the
     loop runs in continuous mode (#227): the dispatcher's ticks start their actions in
     ``Workers`` and do not wait for them. Before each tick ``reloader`` (``config.Reloader``,
@@ -898,22 +899,11 @@ def run_loop(cfg, state, dispatcher, timeout, reloader=None):
     daily = (report.AutoReport(publisher, state, cfg.report.interval, log=log)
              if publisher is not None else None)
 
-    def wait_for_news(seconds, sleep, check):
-        watcher = watch.Watcher(gh, trust, state / runloop.WATCH_STATE_FILE,
-                                interval=min(runloop.WATCH_INTERVAL, seconds), timeout=seconds,
-                                sleep=sleep, out=lambda line: log(f'news: {line}'), err=log)
-
-        def time_left():
-            check()  # after a stop no other gh call (nor token mint) starts: Stopped
-            return watcher.time_left()
-        # No gh call outlasts the wait; the client may be the ticks' own, so it is restored.
-        # The limit belongs to this thread: actions running meanwhile are not bounded by it.
-        before, gh.time_left = gh.time_left, time_left
-        try:
-            return watcher.run()
-        finally:
-            gh.time_left = before
-
+    # The one reader of GitHub of the loop (#683): a thread that writes the stream of the events
+    # of the state_dir, which the roles' wake-ups read, and wakes the loop on news.
+    watcher = watch.Watcher(gh, trust, state / runloop.WATCH_STATE_FILE,
+                            out=lambda line: log(f'news: {line}'), err=log)
+    producer = events.Producer(watcher, events.Stream(state), log=log)
     issue = cfg.run.alert_issue
     alert = (lambda body: dispatcher.gh.comment(issue, body)) if issue else None
 
@@ -925,10 +915,10 @@ def run_loop(cfg, state, dispatcher, timeout, reloader=None):
             daily.after_tick()
         return actions
 
-    return runloop.Loop(tick, wait_for_news, state / runloop.STOP_FILE, log=log,
+    return runloop.Loop(tick, producer.wait, state / runloop.STOP_FILE, log=log,
                         alert=alert, alert_issue=issue, idle_timeout=timeout,
                         workers=workers, language=cfg.language,
-                        notify=getattr(dispatcher, 'notifier', None)).run()
+                        notify=getattr(dispatcher, 'notifier', None), producer=producer).run()
 
 
 def main(argv=None):

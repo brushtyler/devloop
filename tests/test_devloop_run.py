@@ -5,6 +5,7 @@ import os
 import shutil
 import signal
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,7 +14,7 @@ from unittest import mock
 import devloop.__main__ as cli
 from devloop import config, pin, runloop
 from devloop.config import ConfigError, RunPolicy
-from devloop.github import GitHubError
+from devloop.github import GitHub, GitHubError
 from devloop.watch import NOTHING_NEW
 
 from helpers import ssdlc_project
@@ -349,25 +350,40 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(number, 7)
         self.assertIn('`devloop run` si è fermato', body)
 
-    def test_the_wait_uses_a_watcher_with_its_own_state_and_restores_the_client(self):
-        gh = mock.Mock(time_left=None)
-        dispatcher = SimpleNamespace(tick=mock.Mock(return_value=[]), gh=gh, identities=None)
+    def test_the_producer_reads_with_its_own_state_writes_the_stream_and_wakes_the_loop(self):
+        # #683: one reader of GitHub, a thread of the loop with the loop's own watcher state; its
+        # events go to the stream of the state_dir and wake the loop before the idle timeout.
+        gh = GitHub('o/r')
+        ticks = []
+
+        def tick():
+            ticks.append(1)
+            if len(ticks) == 2:
+                (self.tmp / 'STOP').touch()
+            return []
+        dispatcher = SimpleNamespace(tick=tick, gh=gh, identities=None)
         seen = []
 
         class Watcher:
-            def __init__(self, client, trust, state, *, interval, timeout, sleep, out, err):
-                seen.append((client, state, interval, timeout))
-                self.time_left = lambda: 1
+            def __init__(self, client, trust, state, *, out, err):
+                seen.append((client, state))
+                self.gh, self.state_path, self.state = client, state, None
 
-            def run(self):
-                seen.append(gh.time_left)
-                (seen[0][1].parent / 'STOP').touch()  # the loop stops after this wait
-                return NOTHING_NEW
+            def round(self, deliver=None):
+                seen.append(callable(gh.time_left))  # bound in the thread of the producer
+                if len(seen) == 2:
+                    deliver(['PR #5 CI pass @abc1234'])
+                    return ['PR #5 CI pass @abc1234']
+                return []
         with mock.patch.object(cli.watch, 'Watcher', Watcher), mock.patch.object(cli, 'log'):
             code = cli.run_loop(ssdlc_project.load(), self.tmp, dispatcher, 30)
         self.assertEqual(code, 0)
-        self.assertEqual(seen[0], (gh, self.tmp / 'run-watch-state.json', 30, 30))
-        self.assertTrue(callable(seen[1]))
+        self.assertEqual(seen[:2], [(gh, self.tmp / 'run-watch-state.json'), True])
+        self.assertEqual(len(ticks), 2)  # woken by the news, within the idle timeout
+        stream = (self.tmp / 'events/events.log').read_text()
+        self.assertRegex(stream, r'^1 \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ PR #5 CI pass @abc1234\n$')
+        self.assertTrue((self.tmp / 'events/alive').read_text().strip().isdigit())
+        # The limit is the producer's thread's: the ticks' client is not bound by it.
         self.assertIsNone(gh.time_left)
 
     def test_a_sigterm_during_an_auto_pin_ends_the_loop_without_a_restart(self):
@@ -385,7 +401,7 @@ class CommandTests(unittest.TestCase):
 
     def wait_with_stop_during_first_read(self, stop):
         """A real watcher on a client whose first read requests a stop with ``stop``: the
-        GitHub reads that the wait starts, by name."""
+        GitHub reads that the producer of the loop starts (#683), by name."""
         reads = []
 
         class Client:
@@ -398,6 +414,9 @@ class CommandTests(unittest.TestCase):
                     reads.append(name)
                     if len(reads) == 1:
                         stop()
+                        # The read runs in the producer's thread: the main thread handles a
+                        # signal once this one lets it run.
+                        time.sleep(0.2)
                     return []
                 return read
         gh = Client()
@@ -405,9 +424,10 @@ class CommandTests(unittest.TestCase):
         with mock.patch.object(cli, 'log'):
             code = cli.run_loop(ssdlc_project.load(), self.tmp, dispatcher, 900)
         self.assertEqual(code, 0)
-        self.assertEqual(dispatcher.tick.call_count, 1)
-        self.assertIsNone(gh.time_left)  # restored after the stop too
+        # The producer reads from the start of the loop: the stop may come before the first tick.
+        self.assertLessEqual(dispatcher.tick.call_count, 1)
         self.assertFalse((self.tmp / runloop.WATCH_STATE_FILE).exists())  # no round completed
+        self.assertFalse((self.tmp / 'events/alive').exists())
         return reads
 
     def test_a_sigterm_during_a_read_of_the_wait_starts_no_other_read(self):

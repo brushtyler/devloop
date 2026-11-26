@@ -299,6 +299,52 @@ roles use `<role>:<topic>`.
 `devloop status` shows the channel and `operator_mentions` (`notify: …`, `operator mentions:
 …`).
 
+### The stream of the events
+
+`devloop run` is the one reader of GitHub of a project on the host (#683): a thread of the loop
+reads it every 60 seconds, during a long action too, as [`devloop
+watch`](guide.md#waking-the-supervising-agent) does, and writes what it finds to the stream of
+the events, the directory `events/` of the `state_dir`. The wake-ups of the roles
+(`ops/host/role-wait.sh`) read it instead of running `devloop watch`; `devloop watch` stays on
+GitHub, with its options and its state file. The producer knows no reader, and the readers
+cannot write it. No key configures it.
+
+| File | Content |
+|---|---|
+| `events.log` | the current segment, in append only: one line per event, `<n> <YYYY-MM-DDTHH:MM:SSZ> <line>`, with a number that grows by one at each event and goes on across the segments and the restarts, the UTC time it was written and the line of `devloop watch` (labels, `operator reply`, `watch error:`, the routine of #682, …), on one line |
+| `events.log.1` | the previous segment: before a line would take `events.log` past **10 MiB**, `events.log` becomes `events.log.1`, which replaces the one before it. At most two segments, about 20 MiB, are kept |
+| `alive` | the sign of life: the time (seconds since the epoch) of the latest complete read of GitHub that succeeded, with or without events, replaced atomically |
+| `id` | the identity of the stream, written when it is created: a reader whose cursor names another one knows the stream was replaced |
+
+Each line is one `write` of an append-only descriptor, written before the state of the
+loop's watcher (`run-watch-state.json`) is saved: an interruption in between repeats an event at
+the next read, never loses it. A reader takes only the lines that end with a newline; a line left
+half-written by a crash is removed at the next start, and one left by a write that failed (a full
+disk) is cut back at once, or before the next write, so the next line never joins it. The files are created 640, the directory
+750, of devloop's user. `setup-supervisor.sh` and `setup-coordinator.sh` give the user of the
+role a read-only ACL on the directory (`r-x`, and the default `r--` that each new segment
+inherits) and on its files, per project: a role user shared by several projects (#643) gets it
+on the stream of each project it serves, from the setup of that project. `check-host.sh` checks
+that only devloop writes the stream and that the roles of the project read it.
+
+Each wake-up keeps its cursor, the number of the last event it read, in its own state,
+`~/.local/state/devloop-<role>-wait/<project>/` of the user of the role (`_default` without
+`PROJECT`): one per role and per project. Without a cursor it makes a base at the end of the
+stream (`flusso: base …`, which wakes nobody). When the stream was replaced, or the events after
+the cursor are no longer kept, a `flusso:` line says so and it goes on from the first event still
+kept: no event is lost in silence. The coordinator's wake-up reports `eventi fermi:` once per
+episode when, with the service active, the sign of life is older than `EVENTS_STALE_AFTER`
+seconds of the parameters of the host (default 300), counted from the latest of the sign of life
+and the start of the service, or is missing or unreadable ([ops/README.md](../../ops/README.md#10-coordinatore-facoltativo)).
+A stream that cannot be written is a line of `run.log` (`events: …`); the loop goes on, but the
+read is not confirmed: the state of the watcher is not saved and the sign of life not renewed, so
+the same events are written at the first read after the stream recovers, and meanwhile the
+coordinator sees the stream stop. A restart of the loop goes on from `run-watch-state.json`:
+what changed while the loop was stopped is written as events, not swallowed by a new baseline.
+The wake-ups read the two segments together and check them (the inodes of their names, the
+numbers without gaps): a rotation during the read makes it try again, and a cursor never moves
+past an event still kept that it did not give.
+
 ### Project file
 
 The project file (ADR 0006, R2) holds what belongs to the managed repository: its facts and the

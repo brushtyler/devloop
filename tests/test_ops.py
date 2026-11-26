@@ -4,6 +4,7 @@ The scripts run here only with ``--dry-run`` and on temporary directories: a ``P
 records any command that would change the host (``sudo``, ``apt-get``, ``useradd``, …), and the
 tests check that none ran.
 """
+import datetime
 import getpass
 import grp
 import html
@@ -24,7 +25,7 @@ import tomllib
 import unittest
 from pathlib import Path
 
-from devloop import agentuser, apps, redact
+from devloop import agentuser, apps, events, redact
 from devloop.config import load_config
 from helpers import ssdlc_project
 
@@ -68,10 +69,6 @@ READS = r'/usr/bin/bash -c \[\ -r\ \"\$1\"\ \] _ '
 # What ``sudo --version`` prints for each sudo the fakes simulate: the host moved from sudo-rs to
 # the classic sudo on 2026-11-20, and the scripts behave the same with either.
 SUDO_FLAVORS = {'sudo-rs': 'sudo-rs 0.2.8', 'classic sudo': 'Sudo version 1.9.17p2'}
-# The read of GitHub of the coordinator's wake-up (#543), as its sudoers allows it: the same
-# arguments in coordinator-wait.sh, with its own state file.
-WAIT_WATCH = ('@LAUNCHER_CMD@ watch --until-change --interval 60 --timeout 300 '
-              '--state @STATE_PATH@/coordinator-watch-state.json')
 # The notice of a role to the operator (#593, N2 (a)): devloop-pinned notify, with its text.
 NOTIFY = '@LAUNCHER_CMD@ notify *'
 
@@ -1989,9 +1986,11 @@ class DeclarativeFileTests(unittest.TestCase):
         as_devloop = [c.strip() for c in body[1].split('NOPASSWD:', 1)[1].split(',')]
         launcher = '@LAUNCHER_CMD@ '
         self.assertTrue(body[1].startswith('@SUPERVISOR_USER@ ALL=(@DEVLOOP_USER@) NOPASSWD:'))
+        # #683: no watch, the wake-up reads the stream of the events as the supervisor.
         self.assertEqual(as_devloop, [launcher + args for args in (
-            'status', 'status *', 'watch *', 'report *', 'direction', 'tick --dry-run',
+            'status', 'status *', 'report *', 'direction', 'tick --dry-run',
             'pin *', 'notify *')])
+        self.assertNotIn(' watch', text.replace('devloop watch', ''))
         as_root = [c.strip() for c in body[2].split('NOPASSWD:', 1)[1].split(',')]
         self.assertTrue(body[2].startswith('@SUPERVISOR_USER@ ALL=(root) NOPASSWD:'))
         self.assertEqual(as_root, ['/usr/bin/systemctl start @SERVICE_NAME@',
@@ -2003,8 +2002,8 @@ class DeclarativeFileTests(unittest.TestCase):
 
     def test_the_coordinator_sudoers_allows_only_reading_commands(self):
         # #530 (ADR 0002, precisazione del 2026-11-22): journalctl and systemctl status of the
-        # unit, run.log, devloop-pinned status and check-host.sh --read-only; and, for the
-        # coordinator's wake-up (#543), devloop-pinned watch with its own state file only.
+        # unit, run.log, devloop-pinned status and check-host.sh --read-only. No devloop-pinned
+        # watch since #683: the coordinator's wake-up reads the stream of the events as itself.
         text = (OPS / 'host/sudoers-coordinator').read_text()
         body = [line for line in text.replace('\\\n', ' ').splitlines()
                 if line.strip() and not line.startswith('#')]
@@ -2014,13 +2013,9 @@ class DeclarativeFileTests(unittest.TestCase):
         self.assertTrue(body[1].startswith('@COORDINATOR_USER@ ALL=(@DEVLOOP_USER@) NOPASSWD: '))
         as_devloop = [c.strip() for c in body[1].split('NOPASSWD:', 1)[1].split(',')]
         self.assertEqual(as_devloop, ['@LAUNCHER_CMD@ status', '@LAUNCHER_CMD@ direction',
-                                      NOTIFY, WAIT_WATCH,
+                                      NOTIFY,
                                       '/usr/bin/tail -n 200 @STATE_PATH@/run.log',
                                       '/usr/bin/tail -n 1000 @STATE_PATH@/run.log'])
-        # The watch is the one subcommand of devloop-pinned besides status, and not the
-        # supervisor's state file (state_dir/watch-state.json): the events stay the supervisor's.
-        self.assertNotIn('/watch-state.json', WAIT_WATCH)
-        as_devloop.remove(WAIT_WATCH)
         # #593, choice N2 (a) of the operator: the notice to the operator is the one write and
         # the one command with free arguments, its text; the checks below hold for the others.
         as_devloop.remove(NOTIFY)
@@ -2384,16 +2379,20 @@ class DryRunTests(OpsTestCase):
                 # #554: without the overlay there is no ACL to give it, and the script says so.
                 self.assertIn(f'  ATTENZIONE: {state}/config.local.toml non esiste o è un link: '
                               'crearlo (setup-devloop.sh), poi rieseguire questo script\n', out)
-                # #543: the mailbox, with the coordinator in its group; the wake-up in the copy,
-                # and its read of GitHub in the sudoers, with its own state file.
+                # #543: the mailbox, with the coordinator in its group; the wake-up in the copy.
+                # #683: no devloop watch in the sudoers, the read-only ACLs on the stream of
+                # the events instead (state_dir/events, devloop's, 750).
                 self.assertIn(f'[dry-run] usermod -aG {GROUP} {FAKE_COORDINATOR}\n', out)
                 for path in ('to-coordinator/done', 'to-operator', 'to-operator/done'):
                     self.assertIn(f'[dry-run] install -d -m 2770 -o root -g {GROUP} '
                                   f'{self.tmp}/coordination/{path}\n', out)
                 self.assertIn('host/coordinator-wait.sh', files)
-                watch = WAIT_WATCH.replace('@LAUNCHER_CMD@', launcher).replace('@STATE_PATH@',
-                                                                              state)
-                self.assertIn(f'    |     {watch}, \\\n', out)
+                self.assertNotIn(f'{launcher} watch', out)
+                self.assertIn(f'==> Lettura del flusso degli eventi: ACL '
+                              f'u:{FAKE_COORDINATOR}:r-x e d:u:{FAKE_COORDINATOR}:r-- su '
+                              f'{state}/events (#683)\n'
+                              f'  ATTENZIONE: {state} non esiste: crearlo (setup-devloop.sh), '
+                              'poi rieseguire questo script\n', out)
                 self.assertIn('host/role-wait.sh', files)
                 self.assertIn(f'  bash {copy}/host/role-wait.sh --role coordinator\n', out)
                 self.assertNotRegex(out, r'@[A-Z_]+@')
@@ -2427,6 +2426,11 @@ class DryRunTests(OpsTestCase):
         for path in files:
             self.assertIn(f'==> Lettura di {path.name}: ACL u:{FAKE_SUPERVISOR}:r-- su {path}\n'
                           f'  [dry-run] setfacl -m u:{FAKE_SUPERVISOR}:r-- {path}\n', out)
+        # #683: the stream of the events, devloop's and 750, read-only for the supervisor, its
+        # future segments too (the default ACL).
+        self.assertIn(f'  [dry-run] install -d -m 750 -o {ME} -g {GROUP} {state}/events\n'
+                      f'  [dry-run] setfacl -m u:{FAKE_SUPERVISOR}:r-x\\,d:u:{FAKE_SUPERVISOR}:r-- '
+                      f'{state}/events\n', out)
         self.assertIn(f'  ok: il gruppo {GROUP} esiste\n', out)
         self.assertIn(f'  [dry-run] usermod -aG {GROUP} {FAKE_SUPERVISOR}\n', out)
         for path in dirs:
@@ -2455,6 +2459,44 @@ class DryRunTests(OpsTestCase):
         self.assertIn(f'{box}/to-coordinator non è una directory: la casella di prima va '
                       'spostata (ops/host/migrate.md, "Casella fra i ruoli e sveglia del '
                       'coordinatore (#543)")', done.stderr)
+        self.assertEqual(self.mutating_calls(), [])
+
+    def test_the_setup_of_each_role_gives_the_reading_of_the_stream_of_its_project(self):
+        # #683: the ACLs on the stream that devloop run already writes: the directory (r-x and the
+        # default r-- for the new segments) and each file, r--; present, they stay; wider, they
+        # are reduced. Per project: the parameters of the project name its state_dir.
+        for role, script, user in (('supervisor', 'setup-supervisor.sh', FAKE_SUPERVISOR),
+                                   ('coordinator', 'setup-coordinator.sh', FAKE_COORDINATOR)):
+            with self.subTest(role=role):
+                state = self.tmp / f'state-{role}'
+                stream = state / 'events'
+                stream.mkdir(parents=True, mode=0o750)
+                for name in ('events.log', 'events.log.1', 'alive', 'id'):
+                    (stream / name).write_text('1\n')
+                params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=FAKE_SUPERVISOR,
+                                     AGENT_USER=FAKE_AGENT, STATE_DIR=str(state),
+                                     COORDINATOR_OPS_DIR=self.root_copy())
+                self.fake_host('classic sudo', users=(FAKE_AGENT, FAKE_SUPERVISOR))
+                done = self.run_script(f'host/{script}', '--dry-run', '--params', str(params))
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                out = done.stdout
+                self.assertIn(f'  ok: {stream} esiste (750, {ME})\n'
+                              f'  [dry-run] setfacl -m u:{user}:r-x\\,d:u:{user}:r-- {stream}\n',
+                              out)
+                for name in ('alive', 'events.log', 'events.log.1', 'id'):
+                    self.assertIn(f'  [dry-run] setfacl -m u:{user}:r-- {stream / name}\n', out)
+                self.shim('getfacl', f'for a in "$@"; do last=$a; done\necho "user::rwx"\n'
+                                     f'if [ "$last" = {shlex.quote(str(stream))} ]; then\n'
+                                     f'  echo "user:{user}:r-x"; echo "default:user:{user}:r--"\n'
+                                     f'else echo "user:{user}:rw-"; fi\necho "other::---"')
+                done = self.run_script(f'host/{script}', '--dry-run', '--params', str(params))
+                out = done.stdout
+                self.assertIn(f'  ok: ACL presenti su {stream}: user:{user}:r-x, '
+                              f'default:user:{user}:r--\n', out)
+                self.assertNotIn(f'r-x\\,d:u:{user}:r-- {stream}', out)
+                self.assertEqual(out.count(f'  ATTENZIONE: ACL attuale user:{user}:rw-: la '
+                                           'riduco a r--\n'), 4)
+                (self.bin / 'getfacl').unlink()
         self.assertEqual(self.mutating_calls(), [])
 
     def test_setup_supervisor_installs_its_wake_up_and_the_watchdog_of_the_roles(self):
@@ -4850,6 +4892,82 @@ class CheckHostTests(OpsTestCase):
         done = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params))
         self.assertIn(f'  ok: {coordinator}/devloop è un clone\n', done.stdout)
 
+    def events_acl(self, extra=''):
+        """getfacl as ``acl`` gives it, and on the stream of the events (#683) the read-only
+        ACLs of the supervisor (the user of the tests), with ``extra`` on its directory."""
+        stream = self.state / 'events'
+        self.shim('getfacl', f'for a in "$@"; do last=$a; done\necho "user::rwx"\n'
+                             f'case "$last" in\n'
+                             f'  "{self.devloop}") echo "user:{ME}:--x" ;;\n'
+                             f'  "{self.state}/config.local.toml" | "{self.state}/project.toml")'
+                             f' echo "user:{ME}:r--" ;;\n'
+                             f'  "{stream}") echo "user:{ME}:r-x"; echo "default:user:{ME}:r--"'
+                             f'{"; echo " + shlex.quote(extra) if extra else ""} ;;\n'
+                             f'  "{stream}"/*) echo "user:{ME}:r--" ;;\n'
+                             f'esac\necho "group::r-x"\necho "other::---"')
+        return stream
+
+    def test_the_stream_of_the_events_is_written_by_devloop_and_read_by_the_roles(self):
+        # #683: no stream yet, a warning; then devloop's, without writing for others, and
+        # readable by the supervisor with its ACLs, on the directory and on each file.
+        stream = self.state / 'events'
+        done, errors = self.check()
+        self.assertIn(f'  ATTENZIONE: {stream} non esiste: le sveglie dei ruoli non hanno eventi',
+                      done.stdout)
+        self.assertEqual(errors, [])
+        stream.mkdir(mode=0o750)
+        for name in ('alive', 'events.log', 'id'):
+            (stream / name).write_text('1\n')
+            (stream / name).chmod(0o640)
+        self.events_acl()
+        done, errors = self.check()
+        self.assertEqual(errors, [])
+        for line in (f'ok: {stream}: 750, {ME}, scritto solo da devloop',
+                     f'ok: {stream}/events.log: 640, {ME}, scritto solo da devloop',
+                     f'ok: ACL user:{ME}:r-x su {stream}',
+                     f'ok: ACL default:user:{ME}:r-- su {stream}',
+                     f'ok: ACL user:{ME}:r-- su {stream}/events.log',
+                     f'[dry-run] sudo -u {ME} -H -- /usr/bin/bash -c \\[\\ -r\\ \\"\\$1\\"\\ \\] '
+                     f'_ {stream}/alive'):
+            self.assertIn(f'  {line}\n', done.stdout)
+        # Writable by others: by the group, or with an ACL.
+        (stream / 'events.log').chmod(0o660)
+        done, errors = self.check()
+        self.assertEqual(errors, [f'  ERRORE: {stream}/events.log è 660 {ME}: il flusso è di '
+                                  f'{ME} e solo devloop lo scrive'])
+        (stream / 'events.log').chmod(0o640)
+        self.events_acl(extra='user:mallory:rwx')
+        done, errors = self.check()
+        self.assertEqual(errors, [f"  ERRORE: {stream} ha un'ACL di scrittura "
+                                  '(user:mallory:rwx): solo devloop scrive il flusso'])
+        # Without the ACLs of the role: not readable.
+        self.acl(f'user:{ME}:--x')
+        done, errors = self.check()
+        self.assertIn(f"  ERRORE: su {stream} serve l'ACL user:{ME}:r-x, non '' "
+                      '(setup-supervisor.sh)', errors)
+        self.assertIn(f"  ERRORE: su {stream} serve l'ACL default:user:{ME}:r--, non '' "
+                      '(setup-supervisor.sh)', errors)
+        self.assertIn(f"  ERRORE: manca l'ACL u:{ME}:r-- su {stream}/alive (setup-supervisor.sh)",
+                      errors)
+
+    def test_the_old_sudoers_rule_of_devloop_watch_is_an_error(self):
+        # #683: the wake-ups read the stream; a sudoers of the roles still with devloop-pinned
+        # watch is one of before, and setup-supervisor.sh installs the new one.
+        sudoers = self.tmp / 'sudoers.d/devloop-supervisor'
+        sudoers.parent.mkdir()
+        launcher = f'/usr/bin/python3 {self.devloop}/devloop/scripts/devloop-pinned'
+        sudoers.write_text(f'{ME} ALL=({ME}) NOPASSWD: \\\n    {launcher} status, \\\n'
+                           f'    {launcher} watch *\n')
+        done, _ = self.check()
+        self.assertIn(f'  ERRORE: {sudoers} contiene ancora la regola dei sudoers per '
+                      'devloop-pinned watch, tolta dal #683: rieseguire setup-supervisor.sh '
+                      '(ops/host/migrate.md, "Il flusso degli eventi per le sveglie dei ruoli '
+                      '(#683)")\n', done.stdout)
+        sudoers.write_text(f'{ME} ALL=({ME}) NOPASSWD: \\\n    {launcher} status\n')
+        done, _ = self.check()
+        self.assertIn(f'  ok: {sudoers} non ha la regola dei sudoers per devloop-pinned watch '
+                      '(#683)\n', done.stdout)
+
     def test_the_files_of_the_agent_clis_are_checked_as_the_agent_user(self):
         # #438: the home root's and sticky; as the agent user, the probe of the startup check.
         self.agent.chmod(0o755)
@@ -6384,20 +6502,23 @@ FAKE_DEVLOOP = 'opsdry-devloop'
 
 class WakeUpCase(OpsTestCase):
     """The wake-up of the roles run as the role (the user of the tests) with simulated commands:
-    ``sudo`` runs the fake of ``devloop-pinned watch``, which answers from ``watch/<n>.out`` and
-    ``watch/<n>.status`` at its n-th call and then, without news, exits 3 as ``--timeout`` does;
-    and the ``tail`` of run.log; ``systemctl is-active`` says the state of ``service``."""
+    ``sudo`` runs only the ``tail`` of run.log (any other call exits 97 and is recorded);
+    ``systemctl is-active`` says the state of ``service``, ``systemctl show`` the start of the
+    service from ``service-since`` (none without it). The stream of the events (#683) is the one
+    devloop run writes, with ``devloop.events.Stream`` in the state_dir: the tests publish their
+    lines in it, with the time ``STAMP``, and keep its sign of life fresh. The cursors of both
+    roles are set at its start: a test of the base removes them."""
 
     SCRIPT = 'host/coordinator-wait.sh'
     ROLE_ARGS = ()
+    # The UTC time of the lines of the stream, as the wake-up prints it before each event.
+    STAMP = '12:34 '
 
     def setUp(self):
         super().setUp()
         self.fake_host('classic sudo', users=(FAKE_DEVLOOP, FAKE_SUPERVISOR, FAKE_AGENT))
-        # The wake-up keeps its own state in the coordinator's home.
+        # The wake-up keeps its own state in the home of the role.
         (self.bin / 'mkdir').unlink()
-        self.watch = self.tmp / 'watch'
-        self.watch.mkdir()
         self.sudo_log = self.tmp / 'sudo-log'
         self.log = self.tmp / 'run.log'
         self.log.write_text('10:00:00 tick ok\n')
@@ -6405,38 +6526,55 @@ class WakeUpCase(OpsTestCase):
 [ "$1" = -n ] && [ "$2" = -u ] && [ "$3" = {FAKE_DEVLOOP} ] && [ "$4" = -- ] || exit 97
 shift 4
 if [ "$1" = /usr/bin/tail ]; then cat {shlex.quote(str(self.log))}; exit 0; fi
-dir={shlex.quote(str(self.watch))}
-n=$(( $(cat "$dir/count" 2>/dev/null || echo 0) + 1 ))
-echo "$n" > "$dir/count"
-if [ -f "$dir/$n.delay" ]; then sleep "$(cat "$dir/$n.delay")"; fi
-if [ -f "$dir/$n.out" ]; then cat "$dir/$n.out"; exit "$(cat "$dir/$n.status")"; fi
-sleep 0.2
-exit 3''')
+exit 97''')
         self.service_state = self.tmp / 'service'
         self.service_state.write_text('active\n')
-        self.shim('systemctl', f'''[ "$1" = is-active ] || exit 2
-state=$(cat {shlex.quote(str(self.service_state))}); echo "$state"
-[ "$state" = active ]''')
+        self.service_since = self.tmp / 'service-since'
+        self.shim('systemctl', f'''case "$1" in
+is-active)
+    state=$(cat {shlex.quote(str(self.service_state))}); echo "$state"
+    [ "$state" = active ] ;;
+show) cat {shlex.quote(str(self.service_since))} 2>/dev/null || echo n/a ;;
+*) exit 2 ;;
+esac''')
         self.state = self.tmp / 'state'
         self.state.mkdir()
         (self.state / 'config.local.toml').write_text('[run]\nalert_issue = 76\n')
+        self.stream = self.make_stream(self.state)
         self.box = self.tmp / 'coordination/to-coordinator'
         (self.box / 'done').mkdir(parents=True)
         self.coordinator_home = self.home / 'coordinator'
         self.params_file = self.params(DEVLOOP_USER=FAKE_DEVLOOP, SUPERVISOR_USER=FAKE_SUPERVISOR,
                                        AGENT_USER=FAKE_AGENT, COORDINATOR_USER=ME,
                                        STATE_DIR=str(self.state))
+        for role in ('supervisor', 'coordinator'):
+            self.prime(role)
 
-    # devloop watch puts the time before each line (Watcher.run): the fake does the same.
-    STAMP = '12:34 '
+    def make_stream(self, state, **kwargs):
+        """The stream of the events of ``state``, written as devloop run writes it, alive."""
+        now = datetime.datetime(2026, 11, 26, 12, 34, 56, tzinfo=datetime.timezone.utc)
+        stream = events.Stream(state, now=lambda: now, **kwargs)
+        stream.open()
+        self.alive(state)
+        return stream
 
-    def answer(self, n, lines, status=0, delay=None):
-        """The answer of the n-th call of the fake watch, each line with the time before it, as
-        devloop watch prints it; with ``delay``, after that many seconds."""
-        (self.watch / f'{n}.out').write_text(''.join(f'{self.STAMP}{line}\n' for line in lines))
-        (self.watch / f'{n}.status').write_text(f'{status}\n')
-        if delay is not None:
-            (self.watch / f'{n}.delay').write_text(f'{delay}\n')
+    def alive(self, state=None, age=0):
+        """The sign of life of the stream, ``age`` seconds old."""
+        (Path(state or self.state) / 'events/alive').write_text(f'{int(time.time()) - age}\n')
+
+    def cursor(self, role, instance='_default'):
+        return self.coordinator_home / f'.local/state/devloop-{role}-wait/{instance}/events.cursor'
+
+    def prime(self, role, instance='_default', stream=None):
+        """The cursor of ``role`` at the end of the stream, as a first start leaves it."""
+        stream = stream or self.stream
+        path = self.cursor(role, instance)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        identity = (stream.dir / 'id').read_text().strip()
+        path.write_text(f'{identity} {stream._seq} 0 0\n')
+
+    def publish(self, lines, stream=None):
+        (stream or self.stream).append(lines)
 
     def wait_command(self, *args):
         """The command of the wake-up and its environment."""
@@ -6451,10 +6589,12 @@ state=$(cat {shlex.quote(str(self.service_state))}); echo "$state"
         return subprocess.run(command, capture_output=True, text=True, env=env,
                               stdin=subprocess.DEVNULL, timeout=120)
 
-    def watch_calls(self):
+    def sudo_calls(self):
+        """The calls of sudo other than the tail of run.log: none, since #683."""
         if not self.sudo_log.exists():
             return []
-        return [line for line in self.sudo_log.read_text().splitlines() if ' watch ' in line]
+        return [line for line in self.sudo_log.read_text().splitlines()
+                if ' -- /usr/bin/tail -n 200 ' not in line]
 
 
 @unittest.skipIf(BASH is None, 'bash is not installed')
@@ -6463,33 +6603,37 @@ class CoordinatorWaitTests(WakeUpCase):
     role-wait.sh --role coordinator (#602): the same behaviour, from the same command."""
 
     def test_it_wakes_on_an_event_of_the_coordinator_and_not_on_the_others(self):
-        self.answer(1, ['watch baseline: 3 open PRs, 2 open issues'])
-        self.answer(2, ['PR #5 CI pass @abc1234',
-                        'issue #7 labels +agent:ready -agent:needs-operator',
-                        'new issue #10 [agent:ready] Fix the docs',
-                        'issue #11 operator comment by brushtyler: about agent:needs-operator',
-                        # Any other note of the operator (#676), even one that names a reply.
-                        'issue #12 operator comment by brushtyler: /devloopapprove',
-                        'issue #13 operator comment by brushtyler: operator reply by brushtyler',
-                        'issue #14 comment by brushtyler: /devloop approve',
-                        'issue #77 comment by brushtyler-devloop-dispatcher[bot]: ## Allarme'])
-        self.answer(3, ['PR #12 labels +agent:needs-operator -agent:review',
-                        'PR #13 CI fail @def5678'])
+        self.publish(['watch baseline: 3 open PRs, 2 open issues',
+                      'PR #5 CI pass @abc1234',
+                      'issue #7 labels +agent:ready -agent:needs-operator',
+                      'new issue #10 [agent:ready] Fix the docs',
+                      'issue #11 operator comment by brushtyler: about agent:needs-operator',
+                      # Any other note of the operator (#676), even one that names a reply.
+                      'issue #12 operator comment by brushtyler: /devloopapprove',
+                      'issue #13 operator comment by brushtyler: operator reply by brushtyler',
+                      'issue #14 comment by brushtyler: /devloop approve',
+                      'issue #77 comment by brushtyler-devloop-dispatcher[bot]: ## Allarme'])
+        done = self.wait('--period', '1')
+        self.assertEqual((done.returncode, done.stdout),
+                         (0, 'periodo: 1s senza eventi del coordinatore: il controllo '
+                             'periodico\n'), done.stderr)
+        self.publish(['PR #12 labels +agent:needs-operator -agent:review',
+                      'PR #13 CI fail @def5678'])
         done = self.wait()
         self.assertEqual((done.returncode, done.stdout),
                          (0, f'evento: {self.STAMP}PR #12 labels +agent:needs-operator '
                              '-agent:review\n'),
                          done.stderr)
-        # The command of its sudoers, with its own state file: never the supervisor's.
-        clone = f'{self.home}/devloop/devloop'
-        launcher = (f'/usr/bin/env -C {clone} /usr/bin/python3 {clone}/scripts/devloop-pinned '
-                    f'--state-dir {self.state}')
-        command = WAIT_WATCH.replace('@LAUNCHER_CMD@', launcher).replace('@STATE_PATH@',
-                                                                        str(self.state))
-        self.assertEqual(self.watch_calls(), [f'sudo -n -u {FAKE_DEVLOOP} -- {command}'] * 3)
+        # #683: the stream read as the coordinator: no devloop watch, nothing run as devloop
+        # but the tail of run.log of its sudoers.
+        self.assertEqual(self.sudo_calls(), [])
         self.assertIn(f'sudo -n -u {FAKE_DEVLOOP} -- /usr/bin/tail -n 200 {self.state}/run.log',
                       self.sudo_log.read_text())
         self.assertEqual(self.mutating_calls(), [])
+        # The cursor is the coordinator's, in its own state: the stream is not written.
+        self.assertEqual(self.cursor('coordinator').read_text().split()[1], '11')
+        self.assertEqual(sorted(p.name for p in (self.state / 'events').iterdir()),
+                         ['alive', 'events.log', 'id'])
 
     def test_the_events_of_the_coordinator(self):
         for line in ('new PR #14 [agent:review,agent:needs-operator] Bump',
@@ -6501,14 +6645,13 @@ class CoordinatorWaitTests(WakeUpCase):
                      'issue #76 comment by brushtyler-devloop-dispatcher[bot]: ## Agent senza '
                      'utente dedicato',
                      # A reply of the operator (#676): a /devloop command, or a comment on an
-                     # issue or PR in agent:needs-operator, as devloop watch marks it.
+                     # issue or PR in agent:needs-operator, as devloop run marks it.
                      'issue #672 operator reply by brushtyler: /devloop approve',
                      'PR #16 operator reply by brushtyler: sì, procedi',
                      'watch error: 3 consecutive rounds could not read GitHub, the last valid '
                      'state is kept'):
             with self.subTest(line=line):
-                (self.watch / 'count').unlink(missing_ok=True)
-                self.answer(1, ['PR #5 CI pass @abc1234', line])
+                self.publish(['PR #5 CI pass @abc1234', line])
                 done = self.wait()
                 self.assertEqual((done.returncode, done.stdout),
                                  (0, f'evento: {self.STAMP}{line}\n'), done.stderr)
@@ -6523,22 +6666,14 @@ class CoordinatorWaitTests(WakeUpCase):
             self.assertEqual((done.returncode, done.stdout),
                              (0, f'casella: 1 messaggi in {self.box}: {message.name}\n'))
         self.assertTrue(message.exists())
-        self.assertEqual(self.watch_calls(), [])
 
     def test_the_end_of_the_period_wakes_it(self):
-        # The first call answers, with events that are not the coordinator's, only after the
-        # period is over: the period ends during it whatever the load of the host (#579), and
-        # the next round wakes it without calling watch again. If the first reading of the
-        # mailbox, the log and the service already outlasts the period, it wakes before calling
-        # watch: the test asks no number of calls in a fixed time, only that there is no call
-        # after the period. That the events of the others do not wake it is
-        # test_it_wakes_on_an_event_of_the_coordinator_and_not_on_the_others.
-        self.answer(1, ['PR #5 CI pass @abc1234', 'issue #7 labels +agent:ready'], delay=2.2)
+        # Events that are not the coordinator's do not wake it: the period does.
+        self.publish(['PR #5 CI pass @abc1234', 'issue #7 labels +agent:ready'])
         done = self.wait('--period', '2')
         self.assertEqual((done.returncode, done.stdout),
                          (0, 'periodo: 2s senza eventi del coordinatore: il controllo '
                              'periodico\n'), done.stderr)
-        self.assertLessEqual(len(self.watch_calls()), 1)
 
     def test_a_new_error_in_the_log_wakes_it_once(self):
         # The lines of run.log at the first run are the base, not events.
@@ -6587,11 +6722,55 @@ class CoordinatorWaitTests(WakeUpCase):
         self.service_state.write_text('inactive\n')
         self.assertEqual(self.wait('--period', '1').stdout, 'servizio: devloop è inactive\n')
 
-    def test_a_failed_watch_and_another_user_are_errors(self):
-        self.answer(1, [], status=1)
-        done = self.wait()
-        self.assertEqual(done.returncode, 1)
-        self.assertIn(f'errore: devloop watch come {FAKE_DEVLOOP} è uscito con 1', done.stdout)
+    def test_a_stopped_stream_wakes_it_once_per_episode(self):
+        # #683: the service active, the sign of life older than EVENTS_STALE_AFTER (300).
+        # The age as the wake-up reads it: 400 seconds, or a little more on a slow host.
+        stale = (r"^eventi fermi: l'ultima lettura di GitHub riuscita di devloop run è di 40\ds "
+                 r'fa \(soglia EVENTS_STALE_AFTER, 300s\), con devloop attivo\n\Z')
+        self.alive(age=400)
+        done = self.wait('--period', '1')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertRegex(done.stdout, stale)
+        # Once per episode.
+        self.assertTrue(self.wait('--period', '1').stdout.startswith('periodo:'))
+        # Back to fresh: the warning is armed again.
+        self.alive(age=10)
+        self.assertTrue(self.wait('--period', '1').stdout.startswith('periodo:'))
+        self.alive(age=400)
+        self.assertRegex(self.wait('--period', '1').stdout, stale)
+        # Missing, or unreadable: a line of its own, once.
+        self.alive(age=10)
+        self.assertTrue(self.wait('--period', '1').stdout.startswith('periodo:'))
+        (self.state / 'events/alive').unlink()
+        done = self.wait('--period', '1')
+        self.assertEqual(done.stdout, f'eventi fermi: il segno di vita {self.state}/events/alive '
+                                      "è assente o illeggibile (devloop run non lo scrive, o "
+                                      "manca l'ACL di setup-coordinator.sh)\n")
+        self.assertTrue(self.wait('--period', '1').stdout.startswith('periodo:'))
+
+    def test_a_stopped_service_or_one_just_started_is_no_stopped_stream(self):
+        # The service stopped stays "servizio:" (#683).
+        self.alive(age=4000)
+        self.service_state.write_text('inactive\n')
+        self.assertEqual(self.wait('--period', '1').stdout, 'servizio: devloop è inactive\n')
+        # Started again a minute ago: the first read of GitHub has its time.
+        self.service_state.write_text('active\n')
+        started = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=60)
+        self.service_since.write_text(started.strftime('%a %Y-%m-%d %H:%M:%S UTC\n'))
+        self.assertTrue(self.wait('--period', '1').stdout.startswith('periodo:'))
+        # Ten minutes ago: stopped.
+        started -= datetime.timedelta(seconds=540)
+        self.service_since.write_text(started.strftime('%a %Y-%m-%d %H:%M:%S UTC\n'))
+        self.assertTrue(self.wait('--period', '1').stdout.startswith('eventi fermi: '))
+        # A larger EVENTS_STALE_AFTER of the parameters: not stopped yet.
+        (self.coordinator_home / '.local/state/devloop-coordinator-wait/_default/'
+         'events.stale').unlink()
+        self.params_file = self.params(DEVLOOP_USER=FAKE_DEVLOOP, SUPERVISOR_USER=FAKE_SUPERVISOR,
+                                       AGENT_USER=FAKE_AGENT, COORDINATOR_USER=ME,
+                                       STATE_DIR=str(self.state), EVENTS_STALE_AFTER='5000')
+        self.assertTrue(self.wait('--period', '1').stdout.startswith('periodo:'))
+
+    def test_another_user_is_an_error(self):
         self.params_file = self.params(DEVLOOP_USER=FAKE_DEVLOOP, SUPERVISOR_USER=FAKE_SUPERVISOR,
                                        AGENT_USER=FAKE_AGENT, STATE_DIR=str(self.state))
         done = self.wait()
@@ -6602,7 +6781,8 @@ class CoordinatorWaitTests(WakeUpCase):
 @unittest.skipIf(BASH is None, 'bash is not installed')
 class RoleWaitTests(WakeUpCase):
     """ops/host/role-wait.sh (#602), the wake-up of supervisor and coordinator: the mailbox of
-    each role, every event for the supervisor, and the heartbeat at each start."""
+    each role, every event for the supervisor, and the heartbeat at each start; the stream of the
+    events read as the role, with a cursor per role and per project (#683)."""
 
     SCRIPT = 'host/role-wait.sh'
 
@@ -6639,64 +6819,52 @@ class RoleWaitTests(WakeUpCase):
                                  (0, f'casella: 1 messaggi in {box}: {message.name}\n'),
                                  done.stderr)
                 self.assertTrue(message.exists())
-                self.assertEqual(self.watch_calls(), [])
                 message.unlink()
                 (self.tmp / f'coordination/to-{other}/20261124T090000Z-other.txt').unlink()
 
-    def test_a_message_during_the_watch_wakes_each_role_at_once(self):
-        # The watch runs in the background and the mailbox is read every second meanwhile: a
-        # message that arrives during a round of the watch wakes the role before the round ends.
-        # The round is not stopped (sudo is root's): the next wake-up waits for it, without
-        # starting another one on the same state file, and reports its events.
+    def test_a_message_leaves_the_events_of_the_stream_to_the_next_wake_up(self):
+        # A message wakes the role at once; the events written meanwhile stay after its cursor,
+        # and the next wake-up reports them.
         for role, line in (('supervisor', 'PR #5 CI pass @abc1234'),
                            ('coordinator', 'PR #12 labels +agent:needs-operator')):
             with self.subTest(role=role):
                 self.as_role(role)
-                (self.watch / 'count').unlink(missing_ok=True)
-                self.sudo_log.unlink(missing_ok=True)
-                self.answer(1, [line], delay=4)
-                command, env = self.wait_command()
-                started = time.monotonic()
-                with subprocess.Popen(command, env=env, stdin=subprocess.DEVNULL,
-                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                      text=True) as proc:
-                    deadline = time.monotonic() + 10
-                    while not self.watch_calls() and time.monotonic() < deadline:
-                        time.sleep(0.05)
-                    self.assertEqual(len(self.watch_calls()), 1)
-                    message = self.tmp / f'coordination/to-{role}/20261124T101500Z-a1b2c3.txt'
-                    message.write_text('un messaggio arrivato durante il watch\n')
-                    out, err = proc.communicate(timeout=30)
-                elapsed = time.monotonic() - started
-                self.assertEqual((proc.returncode, out),
+                self.prime(role)
+                self.publish([line])
+                message = self.tmp / f'coordination/to-{role}/20261124T101500Z-a1b2c3.txt'
+                message.write_text('un messaggio\n')
+                done = self.wait()
+                self.assertEqual((done.returncode, done.stdout),
                                  (0, f'casella: 1 messaggi in {message.parent}: {message.name}\n'),
-                                 err)
-                # Before the end of the round, which lasts 4 seconds.
-                self.assertLess(elapsed, 3.5)
+                                 done.stderr)
                 message.unlink()
                 done = self.wait()
                 self.assertEqual((done.returncode, done.stdout),
                                  (0, f'evento: {self.STAMP}{line}\n'), done.stderr)
-                self.assertEqual(len(self.watch_calls()), 1)
 
-    def test_every_event_wakes_the_supervisor_with_its_state_file(self):
+    def test_every_event_wakes_the_supervisor_without_any_command_as_devloop(self):
         self.as_role('supervisor')
-        self.answer(1, ['watch baseline: 3 open PRs, 2 open issues'])
-        self.answer(2, ['PR #5 CI pass @abc1234', 'issue #7 labels +agent:ready'])
+        self.publish(['watch baseline: 3 open PRs, 2 open issues'])
+        self.publish(['PR #5 CI pass @abc1234', 'issue #7 labels +agent:ready'])
         done = self.wait()
         self.assertEqual((done.returncode, done.stdout),
                          (0, f'evento: {self.STAMP}PR #5 CI pass @abc1234\n'
                              f'evento: {self.STAMP}issue #7 labels +agent:ready\n'), done.stderr)
-        clone = f'{self.home}/devloop/devloop'
-        command = (f'/usr/bin/env -C {clone} /usr/bin/python3 {clone}/scripts/devloop-pinned '
-                   f'--state-dir {self.state} watch --until-change --interval 60 --timeout 300 '
-                   f'--state {self.state}/watch-state.json')
-        self.assertEqual(self.watch_calls(), [f'sudo -n -u {FAKE_DEVLOOP} -- {command}'] * 2)
-        # The log is the coordinator's: the supervisor's sudoers has no tail.
-        self.assertNotIn('/usr/bin/tail', self.sudo_log.read_text())
+        # #683: the supervisor runs nothing as devloop (the log is the coordinator's).
+        self.assertFalse(self.sudo_log.exists())
         self.assertEqual(self.mutating_calls(), [])
+        # Read once: the events are behind its cursor now.
+        self.assertTrue(self.wait('--period', '1').stdout.startswith('periodo:'))
 
-    # The routine of the roles (#682), as devloop watch marks it by the author it verifies: the
+    def test_the_two_roles_have_their_own_cursors(self):
+        self.publish(['issue #7 labels +agent:needs-operator'])
+        for role in ('coordinator', 'supervisor'):
+            with self.subTest(role=role):
+                self.as_role(role)
+                self.assertEqual(self.wait().stdout,
+                                 f'evento: {self.STAMP}issue #7 labels +agent:needs-operator\n')
+
+    # The routine of the roles (#682), as devloop run marks it by the author it verifies: the
     # archive of the daily summary, the comments of each role app. The issue of the alarms of
     # the tests, #76, is the issue of the diary.
     REPORT = ('issue #316 report by brushtyler-devloop-dispatcher[bot]: ## Riepilogo devloop '
@@ -6715,16 +6883,16 @@ class RoleWaitTests(WakeUpCase):
         for role in ('supervisor', 'coordinator'):
             with self.subTest(role=role):
                 self.as_role(role)
-                (self.watch / 'count').unlink(missing_ok=True)
-                self.sudo_log.unlink(missing_ok=True)
+                self.prime(role)
                 wake = 'issue #7 labels +agent:needs-operator'
-                self.answer(1, [self.REPORT, own[role], diary[role],
-                                self.REPORT.replace('#316', '#76')])
-                self.answer(2, [wake])
+                self.publish([self.REPORT, own[role], diary[role],
+                              self.REPORT.replace('#316', '#76')])
+                done = self.wait('--period', '1')
+                self.assertTrue(done.stdout.startswith('periodo:'), done.stdout)
+                self.publish([wake])
                 done = self.wait()
                 self.assertEqual((done.returncode, done.stdout),
                                  (0, f'evento: {self.STAMP}{wake}\n'), done.stderr)
-                self.assertEqual(len(self.watch_calls()), 2)
 
     def test_what_is_not_routine_still_wakes_each_role(self):
         for role, line in (
@@ -6740,7 +6908,7 @@ class RoleWaitTests(WakeUpCase):
                 ('coordinator', 'issue #7 labels +agent:needs-operator'),
                 ('coordinator', 'issue #20 labels +agent:needs-coordinator'),
                 # A comment that copies the summary from anyone but the dispatcher's identity is
-                # a comment as the others: devloop watch never marks it "report".
+                # a comment as the others: devloop run never marks it "report".
                 ('supervisor', 'issue #316 comment by brushtyler-devloop-claude-agent[bot]: '
                                '## Riepilogo devloop del 2026-11-25'),
                 ('coordinator', 'issue #76 comment by brushtyler-devloop-claude-agent[bot]: '
@@ -6755,11 +6923,171 @@ class RoleWaitTests(WakeUpCase):
                                 '## Diario del 2026-11-26')):
             with self.subTest(role=role, line=line):
                 self.as_role(role)
-                (self.watch / 'count').unlink(missing_ok=True)
-                self.answer(1, [self.REPORT, line])
+                self.prime(role)
+                self.publish([self.REPORT, line])
                 done = self.wait()
                 self.assertEqual((done.returncode, done.stdout),
                                  (0, f'evento: {self.STAMP}{line}\n'), done.stderr)
+
+    def test_the_first_start_makes_a_base_at_the_end_of_the_stream(self):
+        # #683: without a cursor the events already written wake nobody; a line says so.
+        self.as_role('supervisor')
+        self.cursor('supervisor').unlink()
+        self.publish(['PR #5 CI pass @abc1234', 'issue #7 labels +agent:ready'])
+        done = self.wait('--period', '1')
+        self.assertEqual(done.stdout.splitlines(), [
+            f"flusso: base alla fine del flusso {self.state}/events, dopo l'evento 2: gli eventi "
+            'già scritti non svegliano',
+            'periodo: 1s senza eventi del supervisore: il controllo periodico'], done.stderr)
+        self.publish(['PR #6 CI fail @abc1234'])
+        self.assertEqual(self.wait().stdout, f'evento: {self.STAMP}PR #6 CI fail @abc1234\n')
+
+    def test_events_no_longer_kept_are_told_and_it_resumes_from_the_first_kept(self):
+        # #683: a rotation past the cursor (here a segment of 200 bytes): the lost events are
+        # named, and the wake-up goes on from the first one the stream still keeps.
+        self.as_role('supervisor')
+        shutil.rmtree(self.state / 'events')
+        self.stream = self.make_stream(self.state, max_bytes=200)
+        self.prime('supervisor')
+        self.publish([f'issue #{n} labels +agent:ready' for n in range(1, 13)])
+        kept = [int(line.split()[0])
+                for name in ('events.log.1', 'events.log')
+                for line in (self.state / 'events' / name).read_text().splitlines()]
+        self.assertGreater(kept[0], 1)
+        done = self.wait()
+        self.assertEqual(done.stdout.splitlines(), [
+            f'flusso: gli eventi da 1 a {kept[0] - 1} non sono più conservati (rotazione del '
+            f'flusso): riprendo dal primo conservato ({kept[0]})'] + [
+            f'evento: {self.STAMP}issue #{n} labels +agent:ready' for n in kept], done.stderr)
+        # Within the current segment it reads from where it stopped.
+        self.publish(['issue #13 labels +agent:ready'])
+        self.assertEqual(self.wait().stdout,
+                         f'evento: {self.STAMP}issue #13 labels +agent:ready\n')
+
+    def read_stream(self, on_open):
+        """The Python of read_stream of role-wait.sh, run here on the stream and the cursor of
+        the supervisor, with ``on_open(name)`` called before each file it opens: (exit code,
+        output)."""
+        import contextlib
+        import io
+        import sys
+        from unittest import mock
+        script = (OPS / 'host/role-wait.sh').read_text(encoding='utf-8')
+        start = script.index('read_stream() {')
+        begin = script.index("<<'EOF'\n", start) + len("<<'EOF'\n")
+        code = compile(script[begin:script.index('\nEOF\n', begin)], 'read_stream', 'exec')
+
+        def patched_open(path, *args, **kwargs):
+            on_open(os.path.basename(str(path)))
+            return open(path, *args, **kwargs)
+        out = io.StringIO()
+        argv = ['-', str(self.state / 'events'), str(self.cursor('supervisor'))]
+        with mock.patch.object(sys, 'argv', argv), contextlib.redirect_stdout(out):
+            try:
+                exec(code, {'__name__': '__main__', 'open': patched_open})
+                status = 0
+            except SystemExit as exc:
+                status = exc.code or 0
+        return status, out.getvalue()
+
+    def test_a_rotation_during_the_read_loses_no_kept_event(self):
+        # #689: the reader opens the previous segment, then devloop rotates the stream and
+        # writes event 5, then the reader opens the current one. The segment that became the
+        # previous one (3 and 4) is still kept: the read is tried again, and the cursor never
+        # goes past events it did not give. Event 2 went with the rotation, and a line says so.
+        events_dir = self.state / 'events'
+        self.publish(['PR #1 CI pass @abc1234', 'PR #2 CI pass @abc1234'])
+        os.replace(events_dir / 'events.log', events_dir / 'events.log.1')
+        self.publish(['PR #3 CI pass @abc1234', 'PR #4 CI pass @abc1234'])
+        identity = (events_dir / 'id').read_text().strip()
+        self.cursor('supervisor').write_text(f'{identity} 1 0 0\n')
+        opened = []
+
+        def rotate_once(name):
+            if name == 'events.log' and opened == ['events.log.1']:
+                os.replace(events_dir / 'events.log', events_dir / 'events.log.1')
+                self.publish(['PR #5 CI pass @abc1234'])
+            if name.startswith('events.log'):
+                opened.append(name)
+        status, out = self.read_stream(rotate_once)
+        self.assertEqual(status, 0)
+        self.assertEqual(out.splitlines(), [
+            'W gli eventi da 2 a 2 non sono più conservati (rotazione del flusso): riprendo dal '
+            'primo conservato (3)'] + [
+            f'E {self.STAMP}PR #{n} CI pass @abc1234' for n in range(3, 6)])
+        self.assertEqual(opened, ['events.log.1', 'events.log'] * 2)
+        self.assertEqual(self.cursor('supervisor').read_text().split()[:2], [identity, '5'])
+        self.assertEqual(self.read_stream(lambda name: None), (0, ''))
+        # A rotation at every attempt leaves the cursor where it was, for the next round.
+        self.cursor('supervisor').write_text(f'{identity} 3 0 0\n')
+
+        def rotate_always(name):
+            if name == 'events.log':
+                os.replace(events_dir / 'events.log', events_dir / 'events.log.1')
+                self.publish(['PR #6 CI pass @abc1234'])
+        self.assertEqual(self.read_stream(rotate_always), (0, ''))
+        self.assertEqual(self.cursor('supervisor').read_text(), f'{identity} 3 0 0\n')
+
+    def test_a_replaced_stream_is_told_and_read_from_its_first_event(self):
+        self.as_role('supervisor')
+        self.publish(['PR #5 CI pass @abc1234'])
+        self.assertEqual(self.wait().stdout, f'evento: {self.STAMP}PR #5 CI pass @abc1234\n')
+        shutil.rmtree(self.state / 'events')
+        self.stream = self.make_stream(self.state)
+        self.publish(['issue #9 labels +agent:ready'])
+        self.assertEqual(self.wait().stdout.splitlines(), [
+            'flusso: il flusso degli eventi è stato sostituito: riprendo dal primo evento '
+            'conservato (1)',
+            f'evento: {self.STAMP}issue #9 labels +agent:ready'])
+
+    def test_a_stream_it_cannot_read_is_told_and_the_wait_goes_on(self):
+        self.as_role('supervisor')
+        shutil.rmtree(self.state / 'events')
+        done = self.wait('--period', '1')
+        self.assertTrue(done.stdout.startswith('periodo:'), done.stdout)
+        self.assertEqual(done.stderr.count('role-wait: non leggo il flusso degli eventi '
+                                           f'{self.state}/events'), 1, done.stderr)
+        # The supervisor has no warning of a stopped stream: that is the coordinator's.
+        self.assertNotIn('eventi fermi', done.stdout)
+
+    def test_the_same_role_user_on_two_projects_keeps_their_events_apart(self):
+        # #683, with a set of apps shared by two projects (#643): one role user, one stream per
+        # project, one cursor per project; no event of a project in the other's wake-up.
+        self.as_role('supervisor')
+        projects = {}
+        for name in ('alpha', 'beta'):
+            box = self.tmp / f'coordination-{name}'
+            for sub in ('heartbeat', 'to-supervisor/done', 'to-coordinator/done'):
+                (box / sub).mkdir(parents=True)
+            state = self.tmp / f'state-{name}'
+            state.mkdir()
+            stream = self.make_stream(state)
+            params = self.params(PROJECT=name, REPO=f'brushtyler/{name}',
+                                 DEVLOOP_USER=FAKE_DEVLOOP, AGENT_USER=FAKE_AGENT,
+                                 SUPERVISOR_USER=ME, COORDINATOR_USER=FAKE_COORDINATOR,
+                                 COORDINATION_DIR=str(box), STATE_DIR=str(state),
+                                 SUPERVISOR_KEY_DIR=str(self.tmp / f'keys-{name}'))
+            shutil.move(params, self.tmp / f'params-{name}.env')
+            projects[name] = (stream, self.tmp / f'params-{name}.env')
+            self.prime('supervisor', name, stream)
+        projects['alpha'][0].append(['PR #1 CI pass @aaaaaaa'])
+        projects['beta'][0].append(['PR #2 CI fail @bbbbbbb', 'issue #3 labels +agent:ready'])
+        for name, expected in (('alpha', ['PR #1 CI pass @aaaaaaa']),
+                               ('beta', ['PR #2 CI fail @bbbbbbb',
+                                         'issue #3 labels +agent:ready'])):
+            with self.subTest(project=name):
+                self.params_file = projects[name][1]
+                done = self.wait()
+                self.assertEqual(done.stdout.splitlines(),
+                                 [f'evento: {self.STAMP}{line}' for line in expected], done.stderr)
+        # Each cursor moved only on its own stream.
+        self.assertEqual(self.cursor('supervisor', 'alpha').read_text().split()[1], '1')
+        self.assertEqual(self.cursor('supervisor', 'beta').read_text().split()[1], '2')
+        projects['beta'][0].append(['PR #4 CI pass @ccccccc'])
+        self.params_file = projects['alpha'][1]
+        self.assertTrue(self.wait('--period', '1').stdout.startswith('periodo:'))
+        self.params_file = projects['beta'][1]
+        self.assertEqual(self.wait().stdout, f'evento: {self.STAMP}PR #4 CI pass @ccccccc\n')
 
     def test_the_period_and_the_service_wake_the_supervisor(self):
         self.as_role('supervisor')

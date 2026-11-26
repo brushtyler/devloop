@@ -491,11 +491,13 @@ class Watcher:
         if done.returncode != 0:
             self._err(f'devloop watch: the --exec command exited with {done.returncode}')
 
-    def round(self):
+    def round(self, deliver=None):
         """One round: its lines (empty without news), None when it failed, ``EXPIRED`` when
         the timeout passed before it ended. The state is saved before the lines are returned;
         a failed or expired round changes nothing, so what it read is reported by a later
-        run."""
+        run. ``deliver`` (the stream of the events of ``devloop run``, #683), when given, gets
+        the lines before the state is saved: an interruption in between repeats them at the
+        next round instead of losing them."""
         started = self._now()
         summary = None
         try:
@@ -506,6 +508,8 @@ class Watcher:
                 lines, state = self._compare(started)
             if self._expired():
                 return EXPIRED
+            if deliver is not None and lines:
+                deliver(lines)
             save_state(self.state_path, state)
         except (GitHubError, OSError, ValueError, KeyError, TypeError) as exc:
             if self._expired():

@@ -550,6 +550,86 @@ procedura](#un-progetto-con-la-sorgente-a-un-tag-nuovo-666)):
 il pin a mano della copia di prima, a loop fermo, rimette `comment` sui commenti delle app di
 ruolo e sull'archivio del riepilogo.
 
+## Il flusso degli eventi per le sveglie dei ruoli (#683)
+
+Il passo sull'host di #683, su un host con il supervisore o il coordinatore già installati. Con
+#683 GitHub lo legge solo `devloop run`, che scrive gli eventi nel flusso degli eventi dello
+`state_dir` (`<state_dir>/events/`, [reference](../../docs/devloop/reference.md#the-stream-of-the-events));
+la sveglia dei ruoli (`ops/host/role-wait.sh`) lo legge come utente del ruolo, con un'ACL di sola
+lettura, e non esegue più `devloop-pinned watch` come `DEVLOOP_USER`: la regola dei sudoers dei
+ruoli per `watch` si toglie ([ops/README.md](../README.md#10-coordinatore-facoltativo), "Il
+flusso degli eventi"). Servono quindi la copia fissata nuova (che scrive il flusso), le ACL dei
+ruoli sul flusso, i sudoers nuovi e le copie di root nuove di `ops/` (con `host/role-wait.sh` e
+`lib.sh`). Nei comandi, `<checkout>` è il checkout dell'operatore e `<parametri>` il file di
+parametri del progetto.
+
+L'ordine conta: prima il pin, così il flusso esiste e si scrive quando arrivano le sveglie nuove;
+poi le copie, le ACL e i sudoers. Fino al passo 2 le sveglie di prima leggono GitHub con il
+`watch` dei sudoers di prima, come sempre. devloop mergia la PR di #683 come le altre, ma non fa
+il pin automatico di quel commit né dei successivi finché l'operatore non fa il pin a mano
+([Ogni cambio con un passo sull'host](#ogni-cambio-con-un-passo-sullhost)): qui il pin a mano è il
+passo 1.
+
+### Comandi
+
+Come root, dal checkout dell'operatore aggiornato (`git -C <checkout> fetch origin` e
+`git -C <checkout> checkout --detach origin/main`, con il merge di #683), **per ogni progetto
+dell'host** con supervisore o coordinatore (uno con `SOURCE_REF` al tag successivo, con [la sua
+procedura](#un-progetto-con-la-sorgente-a-un-tag-nuovo-666)):
+
+1. **il pin a mano**, a loop fermo, del commit di #683 o di uno successivo, come utente
+   `DEVLOOP_USER`, poi l'avvio: `systemctl stop <SERVICE_NAME>`, `devloop pin origin/main` (con
+   più progetti `devloop --project <progetto> pin origin/main`), `systemctl start
+   <SERVICE_NAME>`. Il pin a mano fa riprendere il pin automatico. Entro un minuto dall'avvio
+   `devloop run` crea `<state_dir>/events/` (di `DEVLOOP_USER`, 750) con `id` e `alive`;
+
+2. **le ACL, i sudoers e le copie di root**, prima con `--dry-run`: le azioni nuove sono solo
+   l'ACL `u:<ruolo>:r-x,d:u:<ruolo>:r--` su `<state_dir>/events` e `u:<ruolo>:r--` sui suoi
+   file, il sudoers del ruolo senza la riga di `devloop-pinned watch`, e l'aggiornamento delle
+   copie di root di `ops/` (con `host/role-wait.sh` e `lib.sh`). Un'altra azione che il passo non
+   spiega vuol dire che l'host non corrisponde ai parametri: ci si ferma e si chiede
+   all'operatore. Lo script del coordinatore si esegue solo se il progetto ha il coordinatore. Con
+   un insieme di app condiviso (#643) l'utente di un ruolo riceve l'ACL sul flusso di ciascun
+   progetto dall'esecuzione per quel progetto:
+
+   ```bash
+   sudo bash <checkout>/ops/host/setup-supervisor.sh --params <parametri> --dry-run
+   sudo bash <checkout>/ops/host/setup-supervisor.sh --params <parametri>
+   sudo bash <checkout>/ops/host/setup-coordinator.sh --params <parametri> --dry-run
+   sudo bash <checkout>/ops/host/setup-coordinator.sh --params <parametri>
+   ```
+
+   Una sveglia di prima che gira in quel momento esce con `errore:` al suo giro successivo (il
+   sudoers non ha più `watch`): il ruolo la riavvia, dalla copia nuova. Un giro di `devloop watch`
+   di prima ancora in corso finisce da sé, entro 300 secondi;
+
+3. **la verifica**: nessun `ERRORE` nei passi `Flusso degli eventi`, `Risveglio del supervisore`
+   e del coordinatore, e la riga `non ha la regola dei sudoers per devloop-pinned watch` per ogni
+   sudoers dei ruoli:
+
+   ```bash
+   sudo bash <checkout>/ops/host/check-host.sh --params <parametri> --no-apps
+   ```
+
+4. **il file di stato di prima** del watch del coordinatore, `<state_dir>/coordinator-watch-state.json`,
+   non serve più: lo si può togliere, come `DEVLOOP_USER`. `<state_dir>/watch-state.json` resta:
+   è il file di stato di `devloop watch` interattivo;
+
+5. **le sessioni dei ruoli**: non serve riavviarle per la sveglia, che ogni risveglio rilancia
+   dalla copia di root. Al primo risveglio dalla copia nuova ciascun ruolo crea la sua base alla
+   fine del flusso (`flusso: base …`): ciò che è cambiato fra l'ultimo giro di prima e la base lo
+   vede al controllo periodico. I ruoli leggono la parte nuova del loro runbook solo da una
+   sessione nuova, che l'operatore avvia quando vuole con `ops/host/start-role.sh`.
+
+`EVENTS_STALE_AFTER` (300 secondi per default) si scrive in `params.env` solo per un'altra soglia
+del flusso fermo; poi si rieseguono gli script del passo 2, che ne aggiornano la copia.
+
+**Rollback**: il passo 2 dal checkout della versione di prima rimette le sveglie di prima, con
+la regola dei sudoers per `devloop-pinned watch`; il pin a mano della copia di prima, a loop
+fermo, ferma il flusso, che resta nello `state_dir` senza lettori. Le ACL di sola lettura sul
+flusso non danno altro che la lettura del flusso stesso; per toglierle, `setfacl -b
+<state_dir>/events` e sui suoi file, come root.
+
 ## Configurazione di ssdlc nel suo file di progetto
 
 Con l'ADR 0006, R3, `devloop/config.toml` non contiene più i fatti di ssdlc né le restrizioni che
