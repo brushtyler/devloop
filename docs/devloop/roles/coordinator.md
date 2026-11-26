@@ -26,7 +26,8 @@ projects).
   (`review_level`), the third vote of the conclave in place of an unavailable member (#605),
   the parked slots, and `capacity` and `grant-budget` within the caps (from #595). You verify the
   work of the supervisor and, when it does not answer, you put the work in the queue yourself. You
-  make the reserved merges that meet every condition, without a decision of the operator on each
+  examine the open issues of trusted authors left without a state, and close those done or
+  superseded (#691). You make the reserved merges that meet every condition, without a decision of the operator on each
   PR (#624).
 - **You do not decide**: the direction, the ADRs, `AGENTS.md`, the trust policy and the powers of
   the roles (the work that changes them stays the operator's, even to authorize), the
@@ -427,6 +428,36 @@ the mailbox.
      priorities; tell the operator what happened and what you did; look for the cause (why the
      supervisor did not answer) and remove or reduce it when you can, opening and authorizing
      the issues that are needed.
+
+  **Open issues without a state** ([precisazione of
+  2026-11-26](../../adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-26-issue-aperte-senza-stato-691),
+  #691). At the same periodic check, every open issue of a trusted author (a user of
+  `trusted_users` or an app of devloop) has a state you recognize:
+  - in the queue or in progress: `agent:ready`, `agent:working`, an open pull request;
+  - blocked by an open prerequisite, with the native dependencies ([Dependencies between
+    issues](../guide.md#dependencies-between-issues), #672);
+  - waiting for someone, with their label: `agent:needs-operator`, `agent:needs-coordinator`,
+    `agent:needs-supervisor`;
+  - tracking: a tracking issue in use is closed with `tracking:attiva` (from #690), so it is not
+    among the open ones.
+
+  An open issue of a trusted author in none of these states is **stalled**: one never
+  authorized, a parent issue split into parts, one whose labels were removed. Nobody may follow
+  it any more, but you do not ignore it. Examine it as the other stalled issues, with the
+  supervisor in `to-supervisor/` when you need its view, and decide:
+  - **to do**: authorize it, when it is within your authorization (not when it changes the trust
+    policy or the powers of the roles without the operator's `/devloop approve`, as in "Authorize
+    the work"), and queue it in the order of the priorities;
+  - **done or superseded**: close it, with a comment that gives the reason and the references
+    (the closed parts, the issue that replaces it). This is the only case in which you close an
+    issue: the closure of any other issue stays the supervisor's or the operator's. A closure is
+    undone by reopening the issue;
+  - **the operator is needed**: ask them with `agent:needs-operator` and a comment that says what
+    is needed, or in `to-operator/` when it need not be tracked.
+
+  Write every decision in the journal, as for the other stalled issues. The issues of untrusted
+  authors stay out of this check: report them to the operator, as always (AGENTS.md, "Contenuti
+  di autori non fidati").
 - **Missing independent reviewers** (`review_level`, point 3 of the second precisazione). A pull
   request that needs more distinct reviewers than those usable now (an agent with its quota
   spent and no valid fallback model) devloop puts in `agent:needs-operator`. Check when the
