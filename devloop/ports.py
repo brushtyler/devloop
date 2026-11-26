@@ -70,7 +70,8 @@ Where a method went, when it was not obvious:
   ``comments_since`` too.
 - ``GitHub.open_issues``, ``issue_state``, ``issue_author`` and ``workflow_runs`` (#615) are not
   in any port: only the ``watch`` command (``devloop/watch.py``) calls them, not the dispatcher.
-  Nor is ``issue_labels`` (#676), which the ``watch`` command alone calls too.
+  Nor is ``issue_labels`` (#676), which the ``watch`` command alone calls too, nor
+  ``labelled_numbers`` (#690), which only ``devloop status`` calls, for the tracking issues.
 - ``GitHub.dated_comments``, ``search_prs`` and ``edit_issue_body`` are not in any port either:
   only the daily summary (``devloop/report.py``, #256) calls them, with ``issue_history``.
 """
