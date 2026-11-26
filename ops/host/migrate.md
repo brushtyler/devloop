@@ -18,6 +18,16 @@ coordinatore. Il checkout dell'operatore resta `/root/repos/ssdlc`.
 **Regola:** mai due dispatcher attivi sullo stesso repository. Il dispatcher nuovo parte solo
 quando quello vecchio è fermo e non ripartirà.
 
+**Un progetto fermo a un tag (#687).** Le sezioni di questo file che si eseguono "per ogni
+progetto dell'host" dal checkout dell'operatore su `origin/main` valgono così per i progetti che
+seguono `main`, come il repository di devloop. Un progetto con la sorgente a un tag
+(`SOURCE_REPO` e `SOURCE_REF`) non le applica da `main`: le applica al tag successivo che le
+contiene, con la procedura di [Un progetto con la sorgente a un tag
+nuovo](#un-progetto-con-la-sorgente-a-un-tag-nuovo-666), e dal checkout di quel tag. Gli script di
+`ops/host/` installano le copie di root di `ops/` dei ruoli dal checkout da cui girano: da `main`,
+quel progetto avrebbe il loop del tag con le sveglie dei ruoli di `main`. Per un progetto con
+`SOURCE_REPO`, `check-host.sh` avvisa quando il checkout da cui gira non è al tag `SOURCE_REF`.
+
 ## Spostare l'installazione su un altro host (#543)
 
 La procedura per l'[agent dell'host](../../docs/devloop/roles/host.md), lanciato dall'operatore
@@ -383,7 +393,8 @@ passo ([Ogni cambio con un passo sull'host](#ogni-cambio-con-un-passo-sullhost))
 
 Come root, dal checkout dell'operatore aggiornato (`git -C <checkout> fetch origin` e
 `git -C <checkout> checkout --detach origin/main`, con il merge di #663), **per ogni progetto
-dell'host** con supervisore o coordinatore:
+dell'host** con supervisore o coordinatore (uno con `SOURCE_REF` al tag successivo, con [la sua
+procedura](#un-progetto-con-la-sorgente-a-un-tag-nuovo-666)):
 
 1. **la cartella**, prima con `--dry-run`: le azioni nuove sono le due `install -d -m 2770 -o root
    -g $COORDINATION_GROUP` di `$COORDINATION_DIR/to-operator` e `$COORDINATION_DIR/to-operator/done`.
@@ -446,7 +457,8 @@ cambio con un passo sull'host](#ogni-cambio-con-un-passo-sullhost)).
 
 Come root, dal checkout dell'operatore aggiornato (`git -C <checkout> fetch origin` e
 `git -C <checkout> checkout --detach origin/main`, con il merge di #676), **per ogni progetto
-dell'host** con supervisore o coordinatore:
+dell'host** con supervisore o coordinatore (uno con `SOURCE_REF` al tag successivo, con [la sua
+procedura](#un-progetto-con-la-sorgente-a-un-tag-nuovo-666)):
 
 1. **le copie di root**, prima con `--dry-run`: le azioni nuove sono solo l'aggiornamento delle
    copie di root di `ops/` (con `host/role-wait.sh`). Un'altra azione che il passo non spiega
@@ -504,7 +516,8 @@ mano dopo il passo ([Ogni cambio con un passo sull'host](#ogni-cambio-con-un-pas
 
 Come root, dal checkout dell'operatore aggiornato (`git -C <checkout> fetch origin` e
 `git -C <checkout> checkout --detach origin/main`, con il merge di #682), **per ogni progetto
-dell'host** con supervisore o coordinatore:
+dell'host** con supervisore o coordinatore (uno con `SOURCE_REF` al tag successivo, con [la sua
+procedura](#un-progetto-con-la-sorgente-a-un-tag-nuovo-666)):
 
 1. **le copie di root**, prima con `--dry-run`: le azioni nuove sono solo l'aggiornamento delle
    copie di root di `ops/` (con `host/role-wait.sh`). Un'altra azione che il passo non spiega
@@ -3467,7 +3480,8 @@ mano resta il comando lungo dell'unità. Il passo non ferma il loop.
 
 Come root, dal checkout dell'operatore aggiornato (`git -C <checkout> fetch origin` e
 `git -C <checkout> checkout --detach origin/main`), **per ogni progetto dell'host**, con il suo
-file di parametri `<parametri>`:
+file di parametri `<parametri>` (uno con `SOURCE_REF` al tag successivo, con [la sua
+procedura](#un-progetto-con-la-sorgente-a-un-tag-nuovo-666)):
 
 1. **lo script**, prima con `--dry-run`: l'elenco delle azioni deve contenere, oltre a quanto
    lo script già ricorda come da fare a mano, solo la directory dei progetti (al primo progetto),
@@ -3523,7 +3537,8 @@ automatico di quel commit né dei successivi finché l'operatore non fa il pin a
 
 Come root, dal checkout dell'operatore aggiornato (`git -C <checkout> fetch origin` e
 `git -C <checkout> checkout --detach origin/main`, con il merge di #593), **per ogni progetto
-dell'host**, con il suo file di parametri `<parametri>`:
+dell'host**, con il suo file di parametri `<parametri>` (uno con `SOURCE_REF` al tag successivo,
+con [la sua procedura](#un-progetto-con-la-sorgente-a-un-tag-nuovo-666)):
 
 1. **l'unità**, prima con `--dry-run`: l'elenco delle azioni deve contenere, oltre a quanto lo
    script già ricorda come da fare a mano, solo l'unità del servizio (`OnFailure=`), la nuova
@@ -3614,16 +3629,21 @@ il checkout dell'operatore di `brushtyler/devloop`, `<tag di prima>` il tag di `
 oggi e `<tag nuovo>` quello da fissare; `SERVICE_NAME`, `SUPERVISOR_USER` e `COORDINATOR_USER`
 sono i valori che gli script ricavano da `<parametri>` (`ops/params.env.example`). Si esegue come
 root, con l'[agent dell'host](../../docs/devloop/roles/host.md), dal checkout dell'operatore
-aggiornato (`git -C <checkout> fetch origin --tags` e
-`git -C <checkout> checkout --detach origin/main`). I passi che chiedono una persona (l'avvio
+aggiornato (`git -C <checkout> fetch origin --tags`). I passi che chiedono una persona (l'avvio
 delle sessioni) li fa l'operatore.
 
-Due checkout, per due usi. Le migrazioni dei passi 3 e 4 si eseguono da `<checkout>`, su
-`origin/main`, come ogni sezione di questo file. Le sessioni del passo 7 partono invece da
-`<checkout del tag>`, un worktree di `<checkout>` fermo su `<tag nuovo>`: `start-role.sh` dà alla
-sessione il runbook (`docs/devloop/roles/<ruolo>.md`) e la configurazione dei ruoli
-(`devloop/config.toml`) del checkout da cui gira, e su `main` possono essere già più avanti del
-tag. Il worktree si crea la prima volta e poi si riusa:
+**Tutto dal checkout del tag (#687).** Per questo progetto ogni script di `ops/host/` (le
+migrazioni del passo 3, `setup-*.sh`, `check-host.sh` del passo 4, `start-role.sh` del passo 7)
+si esegue da `<checkout del tag>`, un worktree di `<checkout>` fermo su `<tag nuovo>`, mai da
+`<checkout>` su `main`. Gli script installano le copie di root di `ops/` dei ruoli
+(`SUPERVISOR_OPS_DIR`, `COORDINATOR_OPS_DIR`, con `host/role-wait.sh` e `lib.sh`) dal checkout da
+cui girano, e `start-role.sh` dà alla sessione il runbook (`docs/devloop/roles/<ruolo>.md`) e la
+configurazione dei ruoli (`devloop/config.toml`) del suo checkout: da `main`, più avanti del tag,
+il progetto avrebbe il loop del tag con le sveglie e i runbook di `main`. Così una correzione di
+`ops/` arrivata su `main` dopo il tag raggiunge il progetto solo con un tag nuovo. `check-host.sh`
+confronta le copie con quelle del checkout da cui gira e, se quel checkout non è al tag
+`SOURCE_REF` fissato, lo dice con un avviso. `<checkout>` serve solo ai comandi `git` che leggono
+i tag. Il worktree si crea la prima volta e poi si riusa, prima del passo 3:
 
 ```bash
 git -C <checkout> worktree add --detach <checkout del tag> '<tag nuovo>'   # la prima volta
@@ -3654,13 +3674,15 @@ git -C <checkout del tag> status --porcelain
    ```
 
    Si eseguono le sezioni stampate, una alla volta e nell'ordine del file, per il solo
-   `<progetto>`. Molte sono scritte per l'installazione del repository di devloop e ne nominano i
+   `<progetto>`, come le scrive `<checkout del tag>/ops/host/migrate.md`: ci sono tutte anche nel
+   tag nuovo. Molte sono scritte per l'installazione del repository di devloop e ne nominano i
    valori (il checkout, il clone, l'utente, lo `state_dir`, il servizio): i loro comandi non si
    eseguono come sono, ma riportati al progetto, con queste regole.
 
-   - **Ogni script di `ops/host/`** si lancia da `<checkout>` con `--params <parametri>`. Senza,
-     legge `ops/params.env` del checkout, cioè i parametri dell'installazione di devloop, e agisce
-     su quella.
+   - **Ogni script di `ops/host/`** si lancia da `<checkout del tag>`, anche dove la sezione
+     scrive `<checkout>`, con `--params <parametri>`. Senza, legge `ops/params.env` del checkout,
+     cioè i parametri dell'installazione di devloop, e agisce su quella. Il passo che porta
+     `<checkout>` a `origin/main` si salta: `<checkout del tag>` resta su `<tag nuovo>`.
    - **I valori dell'installazione di devloop** che una sezione scrive per esteso diventano quelli
      di `<parametri>`: il checkout diventa `<checkout>`, il clone `DEVLOOP_CLONE`, l'utente
      `DEVLOOP_USER`, lo `state_dir` lo `STATE_DIR` del progetto (relativo a `DEVLOOP_CLONE`), il
@@ -3697,14 +3719,16 @@ git -C <checkout del tag> status --porcelain
    (`LAUNCHER_DIR`), con `--coordinator` se il progetto ha il coordinatore:
 
    ```bash
-   sudo bash <checkout>/ops/host/setup-project.sh --params <parametri> --dry-run
-   sudo bash <checkout>/ops/host/setup-project.sh --params <parametri>
+   sudo bash <checkout del tag>/ops/host/setup-project.sh --params <parametri> --dry-run
+   sudo bash <checkout del tag>/ops/host/setup-project.sh --params <parametri>
    ```
 
-4. **La verifica**: `check-host.sh` non dà nessun `ERRORE`:
+4. **La verifica**: `check-host.sh` non dà nessun `ERRORE`, e il suo passo `Checkout di
+   check-host.sh e tag SOURCE_REF` dice `ok: il checkout di questo script è al tag <tag nuovo>
+   fissato`:
 
    ```bash
-   sudo bash <checkout>/ops/host/check-host.sh --params <parametri>
+   sudo bash <checkout del tag>/ops/host/check-host.sh --params <parametri>
    ```
 
 5. **Il pin del tag nuovo**, con il [comando devloop dell'host](#comando-devloop-dellhost-588):
@@ -3735,9 +3759,10 @@ git -C <checkout del tag> status --porcelain
    <checkout del tag>`): con `<checkout>` la sessione ha i runbook di `main`, e va riavviata da
    `<checkout del tag>`.
 
-**Rollback.** A loop fermo: il rollback di ciascuna sezione eseguita al passo 3, dall'ultima alla
-prima; `SOURCE_REF=<tag di prima>` in `<parametri>`; `setup-project.sh` e `check-host.sh` come ai
-passi 3 e 4; il pin del tag di prima (`devloop --project <progetto> pin <tag di prima>`, che
-riusa la sua copia se c'è ancora, [Rollback](../../docs/devloop/guide.md#rollback)); poi il passo
-6, `git -C <checkout del tag> checkout --detach '<tag di prima>'` e il passo 7 con `<tag di prima>`
-al posto di `<tag nuovo>`, perché le sessioni tornino ai runbook del tag di prima.
+**Rollback.** A loop fermo: `git -C <checkout del tag> checkout --detach '<tag di prima>'`, da
+cui si esegue tutto il resto; il rollback di ciascuna sezione eseguita al passo 3, dall'ultima
+alla prima; `SOURCE_REF=<tag di prima>` in `<parametri>`; `setup-project.sh` e `check-host.sh`
+come ai passi 3 e 4, che rimettono le copie di root di `ops/` del tag di prima; il pin del tag di
+prima (`devloop --project <progetto> pin <tag di prima>`, che riusa la sua copia se c'è ancora,
+[Rollback](../../docs/devloop/guide.md#rollback)); poi il passo 6 e il passo 7 con `<tag di
+prima>` al posto di `<tag nuovo>`, perché le sessioni tornino ai runbook del tag di prima.

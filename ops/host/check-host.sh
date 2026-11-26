@@ -14,7 +14,9 @@
 # #494) e `devloop apps`, e il coordinatore, se l'overlay del progetto lo dichiara (#571; key_dir e chiave della sua app, ACL e lettura dell'overlay, #549;
 # sudoers e copia di root di questo script, #530; il suo clone, #643), e Claude Code dei ruoli
 # senza aggiornamenti automatici (#643). Con più progetti sullo stesso host si esegue una volta
-# per progetto, con i suoi parametri (--params).
+# per progetto, con i suoi parametri (--params). Per un progetto con SOURCE_REPO, un avviso se il
+# checkout da cui gira non è al tag SOURCE_REF: le copie di root di ops/ si confrontano con
+# quelle del checkout (#687).
 # Non cambia nulla, se non le sessioni e le cache che le CLI degli agent scrivono da sé. Delle
 # prove delle CLI riporta solo l'esito e il codice di uscita, mai il loro output né il testo del
 # modello (#530).
@@ -270,6 +272,33 @@ check_left_keys() {
         fi
     done
 }
+
+# Il checkout da cui gira questo script, per un progetto con la sorgente a un tag (#687): le copie
+# di root di ops/ si confrontano con quelle di questo checkout, e per quel progetto valgono solo
+# se è al tag SOURCE_REF fissato. Un avviso se non lo è, o se non ha il tag. Nessun checkout di
+# git (la copia di root del coordinatore): nessun confronto. Il git del sistema, non quello del
+# PATH; nessun percorso nell'output.
+if [ -n "$SOURCE_REPO" ]; then
+    step "Checkout di check-host.sh e tag SOURCE_REF $SOURCE_REF (#687)"
+    checkout=$(dirname "$OPS_DIR")
+    if ! [ -e "$checkout/.git" ]; then
+        say "  questo script non gira da un checkout di git: nessun confronto con il tag $SOURCE_REF"
+    else
+        head=$(GIT_OPTIONAL_LOCKS=0 /usr/bin/git -C "$checkout" rev-parse --verify --quiet \
+            'HEAD^{commit}' 2>/dev/null)
+        tagged=$(GIT_OPTIONAL_LOCKS=0 /usr/bin/git -C "$checkout" rev-parse --verify --quiet \
+            "refs/tags/$SOURCE_REF^{commit}" 2>/dev/null)
+        if [ -z "$head" ]; then
+            warn "git non legge il commit del checkout di questo script: non si sa se è al tag $SOURCE_REF fissato, e le copie di root di ops/ si confrontano con quelle del checkout (ops/host/migrate.md, #687)"
+        elif [ -z "$tagged" ]; then
+            warn "il checkout di questo script (${head:0:12}) non ha il tag $SOURCE_REF fissato (git fetch origin --tags): le copie di root di ops/ si confrontano con quelle del checkout, non del tag; per questo progetto check-host.sh e setup-*.sh si eseguono dal checkout del tag (ops/host/migrate.md, #687)"
+        elif [ "$head" != "$tagged" ]; then
+            warn "il checkout di questo script è a ${head:0:12}, non al tag $SOURCE_REF fissato (${tagged:0:12}): le copie di root di ops/ si confrontano con quelle del checkout, non del tag; per questo progetto check-host.sh e setup-*.sh si eseguono dal checkout del tag (ops/host/migrate.md, #687)"
+        else
+            ok "il checkout di questo script è al tag $SOURCE_REF fissato (${head:0:12})"
+        fi
+    fi
+fi
 
 step 'Utenti'
 for user in "$DEVLOOP_USER" "$SUPERVISOR_USER" "$AGENT_USER"; do

@@ -1523,6 +1523,42 @@ class TagUpgradeGuideTests(unittest.TestCase):
                 self.assertIn(phrase, step7)
         self.assertNotIn('<checkout>/ops/host/start-role.sh', section)
 
+    def test_every_script_of_the_project_runs_from_the_checkout_of_the_tag(self):
+        # #687: the scripts install the root copies of ops/ from the checkout they run from, so
+        # for a project with SOURCE_REF every one of them runs from the checkout of the tag, and
+        # migrate.md, the guide and ops/README.md say the same.
+        section = ' '.join(self.section().split())
+        self.assertNotIn('<checkout>/ops/host/', section)
+        self.assertNotIn('checkout --detach origin/main', section)
+        for phrase in ('sudo bash <checkout del tag>/ops/host/setup-project.sh --params '
+                       '<parametri>',
+                       'sudo bash <checkout del tag>/ops/host/check-host.sh --params <parametri>',
+                       'ok: il checkout di questo script è al tag <tag nuovo> fissato',
+                       '`SUPERVISOR_OPS_DIR`, `COORDINATOR_OPS_DIR`'):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, section)
+        migrate = (OPS / 'host/migrate.md').read_text(encoding='utf-8')
+        intro = ' '.join(migrate[:migrate.index('\n## ')].split())
+        self.assertIn('**Un progetto fermo a un tag (#687).**', intro)
+        self.assertIn('le applica al tag successivo che le contiene', intro)
+        self.assertIn('(#un-progetto-con-la-sorgente-a-un-tag-nuovo-666)', intro)
+        # Each section run "per ogni progetto dell'host" points to the procedure.
+        heads = re.findall(r"\*\*per ogni progetto dell'host\*\*[^:]*:", ' '.join(migrate.split()))
+        self.assertGreaterEqual(len(heads), 5)
+        for head in heads:
+            with self.subTest(head=head):
+                self.assertIn('con `SOURCE_REF` al tag successivo', head)
+                self.assertIn('(#un-progetto-con-la-sorgente-a-un-tag-nuovo-666)', head)
+        guide = (ROOT / 'docs/devloop/guide.md').read_text(encoding='utf-8')
+        start = guide.index('\n#### Installation source\n')
+        source = ' '.join(guide[start:guide.index('\n#### ', start + 1)].split())
+        self.assertIn('**Everything from the checkout of the tag** (#687)', source)
+        self.assertIn('never from one on `main`', source)
+        readme = ' '.join((OPS / 'README.md').read_text(encoding='utf-8').split())
+        self.assertIn('**Gli script di un progetto con `SOURCE_REF` dal checkout del suo tag** '
+                      '(#687)', readme)
+        self.assertIn('mai da uno su `main`', readme)
+
     def test_the_section_has_no_value_of_a_real_host(self):
         section = self.section()
         for value in ('/home/', '/var/lib/', '/etc/', '/root/', '/usr/local/', 'widget'):
@@ -3714,6 +3750,74 @@ esac''')
                                            k: f"'{v}'" for k, v in overrides.items()})))
                 self.assertNotEqual(done.returncode, 0)
                 self.assertIn(message, done.stderr)
+        self.assertEqual(self.mutating_calls(), [])
+
+    @unittest.skipUnless(os.access('/usr/bin/git', os.X_OK), '/usr/bin/git is not installed')
+    def test_check_host_warns_when_its_checkout_is_not_at_the_pinned_tag(self):
+        # #687: for a project with SOURCE_REPO, check-host.sh compares the root copies of ops/
+        # with those of the checkout it runs from, so it warns when that checkout is not at the
+        # tag SOURCE_REF (or lacks it). Without SOURCE_REPO it compares nothing with a tag.
+        # check-host.sh reads the state of the service: a read, not a change of the host.
+        self.shim('systemctl', 'echo inactive')
+        checkout = self.tmp / 'checkout'
+        shutil.copytree(OPS, checkout / 'ops')
+        git_env = dict(os.environ, GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@example.invalid',
+                       GIT_COMMITTER_NAME='t', GIT_COMMITTER_EMAIL='t@example.invalid',
+                       GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1')
+
+        def git(*args):
+            done = subprocess.run(['/usr/bin/git', '-C', str(checkout), *args],
+                                  capture_output=True, text=True, env=git_env, timeout=60)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            return done.stdout.strip()
+
+        git('init', '--quiet')
+        git('add', '-A')
+        git('commit', '--quiet', '-m', 'v1.2.0')
+        git('tag', 'v1.2.0')
+        tagged = git('rev-parse', 'HEAD')
+
+        def check(params, ops=checkout / 'ops'):
+            env = dict(os.environ, PATH=f'{self.bin}:{os.environ.get("PATH", "/usr/bin:/bin")}',
+                       OPS_TEST_CALLS=str(self.calls), OPS_OS_RELEASE=str(self.release),
+                       OPS_ARCH='aarch64', LC_ALL='C.UTF-8')
+            return subprocess.run([BASH, str(ops / 'host/check-host.sh'), '--dry-run',
+                                   '--params', str(params)],
+                                  capture_output=True, text=True, env=env,
+                                  stdin=subprocess.DEVNULL, timeout=120).stdout
+
+        step = '==> Checkout di check-host.sh e tag SOURCE_REF v1.2.0 (#687)\n'
+        out = check(self.source_params())
+        self.assertIn(f'{step}  ok: il checkout di questo script è al tag v1.2.0 fissato '
+                      f'({tagged[:12]})\n', out)
+        self.assertNotIn('ATTENZIONE: il checkout di questo script', out)
+        # A later commit, as origin/main after the tag.
+        (checkout / 'ops/later.txt').write_text('after the tag\n')
+        git('add', '-A')
+        git('commit', '--quiet', '-m', 'later')
+        head = git('rev-parse', 'HEAD')
+        out = check(self.source_params())
+        self.assertIn(f'{step}  ATTENZIONE: il checkout di questo script è a {head[:12]}, non al '
+                      f'tag v1.2.0 fissato ({tagged[:12]}): le copie di root di ops/ si '
+                      'confrontano con quelle del checkout, non del tag; per questo progetto '
+                      'check-host.sh e setup-*.sh si eseguono dal checkout del tag '
+                      '(ops/host/migrate.md, #687)\n', out)
+        # A tag the checkout has not fetched.
+        out = check(self.source_params(SOURCE_REF='v1.3.0'))
+        self.assertIn(f'  ATTENZIONE: il checkout di questo script ({head[:12]}) non ha il tag '
+                      'v1.3.0 fissato (git fetch origin --tags)', out)
+        # No path of the host in the lines of the step.
+        self.assertNotIn(str(checkout), out)
+        # A copy of ops/ outside a checkout, as the coordinator's root copy: nothing to compare.
+        copy = self.tmp / 'copy'
+        shutil.copytree(OPS, copy / 'ops')
+        out = check(self.source_params(), ops=copy / 'ops')
+        self.assertIn(f'{step}  questo script non gira da un checkout di git: nessun confronto '
+                      'con il tag v1.2.0\n', out)
+        # Without SOURCE_REPO, as devloop's repository on main: no step, no warning.
+        out = check(self.params())
+        self.assertNotIn('Checkout di check-host.sh', out)
+        self.assertNotIn('il checkout di questo script', out)
         self.assertEqual(self.mutating_calls(), [])
 
     def test_setup_devloop_prepares_the_directory_of_the_repository_locks(self):
