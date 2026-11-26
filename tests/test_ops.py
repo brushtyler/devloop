@@ -6964,6 +6964,70 @@ class RoleWaitTests(WakeUpCase):
         self.assertEqual(self.wait().stdout,
                          f'evento: {self.STAMP}issue #13 labels +agent:ready\n')
 
+    def read_stream(self, on_open):
+        """The Python of read_stream of role-wait.sh, run here on the stream and the cursor of
+        the supervisor, with ``on_open(name)`` called before each file it opens: (exit code,
+        output)."""
+        import contextlib
+        import io
+        import sys
+        from unittest import mock
+        script = (OPS / 'host/role-wait.sh').read_text(encoding='utf-8')
+        start = script.index('read_stream() {')
+        begin = script.index("<<'EOF'\n", start) + len("<<'EOF'\n")
+        code = compile(script[begin:script.index('\nEOF\n', begin)], 'read_stream', 'exec')
+
+        def patched_open(path, *args, **kwargs):
+            on_open(os.path.basename(str(path)))
+            return open(path, *args, **kwargs)
+        out = io.StringIO()
+        argv = ['-', str(self.state / 'events'), str(self.cursor('supervisor'))]
+        with mock.patch.object(sys, 'argv', argv), contextlib.redirect_stdout(out):
+            try:
+                exec(code, {'__name__': '__main__', 'open': patched_open})
+                status = 0
+            except SystemExit as exc:
+                status = exc.code or 0
+        return status, out.getvalue()
+
+    def test_a_rotation_during_the_read_loses_no_kept_event(self):
+        # #689: the reader opens the previous segment, then devloop rotates the stream and
+        # writes event 5, then the reader opens the current one. The segment that became the
+        # previous one (3 and 4) is still kept: the read is tried again, and the cursor never
+        # goes past events it did not give. Event 2 went with the rotation, and a line says so.
+        events_dir = self.state / 'events'
+        self.publish(['PR #1 CI pass @abc1234', 'PR #2 CI pass @abc1234'])
+        os.replace(events_dir / 'events.log', events_dir / 'events.log.1')
+        self.publish(['PR #3 CI pass @abc1234', 'PR #4 CI pass @abc1234'])
+        identity = (events_dir / 'id').read_text().strip()
+        self.cursor('supervisor').write_text(f'{identity} 1 0 0\n')
+        opened = []
+
+        def rotate_once(name):
+            if name == 'events.log' and opened == ['events.log.1']:
+                os.replace(events_dir / 'events.log', events_dir / 'events.log.1')
+                self.publish(['PR #5 CI pass @abc1234'])
+            if name.startswith('events.log'):
+                opened.append(name)
+        status, out = self.read_stream(rotate_once)
+        self.assertEqual(status, 0)
+        self.assertEqual(out.splitlines(), [
+            'W gli eventi da 2 a 2 non sono più conservati (rotazione del flusso): riprendo dal '
+            'primo conservato (3)'] + [
+            f'E {self.STAMP}PR #{n} CI pass @abc1234' for n in range(3, 6)])
+        self.assertEqual(opened, ['events.log.1', 'events.log'] * 2)
+        self.assertEqual(self.cursor('supervisor').read_text().split()[:2], [identity, '5'])
+        self.assertEqual(self.read_stream(lambda name: None), (0, ''))
+        # A rotation at every attempt leaves the cursor where it was, for the next round.
+        self.cursor('supervisor').write_text(f'{identity} 3 0 0\n')
+
+        def rotate_always(name):
+            if name == 'events.log':
+                os.replace(events_dir / 'events.log', events_dir / 'events.log.1')
+                self.publish(['PR #6 CI pass @abc1234'])
+        self.assertEqual(self.read_stream(rotate_always), (0, ''))
+        self.assertEqual(self.cursor('supervisor').read_text(), f'{identity} 3 0 0\n')
+
     def test_a_replaced_stream_is_told_and_read_from_its_first_event(self):
         self.as_role('supervisor')
         self.publish(['PR #5 CI pass @abc1234'])

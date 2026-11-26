@@ -2887,9 +2887,12 @@ or, with a slot free, for news on GitHub; either way the next tick plans at once
 start of the loop to its end, during a long action and with every slot taken too, as `devloop
 watch` does, with the same identity as the ticks' reads and its state in
 `state_dir/run-watch-state.json`, apart from the state of a `devloop watch` of the supervising
-agent. The first read records the starting state. Each read writes what changed, the lines of
-`devloop watch`, to the [stream of the events](reference.md#the-stream-of-the-events) of the
-`state_dir`, and the time of the read to its sign of life; the wake-ups of the roles read that
+agent. The first read records the starting state; after a restart the reads go on from the
+saved state, so what changed while the loop was stopped is news too. Each read writes what
+changed, the lines of `devloop watch`, to the [stream of the
+events](reference.md#the-stream-of-the-events) of the `state_dir`, and the time of the read to
+its sign of life; a read whose events cannot be written is not confirmed, and its events come
+again at the next read. The wake-ups of the roles read that
 stream instead of reading GitHub themselves. A wait for news ends at once when a read found news
 since the previous wait, so changes made by ticks with actions in between count as news and
 cost at most one more tick; three failed reads in a row are news too (`watch error:`). A read

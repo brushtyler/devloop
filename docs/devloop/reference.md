@@ -335,7 +335,14 @@ kept: no event is lost in silence. The coordinator's wake-up reports `eventi fer
 episode when, with the service active, the sign of life is older than `EVENTS_STALE_AFTER`
 seconds of the parameters of the host (default 300), counted from the latest of the sign of life
 and the start of the service, or is missing or unreadable ([ops/README.md](../../ops/README.md#10-coordinatore-facoltativo)).
-A stream that cannot be written is a line of `run.log` (`events: …`); the loop goes on.
+A stream that cannot be written is a line of `run.log` (`events: …`); the loop goes on, but the
+read is not confirmed: the state of the watcher is not saved and the sign of life not renewed, so
+the same events are written at the first read after the stream recovers, and meanwhile the
+coordinator sees the stream stop. A restart of the loop goes on from `run-watch-state.json`:
+what changed while the loop was stopped is written as events, not swallowed by a new baseline.
+The wake-ups read the two segments together and check them (the inodes of their names, the
+numbers without gaps): a rotation during the read makes it try again, and a cursor never moves
+past an event still kept that it did not give.
 
 ### Project file
 

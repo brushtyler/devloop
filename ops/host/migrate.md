@@ -574,7 +574,8 @@ passo 1.
 
 Come root, dal checkout dell'operatore aggiornato (`git -C <checkout> fetch origin` e
 `git -C <checkout> checkout --detach origin/main`, con il merge di #683), **per ogni progetto
-dell'host** con supervisore o coordinatore:
+dell'host** con supervisore o coordinatore (uno con `SOURCE_REF` al tag successivo, con [la sua
+procedura](#un-progetto-con-la-sorgente-a-un-tag-nuovo-666)):
 
 1. **il pin a mano**, a loop fermo, del commit di #683 o di uno successivo, come utente
    `DEVLOOP_USER`, poi l'avvio: `systemctl stop <SERVICE_NAME>`, `devloop pin origin/main` (con

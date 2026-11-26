@@ -367,7 +367,7 @@ class CommandTests(unittest.TestCase):
         class Watcher:
             def __init__(self, client, trust, state, *, out, err):
                 seen.append((client, state))
-                self.gh = client
+                self.gh, self.state_path, self.state = client, state, None
 
             def round(self, deliver=None):
                 seen.append(callable(gh.time_left))  # bound in the thread of the producer

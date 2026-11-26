@@ -25,8 +25,11 @@ The files are created ``FILE_MODE`` (640) and the directory ``DIR_MODE`` (750), 
 read-only ACL that setup-supervisor.sh and setup-coordinator.sh give the roles on the directory,
 with its default for the new files, holds for each new segment (the mode of a new file bounds
 the mask of its ACL). The producer knows no reader, and the readers cannot write the stream.
-A stream that cannot be written is logged, and the loop goes on: the wake-up of the coordinator
-sees the sign of life stop.
+A stream that cannot be written is logged, and the loop goes on: the read is not confirmed (the
+state of the watcher is not saved, the sign of life not renewed), so its events are written at
+the first read after the stream recovers, and meanwhile the wake-up of the coordinator sees the
+sign of life stop. At its start the producer goes on from the state the watcher saved, so what
+changed while the loop was stopped is an event too.
 """
 
 import os
@@ -38,7 +41,7 @@ import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .watch import ERROR_LINE, ERROR_ROUNDS, NOTHING_NEW, failure_class
+from .watch import ERROR_LINE, ERROR_ROUNDS, NOTHING_NEW, failure_class, load_state
 
 DIRECTORY = 'events'
 CURRENT = 'events.log'
@@ -194,6 +197,8 @@ class Producer:
         self._stopped = None
         self._thread = None
         self._failures = 0
+        self._alarmed = False
+        self._loaded = False
 
     # The thread ------------------------------------------------------------
     def start(self, stopped=None):
@@ -227,21 +232,41 @@ class Producer:
                 self.log(f'events: the read failed ({failure_class(exc)})')
             self._closing.wait(self.interval)
 
+    def _load(self):
+        """The state the watcher saved before this start, once, before its first read: what
+        changed since then is an event of the stream, not a new baseline."""
+        self._loaded = True
+        watcher = self.watcher
+        watcher.state = load_state(watcher.state_path)
+        if watcher.state is None and watcher.state_path.exists():
+            self.log('events: the state of the watcher is unreadable, a new baseline replaces it')
+
     def step(self):
-        """One read of GitHub; its events, also written to the stream. None when it failed."""
-        written = []
+        """One read of GitHub; its events, also written to the stream. None when it failed, or
+        when its events could not be written: then the state of the watcher is not saved and the
+        sign of life not renewed, so the next read gives them again and the coordinator sees the
+        stream stop."""
+        if not self._loaded:
+            self._load()
+        undelivered = []
 
         def deliver(lines):
-            self._write(lines)
-            written.extend(lines)
+            if not self._write(lines):
+                undelivered.append(lines)
+                raise OSError(f'the stream {self.stream.dir} could not be written')
         lines = self.watcher.round(deliver=deliver)
+        if undelivered:
+            return None  # GitHub was read: no read failure, the same events at the next read
         if lines is None:
             self._failures += 1
             if self._failures == ERROR_ROUNDS:
-                self._write([ERROR_LINE])
                 self._news.set()
+            # The alarm is an event too: tried again at each failed read until it is written.
+            if self._failures >= ERROR_ROUNDS and not self._alarmed:
+                self._alarmed = self._write([ERROR_LINE])
             return None
         self._failures = 0
+        self._alarmed = False
         for line in lines:
             self.log(f'news: {line}')
         if lines:
@@ -254,11 +279,15 @@ class Producer:
         return lines
 
     def _write(self, lines):
+        """``lines`` appended to the stream: False, logged, when it cannot be written (the loop
+        goes on; the coordinator sees the stream stop)."""
         try:
             self.stream.append(lines)
-        except OSError as exc:  # the loop goes on; the coordinator sees the stream stop
+        except OSError as exc:
             self.log(f'events: {len(lines)} events could not be written to {self.stream.dir} '
                      f'({type(exc).__name__})')
+            return False
+        return True
 
     # The wait of the loop ----------------------------------------------------
     def wait(self, seconds, sleep, check):

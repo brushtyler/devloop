@@ -219,24 +219,41 @@ save() {
 # sveglia. Il cursore è "<id> <numero> <inode> <posizione>": l'identità del flusso, l'ultimo
 # evento letto, e dove riprendere nel segmento corrente se non è ruotato. Si leggono solo le
 # righe intere (con il ritorno a capo): una riga che devloop sta scrivendo si legge al giro dopo.
+# I due segmenti si leggono insieme e si controllano (gli inode dei loro nomi, i numeri senza
+# salti): una rotazione che attraversa la lettura la fa ritentare, e il cursore non avanza mai
+# oltre eventi ancora conservati che non ha letto (#689).
 # Esce con 2 se il flusso non si legge (manca, o manca l'ACL).
 read_stream() {
     python3 -I -B - "$STREAM" "$CURSOR" <<'EOF'
-import os, re, sys
+import contextlib, os, re, sys
 directory, cursor_path = sys.argv[1], sys.argv[2]
 LINE = re.compile(rb'(\d+) \d{4}-\d\d-\d\dT(\d\d:\d\d):\d\dZ (.*)')
+# Le letture dei due segmenti tentate in un giro, se una rotazione le attraversa.
+ATTEMPTS = 5
 
-def segment(name, start=0):
-    """(inode, posizione dopo l'ultima riga intera, righe intere) di un segmento dal byte start."""
+def opened(name):
+    """Il segmento NAME aperto in lettura, o None se manca."""
     try:
-        with open(os.path.join(directory, name), 'rb') as fh:
-            inode = os.fstat(fh.fileno()).st_ino
-            fh.seek(start)
-            data = fh.read()
+        return open(os.path.join(directory, name), 'rb')
     except FileNotFoundError:
+        return None
+
+def segment(fh, start=0):
+    """(inode, posizione dopo l'ultima riga intera, righe intere) del segmento aperto FH dal
+    byte START; (0, 0, b'') se manca."""
+    if fh is None:
         return 0, 0, b''
+    inode = os.fstat(fh.fileno()).st_ino
+    fh.seek(start)
+    data = fh.read()
     end = data.rfind(b'\n') + 1
     return inode, start + end, data[:end]
+
+def path_inode(name):
+    try:
+        return os.stat(os.path.join(directory, name)).st_ino
+    except FileNotFoundError:
+        return 0
 
 def parse(data):
     found = []
@@ -246,6 +263,45 @@ def parse(data):
             found.append((int(match.group(1)), match.group(2).decode(),
                           match.group(3).decode('utf-8', 'replace')))
     return found
+
+def holes(seq, found):
+    """I salti dopo l'evento SEQ fra gli eventi letti: (da, a) dei numeri che mancano."""
+    missing, expected = [], seq + 1
+    for number, _, _ in found:
+        if number > expected:
+            missing.append((expected, number - 1))
+        expected = number + 1
+    return missing
+
+def read_kept():
+    """Gli eventi conservati, il segmento precedente poi il corrente, letti insieme: (eventi,
+    inode e posizione del corrente), o None se una rotazione ha attraversato la lettura (i
+    segmenti aperti non sono più quelli dei loro nomi). I due restano aperti fino al controllo,
+    così nessuno dei loro inode si riusa nel frattempo."""
+    with contextlib.ExitStack() as stack:
+        handles = [opened(name) for name in ('events.log.1', 'events.log')]
+        for fh in handles:
+            if fh is not None:
+                stack.enter_context(fh)
+        previous, current = (segment(fh) for fh in handles)
+        if (path_inode('events.log.1') != previous[0]
+                or path_inode('events.log') != current[0]):
+            return None
+    return parse(previous[2]) + parse(current[2]), current[0], current[1]
+
+def read_coherent():
+    """read_kept, ritentata anche quando gli eventi letti hanno un salto fra loro (devloop run
+    non ne scrive: è una rotazione che la lettura non ha visto). Senza una lettura coerente il
+    giro esce senza toccare il cursore, e rilegge al giro dopo; un salto che resta a ogni
+    tentativo lo dice il chiamante."""
+    read = None
+    for _ in range(ATTEMPTS):
+        read = read_kept()
+        if read is not None and not holes(read[0][0][0] - 1 if read[0] else 0, read[0]):
+            return read
+    if read is None:
+        sys.exit(0)
+    return read
 
 try:
     with open(os.path.join(directory, 'id'), encoding='utf-8') as fh:
@@ -272,9 +328,8 @@ def save(seq, inode, offset):
 out = []
 try:
     if cursor is None:
-        inode, offset, data = segment('events.log')
-        found = parse(data) or parse(segment('events.log.1')[2])
-        last = found[-1][0] if found else 0
+        kept, inode, offset = read_coherent()
+        last = kept[-1][0] if kept else 0
         save(last, inode, offset)
         print(f'N base alla fine del flusso {directory}, dopo l\'evento {last}: gli eventi già '
               'scritti non svegliano')
@@ -282,33 +337,36 @@ try:
     old_identity, seq, old_inode, old_offset = cursor
     found = None
     if old_identity == identity and old_inode:
-        # Il segmento corrente non è ruotato dall'ultima lettura: si legge da dove era rimasta.
-        try:
-            current = os.stat(os.path.join(directory, 'events.log'))
-        except FileNotFoundError:
-            current = None
-        if (current is not None and current.st_ino == old_inode
-                and current.st_size >= old_offset):
-            inode, offset, data = segment('events.log', old_offset)
-            found = [event for event in parse(data) if event[0] > seq]
-            if inode != old_inode or (found and found[0][0] != seq + 1):
-                found = None  # ruotato nel frattempo, o un salto: si rilegge tutto
+        # Il segmento corrente non è ruotato dall'ultima lettura: si legge da dove era rimasta,
+        # se gli eventi nuovi continuano senza salti quelli già letti.
+        fh = opened('events.log')
+        if fh is not None:
+            with fh:
+                if (os.fstat(fh.fileno()).st_ino == old_inode
+                        and os.fstat(fh.fileno()).st_size >= old_offset):
+                    inode, offset, data = segment(fh, old_offset)
+                    found = [event for event in parse(data) if event[0] > seq]
+                    if holes(seq, found):
+                        found = None  # un salto: si rilegge tutto
     if found is None:
-        kept = parse(segment('events.log.1')[2])
-        inode, offset, data = segment('events.log')
-        kept += parse(data)
+        kept, inode, offset = read_coherent()
         if old_identity != identity or (kept and kept[-1][0] < seq):
             found = kept
             first = found[0][0] if found else None
             out.append('W il flusso degli eventi è stato sostituito: riprendo dal primo evento '
                        'conservato' + (f' ({first})' if first else ', nessuno per ora'))
-            seq = 0
+            seq = (first - 1) if first else 0
         else:
             found = [event for event in kept if event[0] > seq]
-            if found and found[0][0] > seq + 1:
-                out.append(f'W gli eventi da {seq + 1} a {found[0][0] - 1} non sono più '
-                           f'conservati (rotazione del flusso): riprendo dal primo conservato '
-                           f'({found[0][0]})')
+        # Ogni salto ancora presente lo dice una riga: il primo sono gli eventi che la rotazione
+        # ha già tolto, prima del primo conservato.
+        for low, high in holes(seq, found):
+            if found and high == found[0][0] - 1 and low == seq + 1:
+                out.append(f'W gli eventi da {low} a {high} non sono più conservati (rotazione '
+                           f'del flusso): riprendo dal primo conservato ({found[0][0]})')
+            else:
+                out.append(f'W gli eventi da {low} a {high} mancano dal flusso: riprendo da '
+                           f'quelli che seguono')
     save(found[-1][0] if found else seq, inode, offset)
 except OSError:
     sys.exit(2)

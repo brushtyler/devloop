@@ -113,16 +113,24 @@ class StreamTests(StreamCase):
 
 
 class FailingWatcher:
-    """A watcher whose rounds follow ``results``: lines, or None for a failed read."""
+    """A watcher whose rounds follow ``results``: lines, or None for a failed read. As
+    ``watch.Watcher``, a round whose lines cannot be delivered fails and gives them again."""
+
+    state = None
+    state_path = Path('/nonexistent/run-watch-state.json')
 
     def __init__(self, results):
         self.results = list(results)
         self.gh = type('Client', (), {'time_left': None})()
 
     def round(self, deliver=None):
-        result = self.results.pop(0)
+        result = self.results[0]
         if result:
-            deliver(result)
+            try:
+                deliver(result)
+            except OSError:
+                return None
+        self.results.pop(0)
         return result
 
 
@@ -183,9 +191,67 @@ class ProducerTests(StreamCase):
 
     def test_a_stream_that_cannot_be_written_does_not_stop_the_reads(self):
         (self.tmp / 'events').write_text('not a directory\n')
-        producer = self.producer(FailingWatcher([['PR #5 CI pass']]))
-        self.assertEqual(producer.step(), ['PR #5 CI pass'])
+        producer = self.producer(FailingWatcher([['PR #5 CI pass'], []]))
+        self.assertIsNone(producer.step())
         self.assertTrue(any('could not be written' in line for line in self.logs), self.logs)
+        # Once the stream can be written, the same read gives its events again.
+        (self.tmp / 'events').unlink()
+        self.assertEqual(producer.step(), ['PR #5 CI pass'])
+        self.assertEqual([line[2] for line in self.lines()], ['PR #5 CI pass'])
+
+    def watcher(self, gh):
+        return Watcher(gh, TRUST, self.tmp / 'run-watch-state.json',
+                       now=lambda: NOW, out=lambda line: None, err=lambda line: None)
+
+    def test_a_restart_goes_on_from_the_saved_state(self):
+        # #689: what changed while the loop was stopped is an event, not a new baseline.
+        gh = FakeGitHub()
+        gh.add_pr(5)
+        self.assertEqual(self.producer(self.watcher(gh)).step(), [])
+        gh.set_labels(5, 'agent:needs-operator')
+        producer = self.producer(self.watcher(gh))
+        self.assertEqual(producer.step(), ['PR #5 labels +agent:needs-operator -agent:review'])
+        self.assertEqual([line[2] for line in self.lines()],
+                         ['PR #5 labels +agent:needs-operator -agent:review'])
+        self.assertEqual(producer.step(), [])
+        # A state that cannot be read is said, and a new baseline replaces it.
+        (self.tmp / 'run-watch-state.json').write_text('{not json\n')
+        producer = self.producer(self.watcher(gh))
+        self.assertEqual(producer.step(), [])
+        self.assertIn('events: the state of the watcher is unreadable, a new baseline '
+                      'replaces it', self.logs)
+
+    def test_events_not_written_are_not_confirmed_and_come_again(self):
+        # #689: a write that fails saves no state of the watcher and renews no sign of life;
+        # once the stream recovers, the next read writes the same events.
+        gh = FakeGitHub()
+        gh.add_pr(5)
+        producer = self.producer(self.watcher(gh))
+        producer.step()
+        state = (self.tmp / 'run-watch-state.json').read_text()
+        (self.dir / 'alive').unlink()
+        gh.set_labels(5, 'agent:needs-operator')
+        with mock.patch.object(events.Stream, 'append', side_effect=PermissionError(13, 'x')):
+            for _ in range(4):  # a write failure is no failed read: no alarm either
+                self.assertIsNone(producer.step())
+        self.assertFalse((self.dir / 'alive').exists())
+        self.assertFalse((self.dir / 'events.log').exists())
+        self.assertEqual((self.tmp / 'run-watch-state.json').read_text(), state)
+        self.assertTrue(any('1 events could not be written' in line for line in self.logs))
+        self.assertEqual(producer.step(), ['PR #5 labels +agent:needs-operator -agent:review'])
+        self.assertEqual([line[2] for line in self.lines()],
+                         ['PR #5 labels +agent:needs-operator -agent:review'])
+        self.assertTrue((self.dir / 'alive').exists())
+
+    def test_an_alarm_that_cannot_be_written_is_tried_again(self):
+        producer = self.producer(FailingWatcher([None] * 5 + [[]]))
+        with mock.patch.object(events.Stream, 'append', side_effect=PermissionError(13, 'x')):
+            for _ in range(3):
+                producer.step()
+        producer.step()
+        self.assertEqual([line[2] for line in self.lines()], [ERROR_LINE])
+        producer.step()
+        self.assertEqual([line[2] for line in self.lines()], [ERROR_LINE])
 
     def test_after_a_stop_no_other_read_starts(self):
         reads = []
