@@ -538,6 +538,19 @@ rest_state() {
     fi
 }
 
+# pause_signal "<ORA> <MOTIVO>": vero per un segnale della sentinella che sveglia anche in pausa
+# (un messaggio, una riga di run.log con un errore, un allarme della pausa) scritto dopo l'inizio
+# di questa attesa, FIRST_START, anche se prima dell'inizio nuovo della pausa cominciata durante
+# il riposo: gli altri motivi del riposo (un evento, il servizio fermo, il lavoro, il controllo
+# giornaliero) in pausa non svegliano.
+pause_signal() {
+    [ "${1%% *}" -ge "$FIRST_START" ] || return 1
+    case ${1#* } in
+        'casella: '* | 'log: '* | 'allarme: '*) return 0 ;;
+    esac
+    return 1
+}
+
 # rest_wait: il riposo (#684) o, mentre la pausa dell'operatore c'è, la pausa (#685); non torna.
 # Lo stato scritto prima di guardare casella e flusso, così un messaggio o un evento che arriva
 # dopo lo vede la sentinella; ciò che c'è già è un risveglio qualunque. In pausa conta solo la
@@ -553,6 +566,7 @@ rest_wait() {
     flock -n "$LOCK_FD" \
         || die "il lock $LOCK è già tenuto: un'altra attesa a riposo del $ROLE_NAME è in corso"
     START=$(date +%s)
+    FIRST_START=$START
     if ops_pause_start >/dev/null; then
         motive=pausa paused=1 pause_seen=1
     fi
@@ -574,9 +588,10 @@ rest_wait() {
                 # La pausa cominciata durante il riposo: lo stato dice "pausa", con un inizio
                 # nuovo, un secondo avanti. Così un segnale della sentinella di prima (un evento
                 # del riposo, anche se scritto nello stesso secondo, da un giro cominciato prima
-                # della pausa) non sveglia il ruolo in pausa; quello di un messaggio o di un
-                # allarme, scritto prima dell'inizio nuovo, la sentinella lo riscrive al giro
-                # dopo, perché è più vecchio dello stato.
+                # della pausa) non sveglia il ruolo in pausa. Un messaggio o un allarme scritto
+                # dopo l'inizio del riposo ma prima dell'inizio nuovo, invece, sveglia: la
+                # sentinella non lo riscrive (i cursori di run.log e del servizio sono già
+                # avanti), e lo vede pause_signal.
                 pause_seen=1
                 START=$(($(date +%s) + 1))
                 rest_state pausa
@@ -595,7 +610,8 @@ rest_wait() {
             exit 0
         fi
         wake=$(ops_rest_wake "$ROLE")
-        if [ -n "$wake" ] && [ "${wake%% *}" -ge "$START" ]; then
+        if [ -n "$wake" ] && { [ "${wake%% *}" -ge "$START" ] \
+            || { [ "$paused" = 1 ] && pause_signal "$wake"; }; }; then
             # In pausa il ruolo non ha eventi da leggere: esce dalla pausa qui, e il suo
             # prossimo comando di attesa la riprende.
             if [ "$paused" = 1 ]; then

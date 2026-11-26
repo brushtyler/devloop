@@ -16,6 +16,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -7681,6 +7682,51 @@ class RoleWaitTests(WakeUpCase):
         self.assertEqual((proc.returncode, out),
                          (0, f'sentinella: casella: 1 messaggi in {self.box}\n'), err)
         self.assertFalse((self.rest / 'supervisor').exists())
+        self.assertTrue(pause.exists())
+
+    def test_an_alarm_of_the_sentinel_while_the_rest_enters_the_pause_wakes_the_role(self):
+        # The real sentinel, as its own user, on the same mailbox, rest/ and run.log.
+        sentinel_state = self.tmp / 'sentinel-state'
+        sentinel_state.mkdir()
+        log = self.state / 'run.log'
+        log.write_text('10:00:00 tick ok\n')
+        # params() writes one file: the sentinel's is a copy, before the role's replaces it.
+        sentinel_params = self.tmp / 'sentinel-params.env'
+        shutil.copy(self.params(
+            DEVLOOP_USER=FAKE_DEVLOOP, SUPERVISOR_USER=FAKE_SUPERVISOR, AGENT_USER=FAKE_AGENT,
+            COORDINATOR_USER=FAKE_COORDINATOR, SENTINEL_USER=ME, STATE_DIR=str(self.state)),
+            sentinel_params)
+        self.as_role('coordinator')
+        self.prime('coordinator')
+
+        def sentinel():
+            environ = dict(os.environ,
+                           PATH=f'{self.bin}:{os.environ.get("PATH", "/usr/bin:/bin")}',
+                           OPS_TEST_CALLS=str(self.calls), STATE_DIRECTORY=str(sentinel_state),
+                           LC_ALL='C.UTF-8')
+            environ.pop('NOTIFY_SOCKET', None)
+            done = subprocess.run([BASH, str(OPS / 'host/role-sentinel.sh'), '--params',
+                                   str(sentinel_params), '--once'], capture_output=True,
+                                  text=True, env=environ, stdin=subprocess.DEVNULL, timeout=120)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            return done
+        sentinel()  # the base of the stream and of run.log
+        proc = self.resting('coordinator')
+        # The rest has not seen the pause yet when the sentinel, in pause, writes its alarm: the
+        # cursor of run.log goes past the error, and no later round writes it again.
+        os.kill(proc.pid, signal.SIGSTOP)
+        try:
+            pause = operator_pause(self, self.rest, int(time.time()))
+            with log.open('a') as fh:
+                fh.write('Traceback (most recent call last):\n')
+            self.assertIn('sveglio il coordinator: log: Traceback', sentinel().stdout)
+            time.sleep(1.1)  # the new start of the pause, a second later than the alarm
+        finally:
+            os.kill(proc.pid, signal.SIGCONT)
+        out, err = proc.communicate(timeout=20)
+        self.assertEqual((proc.returncode, out),
+                         (0, 'sentinella: log: Traceback (most recent call last):\n'), err)
+        self.assertFalse((self.rest / 'coordinator').exists())
         self.assertTrue(pause.exists())
 
     def short_rest_limit(self):
