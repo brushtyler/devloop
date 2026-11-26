@@ -6592,6 +6592,71 @@ class RoleWaitTests(WakeUpCase):
         self.assertNotIn('/usr/bin/tail', self.sudo_log.read_text())
         self.assertEqual(self.mutating_calls(), [])
 
+    # The routine of the roles (#682), as devloop watch marks it by the author it verifies: the
+    # archive of the daily summary, the comments of each role app. The issue of the alarms of
+    # the tests, #76, is the issue of the diary.
+    REPORT = ('issue #316 report by brushtyler-devloop-dispatcher[bot]: ## Riepilogo devloop '
+              'del 2026-11-25')
+    SUPERVISOR_DIARY = ('issue #76 supervisor comment by brushtyler-devloop-supervisor[bot]: '
+                        '## Diario del 2026-11-26')
+    COORDINATOR_DIARY = ('issue #76 coordinator comment by brushtyler-devloop-coordinator[bot]: '
+                         '## Diario del 2026-11-26')
+
+    def test_the_routine_wakes_no_role(self):
+        own = {'supervisor': ('PR #12 supervisor comment by '
+                              'brushtyler-devloop-supervisor[bot]: /devloop grant-round'),
+               'coordinator': ('issue #620 coordinator comment by '
+                               'brushtyler-devloop-coordinator[bot]: /devloop authorize')}
+        diary = {'supervisor': self.COORDINATOR_DIARY, 'coordinator': self.SUPERVISOR_DIARY}
+        for role in ('supervisor', 'coordinator'):
+            with self.subTest(role=role):
+                self.as_role(role)
+                (self.watch / 'count').unlink(missing_ok=True)
+                self.sudo_log.unlink(missing_ok=True)
+                wake = 'issue #7 labels +agent:needs-operator'
+                self.answer(1, [self.REPORT, own[role], diary[role],
+                                self.REPORT.replace('#316', '#76')])
+                self.answer(2, [wake])
+                done = self.wait()
+                self.assertEqual((done.returncode, done.stdout),
+                                 (0, f'evento: {self.STAMP}{wake}\n'), done.stderr)
+                self.assertEqual(len(self.watch_calls()), 2)
+
+    def test_what_is_not_routine_still_wakes_each_role(self):
+        for role, line in (
+                # An alert of the dispatcher on the issue of the alarms: only the summary is
+                # routine, not every comment of the dispatcher.
+                ('supervisor', 'issue #76 comment by brushtyler-devloop-dispatcher[bot]: ## Passo '
+                               "sull'host da fare prima del pin"),
+                ('coordinator', 'issue #76 comment by brushtyler-devloop-dispatcher[bot]: ## Passo '
+                                "sull'host da fare prima del pin"),
+                ('supervisor', 'issue #12 operator comment by brushtyler: guarda qui'),
+                ('coordinator', 'issue #672 operator reply by brushtyler: /devloop approve'),
+                ('supervisor', 'issue #7 labels +agent:needs-operator'),
+                ('coordinator', 'issue #7 labels +agent:needs-operator'),
+                ('coordinator', 'issue #20 labels +agent:needs-coordinator'),
+                # A comment that copies the summary from anyone but the dispatcher's identity is
+                # a comment as the others: devloop watch never marks it "report".
+                ('supervisor', 'issue #316 comment by brushtyler-devloop-claude-agent[bot]: '
+                               '## Riepilogo devloop del 2026-11-25'),
+                ('coordinator', 'issue #76 comment by brushtyler-devloop-claude-agent[bot]: '
+                                '## Riepilogo devloop del 2026-11-25'),
+                ('coordinator', 'issue #76 operator comment by brushtyler: ## Riepilogo devloop '
+                                'del 2026-11-25'),
+                # The other role's comment outside the issue of the diary.
+                ('supervisor', 'issue #620 coordinator comment by '
+                               'brushtyler-devloop-coordinator[bot]: /devloop authorize'),
+                # Without its role app the supervisor signs with its agent's app: a comment.
+                ('coordinator', 'issue #76 comment by brushtyler-devloop-claude-agent[bot]: '
+                                '## Diario del 2026-11-26')):
+            with self.subTest(role=role, line=line):
+                self.as_role(role)
+                (self.watch / 'count').unlink(missing_ok=True)
+                self.answer(1, [self.REPORT, line])
+                done = self.wait()
+                self.assertEqual((done.returncode, done.stdout),
+                                 (0, f'evento: {self.STAMP}{line}\n'), done.stderr)
+
     def test_the_period_and_the_service_wake_the_supervisor(self):
         self.as_role('supervisor')
         done = self.wait('--period', '1')

@@ -145,9 +145,16 @@ On the host of this repository (`PROJECT=devloop`) the copy is
 session.
 
 It ends at the first of: a message in `to-supervisor/` (`casella:`, which it reports without
-consuming it, at once), any event of `devloop watch` (`evento:`), the service not active
-(`servizio:`), or the end of the period, one hour by default (`periodo:`, `--period <seconds>`).
-Read its lines, act, then start it again. Exit 1 (`errore:`) means it cannot read GitHub: tell
+consuming it, at once), any event of `devloop watch` (`evento:`) but the routine, the service
+not active (`servizio:`), or the end of the period, one hour by default (`periodo:`, `--period
+<seconds>`). Read its lines, act, then start it again. The routine does not wake you (#682):
+your own comments (`supervisor comment`, which the watch marks only when you sign with your role
+app, `[roles.supervisor]` as a table), the coordinator's on the issue of the alarms
+`[run].alert_issue`, the issue of the diary (`coordinator comment`), and the archive of the
+daily summary (`report`). The watch marks them by the author it verifies, never by the text.
+The coordinator's other comments, its `/devloop authorize` included, the dispatcher's alerts,
+the operator's comments and the labels wake you as before. You read the diary of the
+coordinator at the periodic check. Exit 1 (`errore:`) means it cannot read GitHub: tell
 the operator. It reads GitHub with `devloop-pinned watch` as devloop's user and your state file,
 the default of devloop, `watch-state.json` of the `state_dir`. The coordinator does not share
 your watch: its wake-up has a state file of its own, so it never takes your events. With

@@ -2762,6 +2762,8 @@ comment text are cut short and control characters removed. What it reports:
 | Native `APPROVED` or `CHANGES_REQUESTED` review of a trusted user | `PR #N review by brushtyler: APPROVED @abc1234` |
 | Comment of a trusted user or of a devloop app; one a trusted user wrote in person (no attribution header) is an `operator comment` | `issue #N operator comment by brushtyler: first line` |
 | An `operator comment` that answers (#676): its first line, read as devloop reads commands (without leading spaces), is a `/devloop` command, or the issue or PR has `agent:needs-operator` (at the previous read or now; for one outside the open listings, closed or beyond their limit, the labels GitHub gives now). The coordinator's wake-up wakes on it, not on the other comments of the operator | `issue #N operator reply by brushtyler: /devloop approve` |
+| Comment of a role app (#682): the supervisor's role app, only with `[roles.supervisor]` as a table (without it the supervisor signs with its agent's app, and its comments are plain comments), or the coordinator's, with `[roles.coordinator]` | `issue #N supervisor comment by brushtyler-devloop-supervisor[bot]: first line`, `issue #N coordinator comment by brushtyler-devloop-coordinator[bot]: first line` |
+| The archive of a day of the [daily summary](#daily-summary) (#682): its `report` record, from the dispatcher's identity only; the same text from anyone else is a comment as the others. The update of the body of the summary issue is no event | `issue #N report by brushtyler-devloop-dispatcher[bot]: first line` |
 | An issue in `agent:ready` blocked by an open issue nobody is doing, once per pair ([orphan prerequisites](#dependencies-between-issues), #671) | `issue #N orphan prerequisite #M: open, without agent:ready, agent:working, an open PR or an authorization of the coordinator` |
 
 The [ledger](protocol.md#evidence-and-telemetry) records (`## devloop ledger`, or `## Registro devloop`
@@ -2771,8 +2773,12 @@ reported: they are too frequent. Trust follows [AGENTS.md](../../AGENTS.md): an 
 dispatcher, and with `[roles.coordinator]` the [coordinator's](reference.md#the-coordinator-app),
 #648; not the [merger app](reference.md#the-merger-app), which only merges: its comments and the
 `review` records naming it are ignored). The coordinator's issues and comments, its `/devloop`
-commands included, are reported as the agents' are, but it writes no record of devloop's: a
-`review` record in its comment is reported as a plain comment. Anyone else's issue or PR
+commands included, are reported as the agents' are, its comments as `coordinator comment`
+(#682), but it writes no record of devloop's: a `review` record in its comment is reported as a
+plain `coordinator comment`. The marks of the role apps and of the summary come from the author
+the watcher verifies, never from the text: the [wake-up of the
+roles](../../ops/README.md#10-coordinatore-facoltativo) skips each role's own comments, the other
+role's on `[run].alert_issue` (the issue of the diary) and the archives of the summary. Anyone else's issue or PR
 produces only `new issue #N by an untrusted author (ignored)` (or `new PR`), with no title nor
 content, and nothing after it. The exception is an issue that the dispatcher admits (#623): its
 latest `agent:ready`, whether the label is still there or the dispatcher already replaced it with

@@ -190,7 +190,7 @@ session. `coordinator-wait.sh --period 3600`, the wake-up of before, is the same
 It ends at the first of: a message in `to-coordinator/` (`casella:`, which it reports without
 consuming it, at once), an event of yours on GitHub (`evento:`: `agent:needs-operator` or
 `agent:needs-coordinator` added, "il merge spetta all'operatore", a comment on the issue of the
-alarms `[run].alert_issue`, an `operator reply`, an error of the watch), a new line of `run.log` with a `Traceback`, an
+alarms `[run].alert_issue` but the routine, an `operator reply`, an error of the watch), a new line of `run.log` with a `Traceback`, an
 `ALERT:`, a `401` or the refusal of the start (`log:`), the service not active (`servizio:`), or
 the end of the period, one hour by
 default (`periodo:`, `--period <seconds>`). Read its lines, act, then start it again. Exit 1
@@ -205,6 +205,15 @@ on an issue or pull request in `agent:needs-operator` (at the previous read or n
 operator answering something that waits for them. Their other comments (`operator comment`) do
 not wake you: you read them at the periodic check. What to do at this wake-up is in Tasks,
 "Replies of the operator".
+
+The routine does not wake you either (#682): your own comments (`coordinator comment`), the
+supervisor's on the issue of the alarms, the issue of the diary (`supervisor comment`, which the
+watch marks only when the supervisor signs with its role app, `[roles.supervisor]` as a table),
+and the archive of the daily summary (`report`, from the dispatcher's identity only). The watch
+marks them by the author it verifies, never by the text: a copy of the summary written by anyone
+else is a comment, which on the issue of the alarms wakes you. The dispatcher's other comments
+there, its alerts ("Passo sull'host da fare prima del pin" and the others), wake you as before.
+You read the supervisor's diary at the periodic check.
 
 Each start writes your heartbeat in `heartbeat/coordinator` of the mailbox: keep the wake-up
 running. A timer of the host, the watchdog of the roles, reads the heartbeats every 5 minutes

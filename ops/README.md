@@ -1002,7 +1002,7 @@ all'operatore", un commento sull'issue degli
 allarmi `[run].alert_issue`, una risposta dell'operatore (`operator reply`, #676: un suo commento
 di persona che comincia con un comando `/devloop` o su un'issue o una PR in
 `agent:needs-operator`), un errore del watch; gli altri eventi li salta, anche gli altri
-commenti dell'operatore), una riga nuova di
+commenti dell'operatore e la routine, sotto), una riga nuova di
 `run.log` con un `Traceback`, un `ALERT:`, un `401` o il rifiuto dell'avvio (`log:`), il servizio
 non attivo (`servizio:`, una volta per cambio di stato), o la fine del periodo
 (`COORDINATOR_WAIT_PERIOD`, per default `ROLE_WAIT_PERIOD`, 3600 secondi, o `--period`;
@@ -1019,9 +1019,21 @@ Il supervisore usa lo stesso script dalla sua copia di root, che `setup-supervis
 `SUPERVISOR_OPS_DIR` (`/usr/local/lib/devloop-supervisor`; con `PROJECT`,
 `/usr/local/lib/devloop-supervisor-<progetto>`): `bash
 /usr/local/lib/devloop-supervisor/host/role-wait.sh --role supervisor`. Per lui ogni evento di
-`devloop watch` è un risveglio (non la riga della base), con il suo file di stato
-(`watch-state.json`, il default di devloop) e il comando `watch` del suo sudoers; non legge
+`devloop watch` è un risveglio (non la riga della base, né la routine, sotto), con il suo file di
+stato (`watch-state.json`, il default di devloop) e il comando `watch` del suo sudoers; non legge
 `run.log`, che non è nel suo sudoers. Il suo stato sta in `~/.local/state/devloop-supervisor-wait/`.
+
+**La routine non sveglia nessuno dei due ruoli** (#682). `devloop watch` la riconosce per l'autore
+che verifica, mai per il testo: l'archivio di un giorno del riepilogo giornaliero (`report by`, il
+record `report` di `devloop report` scritto dall'identità del dispatcher; l'aggiornamento del
+corpo dell'issue del riepilogo non è un evento del watch), i commenti delle app di ruolo
+(`supervisor comment`, solo con `[roles.supervisor]` come tabella, e `coordinator comment`, con
+`[roles.coordinator]`). Il risveglio salta l'archivio del riepilogo, i commenti del ruolo stesso e
+quelli dell'altro ruolo sull'issue degli allarmi, l'issue del diario. Restano risvegli, come
+prima, gli altri commenti del dispatcher sull'issue degli allarmi (i suoi avvisi), i commenti
+dell'operatore, le label e ogni commento che il watch non attribuisce a un ruolo: un supervisore
+senza la sua app di ruolo firma con l'app del suo agent, e i suoi commenti svegliano come prima; un
+diario tenuto su un'altra issue sveglia ancora il supervisore.
 
 A ogni avvio lo script scrive il **battito** del ruolo, `COORDINATION_DIR/heartbeat/<ruolo>`:
 l'ora (secondi dall'epoca) e il periodo, 664 del gruppo dei ruoli. Un battito che non si scrive è

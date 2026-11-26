@@ -17,7 +17,11 @@ changed into lines ``HH:MM <type> #N <detail>`` (UTC):
   header is a ``/devloop`` command or the issue or PR has ``agent:needs-operator`` (at the
   previous read or now; read from GitHub for one outside the open listings, closed or beyond
   their limit): the coordinator's wake-up wakes on a reply, not on every note; ledger records
-  (#133) are left out;
+  (#133) are left out. By author, never by text (#682): a comment of a role app is a
+  ``supervisor comment`` (only with ``[roles.supervisor]`` as a table) or a ``coordinator
+  comment``, and the archive of a day of the daily summary, its ``report`` record written by
+  the dispatcher's identity, is a ``report``: the roles' wake-up skips its own comments and
+  the routine ones;
 - issues and PRs opened, closed or merged;
 - an orphan prerequisite (#671): an issue with ``agent:ready`` blocked ("blocked by", as the
   dispatcher trusts it) by an open issue of the repository that has neither ``agent:ready`` nor
@@ -157,7 +161,8 @@ class Trust:
 
     def __init__(self, users, writers, ready_label, *, supervisor=None, coordinator=None,
                  devloop=(), preflight=False, operator_labels=Labels().operator(),
-                 working_label='agent:working', branch_prefix='agent/issue-'):
+                 working_label='agent:working', branch_prefix='agent/issue-',
+                 supervisor_app=False):
         self.working_label = working_label
         self.branch_prefix = branch_prefix
         self.users = frozenset(users)
@@ -172,6 +177,14 @@ class Trust:
         # The labels that hand an issue or a PR to the operator (#676, ``Labels.operator``): a
         # comment of the operator on one is a reply.
         self.operator_labels = frozenset(operator_labels)
+        # The role apps (#682): the login of each role that signs with an app of its own, the
+        # supervisor's only with ``supervisor_app`` (``[roles.supervisor]`` as a table: without
+        # it the supervisor signs with its agent's app, which the agents' turns share), the
+        # coordinator's with ``[roles.coordinator]``. Their comments are reported as
+        # ``supervisor comment`` and ``coordinator comment``.
+        self.roles = {login: role for role, login in ((SUPERVISOR, supervisor if supervisor_app
+                                                        else None),
+                                                       (COORDINATOR, coordinator)) if login}
 
     @classmethod
     def from_config(cls, cfg):
@@ -207,7 +220,8 @@ class Trust:
         return cls(cfg.trusted_users, writers, cfg.labels.ready, supervisor=supervisor,
                    coordinator=coordinator, devloop=devloop, preflight=bool(cfg.preflight),
                    operator_labels=cfg.labels.operator(), working_label=cfg.labels.working,
-                   branch_prefix=cfg.branch_prefix)
+                   branch_prefix=cfg.branch_prefix,
+                   supervisor_app=cfg.supervisor_actor is not None)
 
     def ready_admitters(self, author):
         """The logins whose ``agent:ready`` admits an issue opened by ``author``, as the
@@ -880,6 +894,17 @@ class Watcher:
                 who = 'ci' if review['source'] == 'ci' else actor
                 return (f'{kind} #{number} review {who} {review["verdict"]} round '
                         f'{review["round"]} @{review["head_sha"][:7]}')
+        text = clean(first_line(body), TEXT_LEN)
+        # The archive of a day of the daily summary (#682, ``devloop report``): its ``report``
+        # record, only from the dispatcher's identity, as ``devloop report`` reads it. Routine:
+        # the roles' wake-up skips it. Anyone else's copy of it is a comment like the others.
+        report = read_marker(body, 'report')
+        if (report is not None and report['event'] == 'archive'
+                and self.trust.wrote(login, DISPATCHER)):
+            return f'{kind} #{number} report by {login}: {text}'
+        role = self.trust.roles.get(login)
+        if role:
+            return f'{kind} #{number} {role} comment by {login}: {text}'
         operator = login in self.trust.users and not body.lstrip().startswith('> [!NOTE]')
         what = 'operator comment' if operator else 'comment'
         # A reply of the operator (#676): a ``/devloop`` command, read as the dispatcher reads
@@ -887,7 +912,7 @@ class Watcher:
         if operator and (command_line(body).split()[:1] == ['/devloop']
                          or self.trust.operator_labels & set(labels())):
             what = 'operator reply'
-        return f'{kind} #{number} {what} by {login}: {clean(first_line(body), TEXT_LEN)}'
+        return f'{kind} #{number} {what} by {login}: {text}'
 
 
 def parse_exec(command):
