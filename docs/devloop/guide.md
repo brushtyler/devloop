@@ -722,7 +722,9 @@ what an authorization is worth do not change. Without `[roles.coordinator]` noth
 The operator's strategic direction of a project (#604,
 [ADR 0002, second precisazione of 2026-11-23, point 7](../adr/0002-ruoli-e-responsabilita.md#seconda-precisazione-del-2026-11-23-modello-operativo-dei-ruoli-597))
 lives in an issue dedicated to it, named by `[direction] issue` in the
-[local overlay](#local-config-as-an-overlay), validated as `[report] issue`. The direction is a
+[local overlay](#local-config-as-an-overlay), validated as `[report] issue`; like it, the issue
+may stay closed, with the label `tracking:attiva`, and must not be locked
+([Tracking issues in use](#tracking-issues-in-use)). The direction is a
 comment of the operator on that issue whose first line is `## Direzione`:
 
 ```markdown
@@ -2596,7 +2598,7 @@ on the host. Telegram takes the details of the host, never a secret nor a vulner
 # command (the launcher, scripts/devloop-pinned, passes them itself):
 devloop="python3 -m devloop --project-config .devloop/project.toml --local-config .devloop/config.local.toml"
 $devloop setup            # create the agent:* labels, the priority:* labels and the review level labels (reviews:0 only when level 0 is on)
-$devloop status           # running action, devloop PRs (with rounds counted on max_review_rounds, merge state and conflicts), ready issues in start order with their priority, planned actions; with [budget] on, the budget of the stories in progress; a pinned copy behind origin/main in the files of the installation; the operator's direction in force; the channel of the notices and operator_mentions
+$devloop status           # running action, devloop PRs (with rounds counted on max_review_rounds, merge state and conflicts), ready issues in start order with their priority, planned actions; with [budget] on, the budget of the stories in progress; a pinned copy behind origin/main in the files of the installation; the operator's direction in force; the channel of the notices and operator_mentions; the label tracking:attiva of the tracking issues in use (see Tracking issues in use)
 $devloop apps             # check the GitHub App of each actor, on the project's repo and with its key_dir
 $devloop tick --dry-run   # print the ready issues in start order and the plan, change nothing (no lock: it runs beside a dispatcher)
 $devloop tick             # run one round
@@ -2919,7 +2921,9 @@ loop waits 1 minute, after the second failure in a row 5 minutes, and the third 
 stops the loop at once (the 30 minutes that would follow it are never waited), with an alert:
 
 - with `[run].alert_issue` (an issue number, unset by default: the operator chooses it in the
-  [local overlay](#local-config-as-an-overlay)), a comment of the dispatcher on that issue, with
+  [local overlay](#local-config-as-an-overlay); it may stay closed, with the label
+  `tracking:attiva`, and must not be locked: [Tracking issues in use](#tracking-issues-in-use)),
+  a comment of the dispatcher on that issue, with
   the attribution header and the class of each error (`network`, `authentication`, … as in
   `devloop watch`, or the name of the error's type), never its message, paths or tokens. One
   attempt only: if it fails, the log says so, with the class of that error;
@@ -3148,7 +3152,9 @@ change, until none of its turns is open: the outcome and the duration of that tu
 archive of the day it started. `--publish --day <past day>` writes or updates only the archive of that day and the
 index, and keeps today's summary as it is; a future day is refused. Without `[report] issue`,
 `--publish` stops with an error that says so, and nothing is read or written. Any error of a
-`devloop report` exits with a non-zero code and its message.
+`devloop report` exits with a non-zero code and its message. The issue may stay closed, with the
+label `tracking:attiva`, and must not be locked
+([Tracking issues in use](#tracking-issues-in-use)).
 
 **In `devloop run`.** With `[report] issue`, the [continuous loop](#continuous-loop) publishes
 the summary at the end of a tick, at most every `[report] interval` minutes (default 15): the
@@ -3157,6 +3163,35 @@ first time at once, then no sooner than the interval since the last attempt, res
 tried again at the next interval; it does not count as a failed tick. Without `[report] issue`
 the loop publishes nothing. A manual `--publish` always publishes, even while the loop runs:
 the two never publish at once (`state_dir/report.lock`).
+
+### Tracking issues in use
+
+The issues of `[report] issue`, `[run].alert_issue` and `[direction] issue`, in every project
+devloop serves, are tracking issues still in use (#690). The operator may close them, so that the
+open issues, and their count, show only the work to do:
+
+- **They may stay closed.** devloop uses them by number: the dispatcher rewrites the body of the
+  summary and comments on it, reads the `/devloop capacity` commands there, comments the alerts,
+  reads the comments of the direction, and `devloop watch` sees the comments of closed issues too.
+  None of these checks that the issue is open, and GitHub allows comments and edits of the body
+  on a closed issue that is not locked. **They must not be locked** (lock).
+- **They carry the label `tracking:attiva`**, which tells them from the tracking issues that are
+  done and finds them with the filter `is:issue label:tracking:attiva`. The label `tracking`
+  stays on every tracking issue, done or in use.
+
+The labels are the operator's: devloop and the roles never add nor remove them. `devloop status`
+only warns, with a line `tracking: …` that does not change its outcome:
+
+- an issue of one of the three keys without `tracking:attiva` (`tracking: issue #N ([report]
+  issue) has no label tracking:attiva: …`, an issue named by more keys once, with all of them);
+- `tracking:attiva` on an issue or PR that none of the three keys names, for example after a
+  change of `[report] issue`: the operator moves the label, or removes it if the issue is done;
+- with one of the keys set and no `tracking:attiva` label in the repository, a single line that
+  says so and how to create it (`gh label create tracking:attiva -R <owner>/<repo>`), with the
+  issues to put it on;
+- a failed read of GitHub, a line of its own.
+
+`ops/host/check-host.sh` does not check it: in read only it uses no app.
 
 ### Stalled agents
 

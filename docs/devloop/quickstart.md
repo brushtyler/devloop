@@ -516,6 +516,12 @@ devloop works on the issues of `acme/widget` that a user of `trusted_users` labe
   author, its date and its link. A new direction is a new comment, complete: it replaces the one
   before ([Project direction](guide.md#project-direction)). Without it, the priorities are those
   of the operator's labels.
+- **The tracking issues in use** (#690), those of `[direction] issue`, `[report] issue` and
+  `[run] alert_issue`, may stay closed, since devloop uses them by number, but must not be
+  locked. Give them the label `tracking:attiva` (create it once, with
+  `gh label create tracking:attiva -R acme/widget`): `devloop status` warns when one of them
+  lacks it, or when it is left on an issue no longer in the configuration
+  ([Tracking issues in use](guide.md#tracking-issues-in-use)).
 - **A change of the project file or of the overlay** is read again before each tick; most keys
   need a restart ([Changes while the loop runs](guide.md#changes-while-the-loop-runs)).
 - **Updating a CLI** is done by hand with the loop stopped ([Agent CLIs](guide.md#agent-clis)).

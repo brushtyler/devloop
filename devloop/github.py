@@ -308,6 +308,14 @@ class GitHub:
         return self._json('api', f'repos/{self.repo}/issues/{int(number)}',
                           '--jq', '[.labels[].name]') or []
 
+    def labelled_numbers(self, label):
+        """The numbers of the issues and PRs with ``label``, open or closed, read with REST page
+        by page (#690): ``devloop status`` checks with it the label of the tracking issues in
+        use, which may stay closed."""
+        return self._json_lines('api', '--paginate',
+                                f'repos/{self.repo}/issues?labels={quote(label, safe="")}'
+                                '&state=all&per_page=100', '--jq', '.[].number')
+
     def comments_since(self, since):
         """Conversation comments of every issue and PR created or edited at ``since`` (ISO 8601,
         UTC) or later, as ``{id, login, number, body, pull_request}``, ``pull_request`` True

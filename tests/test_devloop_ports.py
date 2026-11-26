@@ -95,7 +95,7 @@ class PortDeclarationTests(unittest.TestCase):
         self.assertEqual(public_methods(GitHub) - declared,
                          {'last_labeler', 'open_issues', 'issue_state',
                           'issue_author', 'issue_labels', 'dated_comments', 'search_prs', 'edit_issue_body',
-                          'workflow_runs'})
+                          'workflow_runs', 'labelled_numbers'})
 
     def test_the_dispatcher_depends_on_the_ports(self):
         from devloop import dispatcher, ledger

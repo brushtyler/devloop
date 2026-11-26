@@ -666,6 +666,7 @@ class BehindTests(GitCase):
         with mock.patch.object(cli, 'build', return_value=(CFG, self.state, d)), \
                 mock.patch.object(cli, 'log', lines.append), \
                 mock.patch.object(cli, 'label_transition', return_value=None), \
+                mock.patch.object(cli, 'tracking_lines', return_value=[]), \
                 mock.patch.object(pin, 'INSTALL_ROOT', copy):
             cli.main(['status'])
         self.assertTrue(any(line.startswith(f'pinned copy: {copy.name} ({self.first[:12]}) '
@@ -686,6 +687,7 @@ class BehindTests(GitCase):
         with mock.patch.object(cli, 'build', return_value=(CFG, self.state, d)), \
                 mock.patch.object(cli, 'log', lines.append), \
                 mock.patch.object(cli, 'label_transition', return_value=None), \
+                mock.patch.object(cli, 'tracking_lines', return_value=[]), \
                 mock.patch.object(pin, 'INSTALL_ROOT', copy):
             cli.main(['status'])
         failed = [line for line in lines if line.startswith('auto-pin failed at ')]
@@ -701,6 +703,7 @@ class BehindTests(GitCase):
         with mock.patch.object(cli, 'build', return_value=(CFG, self.state, d)), \
                 mock.patch.object(cli, 'log', lines.append), \
                 mock.patch.object(cli, 'label_transition', return_value=None), \
+                mock.patch.object(cli, 'tracking_lines', return_value=[]), \
                 mock.patch.object(pin, 'INSTALL_ROOT', copy):
             cli.main(['status'])
         self.assertFalse([line for line in lines if line.startswith('auto-pin failed')], lines)

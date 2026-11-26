@@ -865,6 +865,47 @@ def direction_line(cfg, gh):
     return found.header() if found else direction.missing(cfg)
 
 
+TRACKING_ACTIVE = 'tracking:attiva'
+
+
+def tracking_issues(cfg):
+    """The tracking issues the configuration names (#690), ``{number: [keys]}`` in the order of
+    the keys: an issue named by more keys (the diary that is also the issue of the alerts) once."""
+    found = {}
+    for key, number in (('[report] issue', cfg.report.issue),
+                        ('[run].alert_issue', cfg.run.alert_issue),
+                        ('[direction] issue', cfg.direction.issue)):
+        if number:
+            found.setdefault(number, []).append(key)
+    return found
+
+
+def tracking_lines(cfg, gh):
+    """The warnings of ``devloop status`` on the label ``tracking:attiva`` (#690), which finds
+    the tracking issues still in use: they may stay closed, since devloop uses them by number.
+    A line for an issue of the configuration without the label, one for the label on an issue
+    the configuration does not name, one only when the repository has no such label. Read only:
+    the labels are the operator's, and the outcome of ``status`` does not change."""
+    configured = tracking_issues(cfg)
+    try:
+        if TRACKING_ACTIVE not in set(gh.repo_labels()):
+            if not configured:
+                return []
+            numbers = ', '.join(f'#{n}' for n in configured)
+            return [f'tracking: the label {TRACKING_ACTIVE} does not exist in {cfg.repo}: create '
+                    f'it (gh label create {TRACKING_ACTIVE} -R {cfg.repo}) and add it to the '
+                    f'tracking issues in use: {numbers}']
+        labelled = set(gh.labelled_numbers(TRACKING_ACTIVE))
+    except GitHubError as exc:
+        return [f'tracking: the label {TRACKING_ACTIVE} not checked: {exc}']
+    lines = [f'tracking: issue #{n} ({", ".join(keys)}) has no label {TRACKING_ACTIVE}: add it; '
+             'the issue may stay closed' for n, keys in configured.items() if n not in labelled]
+    lines += [f'tracking: #{n} has the label {TRACKING_ACTIVE} and no key of the configuration '
+              '([report] issue, [run].alert_issue, [direction] issue) names it: remove the label '
+              'if it is no longer in use' for n in sorted(labelled - set(configured))]
+    return lines
+
+
 def attention_lines(cfg):
     """The lines of ``devloop status`` on how the operator is warned (#593): the channel of the
     notices, and the logins the requests for a decision mention, which the roles mention too."""
@@ -1195,6 +1236,8 @@ def _command(parser, args, argv, command, timeout):
             log(line)
         if label_transition(dispatcher.gh, cfg.labels) == 'both':
             log(f'labels: {both_labels_warning(cfg.labels)}')
+        for line in tracking_lines(cfg, dispatcher.gh):  # #690: only warnings
+            log(line)
         snap = dispatcher.snapshot()
         for pr in snap.prs:
             log(pr_status_line(pr, cfg, dispatcher.status_reviews(pr)))
