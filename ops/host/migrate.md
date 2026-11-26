@@ -648,7 +648,8 @@ dei ruoli"; [ADR 0002](../../docs/adr/0002-ruoli-e-responsabilita.md), precisazi
   `role-sentinel-<progetto>`), fuori dal gruppo dei ruoli, con le sue ACL: `--x` sulla casella,
   `-wx` su `rest/` (il segnale di risveglio), `r-x` su `to-supervisor/` e `to-coordinator/`, la
   lettura del flusso degli eventi e di `run.log`; le sue unità e la drop-in dell'istanza, il
-  servizio abilitato e avviato;
+  servizio abilitato e avviato. L'overlay non lo legge: l'issue degli allarmi la trova nel file
+  `alert_issue` del flusso, che `devloop run` scrive al suo avvio dopo il pin (passo 3);
 - per il watchdog dei ruoli, `--x` su `rest/`, `rwx` (non più `-wx`) sulle due caselle, per
   l'età dei messaggi di un ruolo a riposo, e la lettura del flusso degli eventi, con la sua unità
   che legge lo `state_dir` (`ProtectHome=read-only`);

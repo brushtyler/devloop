@@ -2416,7 +2416,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         cfg = self._capacity(dry_run)
         actions = plan(snap, cfg)
         if not dry_run and self.rest is not None:
-            actions = self.rest.apply(actions)
+            actions = self.rest.apply(actions, snap)
         prs = {pr.number: pr for pr in snap.prs}
         self.log(f'{"[dry-run] " if dry_run else ""}{pr_counts_line(snap, cfg)}')
         if dry_run:
@@ -2491,9 +2491,10 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         # The supervisor's temporary capacity limits in force (#412), for this plan only.
         cfg = self._capacity()
         actions = plan(snap, cfg, busy, reserved, merging, implement=not pending)
-        # #684: no readiness check nor implementation while a role is at rest.
+        # #684: no readiness check nor implementation while a role is at rest; the queue of the
+        # snapshot tells the roles at rest that there is work.
         if self.rest is not None:
-            actions = self.rest.apply(actions)
+            actions = self.rest.apply(actions, snap)
         # The limit may pass while the snapshot reads GitHub: checked again before any start.
         if pending and self._restart_wait_over(running):
             return []

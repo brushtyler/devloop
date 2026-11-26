@@ -19,11 +19,12 @@
 #   allarme, una volta per ingresso («a riposo dal …, coda vuota»). A riposo un ruolo non batte, e
 #   il watchdog segnala solo le anomalie: la sentinella non attiva; il lock non tenuto (la sessione
 #   è morta); il ruolo svegliato dalla sentinella (rest/<ruolo>.wake) che non toglie il suo riposo
-#   entro REST_WAKE_TIMEOUT secondi dal segnale; il riposo dichiarato con del lavoro: devloop run
-#   che trattiene un controllo di prontezza o un'implementazione (il file hold del flusso degli
-#   eventi) da più di REST_WAKE_TIMEOUT secondi, o un messaggio nella sua casella da più di
-#   REST_MAILBOX_AGE secondi dal suo arrivo. Un ruolo a riposo con un'anomalia si segnala come un
-#   ruolo fermo;
+#   entro REST_WAKE_TIMEOUT secondi dal segnale; il riposo dichiarato con del lavoro: la coda non
+#   vuota (issue in coda, anche bloccate da prerequisiti, o in lavorazione, PR aperte) o un
+#   controllo di prontezza o un'implementazione trattenuti, che devloop run scrive nel file hold
+#   del flusso degli eventi, da più di REST_WAKE_TIMEOUT secondi, o un messaggio nella sua casella
+#   da più di REST_MAILBOX_AGE secondi dal suo arrivo. Un ruolo a riposo con un'anomalia si
+#   segnala come un ruolo fermo;
 # - fermo: nessun riposo valido, e il battito manca o è più vecchio di due periodi (il periodo è
 #   quello scritto nel battito, "<ora> <periodo>").
 # Un ruolo fermo o in anomalia:
@@ -140,7 +141,7 @@ lock_held() {
 # dello stato (per non ripetere gli avvisi: l'inizio del riposo e le anomalie), in BEAT_WHY il
 # perché; torna 1 se ROLE non è a riposo.
 rest() {
-    local role=$1 start wake at why oldest age text anomalies=()
+    local role=$1 start wake at why oldest age text queue='coda vuota' anomalies=()
     start=$(ops_rest_start "$role") || return 1
     if [ -z "$SENTINEL" ]; then
         SENTINEL=$(systemctl is-active "$SENTINEL_UNIT.service" 2>/dev/null)
@@ -159,10 +160,14 @@ rest() {
     else
         lock_held "$role" \
             || anomalies+=("lock:il riposo è dichiarato, ma il lock $REST/$role.lock non è tenuto: la sessione del ruolo non è viva")
-        # Il file del lavoro trattenuto: "<prima volta> <ruoli> <azioni>".
-        if [ -f "$HOLD" ] && read -r at why text <"$HOLD" 2>/dev/null && [[ $at =~ ^[0-9]{1,12}$ ]] \
-            && [ $((NOW - at)) -gt "$REST_WAKE_TIMEOUT" ]; then
-            anomalies+=("lavoro:c'è lavoro: devloop run trattiene ${text:-del lavoro} dalle $(utc "$at"), da più di ${REST_WAKE_TIMEOUT}s (REST_WAKE_TIMEOUT)")
+        # Il file del lavoro con un ruolo a riposo, che devloop run scrive con un controllo di
+        # prontezza o un'implementazione trattenuti o con la coda non vuota (anche solo di issue
+        # bloccate da prerequisiti, che nessuna azione avvia): "<prima volta> <ruoli> <lavoro>".
+        if [ -f "$HOLD" ] && read -r at why text <"$HOLD" 2>/dev/null && [[ $at =~ ^[0-9]{1,12}$ ]]
+        then
+            queue="c'è lavoro dalle $(utc "$at") (${text:-lavoro}), la sentinella lo sveglia"
+            [ $((NOW - at)) -gt "$REST_WAKE_TIMEOUT" ] \
+                && anomalies+=("lavoro:c'è lavoro: ${text:-lavoro} dalle $(utc "$at"), da più di ${REST_WAKE_TIMEOUT}s (REST_WAKE_TIMEOUT)")
         fi
         oldest=$(find "$COORDINATION_DIR/to-$role" -mindepth 1 -maxdepth 1 -type f ! -name '.*' \
                      -printf '%T@\n' 2>/dev/null | sort -n | head -n 1)
@@ -176,7 +181,7 @@ rest() {
     if [ ${#anomalies[@]} -eq 0 ]; then
         BEAT_STATE=riposo
         BEAT_KEY="riposo@$start"
-        BEAT_WHY="a riposo dal $(utc "$start"), coda vuota"
+        BEAT_WHY="a riposo dal $(utc "$start"), $queue"
         return 0
     fi
     BEAT_STATE=anomalia

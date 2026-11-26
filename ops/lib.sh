@@ -73,11 +73,16 @@ COORDINATION_REST=rest
 # setup-coordinator.sh mettono (ensure_events_acl).
 EVENTS_DIR=events
 EVENTS_ALIVE=alive
-# Il lavoro trattenuto (#684), HOLD_FILE di devloop/dispatcher.py: devloop run lo scrive nella
-# directory del flusso mentre non avvia un controllo di prontezza o un'implementazione perché un
-# ruolo è a riposo ("<prima volta> <ruoli> <azioni>"), e lo toglie quando non trattiene più nulla.
-# La sentinella sveglia i ruoli a riposo; il watchdog lo segnala dopo REST_WAKE_TIMEOUT.
+# Il lavoro con un ruolo a riposo (#684), HOLD_FILE di devloop/rest.py: devloop run lo scrive nella
+# directory del flusso mentre un ruolo è a riposo e c'è lavoro, i controlli di prontezza e le
+# implementazioni che non avvia o una coda non vuota ("<prima volta> <ruoli> <lavoro>", con
+# "unknown" al posto dei ruoli se non legge il riposo), e lo toglie quando non c'è più. La
+# sentinella sveglia i ruoli a riposo; il watchdog lo segnala dopo REST_WAKE_TIMEOUT.
 EVENTS_HOLD=hold
+# L'issue degli allarmi del loop (#684, ALERT_ISSUE di devloop/events.py), che devloop run scrive
+# nella directory del flusso al suo avvio: la legge chi legge il flusso ma non l'overlay, la
+# sentinella dei ruoli a riposo (ops_alert_issue).
+EVENTS_ALERT_ISSUE=alert_issue
 
 # Nella home dell'utente degli agent (#438), come CLI_DIRS, CLI_SEALED e CLIS di
 # devloop/agentuser.py: le directory delle CLI, di root, del gruppo dell'utente degli agent e con
@@ -1184,9 +1189,16 @@ ensure_events_acl() {
     done
 }
 
-# ops_alert_issue: l'issue degli allarmi ([run].alert_issue dell'overlay dello state_dir), se si
-# legge; nulla altrimenti.
+# ops_alert_issue: l'issue degli allarmi del loop. Quella che devloop run ha scritto nel flusso
+# degli eventi al suo avvio (EVENTS_ALERT_ISSUE, una riga vuota senza issue), se si legge: la
+# sentinella dei ruoli a riposo non legge l'overlay, che ha i segreti del progetto (#684); se no
+# [run].alert_issue dell'overlay dello state_dir, se si legge; nulla altrimenti.
 ops_alert_issue() {
+    local file=$STATE_PATH/$EVENTS_DIR/$EVENTS_ALERT_ISSUE value
+    if [ -f "$file" ] && [ -r "$file" ] && IFS= read -r value <"$file" 2>/dev/null; then
+        [[ $value =~ ^[1-9][0-9]{0,11}$ ]] && printf '%s\n' "$value"
+        return 0
+    fi
     python3 -I -B - "$STATE_PATH/config.local.toml" 2>/dev/null <<'EOF'
 import sys, tomllib
 with open(sys.argv[1], 'rb') as fh:

@@ -1151,7 +1151,9 @@ riposo sveglia **solo il ruolo interessato**, con gli stessi filtri della sua sv
 riposo: un messaggio nella sua casella; un evento del flusso scritto dopo l'inizio del riposo (ogni
 evento per il supervisore, i suoi per il coordinatore), letto con un cursore della sentinella; per
 il coordinatore, una riga nuova di `run.log` con un errore; per entrambi, il servizio di devloop
-non attivo (a ogni cambio di stato) e il **lavoro trattenuto** da `devloop run` (sotto). Il
+non attivo (a ogni cambio di stato) e il **lavoro** che `devloop run` trova con un ruolo a riposo
+(sotto). L'issue degli allarmi del filtro la legge dal file `alert_issue` che `devloop run` scrive
+nel flusso al suo avvio: la sentinella non legge l'overlay, che ha i segreti del progetto. Il
 **controllo giornaliero**: all'ora fissa UTC `REST_DAILY_CHECK` (default **00:30**, dopo l'ora
 consueta del riepilogo giornaliero, ma indipendente dalla sua pubblicazione) sveglia ogni ruolo il
 cui riposo è cominciato prima: il coordinatore per il controllo dei testi pubblicati e del lavoro
@@ -1172,13 +1174,16 @@ lettura del flusso degli eventi e l'attraversamento della home di devloop e dell
 **Il loop e il riposo.** Con `rest_dir` in `[run]` dell'overlay (il percorso di
 `COORDINATION_DIR/rest`, letto da `DEVLOOP_USER` con l'attraversamento `--x` della casella e di
 `rest/`), `devloop run` resta acceso ma **non avvia un controllo di prontezza né
-un'implementazione mentre un ruolo è a riposo**: trattiene il lavoro, lo scrive nel file `hold`
-del flusso degli eventi (`<prima volta> <ruoli> <azioni>`), su cui la sentinella sveglia i ruoli a
-riposo, e aspetta che lo stato di riposo sia tolto; poi parte subito. Se un ruolo non si sveglia
-entro `rest_wake_timeout` secondi (default **300**) dal primo rilevamento del lavoro, il lavoro
-resta fermo e l'operatore lo sa con `devloop notify`, una volta
-([reference](../docs/devloop/reference.md#the-roles-at-rest)). Senza `rest_dir` il loop non guarda
-il riposo.
+un'implementazione mentre un ruolo è a riposo**: trattiene il lavoro e aspetta che lo stato di
+riposo sia tolto; poi parte subito. Con un ruolo a riposo scrive il lavoro nel file `hold` del
+flusso degli eventi (`<prima volta> <ruoli> <lavoro>`): le azioni trattenute e la coda, anche
+quando nessuna azione può partire (un'issue bloccata da un prerequisito); su quel file la
+sentinella sveglia i ruoli a riposo. Se un ruolo non si sveglia entro `rest_wake_timeout` secondi
+(default **300**) dal primo rilevamento del lavoro, il lavoro resta fermo e l'operatore lo sa con
+`devloop notify`, una volta. Se `devloop run` non legge `rest/` (manca, o manca la sua ACL) non lo
+prende per un riposo assente: trattiene il lavoro, scrive `unknown` al posto dei ruoli e avvisa
+l'operatore, una volta ([reference](../docs/devloop/reference.md#the-roles-at-rest)). Senza
+`rest_dir` il loop non guarda il riposo.
 
 **Il watchdog e il riposo.** Il watchdog vede ogni ruolo in tre stati: **attivo** (battiti
 regolari); **a riposo** (lo stato di riposo, la sentinella attiva, il lock tenuto: una riga
@@ -1186,8 +1191,9 @@ regolari); **a riposo** (lo stato di riposo, la sentinella attiva, il lock tenut
 **fermo** (nessun riposo valido, e il battito manca o è più vecchio di due periodi: l'allarme di
 prima). A riposo segnala solo le **anomalie**, come un ruolo fermo: la sentinella non attiva; il
 lock non tenuto (la sessione è morta); il ruolo svegliato dalla sentinella che non toglie il riposo
-entro `REST_WAKE_TIMEOUT` secondi dal segnale; il riposo dichiarato con del lavoro, cioè il lavoro
-trattenuto da `devloop run` da più di `REST_WAKE_TIMEOUT` secondi, o un messaggio nella sua casella
+entro `REST_WAKE_TIMEOUT` secondi dal segnale; il riposo dichiarato con del lavoro, cioè la coda
+non vuota o il lavoro trattenuto, come li scrive `devloop run` nel file `hold`, da più di
+`REST_WAKE_TIMEOUT` secondi, o un messaggio nella sua casella
 da più di `REST_MAILBOX_AGE` secondi dal suo arrivo (entrambi default **300**, parametri di
 `params.env`). Per questo il watchdog ha anche `--x` su `rest/`, `rwx` (non più `-wx`) sulle due
 caselle (ne legge i nomi e le ore dei messaggi, non il contenuto) e la lettura del flusso degli

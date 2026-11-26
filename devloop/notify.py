@@ -81,6 +81,10 @@ TEXTS = Catalog(
                       'up within {seconds} seconds. No readiness check nor implementation starts '
                       'until they leave their rest: see the sessions of the roles, the sentinel '
                       'and the watchdog of the roles.'),
+        'rest_unreadable': ('`devloop run` cannot read the rest of the roles ([run] rest_dir, '
+                            '{error}): no readiness check nor implementation starts until it '
+                            'can. See the ACL of devloop on the mailbox between the roles '
+                            '(check-host.sh), or remove rest_dir from the overlay.'),
         'test': 'Test of the notices of devloop: the channel works.',
     },
     it={
@@ -99,6 +103,10 @@ TEXTS = Catalog(
                       'svegliati entro {seconds} secondi. Nessun controllo di prontezza né '
                       'implementazione parte finché non escono dal riposo: vedere le sessioni dei '
                       'ruoli, la sentinella e il watchdog dei ruoli.'),
+        'rest_unreadable': ('`devloop run` non legge il riposo dei ruoli ([run] rest_dir, '
+                            '{error}): nessun controllo di prontezza né implementazione parte '
+                            'finché non lo legge. Vedere le ACL di devloop sulla casella fra i '
+                            'ruoli (check-host.sh), o togliere rest_dir dall\'overlay.'),
         'test': 'Prova degli avvisi di devloop: il canale funziona.',
     })
 

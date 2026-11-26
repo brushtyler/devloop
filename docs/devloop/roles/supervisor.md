@@ -230,8 +230,9 @@ states. It only detects: it has no GitHub key and changes nothing.
   its journal, once per rest, never an alarm. At rest it reports only anomalies, as a stopped
   role: the sentinel not active; the lock not held (the session died); a role woken by the
   sentinel that did not resume its heartbeats within `REST_WAKE_TIMEOUT` (300 seconds); a rest
-  declared with work waiting (work held by `devloop run`, or a message in its mailbox for more
-  than `REST_MAILBOX_AGE`, 300 seconds).
+  declared with work waiting (the queue not empty or work held, as `devloop run` writes them, for
+  more than `REST_WAKE_TIMEOUT`, or a message in its mailbox for more than `REST_MAILBOX_AGE`,
+  300 seconds).
 - **Stopped**: no valid rest, and the heartbeat missing or older than two of its periods.
 
 - When the coordinator is stopped, or at rest with an anomaly, it leaves a message in

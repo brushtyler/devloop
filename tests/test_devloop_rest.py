@@ -6,11 +6,12 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from devloop import config, rest, runloop
 from devloop.config import ConfigError, RunPolicy, parse_run
 from devloop.dispatcher import Dispatcher
-from devloop.planning import Action
+from devloop.planning import Action, Snapshot
 from devloop.watch import NOTHING_NEW
 from test_devloop import FakeRunner, FakeWS
 from test_devloop_preflight import PCFG, IssueGH, checked
@@ -75,7 +76,7 @@ class RestHoldTests(RestCase):
         # The file the sentinel wakes the roles on, and the watchdog reads: since when, which
         # roles and what.
         self.assertEqual(self.hold_file.read_text(),
-                         '1000000 coordinator preflight #7, implement #8\n')
+                         '1000000 coordinator held: preflight #7, implement #8\n')
         self.assertEqual(self.hold_file.stat().st_mode & 0o777, 0o640)
         self.assertIn('rest: coordinator at rest: preflight #7, implement #8 held', self.logs[-1])
         # Still held later: the first time stays.
@@ -83,7 +84,7 @@ class RestHoldTests(RestCase):
         self.at_rest('supervisor')
         hold.apply(self.ACTIONS)
         self.assertEqual(self.hold_file.read_text(),
-                         '1000000 supervisor,coordinator preflight #7, implement #8\n')
+                         '1000000 supervisor,coordinator held: preflight #7, implement #8\n')
         # The roles leave their rest: the next tick starts the work, and the file goes.
         for role in ('supervisor', 'coordinator'):
             (self.rest_dir / role).unlink()
@@ -141,14 +142,80 @@ class RestHoldTests(RestCase):
         self.assertEqual(len(self.notifier.sent), 2)
 
     @unittest.skipIf(os.geteuid() == 0, 'root reads any directory')
-    def test_a_rest_directory_it_cannot_read_holds_nothing(self):
+    def test_a_rest_directory_it_cannot_read_holds_the_work_and_tells_the_operator(self):
+        # The rest cannot be verified: not the same as no role at rest.
         hold = self.hold()
         self.at_rest('supervisor')
         self.rest_dir.chmod(0)
         self.addCleanup(self.rest_dir.chmod, 0o755)
-        self.assertEqual(hold.apply(self.ACTIONS), self.ACTIONS)
-        hold.apply(self.ACTIONS)
+        kept = hold.apply(self.ACTIONS)
+        self.assertEqual([a.kind for a in kept], ['merge', 'review'])
+        self.assertTrue(hold.holding())
+        self.assertEqual(self.hold_file.read_text(),
+                         '1000000 unknown held: preflight #7, implement #8\n')
+        self.assertEqual(len(self.notifier.sent), 1)
+        key, text = self.notifier.sent[0]
+        self.assertEqual(key, 'rest-unreadable')
+        self.assertIn('PermissionError', text)
+        # Once: the next ticks and waits hold on, without a second notice nor the one of the
+        # roles that do not wake up.
+        self.clock.now += 600
+        self.assertFalse(hold.poll())
+        self.assertEqual([a.kind for a in hold.apply(self.ACTIONS)], ['merge', 'review'])
+        self.assertEqual(len(self.notifier.sent), 1)
         self.assertEqual(len([line for line in self.logs if 'cannot be read' in line]), 1)
+        # Readable again, with nobody at rest: the work starts.
+        self.rest_dir.chmod(0o755)
+        (self.rest_dir / 'supervisor').unlink()
+        self.assertTrue(hold.poll())
+        self.assertEqual(hold.apply(self.ACTIONS), self.ACTIONS)
+        self.assertFalse(self.hold_file.exists())
+        self.assertIn('can be read again', ' '.join(self.logs))
+
+    def test_a_missing_rest_directory_holds_the_work_too(self):
+        hold = self.hold()
+        shutil.rmtree(self.rest_dir)
+        self.assertEqual([a.kind for a in hold.apply(self.ACTIONS)], ['merge', 'review'])
+        self.assertEqual(self.notifier.sent[0][0], 'rest-unreadable')
+        self.assertIn('FileNotFoundError', self.notifier.sent[0][1])
+
+    def test_a_queue_without_actions_is_work_for_the_roles_at_rest(self):
+        # An issue in the queue blocked by a prerequisite: the plan has no action for it, but a
+        # role does not rest with it, and the watchdog reads it from the file.
+        snap = Snapshot(prs=[SimpleNamespace(number=9)],
+                        ready_issues=[{'number': 7, 'blocked_by': ['#8']}], working_issues=[5])
+        self.assertEqual(rest.queue(snap), ['issue #5', 'issue #7', 'PR #9'])
+        self.assertEqual(rest.queue(None), [])
+        hold = self.hold()
+        # Nobody at rest: nothing written.
+        self.assertEqual(hold.apply([], snap), [])
+        self.assertFalse(self.hold_file.exists())
+        self.at_rest('supervisor')
+        self.assertEqual(hold.apply([], snap), [])
+        self.assertEqual(self.hold_file.read_text(),
+                         '1000000 supervisor queue: issue #5, issue #7, PR #9\n')
+        # Nothing held: the waits of the loop do not poll, and no notice of the hold.
+        self.assertFalse(hold.holding())
+        self.clock.now += 600
+        hold.apply([], snap)
+        self.assertEqual(self.notifier.sent, [])
+        # With an action held too, both.
+        hold.apply([Action('implement', 7)], snap)
+        self.assertEqual(self.hold_file.read_text(),
+                         '1000000 supervisor held: implement #7; queue: issue #5, issue #7, '
+                         'PR #9\n')
+        # The queue emptied: the file goes.
+        empty = Snapshot(prs=[], ready_issues=[], working_issues=[])
+        hold.apply([], empty)
+        self.assertFalse(self.hold_file.exists())
+
+    def test_a_long_queue_is_cut(self):
+        snap = Snapshot(prs=[], ready_issues=[{'number': n} for n in range(1, 14)],
+                        working_issues=[])
+        hold = self.hold()
+        self.at_rest('coordinator')
+        hold.apply([], snap)
+        self.assertTrue(self.hold_file.read_text().endswith('issue #10 and 3 more\n'))
 
     def test_from_config_only_with_rest_dir(self):
         cfg = dataclasses.replace(PCFG, run=RunPolicy())
@@ -186,7 +253,9 @@ class DispatcherRestTests(RestCase):
         self.at_rest('coordinator')
         self.assertEqual(d.tick(), [])
         self.assertEqual(runner.calls, [])
-        self.assertEqual(self.hold_file.read_text(), '1000000 coordinator preflight #7\n')
+        # The queue of the snapshot too: issue #7 is ready.
+        self.assertEqual(self.hold_file.read_text(),
+                         '1000000 coordinator held: preflight #7; queue: issue #7\n')
         # A dry run shows the plan as it is, and holds nothing.
         self.assertEqual([a.kind for a in d.tick(dry_run=True)], ['preflight'])
         # Out of the rest, the check starts.

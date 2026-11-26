@@ -18,6 +18,7 @@ import shlex
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import textwrap
 import time
@@ -7507,11 +7508,76 @@ class RoleSentinelTests(WakeUpCase):
 
     def test_the_work_held_by_devloop_run_wakes_every_role_at_rest(self):
         self.at_rest('coordinator')
-        (self.state / 'events/hold').write_text('1764115200 coordinator implement #12\n')
+        (self.state / 'events/hold').write_text(
+            '1764115200 coordinator held: implement #12; queue: issue #12\n')
         self.sentinel()
         self.assertEqual(self.woken(), {
-            'coordinator': 'lavoro: devloop run aspetta che i ruoli escano dal riposo prima di '
-                           'avviarlo (1764115200 coordinator implement #12)'})
+            'coordinator': "lavoro: c'è lavoro con un ruolo a riposo, e devloop run non avvia un "
+                           "controllo di prontezza né un'implementazione finché i ruoli non "
+                           'escono dal riposo (1764115200 coordinator held: implement #12; queue: '
+                           'issue #12)'})
+
+    @unittest.skipIf(os.geteuid() == 0, 'root reads any file')
+    def test_the_issue_of_the_alerts_comes_from_the_stream_not_from_the_overlay(self):
+        # #684: the overlay holds the secrets of the project, and the sentinel cannot read it;
+        # devloop run writes the issue of the alerts in the stream at its start.
+        overlay = self.state / 'config.local.toml'
+        overlay.chmod(0)
+        self.addCleanup(overlay.chmod, 0o600)
+        self.stream.alert_issue(76)
+        self.at_rest('supervisor')
+        self.at_rest('coordinator')
+        # The diary of the coordinator on the issue of the alerts wakes nobody.
+        self.publish(['issue #76 coordinator comment by brushtyler-devloop-coordinator[bot]: x'])
+        done = self.sentinel()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.woken(), {})
+        # A comment of the dispatcher on it wakes both roles.
+        self.publish(['issue #76 comment by brushtyler-devloop-dispatcher[bot]: ALERT'])
+        self.sentinel()
+        self.assertEqual(set(self.woken()), {'supervisor', 'coordinator'})
+        self.assertIn('issue #76 comment by', self.woken()['coordinator'])
+
+    def test_a_rotation_during_the_read_does_not_skip_events(self):
+        # #684: the reader of the sentinel, run alone, with the current segment rotated between
+        # its look at the names and its open of events.log: the events of the previous segment
+        # still come, and the cursor never passes them.
+        script = (OPS / 'host/role-sentinel.sh').read_text()
+        reader = script.split('read_events() {\n    python3 -I -B - "$STREAM" '
+                              '"$STATE/stream.cursor" <<\'EOF\'\n')[1].split('\nEOF\n}')[0]
+        code = self.tmp / 'reader.py'
+        code.write_text(reader + '\n')
+        cursor = self.tmp / 'reader.cursor'
+        wrapper = textwrap.dedent('''\
+            import builtins, os, sys
+            code, directory, cursor, rotate = sys.argv[1:5]
+            done = [rotate != 'rotate']
+            def hooked(path, *args, **kwargs):
+                name = os.path.join(directory, 'events.log')
+                if not done[0] and str(path) == name:
+                    done[0] = True
+                    os.replace(name, name + '.1')
+                    with builtins.open(name, 'w') as fh:
+                        fh.write('3 2026-11-26T12:35:00Z PR #9 CI pass @abc1234\\n')
+                return builtins.open(path, *args, **kwargs)
+            sys.argv = ['-', directory, cursor]
+            exec(compile(builtins.open(code).read(), 'reader', 'exec'),
+                 {'__name__': '__main__', 'open': hooked})
+            ''')
+
+        def read(rotate=''):
+            done = subprocess.run([sys.executable, '-I', '-c', wrapper, str(code),
+                                   str(self.stream.dir), str(cursor), rotate],
+                                  capture_output=True, text=True, timeout=60)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            return [line.split(' ', 2)[2] for line in done.stdout.splitlines()]
+        self.publish(['issue #1 labels +agent:ready'])
+        self.assertEqual(read(), [])  # the base, at the end
+        self.publish(['issue #7 labels +agent:needs-operator'])
+        self.assertEqual(read('rotate'), ['issue #7 labels +agent:needs-operator',
+                                          'PR #9 CI pass @abc1234'])
+        self.assertEqual(read(), [])
+        self.assertEqual(cursor.read_text().split()[1], '3')
 
     def test_the_daily_check_wakes_both_roles_at_a_fixed_hour(self):
         # The hour of the daily check two minutes ago: a rest begun before it ends, one begun
@@ -7798,7 +7864,10 @@ class RoleWatchdogTests(OpsTestCase):
             'sentinella': ('la sentinella devloop-role-sentinel@sentinella non è attiva (failed)'),
             'lock': 'il lock',
             'svegliato': "la sentinella l'ha svegliato alle",
-            'lavoro': "c'è lavoro: devloop run trattiene implement #12 dalle",
+            'lavoro': "c'è lavoro: held: implement #12; queue: issue #12 dalle",
+            # An issue in the queue that no action starts (blocked by a prerequisite): devloop
+            # run holds nothing, but writes the queue.
+            'coda': "c'è lavoro: queue: issue #7 dalle",
             'casella': 'un messaggio aspetta in to-supervisor/ da 6 minuti',
         }
         for name, text in cases.items():
@@ -7812,7 +7881,10 @@ class RoleWatchdogTests(OpsTestCase):
                         f'{now - 400} casella: 1 messaggi in {box}/to-supervisor\n')
                 elif name == 'lavoro':
                     (self.tmp / f'state-{name}/events/hold').write_text(
-                        f'{now - 400} supervisor implement #12\n')
+                        f'{now - 400} supervisor held: implement #12; queue: issue #12\n')
+                elif name == 'coda':
+                    (self.tmp / f'state-{name}/events/hold').write_text(
+                        f'{now - 400} supervisor queue: issue #7\n')
                 elif name == 'casella':
                     message = box / 'to-supervisor/20261126T101500Z-a1b2c3.txt'
                     message.write_text('x\n')
@@ -7842,6 +7914,21 @@ class RoleWatchdogTests(OpsTestCase):
         (self.tmp / 'state-alpha/events/hold').write_text(f'{now - 30} supervisor preflight #3\n')
         done = self.watchdog('alpha')
         self.assertIn('il supervisore è a riposo', done.stdout)
+        self.assertEqual(self.messages('alpha', 'to-coordinator'), [])
+
+    def test_a_rest_with_work_found_recently_is_not_told_as_an_empty_queue(self):
+        # #684: devloop run found the queue not empty 30 seconds ago; the sentinel wakes the role.
+        self.sentinel_state('active')
+        self.project('alpha')
+        self.beat('alpha', 'coordinator', 60)
+        self.at_rest('alpha', 'supervisor')
+        now = int(time.time())
+        (self.tmp / 'state-alpha/events/hold').write_text(f'{now - 30} supervisor queue: issue #7\n')
+        done = self.watchdog('alpha')
+        self.assertIn("il supervisore è a riposo dal", done.stdout)
+        self.assertIn("c'è lavoro dalle", done.stdout)
+        self.assertIn('(queue: issue #7), la sentinella lo sveglia', done.stdout)
+        self.assertNotIn('coda vuota', done.stdout)
         self.assertEqual(self.messages('alpha', 'to-coordinator'), [])
 
     def test_the_coordinator_at_rest_with_an_anomaly_alerts_the_operator(self):

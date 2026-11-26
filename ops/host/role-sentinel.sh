@@ -10,14 +10,16 @@
 # - un messaggio nella sua casella (to-supervisor/ o to-coordinator/), senza leggerlo;
 # - un evento del flusso degli eventi del progetto (#683) scritto dopo l'inizio del riposo, con il
 #   filtro della sveglia del ruolo (ops_role_event di lib.sh): ogni evento per il supervisore, i
-#   suoi per il coordinatore. La sentinella ha un cursore suo; il ruolo, svegliato, legge poi gli
-#   eventi dal flusso con il suo cursore (role-wait.sh);
+#   suoi per il coordinatore. L'issue degli allarmi del filtro è quella che devloop run scrive nel
+#   flusso (ops_alert_issue): la sentinella non legge l'overlay. La sentinella ha un cursore suo; il
+#   ruolo, svegliato, legge poi gli eventi dal flusso con il suo cursore (role-wait.sh);
 # - solo per il coordinatore, una riga nuova di run.log con un errore (ops_log_error: un
 #   Traceback, un allarme, un 401, il rifiuto dell'avvio), come la sua sveglia;
 # - il servizio di devloop non attivo, a ogni cambio di stato, per entrambi i ruoli, come la sveglia;
-# - il lavoro che devloop run trattiene perché un ruolo è a riposo (#684: il file hold nella
-#   directory del flusso): sveglia ogni ruolo a riposo, e devloop run aspetta che lo stato di
-#   riposo sia tolto prima di avviare un controllo di prontezza o un'implementazione;
+# - il lavoro con un ruolo a riposo (#684: il file hold nella directory del flusso, che devloop
+#   run scrive con i controlli di prontezza e le implementazioni che trattiene o con una coda non
+#   vuota): sveglia ogni ruolo a riposo, e devloop run aspetta che lo stato di riposo sia tolto
+#   prima di avviare un controllo di prontezza o un'implementazione;
 # - il controllo giornaliero (scelta R2), all'ora fissa UTC REST_DAILY_CHECK (default 00:30, dopo il
 #   riepilogo giornaliero, ma senza dipenderne): sveglia ogni ruolo il cui riposo è cominciato prima
 #   dell'ultima occorrenza di quell'ora, il coordinatore per il controllo dei testi pubblicati e del
@@ -86,7 +88,9 @@ REST_DIR=$COORDINATION_DIR/$COORDINATION_REST
 STREAM=$STATE_PATH/$EVENTS_DIR
 HOLD=$STREAM/$EVENTS_HOLD
 LOG=$STATE_PATH/run.log
-ALERT_ISSUE=$(ops_alert_issue)
+# L'issue degli allarmi, riletta a ogni giro (ops_alert_issue): quella che devloop run ha scritto nel
+# flusso al suo avvio, senza leggere l'overlay.
+ALERT_ISSUE=''
 
 # notify ARGOMENTI: systemd-notify, quando systemd lo aspetta (NOTIFY_SOCKET, Type=notify).
 notify() {
@@ -94,72 +98,150 @@ notify() {
     systemd-notify "$@" 2>/dev/null
 }
 
-# Gli eventi del flusso dopo il cursore della sentinella (STATE/stream.cursor, "<id> <inode>
-# <posizione>"), una riga ciascuno: "<ora in secondi> <HH:MM> <riga>". Il segmento corrente si
-# legge da dove era rimasto; dopo una rotazione, il resto del segmento precedente e poi il
-# corrente. Senza cursore, o con il flusso sostituito, la base alla fine, senza eventi. Solo righe
-# intere. Esce con 2 se il flusso non si legge.
+# Gli eventi del flusso dopo il cursore della sentinella (STATE/stream.cursor, "<id> <numero>
+# <inode> <posizione>": l'identità del flusso, l'ultimo evento letto, e dove riprendere nel
+# segmento corrente se non è ruotato), una riga ciascuno: "<ora in secondi> <HH:MM> <riga>". Come
+# la sveglia dei ruoli (role-wait.sh, #689): il segmento corrente si legge da dove era rimasto
+# solo se il file aperto è ancora quello del cursore e gli eventi continuano senza salti;
+# altrimenti i due segmenti si leggono insieme e si controllano (gli inode dei file aperti contro
+# quelli dei loro nomi, i numeri senza salti), e una rotazione che attraversa la lettura la fa
+# ritentare. Il cursore non avanza mai oltre eventi ancora conservati che non ha dato; senza una
+# lettura coerente non si tocca, e il giro dopo rilegge. Senza cursore la base alla fine, senza
+# eventi; con il flusso sostituito, gli eventi conservati (il filtro sull'inizio del riposo scarta
+# i vecchi). Solo righe intere. Esce con 2 se il flusso non si legge.
 read_events() {
     python3 -I -B - "$STREAM" "$STATE/stream.cursor" <<'EOF'
-import calendar, os, re, sys, time
+import calendar, contextlib, os, re, sys, time
 directory, cursor_path = sys.argv[1], sys.argv[2]
-LINE = re.compile(rb'\d+ (\d{4}-\d\d-\d\dT(\d\d:\d\d):\d\dZ) (.*)')
+LINE = re.compile(rb'(\d+) (\d{4}-\d\d-\d\dT(\d\d:\d\d):\d\dZ) (.*)')
+# Le letture dei due segmenti tentate in un giro, se una rotazione le attraversa.
+ATTEMPTS = 5
+
+def opened(name):
+    """Il segmento NAME aperto in lettura, o None se manca."""
+    try:
+        return open(os.path.join(directory, name), 'rb')
+    except FileNotFoundError:
+        return None
+
+def segment(fh, start=0):
+    """(inode, posizione dopo l'ultima riga intera, righe intere) del segmento aperto FH dal
+    byte START; (0, 0, b'') se manca."""
+    if fh is None:
+        return 0, 0, b''
+    inode = os.fstat(fh.fileno()).st_ino
+    fh.seek(start)
+    data = fh.read()
+    end = data.rfind(b'\n') + 1
+    return inode, start + end, data[:end]
+
+def path_inode(name):
+    try:
+        return os.stat(os.path.join(directory, name)).st_ino
+    except FileNotFoundError:
+        return 0
+
+def parse(data):
+    found = []
+    for raw in data.split(b'\n')[:-1]:
+        match = LINE.fullmatch(raw)
+        if match:
+            found.append((int(match.group(1)), match.group(2).decode(), match.group(3).decode(),
+                          match.group(4).decode('utf-8', 'replace')))
+    return found
+
+def gapless(seq, found):
+    """Gli eventi FOUND continuano SEQ senza salti."""
+    for event in found:
+        if event[0] != seq + 1:
+            return False
+        seq = event[0]
+    return True
+
+def read_kept():
+    """Gli eventi conservati, il segmento precedente poi il corrente, letti insieme: (eventi,
+    inode e posizione del corrente), o None se una rotazione ha attraversato la lettura (i
+    segmenti aperti non sono più quelli dei loro nomi). I due restano aperti fino al controllo,
+    così nessuno dei loro inode si riusa nel frattempo."""
+    with contextlib.ExitStack() as stack:
+        handles = [opened(name) for name in ('events.log.1', 'events.log')]
+        for fh in handles:
+            if fh is not None:
+                stack.enter_context(fh)
+        previous, current = (segment(fh) for fh in handles)
+        if (path_inode('events.log.1') != previous[0]
+                or path_inode('events.log') != current[0]):
+            return None
+    return parse(previous[2]) + parse(current[2]), current[0], current[1]
+
+def read_coherent():
+    """read_kept, ritentata anche quando gli eventi letti hanno un salto fra loro (devloop run
+    non ne scrive: è una rotazione che la lettura non ha visto). Senza una lettura coerente esce
+    senza toccare il cursore."""
+    for _ in range(ATTEMPTS):
+        read = read_kept()
+        if read is not None and (not read[0] or gapless(read[0][0][0] - 1, read[0])):
+            return read
+    sys.exit(0)
+
 try:
     with open(os.path.join(directory, 'id'), encoding='utf-8') as fh:
         identity = fh.read().strip()
 except OSError:
     sys.exit(2)
+if not re.fullmatch(r'[0-9a-f]{1,64}', identity):
+    sys.exit(2)
 cursor = None
 try:
     with open(cursor_path, encoding='utf-8') as fh:
         parts = fh.read().split()
-    if len(parts) == 3 and parts[1].isdigit() and parts[2].isdigit():
-        cursor = (parts[0], int(parts[1]), int(parts[2]))
+    if len(parts) == 4 and all(part.isdigit() for part in parts[1:]):
+        cursor = (parts[0], int(parts[1]), int(parts[2]), int(parts[3]))
 except OSError:
     pass
 
-def read(name, start):
-    """(inode, posizione dopo l'ultima riga intera, righe intere) del segmento NAME da START."""
-    try:
-        fh = open(os.path.join(directory, name), 'rb')
-    except FileNotFoundError:
-        return 0, 0, b''
-    with fh:
-        inode, size = os.fstat(fh.fileno()).st_ino, os.fstat(fh.fileno()).st_size
-        if start > size:
-            start = 0
-        fh.seek(start)
-        data = fh.read()
-    end = data.rfind(b'\n') + 1
-    return inode, start + end, data[:end]
+def save(seq, inode, offset):
+    tmp = cursor_path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as fh:
+        fh.write(f'{identity} {seq} {inode} {offset}\n')
+    os.replace(tmp, cursor_path)
 
-data = b''
 try:
-    current = os.stat(os.path.join(directory, 'events.log')).st_ino
-except FileNotFoundError:
-    current = 0
-try:
-    previous = os.stat(os.path.join(directory, 'events.log.1')).st_ino
-except FileNotFoundError:
-    previous = 0
-if cursor is None or cursor[0] != identity:
-    inode, offset, _ = read('events.log', 0)
-elif cursor[1] == current:
-    inode, offset, data = read('events.log', cursor[2])
-else:
-    if cursor[1] == previous:
-        data = read('events.log.1', cursor[2])[2]
-    inode, offset, more = read('events.log', 0)
-    data += more
-tmp = cursor_path + '.tmp'
-with open(tmp, 'w', encoding='utf-8') as fh:
-    fh.write(f'{identity} {inode} {offset}\n')
-os.replace(tmp, cursor_path)
-for raw in data.split(b'\n')[:-1]:
-    match = LINE.fullmatch(raw)
-    if match:
-        at = calendar.timegm(time.strptime(match.group(1).decode(), '%Y-%m-%dT%H:%M:%SZ'))
-        print(at, match.group(2).decode(), match.group(3).decode('utf-8', 'replace'))
+    if cursor is None:
+        kept, inode, offset = read_coherent()
+        save(kept[-1][0] if kept else 0, inode, offset)
+        sys.exit(0)
+    old_identity, seq, old_inode, old_offset = cursor
+    found = None
+    if old_identity == identity and old_inode:
+        # Il segmento corrente non è ruotato dall'ultima lettura: si legge da dove era rimasta,
+        # se il file aperto è quello del cursore e gli eventi nuovi continuano quelli già letti.
+        fh = opened('events.log')
+        if fh is not None:
+            with fh:
+                if (os.fstat(fh.fileno()).st_ino == old_inode
+                        and os.fstat(fh.fileno()).st_size >= old_offset):
+                    inode, offset, data = segment(fh, old_offset)
+                    found = [event for event in parse(data) if event[0] > seq]
+                    if not gapless(seq, found):
+                        found = None  # un salto: si rilegge tutto
+    if found is None:
+        kept, inode, offset = read_coherent()
+        if old_identity != identity or (kept and kept[-1][0] < seq):
+            found = kept  # il flusso è stato sostituito
+            seq = 0
+        else:
+            found = [event for event in kept if event[0] > seq]
+        if found:
+            seq = found[-1][0]
+    elif found:
+        seq = found[-1][0]
+    save(seq, inode, offset)
+except OSError:
+    sys.exit(2)
+for _, stamp, hhmm, text in found:
+    at = calendar.timegm(time.strptime(stamp, '%Y-%m-%dT%H:%M:%SZ'))
+    print(at, hhmm, text)
 EOF
 }
 
@@ -227,6 +309,7 @@ round() {
     local role start resting='' events='' log='' service last why wake_at at hhmm text line
     local box count daily
     NOW=$(date +%s)
+    ALERT_ISSUE=$(ops_alert_issue)
     # I cursori del flusso e di run.log avanzano a ogni giro: nuovo è ciò che è arrivato dal giro
     # prima.
     events=$(read_events)
@@ -284,7 +367,7 @@ round() {
         fi
         if [ -z "$why" ] && [ -f "$HOLD" ]; then
             text=$(head -c 300 "$HOLD" 2>/dev/null | head -n 1)
-            why="lavoro: devloop run aspetta che i ruoli escano dal riposo prima di avviarlo (${text:-lavoro trattenuto})"
+            why="lavoro: c'è lavoro con un ruolo a riposo, e devloop run non avvia un controllo di prontezza né un'implementazione finché i ruoli non escono dal riposo (${text:-lavoro})"
         fi
         if [ -z "$why" ] && [ -n "$daily" ] && [ "$start" -lt "$daily" ]; then
             why="controllo giornaliero delle $REST_DAILY_CHECK UTC"

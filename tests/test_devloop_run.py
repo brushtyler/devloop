@@ -349,6 +349,8 @@ class CommandTests(unittest.TestCase):
         number, body = gh.comment.call_args.args
         self.assertEqual(number, 7)
         self.assertIn('`devloop run` si è fermato', body)
+        # #684: the issue of the alerts in the stream, for the sentinel of the roles at rest.
+        self.assertEqual((self.tmp / 'events/alert_issue').read_text(), '7\n')
 
     def test_the_producer_reads_with_its_own_state_writes_the_stream_and_wakes_the_loop(self):
         # #683: one reader of GitHub, a thread of the loop with the loop's own watcher state; its

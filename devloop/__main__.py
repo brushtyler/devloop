@@ -948,8 +948,17 @@ def run_loop(cfg, state, dispatcher, timeout, reloader=None):
     # of the state_dir, which the roles' wake-ups read, and wakes the loop on news.
     watcher = watch.Watcher(gh, trust, state / runloop.WATCH_STATE_FILE,
                             out=lambda line: log(f'news: {line}'), err=log)
-    producer = events.Producer(watcher, events.Stream(state), log=log)
+    stream = events.Stream(state)
+    producer = events.Producer(watcher, stream, log=log)
     issue = cfg.run.alert_issue
+    # #684: the issue of the alerts for the sentinel of the roles at rest, which reads the
+    # stream but not the overlay.
+    try:
+        stream.alert_issue(issue)
+    except OSError as exc:
+        log(f'events: the issue of the alerts not written to the stream '
+            f'({type(exc).__name__}): the sentinel of the roles at rest does not tell the diary '
+            'of a role on it from the other comments')
     alert = (lambda body: dispatcher.gh.comment(issue, body)) if issue else None
 
     def tick():

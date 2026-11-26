@@ -3015,14 +3015,18 @@ watchdog of the roles tells a role at rest from a stopped one.
 
 With `[run] rest_dir` in the overlay ([reference](reference.md#the-roles-at-rest)) the loop stays
 on, but **starts no readiness check and no implementation while a role rests**: the other actions
-run as before. The work it holds wakes the roles at rest, through the sentinel, and starts as
-soon as their rest ends (`rest: … held until the roles leave their rest` in the log, then `the
-roles left their rest: next tick`). If a role does not wake up within `rest_wake_timeout`
-seconds (300) the work stays held and the operator gets a notice (`rest-hold`, [Notices to the
-operator](#notices-to-the-operator)): look at the sessions of the roles, `journalctl -u
-devloop-role-sentinel@<project>` and the watchdog. To start the work without the roles, remove
-the rest state of the role, as root, from the mailbox (`$COORDINATION_DIR/rest/<role>`), or
-remove `rest_dir` from the overlay and restart the loop.
+run as before. The work it holds, and a queue that is not empty even when no action can start
+(an issue blocked by a prerequisite), wake the roles at rest, through the sentinel; the held work
+starts as soon as their rest ends (`rest: … held until the roles leave their rest` in the log,
+then `the roles left their rest: next tick`). If a role does not wake up within
+`rest_wake_timeout` seconds (300) the work stays held and the operator gets a notice
+(`rest-hold`, [Notices to the operator](#notices-to-the-operator)): look at the sessions of the
+roles, `journalctl -u devloop-role-sentinel@<project>` and the watchdog. If the loop cannot read
+the rest of the roles (`rest_dir` missing, or the ACL of devloop on the mailbox missing), it
+holds the work all the same and the operator gets the notice `rest-unreadable`: run
+`check-host.sh`. To start the work without the roles, remove the rest state of the role, as
+root, from the mailbox (`$COORDINATION_DIR/rest/<role>`), or remove `rest_dir` from the overlay
+and restart the loop.
 
 ### Continuous mode
 
