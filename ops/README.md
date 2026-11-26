@@ -63,7 +63,9 @@ sudo -u supervisor-acme-devloop -H tmux attach -t devloop-supervisor-widget   # 
 - **Agent dell'host:** CLI e modello li sceglie l'operatore al lancio (`--cli`, `--model`). La
   sessione gira con l'utente dell'operatore che lancia lo script con `sudo` (`SUDO_USER`, quello
   che ha `sudo`), mai come root né come l'utente di un altro ruolo, nel checkout da cui parte lo
-  script: va lanciato da un checkout di `main` aggiornato.
+  script: va lanciato da un checkout di `main` aggiornato. Gli script di `ops/host/` per un
+  progetto con `SOURCE_REF` li esegue invece dal checkout del tag del progetto ([Un altro
+  progetto](#un-altro-progetto), #687).
 - La CLI si cerca in `~/.local/bin` dell'utente del ruolo, poi in `/usr/local/bin`, `/usr/bin` e
   `/bin`, e parte interattiva con il modello e il runbook intero come primo messaggio:
   `claude --model <modello> <runbook>`, `codex --model <modello> <runbook>`,
@@ -1212,6 +1214,20 @@ di un solo modulo di test, le regole sugli ADR) stanno nella tabella `[prompts]`
 progetto (ADR 0006, R4, [docs/devloop/reference.md](../docs/devloop/reference.md#project-data-in-the-prompts)):
 senza, i prompt tolgono le frasi che li citano. I test locali e la lettura della CI seguono
 `[tests]` del file di progetto (R5): vale quanto sotto per `local_tests` e `ci_rerun_unrelated`.
+
+**Gli script di un progetto con `SOURCE_REF` dal checkout del suo tag** (#687). Per un progetto
+con la sorgente a parte, ogni script di `ops/host/` (`setup-*.sh`, `check-host.sh`,
+`start-role.sh`) e ogni sezione di [host/migrate.md](host/migrate.md) si eseguono da un checkout
+dell'operatore al tag `SOURCE_REF` del progetto, mai da uno su `main`: gli script installano le
+copie di root di `ops/` dei ruoli (`SUPERVISOR_OPS_DIR`, `COORDINATOR_OPS_DIR`, con
+`host/role-wait.sh` e `lib.sh`) dal checkout da cui girano, e da `main` il progetto avrebbe il
+loop del tag con le sveglie di `main`. Una correzione di `ops/`, o una sezione di `migrate.md`
+che dice "per ogni progetto dell'host", arrivata su `main` dopo il tag raggiunge il progetto
+solo con il tag successivo, con la procedura di [Un progetto con la sorgente a un tag
+nuovo](host/migrate.md#un-progetto-con-la-sorgente-a-un-tag-nuovo-666). `check-host.sh`
+confronta le copie con quelle del checkout da cui gira, e con `SOURCE_REPO` avvisa quando quel
+checkout non è al tag `SOURCE_REF` (o non ha il tag). Il repository di devloop, senza
+`SOURCE_REPO`, resta su `main`.
 
 **devloop nel repository gestito**, come il repository di devloop stesso (il progetto ssdlc):
 
