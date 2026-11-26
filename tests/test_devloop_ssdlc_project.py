@@ -20,7 +20,8 @@ R3's: it updates the frozen ``config.toml`` and ``effective.json`` with it, sayi
 ``second_reviewer`` of #521, ``parallel`` by default; the coordinator actor of #528, off by
 default; ``max_requested_fix_rounds`` of #536, the cap of the code by default;
 ``conclave_substitute_timeout_seconds`` of #605, two hours by default; ``notify`` and
-``operator_mentions`` of #593, none by default; the label
+``operator_mentions`` of #593, none by default; ``run.rest_dir`` and
+``run.rest_wake_timeout`` of #684, no rest and 300 seconds by default; the label
 ``needs_coordinator`` of #607, a default of the code with the other labels, which have no table
 in ``config.toml``; the ``state_dir`` ``.devloop`` of #563, which replaces the value of before). A change of ssdlc's own
 values updates it the same way, saying so: the restrictions, the

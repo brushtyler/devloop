@@ -18,6 +18,7 @@ import shlex
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import textwrap
 import time
@@ -35,7 +36,7 @@ SCRIPTS = ('host/setup-devloop.sh', 'host/setup-supervisor.sh', 'host/setup-agen
            'host/setup-coordinator.sh', 'host/setup-project.sh', 'host/check-host.sh',
            'host/start-role.sh',
            'host/coordinator-wait.sh', 'host/role-wait.sh', 'host/role-watchdog.sh',
-           'github/create-apps.sh')
+           'host/role-sentinel.sh', 'github/create-apps.sh')
 BASH = shutil.which('bash')
 ME = getpass.getuser()
 PREFIX = 'brushtyler-devloop-'
@@ -289,7 +290,10 @@ class LayoutTests(unittest.TestCase):
                      'host/role-wait.sh', 'host/role-watchdog.sh',
                      'host/devloop-role-watchdog@.service', 'host/devloop-role-watchdog@.timer',
                      'host/devloop-role-watchdog-failed@.service',
-                     'host/role-watchdog-project.conf',
+                     'host/role-watchdog-project.conf', 'host/role-sentinel.sh',
+                     'host/devloop-role-sentinel@.service',
+                     'host/devloop-role-sentinel-failed@.service',
+                     'host/role-sentinel-project.conf',
                      'host/devloop-command', 'host/devloop-command-project',
                      'github/create-apps.sh', 'github/ruleset-main.json', 'github/tokens.md',
                      *(f'github/apps/{role}.json' for role in REQUIRED)):
@@ -4364,9 +4368,11 @@ esac''')
                 done = self.run_script(f'host/{script}', '--dry-run', '--params', str(params))
                 self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
                 outs[script] = out = done.stdout
-                # Only the watchdog of the roles (#602), which the host has not yet.
+                # Only the watchdog of the roles (#602) and the sentinel of the roles at rest
+                # (#684, its default of PROJECT), which the host has not yet.
                 self.assertEqual([line for line in out.splitlines() if 'useradd' in line
-                                  and not line.endswith(f' {FAKE_WATCHDOG}')], [])
+                                  and not line.endswith(f' {FAKE_WATCHDOG}')
+                                  and not line.endswith(' role-sentinel-devloop')], [])
                 self.assertNotIn('.ghapps-devloop', out)
                 self.assertNotIn('devloop-devloop', out)
                 for old in ('devloop/ssdlc', 'supervisor/ssdlc', 'coordinator/ssdlc'):
@@ -4790,7 +4796,8 @@ class CheckHostTests(OpsTestCase):
         for path in self.box_dirs():
             path.mkdir(parents=True)
             os.chown(path, -1, os.getgid())
-            path.chmod(0o2770)
+            # The rest of the roles (#684) with the sticky bit.
+            path.chmod(0o3770 if path.name == 'rest' else 0o2770)
         (self.tmp / 'systemd').mkdir()
         (self.tmp / 'systemd/devloop.service').write_text(render('host/devloop.service', {
             'REPO': 'brushtyler/devloop', 'DEVLOOP_USER': ME,
@@ -4814,10 +4821,12 @@ class CheckHostTests(OpsTestCase):
 
     def box_dirs(self):
         """The directories of the mailbox (#543): the box, each destination and its done/, the
-        operator's to-operator/ included (#663), and the heartbeats of the roles (#602)."""
+        operator's to-operator/ included (#663), the heartbeats of the roles (#602) and their
+        rest (#684)."""
         return [self.box] + [self.box / name / sub
                              for name in ('to-coordinator', 'to-supervisor', 'to-operator')
-                             for sub in ('', 'done')] + [self.box / 'heartbeat']
+                             for sub in ('', 'done')] + [self.box / 'heartbeat',
+                                                         self.box / 'rest']
 
     def acl(self, entry, reads=f'user:{ME}:r--'):
         """getfacl: ``entry`` on the home of devloop, ``reads`` on the overlay and the project
@@ -5801,8 +5810,8 @@ exec "$@"''')
                 'COORDINATION_DIR': str(self.box), 'WATCHDOG_OPS_DIR': str(watchdog_copy)}))
         self.fake_host('classic sudo', users=(FAKE_AGENT, FAKE_SUPERVISOR, FAKE_COORDINATOR,
                                               FAKE_WATCHDOG))
-        acls = {self.box: '--x', self.box / 'heartbeat': '--x',
-                self.box / 'to-coordinator': '-wx', self.box / 'to-supervisor': '-wx'}
+        acls = {self.box: '--x', self.box / 'heartbeat': '--x', self.box / 'rest': '--x',
+                self.box / 'to-coordinator': 'rwx', self.box / 'to-supervisor': 'rwx'}
         self.shim('getfacl', 'for a in "$@"; do last=$a; done\necho "user::rwx"\n'
                   + ''.join(f'[ "$last" = "{path}" ] && echo "user:{FAKE_WATCHDOG}:{perms}"\n'
                             for path, perms in acls.items() if path != self.box / 'to-supervisor')
@@ -5816,7 +5825,7 @@ exec "$@"''')
         self.assertIn(f"  ok: l'utente {FAKE_WATCHDOG} esiste\n", out)
         for path, perms in acls.items():
             if path == self.box / 'to-supervisor':
-                self.assertIn(f"  ERRORE: su {path} serve l'ACL u:{FAKE_WATCHDOG}:-wx, non "
+                self.assertIn(f"  ERRORE: su {path} serve l'ACL u:{FAKE_WATCHDOG}:rwx, non "
                               "'nessuna'", out)
             else:
                 self.assertIn(f'  ok: ACL user:{FAKE_WATCHDOG}:{perms} su {path}\n', out)
@@ -5826,6 +5835,84 @@ exec "$@"''')
                                ' ;; show) echo mixed ;; esac')
         self.assertIn('  ERRORE: devloop-role-watchdog@_default.timer non è abilitato (disabled)',
                       watchdog())
+        self.assertEqual(self.mutating_calls(), [])
+
+    def test_the_sentinel_of_the_roles_at_rest_and_its_directory_are_checked(self):
+        # #684: with the coordinator, the units of the sentinel, its drop-in, its service enabled
+        # and active, its user and its ACLs on the mailbox, devloop's reading of the rest; and
+        # the directory of the rest, 3770.
+        done, errors = self.check()
+        self.assertEqual(errors, [], done.stdout)
+        self.assertIn('  ok: il progetto non ha il coordinatore: nessuna sentinella dei ruoli\n',
+                      done.stdout)
+        self.assertIn(f'  ok: {self.box}/rest: 3770, gruppo {GROUP}\n', done.stdout)
+        self.declare_coordinator()
+        self.fake_host('classic sudo', users=(FAKE_AGENT, FAKE_SUPERVISOR, FAKE_COORDINATOR))
+        params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=FAKE_SUPERVISOR,
+                             AGENT_USER=FAKE_AGENT, SENTINEL_USER=FAKE_SENTINEL)
+        self.service('active')
+
+        def sentinel():
+            done = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params))
+            out = done.stdout
+            return out[out.index('==> Sentinella dei ruoli'):out.index('==> Flusso degli eventi')]
+        out = sentinel()
+        systemd = self.tmp / 'systemd'
+        units = ('devloop-role-sentinel@.service', 'devloop-role-sentinel-failed@.service')
+        dropin = systemd / 'devloop-role-sentinel@_default.service.d/project.conf'
+        for unit in units:
+            self.assertIn(f'  ERRORE: {systemd}/{unit} non esiste (setup-supervisor.sh, '
+                          'setup-coordinator.sh; ops/host/migrate.md, "Il riposo dei ruoli '
+                          '(#684)")\n', out)
+        self.assertIn(f'  ERRORE: {dropin} non esiste', out)
+        self.assertIn(f"  ERRORE: l'utente {FAKE_SENTINEL} non esiste", out)
+        self.assertIn('  ok: devloop-role-sentinel@_default.service è abilitato\n', out)
+        self.assertIn('  ok: devloop-role-sentinel@_default.service è attivo\n', out)
+        # Installed as the setup scripts install them, with the ACLs of the sentinel and of
+        # devloop.
+        for unit in units:
+            (systemd / unit).write_text(render(f'host/{unit}', {
+                'DEVLOOP_COMMAND': str(self.tmp / 'bin-root' / 'devloop')}))
+        dropin.parent.mkdir()
+        dropin.write_text(render('host/role-sentinel-project.conf', {
+            'REPO': 'brushtyler/devloop', 'SENTINEL_USER': FAKE_SENTINEL,
+            'COORDINATION_DIR': str(self.box),
+            'WATCHDOG_OPS_DIR': str(self.tmp / 'lib/devloop-role-watchdog')}))
+        self.fake_host('classic sudo', users=(FAKE_AGENT, FAKE_SUPERVISOR, FAKE_COORDINATOR,
+                                              FAKE_SENTINEL))
+        acls = {(FAKE_SENTINEL, self.box): '--x', (FAKE_SENTINEL, self.box / 'rest'): '-wx',
+                (FAKE_SENTINEL, self.box / 'to-coordinator'): 'r-x',
+                (FAKE_SENTINEL, self.box / 'to-supervisor'): 'r-x',
+                (ME, self.box): '--x', (ME, self.box / 'rest'): '--x'}
+        missing = (FAKE_SENTINEL, self.box / 'to-supervisor')
+        self.shim('getfacl', 'for a in "$@"; do last=$a; done\necho "user::rwx"\n'
+                  + ''.join(f'[ "$last" = "{path}" ] && echo "user:{user}:{perms}"\n'
+                            for (user, path), perms in acls.items() if (user, path) != missing)
+                  + 'echo "other::---"')
+        out = sentinel()
+        for unit in units:
+            self.assertIn(f'  ok: {systemd}/{unit} coincide con ops/host/{unit}\n', out)
+        self.assertIn(f'  ok: {dropin} coincide con ops/host/role-sentinel-project.conf\n', out)
+        self.assertIn(f"  ok: l'utente {FAKE_SENTINEL} esiste\n", out)
+        for (user, path), perms in acls.items():
+            if (user, path) == missing:
+                self.assertIn(f"  ERRORE: su {path} serve l'ACL u:{user}:{perms}, non 'nessuna'",
+                              out)
+            else:
+                self.assertIn(f'  ok: ACL user:{user}:{perms} su {path}\n', out)
+        # A sentinel not enabled, or not running, is an error.
+        self.shim('systemctl', 'case "$1" in is-active) echo failed ;; is-enabled) echo disabled'
+                               ' ;; show) echo mixed ;; esac')
+        out = sentinel()
+        self.assertIn('  ERRORE: devloop-role-sentinel@_default.service non è abilitato (disabled)',
+                      out)
+        self.assertIn('  ERRORE: devloop-role-sentinel@_default.service non è attivo (failed): i '
+                      'ruoli a riposo non si svegliano', out)
+        # The directory of the rest without its sticky bit.
+        (self.box / 'rest').chmod(0o2770)
+        done, _ = self.check()
+        self.assertIn(f'  ERRORE: {self.box}/rest è 2770 {GROUP}, deve essere 3770 del gruppo '
+                      f'{GROUP}\n', done.stdout)
         self.assertEqual(self.mutating_calls(), [])
 
     def test_the_key_dir_of_the_coordinator_is_checked(self):
@@ -6025,7 +6112,8 @@ exec "$@"''')
         self.assertIn(f'  ok: il gruppo {GROUP} esiste\n', out)
         self.assertIn(f'  ok: {ME} è nel gruppo {GROUP}\n', out)
         for path in self.box_dirs():
-            self.assertIn(f'  ok: {path}: 2770, gruppo {GROUP}\n', out)
+            mode = '3770' if path.name == 'rest' else '2770'
+            self.assertIn(f'  ok: {path}: {mode}, gruppo {GROUP}\n', out)
         # Without the supervisor's ACL (an overlay replaced with install), an error per file.
         self.acl(f'user:{ME}:--x', reads='')
         done, errors = self.check()
@@ -6134,12 +6222,17 @@ esac''')
         # names in OPS_WATCHDOG_UNITS, and the scripts it compares with the copies of the roles.
         named |= {f'host/{unit}' for unit in re.search(
             r"^OPS_WATCHDOG_UNITS='(.*)'$", lib, re.M).group(1).split()}
+        # So are those of the sentinel of the roles at rest (#684), in OPS_SENTINEL_UNITS.
+        named |= {f'host/{unit}' for unit in re.search(
+            r"^OPS_SENTINEL_UNITS='(.*)'$", lib, re.M).group(1).split()}
         # And the wake-up of the roles (#602; coordinator-wait.sh, #543), which the coordinator
-        # runs from the copy, with its parameters, and the watchdog's script.
+        # runs from the copy, with its parameters, the watchdog's script and the sentinel's.
         self.assertEqual(named | {'lib.sh', 'host/check-host.sh', 'host/coordinator-wait.sh',
-                                  'host/role-wait.sh', 'host/role-watchdog.sh'}, files)
+                                  'host/role-wait.sh', 'host/role-watchdog.sh',
+                                  'host/role-sentinel.sh'}, files)
         self.assertIn('host/devloop@.service', named)
         self.assertIn('host/role-watchdog-project.conf', named)
+        self.assertIn('host/role-sentinel-project.conf', named)
 
     def real_sudo(self, sudo, env_stderr='', env_status=0):
         """A ``sudo`` whose ``--version`` is that of ``SUDO_FLAVORS``, and whose ``sudo -n -E``
@@ -6793,6 +6886,9 @@ class RoleWaitTests(WakeUpCase):
         self.heartbeats = self.tmp / 'coordination/heartbeat'
         self.heartbeats.mkdir()
         (self.tmp / 'coordination/to-supervisor/done').mkdir(parents=True)
+        # The rest of the roles (#684).
+        self.rest = self.tmp / 'coordination/rest'
+        self.rest.mkdir()
 
     def as_role(self, role):
         """role-wait.sh --role ROLE, with the user of the tests as that role."""
@@ -7130,6 +7226,412 @@ class RoleWaitTests(WakeUpCase):
         self.assertEqual(done.returncode, 2)
         self.assertIn('--role vuole supervisor o coordinator', done.stderr)
 
+    # The rest of the roles (#684) ---------------------------------------------------------
+
+    def until(self, condition, what, seconds=20):
+        deadline = time.monotonic() + seconds
+        while not condition():
+            if time.monotonic() > deadline:
+                self.fail(f'not within {seconds}s: {what}')
+            time.sleep(0.1)
+
+    def lock_held(self, role):
+        """Whether the lock of the rest of ``role`` is held, as the watchdog asks: a shared lock
+        that cannot be taken."""
+        import fcntl
+        try:
+            fd = os.open(self.rest / f'{role}.lock', os.O_RDONLY)
+        except FileNotFoundError:
+            return False
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        finally:
+            os.close(fd)
+        return False
+
+    def resting(self, role):
+        """role-wait.sh --rest of ``role``, started in the background once its rest is declared
+        and its lock held."""
+        command, env = self.wait_command('--rest')
+        proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, env=env, stdin=subprocess.DEVNULL)
+
+        def stop():
+            if proc.poll() is None:
+                proc.kill()
+            proc.communicate()
+        self.addCleanup(stop)
+        # The lock first, then the state, then the look at the mailbox and the stream: once the
+        # state is there, a moment more for that look.
+        self.until(lambda: self.lock_held(role) and (self.rest / role).exists(),
+                   'the lock of the rest held and the state written')
+        time.sleep(1)
+        return proc
+
+    def test_the_rest_is_declared_with_its_lock_and_ends_on_the_signal_of_the_sentinel(self):
+        for role in ('supervisor', 'coordinator'):
+            with self.subTest(role=role):
+                self.as_role(role)
+                before = int(time.time())
+                proc = self.resting(role)
+                state = self.rest / role
+                start, reason = state.read_text().split()
+                self.assertLessEqual(before, int(start))
+                self.assertEqual(reason, 'riposo')
+                self.assertEqual(stat.S_IMODE(state.stat().st_mode), 0o664)
+                # At rest a role writes no heartbeat.
+                self.assertFalse((self.heartbeats / role).exists())
+                # A signal of a rest of before does not wake it; one after its start does.
+                wake = self.rest / f'{role}.wake'
+                wake.write_text(f'{int(start) - 10} controllo giornaliero delle 00:30 UTC\n')
+                time.sleep(1.5)
+                self.assertIsNone(proc.poll())
+                # Nor does a message in the box: the sentinel watches it, not the wait.
+                message = self.tmp / f'coordination/to-{role}/20261126T101500Z-a1b2c3.txt'
+                message.write_text('un messaggio\n')
+                time.sleep(1.5)
+                self.assertIsNone(proc.poll())
+                wake.write_text(f'{int(start)} casella: 1 messaggi in {message.parent}\n')
+                out, err = proc.communicate(timeout=20)
+                self.assertEqual((proc.returncode, out),
+                                 (0, f'sentinella: casella: 1 messaggi in {message.parent}\n'), err)
+                # The state stays until the role resumes its heartbeats with role-wait.sh.
+                self.assertTrue(state.exists())
+                self.assertFalse(self.lock_held(role))
+                done = self.wait()
+                self.assertEqual(done.stdout, f'casella: 1 messaggi in {message.parent}: '
+                                              f'{message.name}\n', done.stderr)
+                self.assertFalse(state.exists())
+                self.assertTrue((self.heartbeats / role).exists())
+                message.unlink()
+                wake.unlink()
+                (self.heartbeats / role).unlink()
+        self.assertEqual(self.mutating_calls(), [])
+
+    def test_with_something_to_do_the_role_does_not_rest(self):
+        # A message, or an event of the stream after its cursor: a wake-up as any other, with
+        # the heartbeat, and no rest.
+        for role, line in (('supervisor', 'PR #5 CI pass @abc1234'),
+                           ('coordinator', 'issue #7 labels +agent:needs-operator')):
+            with self.subTest(role=role):
+                self.as_role(role)
+                self.prime(role)
+                self.publish([line])
+                done = self.wait('--rest')
+                self.assertEqual((done.returncode, done.stdout),
+                                 (0, f'evento: {self.STAMP}{line}\n'), done.stderr)
+                self.assertFalse((self.rest / role).exists())
+                self.assertTrue((self.heartbeats / role).exists())
+                message = self.tmp / f'coordination/to-{role}/m.txt'
+                message.write_text('x\n')
+                done = self.wait('--rest')
+                self.assertTrue(done.stdout.startswith('casella: 1 messaggi'), done.stdout)
+                self.assertFalse((self.rest / role).exists())
+                message.unlink()
+
+    def test_a_second_rest_of_the_same_role_is_refused(self):
+        self.as_role('supervisor')
+        proc = self.resting('supervisor')
+        done = self.wait('--rest')
+        self.assertEqual(done.returncode, 1)
+        self.assertIn('è già tenuto: un\'altra attesa a riposo del supervisore', done.stderr)
+        # The rest of the first wait stays as it was.
+        self.assertIsNone(proc.poll())
+        self.assertTrue((self.rest / 'supervisor').exists())
+        self.assertTrue(self.lock_held('supervisor'))
+
+    def test_a_rest_whose_state_is_removed_ends(self):
+        self.as_role('coordinator')
+        proc = self.resting('coordinator')
+        (self.rest / 'coordinator').unlink()
+        out, err = proc.communicate(timeout=20)
+        self.assertEqual((proc.returncode, out),
+                         (0, f'riposo: lo stato {self.rest}/coordinator è stato tolto: il '
+                             'coordinatore riprende\n'), err)
+
+    def test_without_the_directory_of_the_rest_the_role_does_not_rest(self):
+        self.as_role('supervisor')
+        self.rest.rmdir()
+        done = self.wait('--rest')
+        self.assertEqual(done.returncode, 1)
+        self.assertIn(f'non scrivo in {self.rest}', done.stderr)
+        self.assertIn('la sveglia normale', done.stderr)
+
+
+FAKE_SENTINEL = 'opsdry-sentinel'
+
+
+@unittest.skipIf(BASH is None, 'bash is not installed')
+class RoleSentinelTests(WakeUpCase):
+    """ops/host/role-sentinel.sh (#684), the sentinel of the roles at rest, run as its user (the
+    user of the tests) for one round (--once), on the stream of the events, run.log, the
+    service and the mailbox of WakeUpCase, with STATE_DIRECTORY as systemd sets it."""
+
+    def setUp(self):
+        super().setUp()
+        (self.bin / 'chmod').unlink()  # the signal of the sentinel, 644
+        self.box_dir = self.tmp / 'coordination'
+        (self.box_dir / 'to-supervisor/done').mkdir(parents=True)
+        self.rest = self.box_dir / 'rest'
+        self.rest.mkdir()
+        self.sentinel_state = self.tmp / 'sentinel-state'
+        self.sentinel_state.mkdir()
+        # The stream written now, so that the rests begin before its events and after the last
+        # daily check: its hour half an hour from now, whose last occurrence was yesterday.
+        self.STREAM_AT = int(time.time())
+        written = datetime.datetime.fromtimestamp(self.STREAM_AT, datetime.timezone.utc)
+        self.STAMP = written.strftime('%H:%M ')
+        shutil.rmtree(self.state / 'events')
+        self.stream = events.Stream(self.state, now=lambda: written)
+        self.stream.open()
+        self.alive()
+        self.daily = time.strftime('%H:%M', time.gmtime(self.STREAM_AT + 1800))
+        # The sentinel reads run.log itself, with its ACL, not with the tail of the coordinator.
+        self.log = self.state / 'run.log'
+        self.log.write_text('10:00:00 tick ok\n')
+        self.params_file = self.sentinel_params()
+        # The first round makes the base of the stream and of run.log: what is already there is
+        # not new.
+        self.assertEqual(self.sentinel().returncode, 0)
+
+    def sentinel_params(self, **overrides):
+        values = dict(DEVLOOP_USER=FAKE_DEVLOOP, SUPERVISOR_USER=FAKE_SUPERVISOR,
+                      AGENT_USER=FAKE_AGENT, COORDINATOR_USER=FAKE_COORDINATOR, SENTINEL_USER=ME,
+                      STATE_DIR=str(self.state), REST_DAILY_CHECK=self.daily)
+        values.update(overrides)
+        return self.params(**values)
+
+    def sentinel(self, **env):
+        environ = dict(os.environ, PATH=f'{self.bin}:{os.environ.get("PATH", "/usr/bin:/bin")}',
+                       OPS_TEST_CALLS=str(self.calls), STATE_DIRECTORY=str(self.sentinel_state),
+                       LC_ALL='C.UTF-8')
+        environ.update(env)
+        environ.pop('NOTIFY_SOCKET', None)
+        return subprocess.run([BASH, str(OPS / 'host/role-sentinel.sh'), '--params',
+                               str(self.params_file), '--once'], capture_output=True, text=True,
+                              env=environ, stdin=subprocess.DEVNULL, timeout=120)
+
+    def at_rest(self, role, start=None):
+        start = self.STREAM_AT - 60 if start is None else start
+        (self.rest / role).write_text(f'{start} riposo\n')
+        return start
+
+    def woken(self):
+        """The signals of the sentinel: {role: reason}."""
+        found = {}
+        for role in ('supervisor', 'coordinator'):
+            path = self.rest / f'{role}.wake'
+            if path.exists():
+                found[role] = path.read_text().split(' ', 1)[1].rstrip('\n')
+        return found
+
+    def test_nobody_at_rest_nobody_is_woken(self):
+        self.publish(['PR #5 CI pass @abc1234'])
+        (self.box_dir / 'to-coordinator/m.txt').write_text('x\n')
+        done = self.sentinel()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.woken(), {})
+        self.assertEqual(self.mutating_calls(), [])
+
+    def test_a_message_wakes_only_the_role_of_its_mailbox(self):
+        self.at_rest('supervisor')
+        self.at_rest('coordinator')
+        (self.box_dir / 'to-coordinator/20261126T101500Z-a1b2c3.txt').write_text('x\n')
+        done = self.sentinel()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.woken(),
+                         {'coordinator': f'casella: 1 messaggi in {self.box_dir}/to-coordinator'})
+        self.assertIn('sveglio il coordinator: casella:', done.stdout)
+        wake = self.rest / 'coordinator.wake'
+        at = int(wake.read_text().split()[0])
+        self.assertLessEqual(at, int(time.time()))
+        self.assertEqual(stat.S_IMODE(wake.stat().st_mode), 0o644)
+        # Once per rest: the signal is not written again.
+        before = wake.read_text()
+        time.sleep(1.1)
+        self.sentinel()
+        self.assertEqual(wake.read_text(), before)
+        # The role left its rest: the signal goes.
+        (self.rest / 'coordinator').unlink()
+        self.sentinel()
+        self.assertFalse(wake.exists())
+        self.assertEqual(self.mutating_calls(), [])
+
+    def test_an_event_wakes_only_the_roles_whose_wake_up_it_would_end(self):
+        self.at_rest('supervisor')
+        self.at_rest('coordinator')
+        # Every event wakes the supervisor; the routine nobody.
+        self.publish(['issue #316 report by brushtyler-devloop-dispatcher[bot]: ## Riepilogo'])
+        self.sentinel()
+        self.assertEqual(self.woken(), {})
+        self.publish(['PR #5 CI pass @abc1234'])
+        self.sentinel()
+        self.assertEqual(self.woken(), {'supervisor': f'evento: {self.STAMP}PR #5 CI pass '
+                                                      '@abc1234'})
+        # The coordinator only on its own events.
+        self.publish(['issue #7 labels +agent:needs-operator'])
+        self.sentinel()
+        self.assertEqual(self.woken()['coordinator'],
+                         f'evento: {self.STAMP}issue #7 labels +agent:needs-operator')
+
+    def test_an_event_written_before_the_rest_wakes_nobody(self):
+        self.at_rest('supervisor', start=self.STREAM_AT + 100)
+        self.publish(['PR #5 CI pass @abc1234'])
+        self.sentinel()
+        self.assertEqual(self.woken(), {})
+
+    def test_an_error_of_run_log_wakes_only_the_coordinator(self):
+        self.at_rest('supervisor')
+        self.at_rest('coordinator')
+        with self.log.open('a') as fh:
+            fh.write('11:00:00 tick ok\n11:00:01 Traceback (most recent call last):\n')
+        done = self.sentinel()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.woken(),
+                         {'coordinator': 'log: 11:00:01 Traceback (most recent call last):'})
+
+    def test_a_stopped_service_wakes_both_roles_once_per_change(self):
+        self.at_rest('supervisor')
+        self.at_rest('coordinator')
+        self.service_state.write_text('failed\n')
+        self.sentinel()
+        self.assertEqual(self.woken(), {'supervisor': 'servizio: devloop è failed',
+                                        'coordinator': 'servizio: devloop è failed'})
+        for role in ('supervisor', 'coordinator'):
+            (self.rest / role).unlink()
+        self.sentinel()
+        self.at_rest('supervisor', start=int(time.time()))
+        self.sentinel()
+        self.assertEqual(self.woken(), {})
+
+    def test_the_work_held_by_devloop_run_wakes_every_role_at_rest(self):
+        self.at_rest('coordinator')
+        (self.state / 'events/hold').write_text(
+            '1764115200 coordinator held: implement #12; queue: issue #12\n')
+        self.sentinel()
+        self.assertEqual(self.woken(), {
+            'coordinator': "lavoro: c'è lavoro con un ruolo a riposo, e devloop run non avvia un "
+                           "controllo di prontezza né un'implementazione finché i ruoli non "
+                           'escono dal riposo (1764115200 coordinator held: implement #12; queue: '
+                           'issue #12)'})
+
+    @unittest.skipIf(os.geteuid() == 0, 'root reads any file')
+    def test_the_issue_of_the_alerts_comes_from_the_stream_not_from_the_overlay(self):
+        # #684: the overlay holds the secrets of the project, and the sentinel cannot read it;
+        # devloop run writes the issue of the alerts in the stream at its start.
+        overlay = self.state / 'config.local.toml'
+        overlay.chmod(0)
+        self.addCleanup(overlay.chmod, 0o600)
+        self.stream.alert_issue(76)
+        self.at_rest('supervisor')
+        self.at_rest('coordinator')
+        # The diary of the coordinator on the issue of the alerts wakes nobody.
+        self.publish(['issue #76 coordinator comment by brushtyler-devloop-coordinator[bot]: x'])
+        done = self.sentinel()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.woken(), {})
+        # A comment of the dispatcher on it wakes both roles.
+        self.publish(['issue #76 comment by brushtyler-devloop-dispatcher[bot]: ALERT'])
+        self.sentinel()
+        self.assertEqual(set(self.woken()), {'supervisor', 'coordinator'})
+        self.assertIn('issue #76 comment by', self.woken()['coordinator'])
+
+    def test_a_rotation_during_the_read_does_not_skip_events(self):
+        # #684: the reader of the sentinel, run alone, with the current segment rotated between
+        # its look at the names and its open of events.log: the events of the previous segment
+        # still come, and the cursor never passes them.
+        script = (OPS / 'host/role-sentinel.sh').read_text()
+        reader = script.split('read_events() {\n    python3 -I -B - "$STREAM" '
+                              '"$STATE/stream.cursor" <<\'EOF\'\n')[1].split('\nEOF\n}')[0]
+        code = self.tmp / 'reader.py'
+        code.write_text(reader + '\n')
+        cursor = self.tmp / 'reader.cursor'
+        wrapper = textwrap.dedent('''\
+            import builtins, os, sys
+            code, directory, cursor, rotate = sys.argv[1:5]
+            done = [rotate != 'rotate']
+            def hooked(path, *args, **kwargs):
+                name = os.path.join(directory, 'events.log')
+                if not done[0] and str(path) == name:
+                    done[0] = True
+                    os.replace(name, name + '.1')
+                    with builtins.open(name, 'w') as fh:
+                        fh.write('3 2026-11-26T12:35:00Z PR #9 CI pass @abc1234\\n')
+                return builtins.open(path, *args, **kwargs)
+            sys.argv = ['-', directory, cursor]
+            exec(compile(builtins.open(code).read(), 'reader', 'exec'),
+                 {'__name__': '__main__', 'open': hooked})
+            ''')
+
+        def read(rotate=''):
+            done = subprocess.run([sys.executable, '-I', '-c', wrapper, str(code),
+                                   str(self.stream.dir), str(cursor), rotate],
+                                  capture_output=True, text=True, timeout=60)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            return [line.split(' ', 2)[2] for line in done.stdout.splitlines()]
+        self.publish(['issue #1 labels +agent:ready'])
+        self.assertEqual(read(), [])  # the base, at the end
+        self.publish(['issue #7 labels +agent:needs-operator'])
+        self.assertEqual(read('rotate'), ['issue #7 labels +agent:needs-operator',
+                                          'PR #9 CI pass @abc1234'])
+        self.assertEqual(read(), [])
+        self.assertEqual(cursor.read_text().split()[1], '3')
+
+    def test_the_daily_check_wakes_both_roles_at_a_fixed_hour(self):
+        # The hour of the daily check two minutes ago: a rest begun before it ends, one begun
+        # after it does not.
+        now = int(time.time())
+        hour = time.strftime('%H:%M', time.gmtime(now - 120))
+        self.params_file = self.sentinel_params(REST_DAILY_CHECK=hour)
+        self.at_rest('supervisor', start=now - 3600)
+        self.at_rest('coordinator', start=now - 30)
+        self.sentinel()
+        self.assertEqual(self.woken(),
+                         {'supervisor': f'controllo giornaliero delle {hour} UTC'})
+        # Without the daily summary too: the sentinel reads nothing of it.
+        self.assertNotIn('report', (OPS / 'host/role-sentinel.sh').read_text().split(
+            'daily_check() {')[1].split('\n}\n')[0])
+
+    def test_another_user_no_state_directory_and_a_wrong_hour_are_errors(self):
+        self.params_file = self.sentinel_params(SENTINEL_USER=FAKE_SENTINEL)
+        done = self.sentinel()
+        self.assertEqual(done.returncode, 1)
+        self.assertIn(f'va eseguito come {FAKE_SENTINEL}', done.stderr)
+        self.params_file = self.sentinel_params()
+        done = self.sentinel(STATE_DIRECTORY=str(self.tmp / 'missing'))
+        self.assertEqual(done.returncode, 1)
+        self.assertIn('manca STATE_DIRECTORY', done.stderr)
+        self.params_file = self.sentinel_params(REST_DAILY_CHECK='24:00')
+        done = self.sentinel()
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("REST_DAILY_CHECK è un'ora UTC HH:MM", done.stderr)
+
+    def test_the_unit_has_a_watchdog_restarts_and_notifies_the_operator(self):
+        unit = (OPS / 'host/devloop-role-sentinel@.service').read_text()
+        for line in ('Type=notify', 'NotifyAccess=all', 'WatchdogSec=120', 'Restart=on-failure',
+                     'OnFailure=devloop-role-sentinel-failed@%i.service', 'NoNewPrivileges=yes',
+                     'ProtectSystem=strict', 'ProtectHome=read-only'):
+            self.assertIn(f'\n{line}\n', unit)
+        failed = render('host/devloop-role-sentinel-failed@.service',
+                        {'DEVLOOP_COMMAND': '/usr/local/bin/devloop'})
+        self.assertIn('ExecStart=/usr/local/bin/devloop --project %i notify --sentinel-failed %i\n',
+                      failed)
+        dropin = render('host/role-sentinel-project.conf', {
+            'REPO': 'brushtyler/devloop', 'SENTINEL_USER': 'role-sentinel',
+            'COORDINATION_DIR': '/var/lib/devloop-coordination',
+            'WATCHDOG_OPS_DIR': '/usr/local/lib/devloop-role-watchdog'})
+        self.assertIn('User=role-sentinel\n', dropin)
+        # Its only write: the signal of the wake-up in rest/.
+        self.assertIn('ReadWritePaths=/var/lib/devloop-coordination/rest\n', dropin)
+        self.assertIn('ExecStart=/usr/bin/bash /usr/local/lib/devloop-role-watchdog/host/'
+                      'role-sentinel.sh --params /usr/local/lib/devloop-role-watchdog/params.env\n',
+                      dropin)
+        # A sign of life at every round, to systemd.
+        script = (OPS / 'host/role-sentinel.sh').read_text()
+        self.assertIn('    notify WATCHDOG=1\n    round\n', script)
+
 
 @unittest.skipIf(BASH is None, 'bash is not installed')
 class RoleWatchdogTests(OpsTestCase):
@@ -7147,14 +7649,18 @@ class RoleWatchdogTests(OpsTestCase):
     def project(self, name):
         """A project on the host: its mailbox, its state of the watchdog and its parameters."""
         box = self.tmp / f'coordination-{name}'
-        for sub in ('heartbeat', 'to-coordinator/done', 'to-supervisor/done'):
+        for sub in ('heartbeat', 'to-coordinator/done', 'to-supervisor/done', 'rest'):
             (box / sub).mkdir(parents=True)
         state = self.tmp / f'watchdog-state/{name}'
         state.mkdir(parents=True)
+        # The state_dir of devloop of the project, with the stream of the events (#684: the
+        # work held by devloop run).
+        (self.tmp / f'state-{name}/events').mkdir(parents=True)
         params = self.params(PROJECT=name, REPO=f'brushtyler/{name}',
                              DEVLOOP_USER=f'{FAKE_DEVLOOP}-{name}', AGENT_USER=FAKE_AGENT,
                              SUPERVISOR_USER=FAKE_SUPERVISOR, COORDINATOR_USER=FAKE_COORDINATOR,
                              WATCHDOG_USER=ME, COORDINATION_DIR=str(box),
+                             STATE_DIR=str(self.tmp / f'state-{name}'),
                              SUPERVISOR_KEY_DIR=str(self.tmp / f'keys-{name}'))
         shutil.move(params, self.tmp / f'params-{name}.env')
         self.projects[name] = (box, state, self.tmp / f'params-{name}.env')
@@ -7296,6 +7802,149 @@ class RoleWatchdogTests(OpsTestCase):
         self.assertEqual(done.returncode, 1)
         self.assertIn('manca STATE_DIRECTORY', done.stderr)
 
+    # The rest of the roles (#684) ---------------------------------------------------------
+
+    def sentinel_state(self, state):
+        """systemctl as the watchdog reads it: the state of the sentinel, nothing recorded."""
+        self.shim('systemctl', f'[ "$1" = is-active ] && echo {state}')
+
+    def at_rest(self, name, role, start=None, lock=True):
+        """``role`` of project ``name`` at rest since ``start``, with its lock held by a process
+        of its own (here the tests') when ``lock``."""
+        import fcntl
+        rest = self.projects[name][0] / 'rest'
+        start = int(time.time()) - 3600 if start is None else start
+        (rest / role).write_text(f'{start} riposo\n')
+        # One lock per file: a second open of it would wait for the first.
+        locks = self.__dict__.setdefault('locks', {})
+        if lock and rest / role not in locks:
+            fh = locks[rest / role] = open(rest / f'{role}.lock', 'a')
+            self.addCleanup(fh.close)
+            fcntl.flock(fh, fcntl.LOCK_EX)
+        return start
+
+    def test_a_role_at_rest_is_information_once_not_an_alarm(self):
+        self.sentinel_state('active')
+        self.project('alpha')
+        self.beat('alpha', 'coordinator', 60)
+        # No heartbeat for hours: at rest, it does not beat.
+        start = self.at_rest('alpha', 'supervisor', start=int(time.time()) - 90000)
+        since = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(start))
+        done = self.watchdog('alpha')
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn('informazione: progetto alpha (brushtyler/alpha): il supervisore è a riposo '
+                      f'dal {since}, coda vuota\n', done.stdout)
+        self.assertNotIn("avviso all'operatore", done.stdout)
+        self.assertEqual(self.messages('alpha', 'to-coordinator'), [])
+        # Once per entry.
+        done = self.watchdog('alpha')
+        self.assertIn('stato invariato', done.stdout)
+        self.assertNotIn('informazione', done.stdout)
+        # Out of the rest, with its heartbeats: no alarm; a new rest is told again.
+        (self.projects['alpha'][0] / 'rest/supervisor').unlink()
+        self.beat('alpha', 'supervisor', 0)
+        done = self.watchdog('alpha')
+        self.assertNotIn('informazione', done.stdout)
+        self.assertEqual(self.messages('alpha', 'to-coordinator'), [])
+        self.at_rest('alpha', 'supervisor', start=int(time.time()) - 10)
+        self.assertIn('il supervisore è a riposo', self.watchdog('alpha').stdout)
+        # Both at rest: nothing to alarm either.
+        self.at_rest('alpha', 'coordinator')
+        done = self.watchdog('alpha')
+        self.assertIn('il coordinatore è a riposo', done.stdout)
+        self.assertNotIn("avviso all'operatore", done.stdout)
+        for box in ('to-coordinator', 'to-supervisor'):
+            self.assertEqual(self.messages('alpha', box), [])
+        self.assertEqual(self.mutating_calls(), [])
+
+    def test_the_anomalies_of_a_rest_are_told_as_a_stopped_role(self):
+        now = int(time.time())
+        # project: (what breaks the rest, what the message says)
+        cases = {
+            'sentinella': ('la sentinella devloop-role-sentinel@sentinella non è attiva (failed)'),
+            'lock': 'il lock',
+            'svegliato': "la sentinella l'ha svegliato alle",
+            'lavoro': "c'è lavoro: held: implement #12; queue: issue #12 dalle",
+            # An issue in the queue that no action starts (blocked by a prerequisite): devloop
+            # run holds nothing, but writes the queue.
+            'coda': "c'è lavoro: queue: issue #7 dalle",
+            'casella': 'un messaggio aspetta in to-supervisor/ da 6 minuti',
+        }
+        for name, text in cases.items():
+            with self.subTest(anomaly=name):
+                self.sentinel_state('failed' if name == 'sentinella' else 'active')
+                box = self.project(name)
+                self.beat(name, 'coordinator', 60)
+                start = self.at_rest(name, 'supervisor', lock=name != 'lock')
+                if name == 'svegliato':
+                    (box / 'rest/supervisor.wake').write_text(
+                        f'{now - 400} casella: 1 messaggi in {box}/to-supervisor\n')
+                elif name == 'lavoro':
+                    (self.tmp / f'state-{name}/events/hold').write_text(
+                        f'{now - 400} supervisor held: implement #12; queue: issue #12\n')
+                elif name == 'coda':
+                    (self.tmp / f'state-{name}/events/hold').write_text(
+                        f'{now - 400} supervisor queue: issue #7\n')
+                elif name == 'casella':
+                    message = box / 'to-supervisor/20261126T101500Z-a1b2c3.txt'
+                    message.write_text('x\n')
+                    os.utime(message, (now - 400, now - 400))
+                done = self.watchdog(name)
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                sent = self.messages(name, 'to-coordinator')
+                self.assertEqual(len(sent), 1, done.stdout)
+                since = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(start))
+                self.assertIn(f'il supervisore è a riposo dal {since}, ma ', sent[0])
+                self.assertIn(text, sent[0])
+                self.assertIn('"Stopped roles"', sent[0])
+                self.assertNotIn('informazione', done.stdout)
+                # Not repeated while it stays.
+                self.assertIn('stato invariato', self.watchdog(name).stdout)
+                self.assertEqual(len(self.messages(name, 'to-coordinator')), 1)
+
+    def test_a_signal_within_its_time_or_a_recent_message_is_no_anomaly(self):
+        self.sentinel_state('active')
+        box = self.project('alpha')
+        self.beat('alpha', 'coordinator', 60)
+        self.at_rest('alpha', 'supervisor', lock=False)
+        now = int(time.time())
+        # Woken a minute ago: the lock is no longer held, and the role has its time.
+        (box / 'rest/supervisor.wake').write_text(f'{now - 60} controllo giornaliero\n')
+        (box / 'to-supervisor/m.txt').write_text('x\n')
+        (self.tmp / 'state-alpha/events/hold').write_text(f'{now - 30} supervisor preflight #3\n')
+        done = self.watchdog('alpha')
+        self.assertIn('il supervisore è a riposo', done.stdout)
+        self.assertEqual(self.messages('alpha', 'to-coordinator'), [])
+
+    def test_a_rest_with_work_found_recently_is_not_told_as_an_empty_queue(self):
+        # #684: devloop run found the queue not empty 30 seconds ago; the sentinel wakes the role.
+        self.sentinel_state('active')
+        self.project('alpha')
+        self.beat('alpha', 'coordinator', 60)
+        self.at_rest('alpha', 'supervisor')
+        now = int(time.time())
+        (self.tmp / 'state-alpha/events/hold').write_text(f'{now - 30} supervisor queue: issue #7\n')
+        done = self.watchdog('alpha')
+        self.assertIn("il supervisore è a riposo dal", done.stdout)
+        self.assertIn("c'è lavoro dalle", done.stdout)
+        self.assertIn('(queue: issue #7), la sentinella lo sveglia', done.stdout)
+        self.assertNotIn('coda vuota', done.stdout)
+        self.assertEqual(self.messages('alpha', 'to-coordinator'), [])
+
+    def test_the_coordinator_at_rest_with_an_anomaly_alerts_the_operator(self):
+        self.sentinel_state('active')
+        self.project('alpha')
+        self.beat('alpha', 'supervisor', 60)
+        self.at_rest('alpha', 'coordinator', lock=False)
+        done = self.watchdog('alpha')
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        sent = self.messages('alpha', 'to-supervisor')
+        self.assertEqual(len(sent), 1)
+        self.assertIn('il coordinatore è a riposo dal', sent[0])
+        self.assertIn('il lock', sent[0])
+        self.assertIn("avviso all'operatore: watchdog dei ruoli, progetto alpha "
+                      '(brushtyler/alpha): il coordinatore è a riposo dal', done.stdout)
+
     def test_the_instances_of_two_projects_are_isolated(self):
         # Two projects on the same host: each instance reads and writes only its own mailbox.
         alpha, beta = self.project('alpha'), self.project('beta')
@@ -7341,12 +7990,31 @@ class RoleWatchdogTests(OpsTestCase):
                               f'--home-dir / --shell /usr/sbin/nologin role-watchdog-{name}\n',
                               out)
                 acls = [line.split()[-2:] for line in out.splitlines()
-                        if 'setfacl' in line and 'role-watchdog' in line]
+                        if 'setfacl' in line and 'role-watchdog' in line
+                        and 'coordination' in line]
                 box = self.projects[name][0]
+                # #684: the rest of the roles, and the list of the messages a role at rest has.
                 self.assertEqual(acls, [[f'u:role-watchdog-{name}:--x', str(box)],
                                         [f'u:role-watchdog-{name}:--x', f'{box}/heartbeat'],
-                                        [f'u:role-watchdog-{name}:-wx', f'{box}/to-coordinator'],
-                                        [f'u:role-watchdog-{name}:-wx', f'{box}/to-supervisor']])
+                                        [f'u:role-watchdog-{name}:--x', f'{box}/rest'],
+                                        [f'u:role-watchdog-{name}:rwx', f'{box}/to-coordinator'],
+                                        [f'u:role-watchdog-{name}:rwx', f'{box}/to-supervisor']])
+                # The sentinel of the project (#684): a user of its own, its ACLs on its mailbox
+                # only, its drop-in and its service enabled.
+                self.assertIn('[dry-run] useradd --system --user-group --no-create-home '
+                              f'--home-dir / --shell /usr/sbin/nologin role-sentinel-{name}\n',
+                              out)
+                acls = [line.split()[-2:] for line in out.splitlines()
+                        if 'setfacl' in line and 'role-sentinel' in line
+                        and 'coordination' in line]
+                self.assertEqual(acls, [[f'u:role-sentinel-{name}:--x', str(box)],
+                                        [f'u:role-sentinel-{name}:-wx', f'{box}/rest'],
+                                        [f'u:role-sentinel-{name}:r-x', f'{box}/to-coordinator'],
+                                        [f'u:role-sentinel-{name}:r-x', f'{box}/to-supervisor']])
+                self.assertIn(f'scriverebbe {self.tmp}/systemd/devloop-role-sentinel@{name}.'
+                              'service.d/project.conf', out)
+                self.assertIn(f'[dry-run] systemctl enable --now devloop-role-sentinel@{name}.'
+                              'service\n', out)
                 self.assertNotIn(f'usermod -aG {GROUP} role-watchdog', out)
                 self.assertNotIn(f'coordination-{other}', out)
                 self.assertIn(f'scriverebbe {self.tmp}/systemd/devloop-role-watchdog@{name}.'

@@ -11,12 +11,29 @@
 # in to-supervisor/ e to-coordinator/ della casella del suo progetto. Dalla copia di root in
 # WATCHDOG_OPS_DIR, con i parametri del progetto copiati lì (params.env).
 #
-# Un ruolo è fermo se il suo battito manca o è più vecchio di due periodi (il periodo è quello
-# scritto nel battito, "<ora> <periodo>"):
-# - supervisore fermo, coordinatore no: un messaggio in to-coordinator/;
-# - coordinatore fermo, supervisore no: un messaggio in to-supervisor/ e un avviso all'operatore;
-# - entrambi fermi: un avviso all'operatore, e un messaggio in entrambe le caselle, per il primo
+# Ogni ruolo è in uno di tre stati (#684; ADR 0002, precisazione del 2026-11-26):
+# - attivo: battiti regolari, niente da fare;
+# - a riposo: lo stato di riposo che il ruolo ha dichiarato (COORDINATION_DIR/rest/<ruolo>, che
+#   role-wait.sh --rest scrive), la sentinella dei ruoli attiva (devloop-role-sentinel@<progetto>)
+#   e il lock del ruolo tenuto (rest/<ruolo>.lock, con flock): un'informazione nel journal, non un
+#   allarme, una volta per ingresso («a riposo dal …, coda vuota»). A riposo un ruolo non batte, e
+#   il watchdog segnala solo le anomalie: la sentinella non attiva; il lock non tenuto (la sessione
+#   è morta); il ruolo svegliato dalla sentinella (rest/<ruolo>.wake) che non toglie il suo riposo
+#   entro REST_WAKE_TIMEOUT secondi dal segnale; il riposo dichiarato con del lavoro: la coda non
+#   vuota (issue in coda, anche bloccate da prerequisiti, o in lavorazione, PR aperte) o un
+#   controllo di prontezza o un'implementazione trattenuti, che devloop run scrive nel file hold
+#   del flusso degli eventi, da più di REST_WAKE_TIMEOUT secondi, o un messaggio nella sua casella
+#   da più di REST_MAILBOX_AGE secondi dal suo arrivo. Un ruolo a riposo con un'anomalia si
+#   segnala come un ruolo fermo;
+# - fermo: nessun riposo valido, e il battito manca o è più vecchio di due periodi (il periodo è
+#   quello scritto nel battito, "<ora> <periodo>").
+# Un ruolo fermo o in anomalia:
+# - il supervisore, con il coordinatore attivo o a riposo: un messaggio in to-coordinator/;
+# - il coordinatore, con il supervisore attivo o a riposo: un messaggio in to-supervisor/ e un
+#   avviso all'operatore;
+# - entrambi: un avviso all'operatore, e un messaggio in entrambe le caselle, per il primo
 #   ruolo che riparte.
+# Un messaggio a un ruolo a riposo lo sveglia, attraverso la sentinella.
 # Ogni avviso nomina il progetto. Lo stesso avviso non si ripete finché lo stato non cambia: lo
 # stato dell'ultimo controllo sta in STATE_DIRECTORY (StateDirectory= dell'unità). Gli avvisi
 # all'operatore passeranno da `devloop notify` del progetto (#593); finché non c'è, vanno nelle
@@ -101,6 +118,82 @@ if [ "$MODE" = failed ]; then
 fi
 
 NOW=$(date +%s)
+REST=$COORDINATION_DIR/$COORDINATION_REST
+HOLD=$STATE_PATH/$EVENTS_DIR/$EVENTS_HOLD
+# Lo stato della sentinella, letto solo con un ruolo a riposo.
+SENTINEL=''
+
+# utc SECONDI: l'ora UTC di SECONDI dall'epoca.
+utc() { date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ; }
+
+# lock_held ROLE: il lock del riposo di ROLE è tenuto (da role-wait.sh --rest, in esclusiva): un
+# lock condiviso non si ottiene. Il file si apre in sola lettura, senza crearlo.
+lock_held() {
+    local fd held=1
+    # Fra graffe: la redirezione di stderr vale solo per l'apertura, non per il resto dello script.
+    { exec {fd}<"$REST/$1.lock"; } 2>/dev/null || return 1
+    flock -n -s "$fd" || held=0
+    exec {fd}<&-
+    [ "$held" = 0 ]
+}
+
+# rest ROLE: se ROLE ha dichiarato il riposo, in BEAT_STATE riposo o anomalia, in BEAT_KEY la chiave
+# dello stato (per non ripetere gli avvisi: l'inizio del riposo e le anomalie), in BEAT_WHY il
+# perché; torna 1 se ROLE non è a riposo.
+rest() {
+    local role=$1 start wake at why oldest age text queue='coda vuota' anomalies=()
+    start=$(ops_rest_start "$role") || return 1
+    if [ -z "$SENTINEL" ]; then
+        SENTINEL=$(systemctl is-active "$SENTINEL_UNIT.service" 2>/dev/null)
+        SENTINEL=${SENTINEL:-sconosciuto}
+    fi
+    if [ "$SENTINEL" != active ]; then
+        anomalies+=("sentinella:la sentinella $SENTINEL_UNIT non è attiva ($SENTINEL): nessuno sveglia il ruolo")
+    fi
+    wake=$(ops_rest_wake "$role")
+    if [ -n "$wake" ] && [ "${wake%% *}" -ge "$start" ]; then
+        at=${wake%% *}
+        why=${wake#* }
+        if [ $((NOW - at)) -gt "$REST_WAKE_TIMEOUT" ]; then
+            anomalies+=("svegliato:la sentinella l'ha svegliato alle $(utc "$at") ($why), ma dopo più di ${REST_WAKE_TIMEOUT}s non ha ripreso i battiti (REST_WAKE_TIMEOUT)")
+        fi
+    else
+        lock_held "$role" \
+            || anomalies+=("lock:il riposo è dichiarato, ma il lock $REST/$role.lock non è tenuto: la sessione del ruolo non è viva")
+        # Il file del lavoro con un ruolo a riposo, che devloop run scrive con un controllo di
+        # prontezza o un'implementazione trattenuti o con la coda non vuota (anche solo di issue
+        # bloccate da prerequisiti, che nessuna azione avvia): "<prima volta> <ruoli> <lavoro>".
+        if [ -f "$HOLD" ] && read -r at why text <"$HOLD" 2>/dev/null && [[ $at =~ ^[0-9]{1,12}$ ]]
+        then
+            queue="c'è lavoro dalle $(utc "$at") (${text:-lavoro}), la sentinella lo sveglia"
+            [ $((NOW - at)) -gt "$REST_WAKE_TIMEOUT" ] \
+                && anomalies+=("lavoro:c'è lavoro: ${text:-lavoro} dalle $(utc "$at"), da più di ${REST_WAKE_TIMEOUT}s (REST_WAKE_TIMEOUT)")
+        fi
+        oldest=$(find "$COORDINATION_DIR/to-$role" -mindepth 1 -maxdepth 1 -type f ! -name '.*' \
+                     -printf '%T@\n' 2>/dev/null | sort -n | head -n 1)
+        oldest=${oldest%%.*}
+        if [ -n "$oldest" ]; then
+            age=$((NOW - oldest))
+            [ "$age" -gt "$REST_MAILBOX_AGE" ] \
+                && anomalies+=("casella:un messaggio aspetta in to-$role/ da $((age / 60)) minuti, più di ${REST_MAILBOX_AGE}s (REST_MAILBOX_AGE)")
+        fi
+    fi
+    if [ ${#anomalies[@]} -eq 0 ]; then
+        BEAT_STATE=riposo
+        BEAT_KEY="riposo@$start"
+        BEAT_WHY="a riposo dal $(utc "$start"), $queue"
+        return 0
+    fi
+    BEAT_STATE=anomalia
+    BEAT_KEY="anomalia@$start"
+    BEAT_WHY="a riposo dal $(utc "$start"), ma"
+    for text in "${anomalies[@]}"; do
+        BEAT_KEY="$BEAT_KEY:${text%%:*}"
+        BEAT_WHY="$BEAT_WHY ${text#*:};"
+    done
+    BEAT_WHY=${BEAT_WHY%;}
+}
+
 # beat ROLE: in BEAT_STATE ok o fermo, in BEAT_WHY il perché; torna 1 se il battito non si legge.
 beat() {
     local file=$BEATS/$1 at='' period='' age
@@ -126,13 +219,24 @@ beat() {
     BEAT_WHY="battito di $((age / 60)) minuti fa"
 }
 
-beat supervisor || exit 1
-SUPERVISOR_STATE=$BEAT_STATE SUPERVISOR_WHY=$BEAT_WHY
-beat coordinator || exit 1
-COORDINATOR_STATE=$BEAT_STATE COORDINATOR_WHY=$BEAT_WHY
+# state ROLE: lo stato di ROLE, il riposo prima del battito: in BEAT_STATE attivo (ok), riposo,
+# anomalia o fermo, in BEAT_KEY la chiave dello stato, in BEAT_WHY il perché; torna 1 se il
+# battito non si legge.
+state() {
+    if rest "$1"; then
+        return 0
+    fi
+    beat "$1" || return 1
+    BEAT_KEY=$BEAT_STATE
+}
+
+state supervisor || exit 1
+SUPERVISOR_STATE=$BEAT_STATE SUPERVISOR_KEY=$BEAT_KEY SUPERVISOR_WHY=$BEAT_WHY
+state coordinator || exit 1
+COORDINATOR_STATE=$BEAT_STATE COORDINATOR_KEY=$BEAT_KEY COORDINATOR_WHY=$BEAT_WHY
 rm -f "$STATE/failed"
 
-NEW="supervisor=$SUPERVISOR_STATE coordinator=$COORDINATOR_STATE"
+NEW="supervisor=$SUPERVISOR_KEY coordinator=$COORDINATOR_KEY"
 OLD=$(cat "$STATE/last" 2>/dev/null || printf 'supervisor=ok coordinator=ok')
 say "$WHO: supervisore $SUPERVISOR_STATE ($SUPERVISOR_WHY), coordinatore $COORDINATOR_STATE ($COORDINATOR_WHY)"
 if [ "$NEW" = "$OLD" ]; then
@@ -140,31 +244,78 @@ if [ "$NEW" = "$OLD" ]; then
     exit 0
 fi
 
+# bad KEY: lo stato di chiave KEY è da segnalare (fermo, o a riposo con un'anomalia).
+bad() { [[ $1 == fermo || $1 == anomalia@* ]]; }
+# alarms STATO: la parte da segnalare di uno stato salvato ("supervisor=… coordinator=…"): la
+# chiave di ogni ruolo fermo o in anomalia, "ok" per gli altri. Un ruolo che entra in riposo, o
+# ne esce, non ripete l'avviso dell'altro.
+alarms() {
+    local part out='' role key
+    for part in $1; do
+        role=${part%%=*}
+        key=${part#*=}
+        bad "$key" || key=ok
+        out="$out $role=$key"
+    done
+    printf '%s' "${out# }"
+}
+
+# L'informazione del riposo (#684): nel journal, non un allarme, una volta per ingresso.
+for role in supervisor coordinator; do
+    if [ "$role" = supervisor ]; then
+        key=$SUPERVISOR_KEY why=$SUPERVISOR_WHY name=supervisore
+    else
+        key=$COORDINATOR_KEY why=$COORDINATOR_WHY name=coordinatore
+    fi
+    if [[ $key == riposo@* ]] && [[ " $OLD " != *" $role=$key "* ]]; then
+        say "informazione: $WHO: il $name è $why"
+    fi
+done
+
 # L'avviso all'operatore: `devloop notify` del progetto quando ci sarà (#593); finché non c'è,
 # il journal (questa riga) e le caselle.
 operator() {
     say "avviso all'operatore: $1 (devloop notify non c'è ancora, #593: solo il journal e le caselle)"
 }
 
-case $NEW in
-    'supervisor=fermo coordinator=ok')
-        send to-coordinator "watchdog dei ruoli, $WHO: il supervisore è fermo ($SUPERVISOR_WHY). Vedere il runbook, \"Stopped roles\"." \
-            || exit 1
-        ;;
-    'supervisor=ok coordinator=fermo')
-        text="watchdog dei ruoli, $WHO: il coordinatore è fermo ($COORDINATOR_WHY)."
-        send to-supervisor "$text Vedere il runbook, \"Stopped roles\"." || exit 1
-        operator "$text"
-        ;;
-    'supervisor=fermo coordinator=fermo')
-        text="watchdog dei ruoli, $WHO: supervisore e coordinatore sono fermi (supervisore: $SUPERVISOR_WHY; coordinatore: $COORDINATOR_WHY)."
-        operator "$text"
-        send to-coordinator "$text" && send to-supervisor "$text" || exit 1
-        ;;
-    *)
-        say "$WHO: supervisore e coordinatore di nuovo attivi"
-        ;;
-esac
+# describe RUOLO STATO PERCHÉ: il ruolo fermo o in anomalia, per gli avvisi.
+describe() {
+    if [ "$2" = fermo ]; then
+        printf 'il %s è fermo (%s)' "$1" "$3"
+    else
+        printf 'il %s è %s' "$1" "$3"
+    fi
+}
+
+NEW_ALARMS=$(alarms "$NEW")
+if [ "$NEW_ALARMS" != "$(alarms "$OLD")" ]; then
+    sup=0 coo=0
+    bad "$SUPERVISOR_KEY" && sup=1
+    bad "$COORDINATOR_KEY" && coo=1
+    case $sup$coo in
+        10)
+            send to-coordinator "watchdog dei ruoli, $WHO: $(describe supervisore "$SUPERVISOR_STATE" "$SUPERVISOR_WHY"). Vedere il runbook, \"Stopped roles\"." \
+                || exit 1
+            ;;
+        01)
+            text="watchdog dei ruoli, $WHO: $(describe coordinatore "$COORDINATOR_STATE" "$COORDINATOR_WHY")."
+            send to-supervisor "$text Vedere il runbook, \"Stopped roles\"." || exit 1
+            operator "$text"
+            ;;
+        11)
+            if [ "$SUPERVISOR_STATE $COORDINATOR_STATE" = 'fermo fermo' ]; then
+                text="watchdog dei ruoli, $WHO: supervisore e coordinatore sono fermi (supervisore: $SUPERVISOR_WHY; coordinatore: $COORDINATOR_WHY)."
+            else
+                text="watchdog dei ruoli, $WHO: supervisore e coordinatore non sono attivi ($(describe supervisore "$SUPERVISOR_STATE" "$SUPERVISOR_WHY"); $(describe coordinatore "$COORDINATOR_STATE" "$COORDINATOR_WHY"))."
+            fi
+            operator "$text"
+            send to-coordinator "$text" && send to-supervisor "$text" || exit 1
+            ;;
+        *)
+            say "$WHO: supervisore e coordinatore di nuovo attivi"
+            ;;
+    esac
+fi
 printf '%s\n' "$NEW" >"$STATE/last.tmp" && mv -f "$STATE/last.tmp" "$STATE/last" \
     || { say "errore: non salvo lo stato in $STATE" >&2; exit 1; }
 exit 0

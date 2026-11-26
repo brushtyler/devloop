@@ -28,13 +28,13 @@ VERIFIED_ARCH=aarch64
 OPS_STATE_DIR=.devloop
 
 # I segnaposto @NOME@ che `render` sostituisce nei file dichiarativi (unità, sudoers).
-OPS_TEMPLATE_VARS='REPO DEVLOOP_USER SUPERVISOR_USER AGENT_USER COORDINATOR_USER DEVLOOP_HOME AGENT_HOME DEVLOOP_CLONE STATE_DIR STATE_PATH LAUNCHER_CMD DEVLOOP_PATH AGENT_PATH SERVICE_NAME REPO_LOCK_DIR REPO_LOCK_GROUP COORDINATOR_OPS_DIR COORDINATION_DIR WATCHDOG_USER WATCHDOG_OPS_DIR DEVLOOP_PROJECTS_DIR DEVLOOP_COMMAND OPS_INSTANCE'
+OPS_TEMPLATE_VARS='REPO DEVLOOP_USER SUPERVISOR_USER AGENT_USER COORDINATOR_USER DEVLOOP_HOME AGENT_HOME DEVLOOP_CLONE STATE_DIR STATE_PATH LAUNCHER_CMD DEVLOOP_PATH AGENT_PATH SERVICE_NAME REPO_LOCK_DIR REPO_LOCK_GROUP COORDINATOR_OPS_DIR COORDINATION_DIR WATCHDOG_USER WATCHDOG_OPS_DIR SENTINEL_USER DEVLOOP_PROJECTS_DIR DEVLOOP_COMMAND OPS_INSTANCE'
 
 # I file di ops/ che check-host.sh legge (#530): setup-coordinator.sh li copia, con i parametri
 # (params.env), nella directory di root COORDINATOR_OPS_DIR, da cui il coordinatore esegue come
 # root `check-host.sh --read-only`, mai dal clone di devloop né da un checkout scrivibile. Con
 # loro il risveglio dei ruoli (role-wait.sh, #602) e il suo involucro coordinator-wait.sh (#543).
-OPS_COORDINATOR_FILES='lib.sh host/check-host.sh host/role-wait.sh host/coordinator-wait.sh host/role-watchdog.sh host/sudoers-supervisor host/sudoers-agent host/sudoers-coordinator host/tmpfiles-devloop-repos.conf host/devloop.service host/devloop@.service host/devloop-project.conf host/devloop-role-watchdog@.service host/devloop-role-watchdog@.timer host/devloop-role-watchdog-failed@.service host/role-watchdog-project.conf host/devloop-command host/devloop-command-project host/devloop-failed@.service'
+OPS_COORDINATOR_FILES='lib.sh host/check-host.sh host/role-wait.sh host/coordinator-wait.sh host/role-watchdog.sh host/role-sentinel.sh host/sudoers-supervisor host/sudoers-agent host/sudoers-coordinator host/tmpfiles-devloop-repos.conf host/devloop.service host/devloop@.service host/devloop-project.conf host/devloop-role-watchdog@.service host/devloop-role-watchdog@.timer host/devloop-role-watchdog-failed@.service host/role-watchdog-project.conf host/devloop-role-sentinel@.service host/devloop-role-sentinel-failed@.service host/role-sentinel-project.conf host/devloop-command host/devloop-command-project host/devloop-failed@.service'
 # Il risveglio del supervisore (#602): setup-supervisor.sh copia questi file, con i parametri,
 # nella directory di root SUPERVISOR_OPS_DIR, da cui il supervisore lo esegue.
 OPS_SUPERVISOR_FILES='lib.sh host/role-wait.sh'
@@ -42,8 +42,12 @@ OPS_SUPERVISOR_FILES='lib.sh host/role-wait.sh'
 # i parametri del progetto, nella directory di root WATCHDOG_OPS_DIR, da cui lo esegue l'istanza
 # devloop-role-watchdog@<progetto>; le unità template (OPS_WATCHDOG_UNITS) vanno in SYSTEMD_DIR,
 # una volta per host, con una drop-in per istanza (host/role-watchdog-project.conf).
-OPS_WATCHDOG_FILES='lib.sh host/role-watchdog.sh'
+# Con il watchdog, dalla stessa copia, la sentinella dei ruoli a riposo (#684): l'istanza
+# devloop-role-sentinel@<progetto>, con le sue unità template (OPS_SENTINEL_UNITS) e la sua
+# drop-in (host/role-sentinel-project.conf).
+OPS_WATCHDOG_FILES='lib.sh host/role-watchdog.sh host/role-sentinel.sh'
 OPS_WATCHDOG_UNITS='devloop-role-watchdog@.service devloop-role-watchdog@.timer devloop-role-watchdog-failed@.service'
+OPS_SENTINEL_UNITS='devloop-role-sentinel@.service devloop-role-sentinel-failed@.service'
 
 # La casella fra supervisore e coordinatore (#543): sotto COORDINATION_DIR una directory di
 # messaggi per destinatario, ciascuna con la sua done/ per i messaggi letti. Tutte di root, del
@@ -56,6 +60,12 @@ COORDINATION_OPERATOR_BOX=to-operator
 # I battiti dei ruoli (#602): COORDINATION_DIR/heartbeat/<ruolo>, che role-wait.sh scrive a ogni
 # avvio e il watchdog dei ruoli legge; la directory è come le caselle, senza done/.
 COORDINATION_HEARTBEAT=heartbeat
+# Il riposo dei ruoli (#684): COORDINATION_DIR/rest/, di root, del gruppo dei ruoli, 3770 (lo
+# sticky bit: ognuno rimuove o sostituisce solo i suoi file). Dentro, di ciascun ruolo, lo stato
+# di riposo <ruolo> ("<inizio> <motivo>", che role-wait.sh --rest scrive e role-wait.sh toglie),
+# il file del suo lock <ruolo>.lock (tenuto con flock da role-wait.sh --rest mentre aspetta) e,
+# della sentinella, il segnale di risveglio <ruolo>.wake ("<ora> <motivo>").
+COORDINATION_REST=rest
 
 # Il flusso degli eventi (#683), come devloop/events.py: la directory dello state_dir che devloop
 # run scrive (DIRECTORY), con i segmenti, il segno di vita (ALIVE) e l'identità del flusso. I
@@ -63,6 +73,16 @@ COORDINATION_HEARTBEAT=heartbeat
 # setup-coordinator.sh mettono (ensure_events_acl).
 EVENTS_DIR=events
 EVENTS_ALIVE=alive
+# Il lavoro con un ruolo a riposo (#684), HOLD_FILE di devloop/rest.py: devloop run lo scrive nella
+# directory del flusso mentre un ruolo è a riposo e c'è lavoro, i controlli di prontezza e le
+# implementazioni che non avvia o una coda non vuota ("<prima volta> <ruoli> <lavoro>", con
+# "unknown" al posto dei ruoli se non legge il riposo), e lo toglie quando non c'è più. La
+# sentinella sveglia i ruoli a riposo; il watchdog lo segnala dopo REST_WAKE_TIMEOUT.
+EVENTS_HOLD=hold
+# L'issue degli allarmi del loop (#684, ALERT_ISSUE di devloop/events.py), che devloop run scrive
+# nella directory del flusso al suo avvio: la legge chi legge il flusso ma non l'overlay, la
+# sentinella dei ruoli a riposo (ops_alert_issue).
+EVENTS_ALERT_ISSUE=alert_issue
 
 # Nella home dell'utente degli agent (#438), come CLI_DIRS, CLI_SEALED e CLIS di
 # devloop/agentuser.py: le directory delle CLI, di root, del gruppo dell'utente degli agent e con
@@ -406,7 +426,7 @@ ops_devloop_keys() {
 # e quelli che sono nomi di utenti dei ruoli, sostituiti solo da soli e solo se non sono i default
 # documentati (OPS_PUBLIC_USERS, come PUBLIC_USERS di devloop/redact.py).
 OPS_REDACT_PATHS='STATE_DIR DEVLOOP_KEY_DIR SUPERVISOR_KEY_DIR COORDINATOR_KEY_DIR COORDINATOR_CLONE DEVLOOP_HOME AGENT_HOME SUPERVISOR_HOME COORDINATOR_HOME COORDINATION_DIR COORDINATOR_OPS_DIR SUPERVISOR_OPS_DIR WATCHDOG_OPS_DIR LAUNCHER_DIR REPO_LOCK_DIR SYSTEMD_DIR SUDOERS_FILE AGENT_SUDOERS_FILE COORDINATOR_SUDOERS_FILE TMPFILES_FILE DEVLOOP_PROJECTS_DIR DEVLOOP_COMMAND'
-OPS_REDACT_USERS='DEVLOOP_USER AGENT_USER SUPERVISOR_USER COORDINATOR_USER WATCHDOG_USER'
+OPS_REDACT_USERS='DEVLOOP_USER AGENT_USER SUPERVISOR_USER COORDINATOR_USER WATCHDOG_USER SENTINEL_USER'
 # Gli altri nomi dell'installazione, sostituiti da soli e nei nomi dei percorsi e delle unità
 # ($SYSTEMD_DIR/$SERVICE_NAME.service), alle condizioni degli utenti.
 OPS_REDACT_NAMES='SERVICE_NAME'
@@ -454,7 +474,8 @@ ops_redact_filter() {
 import json, re, sys
 data = json.loads(sys.argv[1])
 prefix = data.get("app_prefix") or ""
-public = {"devloop", "devloop-agent", "supervisor", "coordinator", "role-watchdog", "root"}
+public = {"devloop", "devloop-agent", "supervisor", "coordinator", "role-watchdog",
+          "role-sentinel", "root"}
 paths = {}
 for name, value in data.get("paths", {}).items():
     value = value.rstrip("/")
@@ -600,6 +621,8 @@ ops_load_params() {
         : "${SUPERVISOR_OPS_DIR:=/usr/local/lib/devloop-supervisor-$PROJECT}"
         : "${WATCHDOG_OPS_DIR:=/usr/local/lib/devloop-role-watchdog-$PROJECT}"
         : "${WATCHDOG_USER:=role-watchdog-$PROJECT}"
+        # La sentinella dei ruoli a riposo (#684): un utente per progetto, come il watchdog.
+        : "${SENTINEL_USER:=role-sentinel-$PROJECT}"
         # L'avviatore della sorgente a parte, dal tag SOURCE_REF del progetto (#573): una
         # directory per progetto, così due progetti con tag diversi non si sovrascrivono a
         # turno lo stesso file.
@@ -659,6 +682,7 @@ ops_load_params() {
     : "${SUPERVISOR_OPS_DIR:=/usr/local/lib/devloop-supervisor}"
     : "${WATCHDOG_OPS_DIR:=/usr/local/lib/devloop-role-watchdog}"
     : "${WATCHDOG_USER:=role-watchdog}"
+    : "${SENTINEL_USER:=role-sentinel}"
     # Il comando devloop dell'host (#588): l'involucro del launcher, e la directory di root con un
     # file per progetto da cui sceglie il progetto. Gli stessi per tutti i progetti dell'host.
     : "${DEVLOOP_PROJECTS_DIR:=/etc/devloop/projects}"
@@ -670,6 +694,13 @@ ops_load_params() {
     # Il flusso fermo (#683): la sveglia del coordinatore lo dice quando il segno di vita del
     # flusso degli eventi è più vecchio di tanti secondi, con il servizio attivo.
     : "${EVENTS_STALE_AFTER:=300}"
+    # Il riposo dei ruoli (#684): l'ora fissa UTC (HH:MM) del controllo giornaliero, a cui la
+    # sentinella sveglia i ruoli a riposo; i secondi entro cui un ruolo svegliato toglie il suo
+    # riposo, oltre cui anche il lavoro trattenuto da devloop run è un'anomalia per il watchdog; e
+    # quelli oltre cui lo è un messaggio nella casella di un ruolo a riposo.
+    : "${REST_DAILY_CHECK:=00:30}"
+    : "${REST_WAKE_TIMEOUT:=300}"
+    : "${REST_MAILBOX_AGE:=300}"
     # Il nome del progetto nei nomi per progetto dei ruoli (#602): PROJECT, o _default senza
     # PROJECT. '_' non è ammesso in PROJECT, così l'installazione senza PROJECT non coincide mai
     # con un progetto (PROJECT=default compreso): unità, drop-in e stato restano distinti.
@@ -679,6 +710,9 @@ ops_load_params() {
     WATCHDOG_UNIT=devloop-role-watchdog@$WATCHDOG_INSTANCE
     WATCHDOG_DROPIN=$SYSTEMD_DIR/$WATCHDOG_UNIT.service.d/project.conf
     WATCHDOG_FAILED_DROPIN=$SYSTEMD_DIR/devloop-role-watchdog-failed@$WATCHDOG_INSTANCE.service.d/project.conf
+    # La sentinella dei ruoli a riposo (#684), della stessa istanza.
+    SENTINEL_UNIT=devloop-role-sentinel@$WATCHDOG_INSTANCE
+    SENTINEL_DROPIN=$SYSTEMD_DIR/$SENTINEL_UNIT.service.d/project.conf
     # Il file del progetto per il comando devloop (#588), con il nome dell'istanza.
     DEVLOOP_PROJECT_FILE=$DEVLOOP_PROJECTS_DIR/params-$OPS_INSTANCE.env
 
@@ -757,6 +791,7 @@ ops_load_params() {
     _require_name AGENT_USER
     _require_name COORDINATOR_USER
     _require_name WATCHDOG_USER
+    _require_name SENTINEL_USER
     _require_name REPO_LOCK_GROUP
     [ "$AGENT_USER" != "$DEVLOOP_USER" ] || die "AGENT_USER deve essere diverso da DEVLOOP_USER"
     [ "$AGENT_USER" != "$SUPERVISOR_USER" ] || die "AGENT_USER deve essere diverso da SUPERVISOR_USER"
@@ -769,6 +804,10 @@ ops_load_params() {
     # Il watchdog dei ruoli (#602) entra solo nella casella del suo progetto: un utente suo.
     for role in DEVLOOP_USER SUPERVISOR_USER AGENT_USER COORDINATOR_USER; do
         [ "$WATCHDOG_USER" != "${!role}" ] || die "WATCHDOG_USER deve essere diverso da $role"
+    done
+    # La sentinella (#684) legge soltanto, e scrive solo il segnale di risveglio: un utente suo.
+    for role in DEVLOOP_USER SUPERVISOR_USER AGENT_USER COORDINATOR_USER WATCHDOG_USER; do
+        [ "$SENTINEL_USER" != "${!role}" ] || die "SENTINEL_USER deve essere diverso da $role"
     done
     local path
     for path in DEVLOOP_HOME SUPERVISOR_HOME AGENT_HOME COORDINATOR_HOME DEVLOOP_CLONE \
@@ -811,10 +850,13 @@ ops_load_params() {
                 || die "$copy non può stare dentro né contenere $inside"
         done
     done
-    for copy in ROLE_WAIT_PERIOD COORDINATOR_WAIT_PERIOD EVENTS_STALE_AFTER; do
+    for copy in ROLE_WAIT_PERIOD COORDINATOR_WAIT_PERIOD EVENTS_STALE_AFTER REST_WAKE_TIMEOUT \
+        REST_MAILBOX_AGE; do
         [[ ${!copy} =~ ^[1-9][0-9]{0,6}$ ]] \
             || die "$copy è un numero di secondi, da 1 a 9999999: '${!copy}'"
     done
+    [[ $REST_DAILY_CHECK =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] \
+        || die "REST_DAILY_CHECK è un'ora UTC HH:MM: '$REST_DAILY_CHECK'"
     ops_check_host_users
 }
 
@@ -833,15 +875,22 @@ _ops_host_users() {
         [ "$file" = "$UNIT_FILE" ] || [ "$file" = "$DROPIN_FILE" ] && continue
         # Le unità del watchdog dei ruoli (#602) e dell'avviso di un servizio caduto (#593) non
         # sono il servizio di un progetto.
-        case $(basename "$file") in devloop-role-watchdog* | devloop-failed@*) continue ;; esac
+        case $(basename "$file") in
+            devloop-role-watchdog* | devloop-role-sentinel* | devloop-failed@*) continue ;;
+        esac
         sed -n "s|^User=\([a-z_][a-z0-9_-]*\)\$|\1 devloop $file|p" "$file"
     done
-    # Il watchdog dei ruoli di un altro progetto (#602): il suo utente entra solo nella casella di
-    # quel progetto.
+    # Il watchdog dei ruoli di un altro progetto (#602) e la sua sentinella (#684): i loro utenti
+    # entrano solo nella casella di quel progetto.
     for file in "$SYSTEMD_DIR"/devloop-role-watchdog@*.service.d/project.conf; do
         [ -f "$file" ] && [ -r "$file" ] || continue
         [ "$file" = "$WATCHDOG_DROPIN" ] && continue
         sed -n "s|^User=\([a-z_][a-z0-9_-]*\)\$|\1 watchdog $file|p" "$file"
+    done
+    for file in "$SYSTEMD_DIR"/devloop-role-sentinel@*.service.d/project.conf; do
+        [ -f "$file" ] && [ -r "$file" ] || continue
+        [ "$file" = "$SENTINEL_DROPIN" ] && continue
+        sed -n "s|^User=\([a-z_][a-z0-9_-]*\)\$|\1 sentinel $file|p" "$file"
     done
     for dir in $(printf '%s\n' "$(dirname "$SUDOERS_FILE")" "$(dirname "$AGENT_SUDOERS_FILE")" | sort -u); do
         for file in "$dir"/devloop-*; do
@@ -934,7 +983,9 @@ _ops_unit_overlay() {
     local file
     for file in "$SYSTEMD_DIR"/devloop*.service "$SYSTEMD_DIR"/devloop@*.service.d/project.conf; do
         [ -f "$file" ] && [ -r "$file" ] || continue
-        case $(basename "$file") in devloop-role-watchdog* | devloop-failed@*) continue ;; esac
+        case $(basename "$file") in
+            devloop-role-watchdog* | devloop-role-sentinel* | devloop-failed@*) continue ;;
+        esac
         grep -qxF "User=$1" "$file" || continue
         sed -n 's|^StandardOutput=append:\(/.*\)/run\.log$|\1/config.local.toml|p' "$file" | head -n 1
         return
@@ -953,7 +1004,8 @@ _ops_unit_overlay() {
 ops_check_host_users() {
     local user role file target var hint app mine theirs
     while read -r user role file target; do
-        for var in DEVLOOP_USER AGENT_USER SUPERVISOR_USER COORDINATOR_USER WATCHDOG_USER; do
+        for var in DEVLOOP_USER AGENT_USER SUPERVISOR_USER COORDINATOR_USER WATCHDOG_USER \
+            SENTINEL_USER; do
             [ "${!var}" = "$user" ] || continue
             app=''
             case $var:$role in
@@ -1137,6 +1189,90 @@ ensure_events_acl() {
     done
 }
 
+# ops_alert_issue: l'issue degli allarmi del loop. Quella che devloop run ha scritto nel flusso
+# degli eventi al suo avvio (EVENTS_ALERT_ISSUE, una riga vuota senza issue), se si legge: la
+# sentinella dei ruoli a riposo non legge l'overlay, che ha i segreti del progetto (#684); se no
+# [run].alert_issue dell'overlay dello state_dir, se si legge; nulla altrimenti.
+ops_alert_issue() {
+    local file=$STATE_PATH/$EVENTS_DIR/$EVENTS_ALERT_ISSUE value
+    if [ -f "$file" ] && [ -r "$file" ] && IFS= read -r value <"$file" 2>/dev/null; then
+        [[ $value =~ ^[1-9][0-9]{0,11}$ ]] && printf '%s\n' "$value"
+        return 0
+    fi
+    python3 -I -B - "$STATE_PATH/config.local.toml" 2>/dev/null <<'EOF'
+import sys, tomllib
+with open(sys.argv[1], 'rb') as fh:
+    value = (tomllib.load(fh).get('run') or {}).get('alert_issue')
+if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+    print(value)
+EOF
+}
+
+# ops_role_event ROLE LINE: LINE, una riga del flusso degli eventi, sveglia ROLE (supervisor o
+# coordinator; docs/devloop/guide.md, "Waking the supervising agent"). LINE può avere l'ora
+# ("HH:MM ") davanti, come la stampa devloop watch: i filtri la saltano. ALERT_ISSUE è l'issue
+# degli allarmi (ops_alert_issue). Il filtro della sveglia dei ruoli (role-wait.sh, #602) e della
+# sentinella dei ruoli a riposo (role-sentinel.sh, #684). La riga della base di devloop watch non
+# è un evento per nessuno.
+ops_role_event() {
+    local role=$1 line=$2 other=supervisor
+    local operator=agent:needs-operator coordinator=agent:needs-coordinator
+    [ "$role" = supervisor ] && other=coordinator
+    [[ $line =~ ^[0-9]{2}:[0-9]{2}\ (.*)$ ]] && line=${BASH_REMATCH[1]}
+    [ -n "$line" ] || return 1
+    [[ $line == 'watch baseline:'* ]] && return 1
+    # La routine (#682), riconosciuta da devloop run per l'autore, mai per il testo: l'archivio
+    # del riepilogo giornaliero ("report by"), i commenti del ruolo stesso, il diario dell'altro
+    # ruolo (un suo commento sull'issue degli allarmi).
+    [[ $line =~ ^(PR|issue)\ \#[0-9]+\ (report|$role\ comment)\ by\  ]] && return 1
+    [ -n "${ALERT_ISSUE:-}" ] && [[ $line =~ ^issue\ \#$ALERT_ISSUE\ $other\ comment\ by\  ]] \
+        && return 1
+    [ "$role" = supervisor ] && return 0
+    # Una delle due label aggiunta, o fra quelle di un'issue o di una PR nuova ("new PR #N [a,b]
+    # titolo").
+    [[ $line == *" +$operator"* || $line == *" +$coordinator"* ]] && return 0
+    if [[ $line =~ ^new\ (PR|issue)\ \#[0-9]+\ \[([^]]*)\] ]]; then
+        case ",${BASH_REMATCH[2]}," in
+            *",$operator,"* | *",$coordinator,"*) return 0 ;;
+        esac
+    fi
+    [[ ${line,,} == *"merge spetta all'operatore"* ]] && return 0
+    [[ $line == 'watch error:'* ]] && return 0
+    # Una risposta dell'operatore (#676): devloop run la distingue da un commento qualunque.
+    [[ $line =~ ^(PR|issue)\ \#[0-9]+\ operator\ reply\ by\  ]] && return 0
+    [ -n "${ALERT_ISSUE:-}" ] && [[ $line =~ ^issue\ \#$ALERT_ISSUE\ (operator\ )?comment\ by\  ]] \
+        && return 0
+    return 1
+}
+
+# ops_log_error LINE: LINE, una riga di run.log, è un errore che sveglia il coordinatore: un
+# Traceback, un allarme (ALERT:), un 401 o "Bad credentials", il rifiuto dell'avvio ("devloop:").
+ops_log_error() {
+    grep -Eq 'Traceback|ALERT:|(^|[^0-9])401([^0-9]|$)|[Bb]ad credentials|^devloop: ' <<<"$1"
+}
+
+# ops_rest_start ROLE: l'inizio (secondi dall'epoca) del riposo dichiarato di ROLE (#684), da
+# COORDINATION_DIR/rest/ROLE ("<inizio> <motivo>"); nulla, e 1, se non è a riposo o lo stato non
+# si legge.
+ops_rest_start() {
+    local at='' why=''
+    [ -f "$COORDINATION_DIR/$COORDINATION_REST/$1" ] || return 1
+    read -r at why <"$COORDINATION_DIR/$COORDINATION_REST/$1" 2>/dev/null || return 1
+    [[ $at =~ ^[0-9]{1,12}$ ]] || return 1
+    printf '%s\n' "$at"
+}
+
+# ops_rest_wake ROLE: l'ora (secondi dall'epoca) del segnale di risveglio di ROLE che la
+# sentinella ha scritto (COORDINATION_DIR/rest/ROLE.wake, "<ora> <motivo>"), e il motivo; nulla,
+# e 1, se non c'è.
+ops_rest_wake() {
+    local at='' why=''
+    [ -f "$COORDINATION_DIR/$COORDINATION_REST/$1.wake" ] || return 1
+    read -r at why <"$COORDINATION_DIR/$COORDINATION_REST/$1.wake" 2>/dev/null || return 1
+    [[ $at =~ ^[0-9]{1,12}$ ]] || return 1
+    printf '%s %s\n' "$at" "$why"
+}
+
 # coordination_dirs: le directory della casella, una per riga: COORDINATION_DIR, una directory di
 # messaggi per destinatario (COORDINATION_BOXES e COORDINATION_OPERATOR_BOX, #663) con la sua
 # done/, e quella dei battiti (#602, COORDINATION_HEARTBEAT).
@@ -1147,15 +1283,27 @@ coordination_dirs() {
         printf '%s\n' "$COORDINATION_DIR/$box" "$COORDINATION_DIR/$box/done"
     done
     printf '%s\n' "$COORDINATION_DIR/$COORDINATION_HEARTBEAT"
+    printf '%s\n' "$COORDINATION_DIR/$COORDINATION_REST"
+}
+
+# coordination_mode DIR: il modo di una directory di coordination_dirs: 3770 per quella del
+# riposo (#684), con lo sticky bit, 2770 per le altre.
+coordination_mode() {
+    if [ "$1" = "$COORDINATION_DIR/$COORDINATION_REST" ]; then
+        printf '3770'
+    else
+        printf '2770'
+    fi
 }
 
 # ensure_coordination USER: la casella fra supervisore e coordinatore (#543). Il gruppo
 # COORDINATION_GROUP con dentro USER, e le directory di coordination_dirs, tutte
-# root:COORDINATION_GROUP 2770: i due ruoli si scrivono a vicenda e scrivono all'operatore in
-# to-operator/ (#663), nessun altro utente vi entra. Una voce che è un link o un file al
+# root:COORDINATION_GROUP 2770 (3770 quella del riposo, #684): i due ruoli si scrivono a vicenda
+# e scrivono all'operatore in to-operator/ (#663), nessun altro utente vi entra se non con le ACL
+# del watchdog, della sentinella e di devloop. Una voce che è un link o un file al
 # posto di una directory (la casella di prima, con un file per destinatario) ferma lo script.
 ensure_coordination() {
-    local user=$1 dir actual
+    local user=$1 dir actual mode
     if getent group "$COORDINATION_GROUP" >/dev/null; then
         ok "il gruppo $COORDINATION_GROUP esiste"
     else
@@ -1171,16 +1319,17 @@ ensure_coordination() {
         if [ -L "$dir" ] || { [ -e "$dir" ] && ! [ -d "$dir" ]; }; then
             die "$dir non è una directory: la casella di prima va spostata (ops/host/migrate.md, \"Casella fra i ruoli e sveglia del coordinatore (#543)\"); niente cambiato da qui"
         fi
+        mode=$(coordination_mode "$dir")
         if ! [ -d "$dir" ]; then
-            run install -d -m 2770 -o root -g "$COORDINATION_GROUP" "$dir"
+            run install -d -m "$mode" -o root -g "$COORDINATION_GROUP" "$dir"
             continue
         fi
         actual=$(stat -c '%a %U %G' "$dir")
-        if [ "$actual" = "2770 root $COORDINATION_GROUP" ]; then
-            ok "$dir: 2770, root, gruppo $COORDINATION_GROUP"
+        if [ "$actual" = "$mode root $COORDINATION_GROUP" ]; then
+            ok "$dir: $mode, root, gruppo $COORDINATION_GROUP"
         else
             run chown "root:$COORDINATION_GROUP" "$dir"
-            run chmod 2770 "$dir"
+            run chmod "$mode" "$dir"
         fi
     done
 }
@@ -1247,14 +1396,36 @@ EOF
 }
 
 # Le ACL del watchdog dei ruoli (#602) sulla casella del suo progetto, una "<directory> <permessi>"
-# per riga: l'attraversamento di COORDINATION_DIR e di heartbeat/ (legge i battiti, 664, senza
-# elencarli) e la scrittura dei messaggi in to-supervisor/ e to-coordinator/ (senza leggerli).
+# per riga: l'attraversamento di COORDINATION_DIR, di heartbeat/ (legge i battiti, 664, senza
+# elencarli) e di rest/ (lo stato di riposo, il lock e il segnale di risveglio, #684), e in
+# to-supervisor/ e to-coordinator/ la scrittura dei messaggi e, dal #684, l'elenco (i nomi e le
+# ore dei messaggi in attesa di un ruolo a riposo; i messaggi, 640 del gruppo, non li legge).
 watchdog_acls() {
     local box
-    printf '%s --x\n' "$COORDINATION_DIR" "$COORDINATION_DIR/$COORDINATION_HEARTBEAT"
+    printf '%s --x\n' "$COORDINATION_DIR" "$COORDINATION_DIR/$COORDINATION_HEARTBEAT" \
+        "$COORDINATION_DIR/$COORDINATION_REST"
     for box in $COORDINATION_BOXES; do
-        printf '%s -wx\n' "$COORDINATION_DIR/$box"
+        printf '%s rwx\n' "$COORDINATION_DIR/$box"
     done
+}
+
+# Le ACL della sentinella dei ruoli a riposo (#684) sulla casella del suo progetto, come
+# watchdog_acls: l'attraversamento di COORDINATION_DIR, in rest/ la scrittura del segnale di
+# risveglio (senza elencare: legge per nome lo stato dei due ruoli; lo sticky bit le lascia
+# rimuovere solo i suoi file) e l'elenco di to-supervisor/ e to-coordinator/, senza scrittura.
+sentinel_acls() {
+    local box
+    printf '%s --x\n' "$COORDINATION_DIR"
+    printf '%s -wx\n' "$COORDINATION_DIR/$COORDINATION_REST"
+    for box in $COORDINATION_BOXES; do
+        printf '%s r-x\n' "$COORDINATION_DIR/$box"
+    done
+}
+
+# Le ACL di devloop sulla casella (#684): l'attraversamento di COORDINATION_DIR e di rest/, per
+# leggere per nome lo stato di riposo dei ruoli ([run] rest_dir dell'overlay). Nessun'altra.
+rest_devloop_acls() {
+    printf '%s --x\n' "$COORDINATION_DIR" "$COORDINATION_DIR/$COORDINATION_REST"
 }
 
 # ensure_role_watchdog BOTH: il watchdog dei ruoli (#602). Le unità template
@@ -1285,14 +1456,66 @@ ensure_role_watchdog() {
     while read -r dir perms; do
         ensure_dir_acl "$WATCHDOG_USER" "$dir" "$perms"
     done < <(watchdog_acls)
+    # Il lavoro trattenuto da devloop run (#684), nella directory del flusso degli eventi: il
+    # watchdog la legge, come i ruoli, con l'attraversamento della home di devloop e dello
+    # state_dir.
+    ensure_state_reader "$WATCHDOG_USER"
     ops_root_copy "$WATCHDOG_OPS_DIR" $OPS_WATCHDOG_FILES
     line=$(render "$OPS_DIR/host/role-watchdog-project.conf")
     for dropin in "$WATCHDOG_DROPIN" "$WATCHDOG_FAILED_DROPIN"; do
         ensure_dir "$(dirname "$dropin")" 755 root
         put_file "$dropin" 644 root "$line" && changed=1
     done
+    ensure_role_sentinel
+    [ "$SENTINEL_CHANGED" = 0 ] || changed=1
     [ "$changed" = 0 ] || run systemctl daemon-reload
     run systemctl enable --now "$WATCHDOG_UNIT.timer"
+    run systemctl enable --now "$SENTINEL_UNIT.service"
+}
+
+# ensure_state_reader USER: USER legge il flusso degli eventi del progetto (#683) e run.log:
+# l'attraversamento della home di devloop e dello state_dir, e le ACL di sola lettura del flusso.
+ensure_state_reader() {
+    local user=$1
+    ensure_traverse_acl "$user" "$DEVLOOP_HOME"
+    ensure_traverse_acl "$user" "$STATE_PATH"
+    ensure_events_acl "$user"
+}
+
+# ensure_role_sentinel: la sentinella dei ruoli a riposo (#684), con il watchdog: le unità
+# template in SYSTEMD_DIR, l'utente SENTINEL_USER fuori dal gruppo dei ruoli, le sue ACL sulla
+# casella (sentinel_acls) e sullo state_dir (ensure_state_reader), la drop-in dell'istanza; e
+# l'attraversamento della casella e di rest/ per devloop (rest_devloop_acls), che non avvia lavoro
+# nuovo con un ruolo a riposo. SENTINEL_CHANGED=1 se ha scritto (o scriverebbe) un'unità o la
+# drop-in.
+SENTINEL_CHANGED=0
+ensure_role_sentinel() {
+    local unit dir perms
+    SENTINEL_CHANGED=0
+    for unit in $OPS_SENTINEL_UNITS; do
+        put_file "$SYSTEMD_DIR/$unit" 644 root "$(render "$OPS_DIR/host/$unit")" \
+            && SENTINEL_CHANGED=1
+    done
+    if user_exists "$SENTINEL_USER"; then
+        ok "l'utente $SENTINEL_USER esiste"
+    else
+        run useradd --system --user-group --no-create-home --home-dir / \
+            --shell /usr/sbin/nologin "$SENTINEL_USER"
+    fi
+    if id -nG "$SENTINEL_USER" 2>/dev/null | tr ' ' '\n' | grep -qxF "$COORDINATION_GROUP"; then
+        die "$SENTINEL_USER è nel gruppo $COORDINATION_GROUP: la sentinella entra solo nella casella del suo progetto, con le ACL (gpasswd -d $SENTINEL_USER $COORDINATION_GROUP)"
+    fi
+    while read -r dir perms; do
+        ensure_dir_acl "$SENTINEL_USER" "$dir" "$perms"
+    done < <(sentinel_acls)
+    ensure_state_reader "$SENTINEL_USER"
+    while read -r dir perms; do
+        ensure_dir_acl "$DEVLOOP_USER" "$dir" "$perms"
+    done < <(rest_devloop_acls)
+    ensure_dir "$(dirname "$SENTINEL_DROPIN")" 755 root
+    put_file "$SENTINEL_DROPIN" 644 root "$(render "$OPS_DIR/host/role-sentinel-project.conf")" \
+        && SENTINEL_CHANGED=1
+    return 0
 }
 
 # clone_origin DIR: l'URL dell'origin del clone DIR, letto da .git/config senza eseguire git nel

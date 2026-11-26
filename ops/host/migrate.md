@@ -630,6 +630,108 @@ fermo, ferma il flusso, che resta nello `state_dir` senza lettori. Le ACL di sol
 flusso non danno altro che la lettura del flusso stesso; per toglierle, `setfacl -b
 <state_dir>/events` e sui suoi file, come root.
 
+## Il riposo dei ruoli (#684)
+
+Il passo sull'host di #684, su un host con il supervisore e il coordinatore già installati e con
+il flusso degli eventi di [#683](#il-flusso-degli-eventi-per-le-sveglie-dei-ruoli-683). Con #684
+un ruolo che a fine turno non ha niente da fare entra in riposo (`role-wait.sh --rest`): dichiara
+lo stato `$COORDINATION_DIR/rest/<ruolo>`, tiene il lock `rest/<ruolo>.lock` e non scrive
+battiti; lo sveglia la sentinella dei ruoli, il servizio `devloop-role-sentinel@<progetto>`
+(`ops/host/role-sentinel.sh`), senza modello né chiavi; `devloop run` non avvia un controllo di
+prontezza né un'implementazione mentre un ruolo è a riposo, e il watchdog dei ruoli distingue il
+riposo dal ruolo fermo ([ops/README.md](../README.md#10-coordinatore-facoltativo), "Il riposo
+dei ruoli"; [ADR 0002](../../docs/adr/0002-ruoli-e-responsabilita.md), precisazione del
+2026-11-26). Servono quindi:
+
+- la directory `$COORDINATION_DIR/rest/`, di root, del gruppo dei ruoli, 3770;
+- l'utente della sentinella (`SENTINEL_USER`, per default `role-sentinel`, con `PROJECT`
+  `role-sentinel-<progetto>`), fuori dal gruppo dei ruoli, con le sue ACL: `--x` sulla casella,
+  `-wx` su `rest/` (il segnale di risveglio), `r-x` su `to-supervisor/` e `to-coordinator/`, la
+  lettura del flusso degli eventi e di `run.log`; le sue unità e la drop-in dell'istanza, il
+  servizio abilitato e avviato. L'overlay non lo legge: l'issue degli allarmi la trova nel file
+  `alert_issue` del flusso, che `devloop run` scrive al suo avvio dopo il pin (passo 3);
+- per il watchdog dei ruoli, `--x` su `rest/`, `rwx` (non più `-wx`) sulle due caselle, per
+  l'età dei messaggi di un ruolo a riposo, e la lettura del flusso degli eventi, con la sua unità
+  che legge lo `state_dir` (`ProtectHome=read-only`);
+- per `DEVLOOP_USER`, `--x` su `$COORDINATION_DIR` e su `rest/`, per leggere lo stato di riposo;
+- le copie di root nuove di `ops/` (con `host/role-wait.sh`, `host/role-sentinel.sh`,
+  `host/role-watchdog.sh` e `lib.sh`);
+- la chiave `rest_dir` di `[run]` nell'overlay del progetto, con il percorso di `rest/`: senza,
+  `devloop run` non guarda il riposo dei ruoli e avvia il lavoro come prima.
+
+Nei comandi, `<checkout>` è il checkout dell'operatore e `<parametri>` il file di parametri del
+progetto. devloop mergia la PR di #684 come le altre, ma non fa il pin automatico di quel commit
+né dei successivi finché l'operatore non fa il pin a mano
+([Ogni cambio con un passo sull'host](#ogni-cambio-con-un-passo-sullhost)): qui è il passo 3.
+
+### Comandi
+
+Come root, dal checkout dell'operatore aggiornato (`git -C <checkout> fetch origin` e
+`git -C <checkout> checkout --detach origin/main`, con il merge di #684), **per ogni progetto
+dell'host** con supervisore e coordinatore (uno con `SOURCE_REF` al tag successivo, con [la sua
+procedura](#un-progetto-con-la-sorgente-a-un-tag-nuovo-666)):
+
+1. **il loop fermo**: `systemctl stop <SERVICE_NAME>`. Le sessioni dei ruoli restano: finché non
+   leggono il runbook nuovo usano la sveglia normale;
+
+2. **la casella, gli utenti, le ACL, le unità e le copie di root**, prima con `--dry-run`. Le
+   azioni nuove sono quelle elencate sopra; un'altra azione che il passo non spiega vuol dire che
+   l'host non corrisponde ai parametri: ci si ferma e si chiede all'operatore:
+
+   ```bash
+   sudo bash <checkout>/ops/host/setup-supervisor.sh --params <parametri> --dry-run
+   sudo bash <checkout>/ops/host/setup-supervisor.sh --params <parametri>
+   sudo bash <checkout>/ops/host/setup-coordinator.sh --params <parametri> --dry-run
+   sudo bash <checkout>/ops/host/setup-coordinator.sh --params <parametri>
+   ```
+
+   Il secondo script trova già fatto ciò che il primo ha fatto;
+
+3. **l'overlay e il pin a mano**: come l'operatore (l'overlay è suo), in `[run]` di
+   `<state_dir>/config.local.toml` la riga `rest_dir = "<COORDINATION_DIR>/rest"`, con il valore
+   di `COORDINATION_DIR` dei parametri; `rest_wake_timeout` (300 secondi per default) solo per
+   un'altra soglia. Poi, come utente `DEVLOOP_USER`, `devloop pin origin/main` (con più progetti
+   `devloop --project <progetto> pin origin/main`) e `systemctl start <SERVICE_NAME>`. Il pin a
+   mano fa riprendere il pin automatico;
+
+4. **la verifica**: nessun `ERRORE` nei passi `Casella fra supervisore e coordinatore`,
+   `Watchdog dei ruoli`, `Sentinella dei ruoli a riposo` e `Flusso degli eventi`, con la riga
+   `devloop-role-sentinel@<progetto>.service è attivo`:
+
+   ```bash
+   sudo bash <checkout>/ops/host/check-host.sh --params <parametri> --no-apps
+   ```
+
+5. **la prova delle CLI dei ruoli**, una breve per ogni CLI in uso come ruolo (`claude`, `codex`
+   o `agy` delle tabelle `[roles.supervisor]` e `[roles.coordinator]`), da una sessione di prova
+   avviata con `ops/host/start-role.sh` come per il ruolo: si chiede alla sessione di lanciare in
+   background `bash <copia di root>/host/role-wait.sh --role <ruolo> --rest` e di dire che cosa
+   stampa quando esce; dopo qualche minuto, come root, un messaggio nella casella del ruolo
+   (`<COORDINATION_DIR>/to-<ruolo>/`, con il comando del runbook, "Channel"). La prova riesce se
+   la sentinella sveglia il ruolo (la riga `sentinella: casella: …` arriva alla sessione), e se,
+   ripresa la sessione dopo averla chiusa con il comando in attesa, la CLI vede ancora l'uscita
+   del comando o lo rilancia. Una CLI che non regge l'attesa (il comando esce prima del segnale,
+   la sessione non ne vede l'uscita, o la ripresa lo perde) non usa il riposo: l'operatore lo
+   scrive nella casella del ruolo, e il ruolo usa la sveglia normale, come prima ([runbook del
+   supervisore](../../docs/devloop/roles/supervisor.md#rest), [del
+   coordinatore](../../docs/devloop/roles/coordinator.md#rest)). Il messaggio di prova si toglie
+   dalla casella;
+
+6. **le sessioni dei ruoli**: leggono la parte nuova del loro runbook solo da una sessione nuova,
+   che l'operatore avvia quando vuole con `ops/host/start-role.sh`.
+
+`REST_DAILY_CHECK` (l'ora UTC del controllo giornaliero, 00:30), `REST_WAKE_TIMEOUT` e
+`REST_MAILBOX_AGE` (300 secondi) si scrivono in `params.env` solo per altri valori; poi si
+rieseguono gli script del passo 2, che ne aggiornano la copia.
+
+**Rollback**: senza `rest_dir` nell'overlay (e un riavvio del servizio) `devloop run` non guarda
+più il riposo; un ruolo a riposo si sveglia con un messaggio nella sua casella finché la
+sentinella è attiva, e poi usa la sveglia normale. `systemctl disable --now
+devloop-role-sentinel@<progetto>.service` ferma la sentinella; il passo 2 dal checkout della
+versione di prima rimette le copie e le ACL di prima del watchdog. La directory `rest/` e
+l'utente della sentinella restano senza effetto; per toglierli, come root, `rm -r
+<COORDINATION_DIR>/rest` e `userdel <SENTINEL_USER>`.
+
 ## Configurazione di ssdlc nel suo file di progetto
 
 Con l'ADR 0006, R3, `devloop/config.toml` non contiene più i fatti di ssdlc né le restrizioni che

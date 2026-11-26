@@ -121,6 +121,7 @@ default) names the issue of the alert of the [continuous loop](guide.md#continuo
 the other alerts of the dispatcher, such as a [red CI on `main`](guide.md#red-ci-on-main) (#459),
 read at each tick only when it is set; a value that
 is not an issue number (an integer of at least 1), or an unknown key, stops devloop at startup.
+`[run] rest_dir` and `rest_wake_timeout` set [the roles at rest](#the-roles-at-rest) (#684).
 `[report]` (`issue`, unset by default; `interval`, default 15) sets the
 [daily summary](guide.md#daily-summary): the dedicated issue it is published on and the minutes
 between two automatic publications of `devloop run`; an `issue` that is not an issue number, an
@@ -283,6 +284,7 @@ does not load, the most common cause of a refused start, still has its channel; 
 devloop notify [--key KEY] "<message>"     # exit 0: sent, within the interval, or no channel; 1: failed
 devloop notify --test                      # whatever the interval; exit 1 also without a channel
 devloop notify --service-failed PROJECT    # the notice of the OnFailure= unit of the service
+devloop notify --sentinel-failed PROJECT   # that of the sentinel of the roles at rest (#684)
 ```
 
 A key has letters, digits and `_ . : @ / -`, at most 100 characters; without `--key` it is the
@@ -293,8 +295,9 @@ in the log: a notice lost is worse than one repeated. The text starts with `devl
 and is cut at 3500 characters. The Telegram backend sends one `sendMessage` with a timeout of 15
 seconds and never reads the messages of the bot; an error is logged by its HTTP status or its
 class, never with its text, which may hold the URL and so the token. The keys devloop uses:
-`run-stopped`, `run-refused`, `alert-issue:<N>`, `service-failed:<project>` and `test`; the
-roles use `<role>:<topic>`.
+`run-stopped`, `run-refused`, `alert-issue:<N>`, `service-failed:<project>`,
+`sentinel-failed:<project>`, `rest-hold`, `rest-unreadable` and `test`; the roles use
+`<role>:<topic>`.
 
 `devloop status` shows the channel and `operator_mentions` (`notify: …`, `operator mentions:
 …`).
@@ -315,6 +318,8 @@ cannot write it. No key configures it.
 | `events.log.1` | the previous segment: before a line would take `events.log` past **10 MiB**, `events.log` becomes `events.log.1`, which replaces the one before it. At most two segments, about 20 MiB, are kept |
 | `alive` | the sign of life: the time (seconds since the epoch) of the latest complete read of GitHub that succeeded, with or without events, replaced atomically |
 | `id` | the identity of the stream, written when it is created: a reader whose cursor names another one knows the stream was replaced |
+| `alert_issue` | the issue of the alerts of the loop (`[run].alert_issue`), written at the start of `devloop run`, an empty line without one: the sentinel of the roles at rest (#684), which may not read the overlay, tells by it the diary of a role on that issue from the comments that wake the other one |
+| `hold` | the work with a role at rest (#684, [the roles at rest](#the-roles-at-rest)), only while there is some |
 
 Each line is one `write` of an append-only descriptor, written before the state of the
 loop's watcher (`run-watch-state.json`) is saved: an interruption in between repeats an event at
@@ -344,6 +349,39 @@ what changed while the loop was stopped is written as events, not swallowed by a
 The wake-ups read the two segments together and check them (the inodes of their names, the
 numbers without gaps): a rotation during the read makes it try again, and a cursor never moves
 past an event still kept that it did not give.
+
+### The roles at rest
+
+A role with nothing to do at the end of its turn rests (#684; [ADR 0002, precision of
+2026-11-26](../adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-26-il-riposo-dei-ruoli-684)):
+`ops/host/role-wait.sh --rest` declares its state `<rest_dir>/<role>` and holds a lock, and the
+sentinel of the roles wakes it ([ops/README.md](../../ops/README.md#10-coordinatore-facoltativo),
+"Il riposo dei ruoli"). Two keys of `[run]` of the host's overlay (the project file cannot have
+them) tell `devloop run` about it:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `[run] rest_dir` | unset: the loop never looks at the rest | the absolute path of the directory of the rest of the roles, `$COORDINATION_DIR/rest` of the host, which devloop's user reaches with a traversal ACL |
+| `[run] rest_wake_timeout` | `300` | the seconds after the first time work is held after which the operator is told, a whole number of at least 1 |
+
+With `rest_dir`, while a role (`supervisor` or `coordinator`) has its state there, a tick of
+`devloop run` or `devloop tick` starts no readiness check and no implementation: the plan keeps
+every other action, and the held ones start at the first tick after the rest ends. While a role
+rests and there is work, the loop writes it to `events/hold` of the `state_dir`, `<since> <roles>
+<work>` (640, so the read-only ACL of the stream of the events applies): `held: …`, the actions
+it holds, and `queue: …`, the queue of the tick (the ready issues, those blocked by a
+prerequisite included, the issues being worked on and the open PRs, at most ten named), since a
+role does not rest with any of them. The sentinel wakes the roles at rest on it, and the watchdog
+of the roles reads it; a tick without work, or without a role at rest, removes it. While work is
+held, each wait of the loop looks at the rest every second and ends as soon as no role rests.
+After `rest_wake_timeout` seconds from the first time work was found the loop tells the operator
+once, with the key `rest-hold` of `devloop notify`, and goes on holding: no new work starts while
+a role rests. A rest that cannot be verified (`rest_dir` missing, or a directory devloop cannot
+read) is not taken for no rest: the work stays held, `unknown` stands for the roles in
+`events/hold`, and the operator is told once, with the key `rest-unreadable`, until the directory
+can be read again. A dry run and `devloop status` show the plan without the hold. A value that
+is not an absolute path, or a timeout that is not a whole number of at least 1, stops devloop at
+startup.
 
 ### Project file
 

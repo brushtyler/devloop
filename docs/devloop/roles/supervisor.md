@@ -174,19 +174,71 @@ its `/devloop` commands included, as those of the agents' apps (#648): you see a
 coordinator as soon as it is opened, before anyone queues it. Its issues still open from
 before are reported once, at the first run with `[roles.coordinator]`, as `issue #N author now trusted`.
 
-Each start writes your heartbeat in `heartbeat/supervisor` of the mailbox: keep the wake-up
-running. A timer of the host, the watchdog of the roles, reads the heartbeats every 5 minutes
-(Stopped roles).
+Each start writes your heartbeat in `heartbeat/supervisor` of the mailbox, and ends your rest if
+you were resting: keep the wake-up running. A timer of the host, the watchdog of the roles, reads
+the heartbeats every 5 minutes (Stopped roles).
+
+## Rest
+
+When a turn ends with nothing to do, rest instead of waiting for the periodic check (#684; ADR
+0002, precision of 2026-11-26 on the rest of the roles): every wake-up with nothing to find
+re-reads your whole context, and costs. Nothing to do means: no issue in the queue or being
+worked on (`agent:ready`, `agent:working`), no open PR, nothing that waits for you (an
+escalation in `agent:needs-supervisor`, a command to answer), and an empty `to-supervisor/`. Then
+start, as a background command, the same wake-up with `--rest` instead of the usual one:
+
+```bash
+bash /usr/local/lib/devloop-supervisor/host/role-wait.sh --role supervisor --rest   # SUPERVISOR_OPS_DIR
+```
+
+It declares your rest in `rest/supervisor` of the mailbox, holds the lock `rest/supervisor.lock`
+(the proof, for the watchdog, that your session lives) and writes no heartbeat. If your mailbox
+already has a message, or the stream an event for you, it does not rest: it prints the lines and
+writes your heartbeat, as any wake-up. Otherwise it waits only for the signal of the sentinel of
+the roles (`devloop-role-sentinel@<project>`, a service of the host without a model or keys),
+which reads the stream of the events, `run.log`, the service and the mailboxes for you, and
+wakes only the role concerned: it ends with a `sentinella: …` line that says why (a message, an
+event, the service, the work `devloop run` holds for the roles at rest, the daily check).
+
+At once, then, start the usual wake-up again, without `--rest`: it ends your rest, writes your
+heartbeat, and gives you the events after your cursor (the sentinel only woke you; read the
+event with your own cursor). Do it within 5 minutes of the signal (`REST_WAKE_TIMEOUT`): later,
+the watchdog reports you. While a role rests, `devloop run` starts no readiness check and no
+implementation: when work arrives it wakes the roles at rest and waits for their rest to end,
+and after 5 minutes tells the operator.
+
+**The daily check.** The sentinel wakes you once a day at a fixed UTC hour (`REST_DAILY_CHECK`,
+00:30 by default, after the usual hour of the daily summary, whether or not it was published), so
+that no wait lasts more than a day: with nothing to do, rest again. A `riposo:` line means the
+sentinel gave no signal for more than a day: do a periodic check, and tell the operator in
+`to-operator/` that the sentinel missed it.
+
+**The fallback.** If your CLI does not hold a background command this long, or loses it when the
+session is resumed (the operator says so in your mailbox after the probe of the step on the host,
+[ops/host/migrate.md, "Il riposo dei ruoli (#684)"](../../../ops/host/migrate.md#il-riposo-dei-ruoli-684)),
+or `--rest` ends with an error (no `rest/` in the mailbox, a lock held by another wait), do not
+rest: use the usual wake-up, with its periodic check, as before.
 
 ## Stopped roles
 
 The watchdog of the roles (`devloop-role-watchdog@<project>`, ADR 0002, second precision of
-2026-11-23, point 6) sees a role as stopped when its heartbeat is missing or older than two of
-its periods. It only detects: it has no GitHub key and changes nothing.
+2026-11-23, point 6, and precision of 2026-11-26 on the rest) sees each role in one of three
+states. It only detects: it has no GitHub key and changes nothing.
 
-- When the coordinator is stopped, it leaves a message in `to-supervisor/` that names the project
-  and alerts the operator. Tell the operator on GitHub (`agent:needs-operator` on the journal of
-  the project) if the coordinator does not come back; you do not start its session.
+- **Active**: regular heartbeats.
+- **At rest**: the rest declared, the sentinel active, the lock held: a line of information in
+  its journal, once per rest, never an alarm. At rest it reports only anomalies, as a stopped
+  role: the sentinel not active; the lock not held (the session died); a role woken by the
+  sentinel that did not resume its heartbeats within `REST_WAKE_TIMEOUT` (300 seconds); a rest
+  declared with work waiting (the queue not empty or work held, as `devloop run` writes them, for
+  more than `REST_WAKE_TIMEOUT`, or a message in its mailbox for more than `REST_MAILBOX_AGE`,
+  300 seconds).
+- **Stopped**: no valid rest, and the heartbeat missing or older than two of its periods.
+
+- When the coordinator is stopped, or at rest with an anomaly, it leaves a message in
+  `to-supervisor/` that names the project and alerts the operator. Tell the operator on GitHub
+  (`agent:needs-operator` on the journal of the project) if the coordinator does not come back;
+  you do not start its session. If you are resting, the message wakes you through the sentinel.
 - When you were stopped too, the message is in both mailboxes: read it at startup.
 - It warns again only when the state changes. If the watchdog itself fails, a message in both
   mailboxes says so: tell the operator.

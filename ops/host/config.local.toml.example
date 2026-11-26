@@ -52,6 +52,11 @@
 # Issue su cui commentare l'allarme di tre tick falliti di fila (senza: solo una riga nel log).
 # [run]
 # alert_issue = 123
+# Il riposo dei ruoli (#684): la directory rest/ della casella fra i ruoli (COORDINATION_DIR/rest).
+# Mentre un ruolo è a riposo nessun controllo di prontezza né implementazione parte; dopo
+# rest_wake_timeout secondi senza risveglio, un avviso all'operatore (devloop notify).
+# rest_dir = "/var/lib/devloop-coordination/rest"
+# rest_wake_timeout = 300
 
 # Issue del riepilogo giornaliero (senza: nessun riepilogo).
 # [report]

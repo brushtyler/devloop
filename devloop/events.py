@@ -21,6 +21,10 @@ The stream is the directory ``events/`` of the state_dir (``Stream``):
   of GitHub that succeeded, with or without events, replaced atomically.
 - ``id``, the identity of the stream, written when the stream is created: a reader whose cursor
   names another one knows the stream was replaced.
+- ``alert_issue``, the issue of the alerts of the loop (``[run].alert_issue``), written by
+  ``devloop run`` at its start, an empty line without one: the readers of the stream that may not
+  read the overlay, the sentinel of the roles at rest (#684), tell the diary of a role on that
+  issue from the comments that wake the other one.
 
 The files are created ``FILE_MODE`` (640) and the directory ``DIR_MODE`` (750), so the
 read-only ACL that setup-supervisor.sh and setup-coordinator.sh give the roles on the directory,
@@ -49,6 +53,7 @@ CURRENT = 'events.log'
 PREVIOUS = 'events.log.1'
 ALIVE = 'alive'
 IDENTITY = 'id'
+ALERT_ISSUE = 'alert_issue'
 MAX_SEGMENT = 10 * 1024 * 1024
 FILE_MODE = 0o640
 DIR_MODE = 0o750
@@ -169,6 +174,13 @@ class Stream:
         except BaseException:
             self._seq = None
             raise
+
+    def alert_issue(self, number):
+        """``ALERT_ISSUE`` with ``number``, the issue of the alerts of the loop (0 or None
+        without one), for the readers of the stream that may not read the overlay (#684)."""
+        if self._seq is None:
+            self.open()
+        self._replace(self.dir / ALERT_ISSUE, f'{number}\n' if number else '\n')
 
     def alive(self):
         """The sign of life: the time of the read that just succeeded."""

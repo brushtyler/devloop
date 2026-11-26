@@ -99,11 +99,22 @@ class MergePolicy:
         return min(modes, key=MERGE_MODES.index)
 
 
+# The seconds ``devloop run`` waits for the roles at rest to wake up once it holds new work,
+# before it tells the operator (#684).
+REST_WAKE_TIMEOUT = 300
+
+
 @dataclass(frozen=True)
 class RunPolicy:
     """``[run]`` (#177): the issue that gets the alert of ``devloop run`` after three consecutive
-    failed ticks, or 0 when none is configured (the alert goes to the local log only)."""
+    failed ticks, or 0 when none is configured (the alert goes to the local log only).
+    ``rest_dir`` (#684), a key of the host's overlay, the directory of the roles' rest
+    (``$COORDINATION_DIR/rest``), or '' when the roles never rest: while a role is at rest no
+    readiness check nor implementation starts; ``rest_wake_timeout`` the seconds after which the
+    work held so is told to the operator."""
     alert_issue: int = 0
+    rest_dir: str = ''
+    rest_wake_timeout: int = REST_WAKE_TIMEOUT
 
 
 # The backends of ``[notify]`` (#593): the channels ``devloop notify`` sends on
@@ -1137,17 +1148,25 @@ def parse_pin(table, lists):
 
 
 def parse_run(table):
-    """``[run]`` (#177): ``alert_issue``, optional, the number of an issue (at least 1)."""
+    """``[run]`` (#177): ``alert_issue``, optional, the number of an issue (at least 1);
+    ``rest_dir`` (#684), optional, an absolute path; ``rest_wake_timeout``, seconds (at least
+    1)."""
     if not isinstance(table, dict):
         raise ConfigError('run: expected a table')
-    unknown = set(table) - {'alert_issue'}
+    unknown = set(table) - {'alert_issue', 'rest_dir', 'rest_wake_timeout'}
     if unknown:
         raise ConfigError(f'run: unknown keys {sorted(unknown)}')
     alert = table.get('alert_issue', 0)
     if 'alert_issue' in table and (not isinstance(alert, int) or isinstance(alert, bool)
                                    or alert < 1):
         raise ConfigError('run.alert_issue: expected the number of an issue')
-    return RunPolicy(alert_issue=alert)
+    rest_dir = table.get('rest_dir', '')
+    if not isinstance(rest_dir, str) or (rest_dir and not rest_dir.startswith('/')):
+        raise ConfigError('run.rest_dir: expected an absolute path')
+    timeout = table.get('rest_wake_timeout', REST_WAKE_TIMEOUT)
+    if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout < 1:
+        raise ConfigError('run.rest_wake_timeout: expected a number of seconds (at least 1)')
+    return RunPolicy(alert_issue=alert, rest_dir=rest_dir, rest_wake_timeout=timeout)
 
 
 def parse_notify(table):
@@ -2212,7 +2231,7 @@ OVERLAY_KEYS = {
     'agents': {'*': _AGENT_KEYS},
     'apps': {'key_dir': None, '*': dict.fromkeys(('app_id', 'slug'))},
     'pin': {'auto': None},
-    'run': {'alert_issue': None},
+    'run': dict.fromkeys(('alert_issue', 'rest_dir', 'rest_wake_timeout')),
     'report': dict.fromkeys(('issue', 'interval')),
     'direction': {'issue': None},
     'notify': dict.fromkeys(('backend', 'chat_id', 'token_file', 'interval')),

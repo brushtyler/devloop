@@ -98,6 +98,16 @@ class StreamTests(StreamCase):
         self.assertEqual(sorted(p.name for p in self.dir.iterdir()),
                          ['alive', 'events.log', 'id'])
 
+    def test_the_issue_of_the_alerts_for_the_readers_of_the_stream(self):
+        # #684: the sentinel of the roles at rest reads it, not the overlay.
+        stream = self.stream()
+        stream.alert_issue(76)
+        self.assertEqual((self.dir / events.ALERT_ISSUE).read_text(), '76\n')
+        self.assertEqual(stat.S_IMODE((self.dir / events.ALERT_ISSUE).stat().st_mode) & 0o137, 0)
+        stream.alert_issue(0)
+        self.assertEqual((self.dir / events.ALERT_ISSUE).read_text(), '\n')
+        self.assertEqual(sorted(p.name for p in self.dir.iterdir()), ['alert_issue', 'id'])
+
     def test_each_line_is_written_with_a_single_write(self):
         stream = self.stream()
         stream.open()

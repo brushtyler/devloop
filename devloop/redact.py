@@ -68,7 +68,7 @@ NAME = re.compile(r'^[A-Z][A-Z0-9_]*$')
 # The default names of the roles' users: public in the documentation, and words of devloop's
 # own texts. Replacing them would rewrite every "devloop" of a comment.
 PUBLIC_USERS = frozenset({'devloop', 'devloop-agent', 'supervisor', 'coordinator',
-                          'role-watchdog', 'root'})
+                          'role-watchdog', 'role-sentinel', 'root'})
 MIN_USER = 3
 # A key file GitHub generated for an app (``apps.find_key``).
 KEY_FILE = re.compile(r'(?<![\w.-])([A-Za-z0-9][A-Za-z0-9-]*)\.\d{4}-\d{2}-\d{2}\.private-key'

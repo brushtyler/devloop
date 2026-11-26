@@ -131,6 +131,9 @@ sorveglia ciascuno e cosa fa all'avvio:
 - **il watchdog dei ruoli** (#602): il timer `devloop-role-watchdog@<progetto>`, ogni 5 minuti,
   controlla i battiti e dice nella casella e all'operatore quando un ruolo è fermo (passo 10,
   "Watchdog dei ruoli");
+- **il riposo** (#684): a coda vuota un ruolo entra in riposo e non batte; lo sveglia la
+  sentinella `devloop-role-sentinel@<progetto>`, e il loop non avvia lavoro nuovo finché un ruolo
+  riposa (passo 10, "Il riposo dei ruoli");
 - **l'avvio**: ogni ruolo rilegge la sua casella, il diario (#76) e il riepilogo (#316), poi
   riprende a sorvegliare.
 
@@ -167,14 +170,21 @@ ops/
                              mano rimasti in un solo blocco (#643)
     role-wait.sh             il risveglio di supervisore e coordinatore (--role): esce sui loro
                              eventi del flusso degli eventi, su un messaggio nella casella o
-                             alla fine del periodo, e a ogni avvio scrive il battito del ruolo
+                             alla fine del periodo, e a ogni avvio scrive il battito del ruolo;
+                             con --rest il riposo del ruolo, fino al segnale della sentinella
     coordinator-wait.sh      involucro compatibile: role-wait.sh --role coordinator
-    role-watchdog.sh         il watchdog dei ruoli: dai battiti, i ruoli fermi nella casella e
-                             all'operatore
+    role-watchdog.sh         il watchdog dei ruoli: dai battiti e dal riposo, i ruoli fermi o
+                             in anomalia nella casella e all'operatore
     devloop-role-watchdog@.service, devloop-role-watchdog@.timer,
     devloop-role-watchdog-failed@.service  unità template del watchdog, una istanza per
                              progetto, ogni 5 minuti; -failed@ è il suo OnFailure=
     role-watchdog-project.conf  drop-in di un progetto per le istanze del watchdog (segnaposto)
+    role-sentinel.sh         la sentinella dei ruoli a riposo: sveglia solo il ruolo interessato
+                             e, una volta al giorno, i ruoli a riposo (#684)
+    devloop-role-sentinel@.service, devloop-role-sentinel-failed@.service  unità template
+                             della sentinella, una istanza per progetto; -failed@ avvisa
+                             l'operatore con devloop notify
+    role-sentinel-project.conf  drop-in di un progetto per l'istanza della sentinella
     devloop.service          unità systemd (con segnaposto @NOME@)
     devloop@.service         unità template, per più progetti sullo stesso host (PROJECT)
     devloop-project.conf     drop-in di un progetto per devloop@<progetto> (con segnaposto)
@@ -1107,7 +1117,8 @@ in entrambe le caselle.
 L'unità gira come `WATCHDOG_USER` (`role-watchdog`; con `PROJECT`, `role-watchdog-<progetto>`), un
 utente di sistema senza home né shell, **uno per progetto**, che **non** è nel gruppo dei ruoli:
 entra solo nella casella del suo progetto, con le ACL che mettono gli script di setup (`--x` su
-`COORDINATION_DIR` e `heartbeat/`, `-wx` su `to-supervisor/` e `to-coordinator/`), e scrive solo
+`COORDINATION_DIR`, `heartbeat/` e `rest/`, `rwx` su `to-supervisor/` e `to-coordinator/`, che
+fino al #684 erano `-wx`), e scrive solo
 lì (`ReadWritePaths=`, con `ProtectSystem=strict`). Così le istanze di due progetti sullo stesso
 host non leggono la casella dell'altro. `setup-supervisor.sh` e `setup-coordinator.sh`
 installano le tre unità template in `SYSTEMD_DIR` (una volta per host) e, quando il progetto ha
@@ -1115,6 +1126,82 @@ sia il supervisore sia il coordinatore, l'utente, le ACL, la copia di root, le d
 istanze (`ops/host/role-watchdog-project.conf`) e il timer abilitato e avviato (`systemctl enable
 --now`). `check-host.sh` verifica la copia del supervisore e, con il coordinatore del progetto,
 le unità, le drop-in, il timer abilitato, l'utente fuori dal gruppo e le sue ACL sulla casella.
+
+**Il riposo dei ruoli** (#684; [ADR 0002, precisazione del
+2026-11-26](../docs/adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-26-il-riposo-dei-ruoli-684)).
+A coda vuota ogni risveglio periodico di un ruolo rilegge dalla cache tutto il contesto della
+sessione, senza trovare niente da fare. Un ruolo che a fine turno non ha niente da fare entra
+quindi in **riposo**: lancia in background `role-wait.sh --role <ruolo> --rest` al posto della
+sveglia normale, che prende il lock `COORDINATION_DIR/rest/<ruolo>.lock` (con `flock`: il lock
+tenuto prova che la sessione è viva), scrive lo **stato di riposo** `rest/<ruolo>` ("<inizio>
+riposo", 664), e non scrive battiti. Se la casella ha già un messaggio, o il flusso un evento per
+il ruolo, non entra in riposo: è un risveglio come gli altri. Altrimenti aspetta solo il
+**segnale della sentinella**, `rest/<ruolo>.wake`, scritto dopo l'inizio del riposo: non legge
+GitHub né altro che possa bloccarsi, ed esce con una riga `sentinella: <motivo>`. Il ruolo
+rilancia allora la sveglia normale, che toglie lo stato, scrive il battito e gli dà gli eventi dal
+suo cursore. La directory `rest/` è di root, del gruppo dei ruoli, **3770**: con lo sticky bit
+ognuno rimuove o sostituisce solo i suoi file. Se la CLI di un ruolo non regge l'attesa, il ruolo
+usa la sveglia normale, come prima (la prova delle CLI è nel passo sull'host,
+[host/migrate.md](host/migrate.md#il-riposo-dei-ruoli-684)).
+
+La **sentinella** è un servizio per progetto, `devloop-role-sentinel@<progetto>.service`
+(`ops/host/role-sentinel.sh`, dalla copia di root del watchdog, `WATCHDOG_OPS_DIR`), senza
+modello, senza chiavi e senza battiti per nessuno. Un giro ogni 5 secondi: mentre un ruolo è a
+riposo sveglia **solo il ruolo interessato**, con gli stessi filtri della sua sveglia, una volta per
+riposo: un messaggio nella sua casella; un evento del flusso scritto dopo l'inizio del riposo (ogni
+evento per il supervisore, i suoi per il coordinatore), letto con un cursore della sentinella; per
+il coordinatore, una riga nuova di `run.log` con un errore; per entrambi, il servizio di devloop
+non attivo (a ogni cambio di stato) e il **lavoro** che `devloop run` trova con un ruolo a riposo
+(sotto). L'issue degli allarmi del filtro la legge dal file `alert_issue` che `devloop run` scrive
+nel flusso al suo avvio: la sentinella non legge l'overlay, che ha i segreti del progetto. Il
+**controllo giornaliero**: all'ora fissa UTC `REST_DAILY_CHECK` (default **00:30**, dopo l'ora
+consueta del riepilogo giornaliero, ma indipendente dalla sua pubblicazione) sveglia ogni ruolo il
+cui riposo è cominciato prima: il coordinatore per il controllo dei testi pubblicati e del lavoro
+fermo, il supervisore che, senza niente da fare, torna a riposo. L'attesa a riposo dura così al
+più un giorno (`role-wait.sh --rest` stesso esce dopo 25 ore senza segnale). La sentinella toglie
+il suo segnale quando il ruolo non è più a riposo. Contro il blocco, l'unità è `Type=notify` con
+`WatchdogSec=120` (un segno di vita a ogni giro, `systemd-notify WATCHDOG=1`), `Restart=on-failure`
+e `OnFailure=devloop-role-sentinel-failed@<progetto>.service`, che avvisa l'operatore con `devloop
+notify --sentinel-failed <progetto>`, come per il servizio di devloop (#593). Gira come
+`SENTINEL_USER` (`role-sentinel`; con `PROJECT`, `role-sentinel-<progetto>`), un utente di sistema
+del solo progetto, fuori dal gruppo dei ruoli, con privilegi minimi: `--x` su `COORDINATION_DIR`,
+`-wx` su `rest/` (la sola scrittura, il segnale di risveglio, `ReadWritePaths=` della drop-in
+`ops/host/role-sentinel-project.conf`), `r-x` su `to-supervisor/` e `to-coordinator/`, la sola
+lettura del flusso degli eventi e l'attraversamento della home di devloop e dello `state_dir`, per
+`run.log`; il suo stato (i cursori, l'ultimo stato del servizio) in
+`/var/lib/devloop-role-sentinel/<progetto>` (`StateDirectory=`).
+
+**Il loop e il riposo.** Con `rest_dir` in `[run]` dell'overlay (il percorso di
+`COORDINATION_DIR/rest`, letto da `DEVLOOP_USER` con l'attraversamento `--x` della casella e di
+`rest/`), `devloop run` resta acceso ma **non avvia un controllo di prontezza né
+un'implementazione mentre un ruolo è a riposo**: trattiene il lavoro e aspetta che lo stato di
+riposo sia tolto; poi parte subito. Con un ruolo a riposo scrive il lavoro nel file `hold` del
+flusso degli eventi (`<prima volta> <ruoli> <lavoro>`): le azioni trattenute e la coda, anche
+quando nessuna azione può partire (un'issue bloccata da un prerequisito); su quel file la
+sentinella sveglia i ruoli a riposo. Se un ruolo non si sveglia entro `rest_wake_timeout` secondi
+(default **300**) dal primo rilevamento del lavoro, il lavoro resta fermo e l'operatore lo sa con
+`devloop notify`, una volta. Se `devloop run` non legge `rest/` (manca, o manca la sua ACL) non lo
+prende per un riposo assente: trattiene il lavoro, scrive `unknown` al posto dei ruoli e avvisa
+l'operatore, una volta ([reference](../docs/devloop/reference.md#the-roles-at-rest)). Senza
+`rest_dir` il loop non guarda il riposo.
+
+**Il watchdog e il riposo.** Il watchdog vede ogni ruolo in tre stati: **attivo** (battiti
+regolari); **a riposo** (lo stato di riposo, la sentinella attiva, il lock tenuto: una riga
+`informazione:` nel journal, una volta per ingresso, «a riposo dal …, coda vuota», mai un allarme);
+**fermo** (nessun riposo valido, e il battito manca o è più vecchio di due periodi: l'allarme di
+prima). A riposo segnala solo le **anomalie**, come un ruolo fermo: la sentinella non attiva; il
+lock non tenuto (la sessione è morta); il ruolo svegliato dalla sentinella che non toglie il riposo
+entro `REST_WAKE_TIMEOUT` secondi dal segnale; il riposo dichiarato con del lavoro, cioè la coda
+non vuota o il lavoro trattenuto, come li scrive `devloop run` nel file `hold`, da più di
+`REST_WAKE_TIMEOUT` secondi, o un messaggio nella sua casella
+da più di `REST_MAILBOX_AGE` secondi dal suo arrivo (entrambi default **300**, parametri di
+`params.env`). Per questo il watchdog ha anche `--x` su `rest/`, `rwx` (non più `-wx`) sulle due
+caselle (ne legge i nomi e le ore dei messaggi, non il contenuto) e la lettura del flusso degli
+eventi, con l'unità che legge lo `state_dir` (`ProtectHome=read-only`). `setup-supervisor.sh` e
+`setup-coordinator.sh` preparano tutto con il watchdog; `check-host.sh` verifica la directory
+`rest/` (3770), le unità e la drop-in della sentinella, il servizio abilitato e attivo, il suo
+utente fuori dal gruppo e le ACL della sentinella e di devloop. Su un host già attivo:
+[host/migrate.md](host/migrate.md#il-riposo-dei-ruoli-684).
 
 **App del coordinatore** (#549). Il coordinatore firma comandi, commenti e label con un'app sua,
 `<APP_PREFIX>coordinator`, che l'operatore crea come le altre (passo 2), dal manifest
@@ -1414,6 +1501,7 @@ progetto:
 | `COORDINATOR_SUDOERS_FILE`, `COORDINATOR_OPS_DIR` | `/etc/sudoers.d/devloop-coordinator-widget`, `/usr/local/lib/devloop-coordinator-widget` |
 | `SUPERVISOR_OPS_DIR` | `/usr/local/lib/devloop-supervisor-widget`: la copia di root del risveglio del supervisore (#602) |
 | `WATCHDOG_USER`, `WATCHDOG_OPS_DIR` | `role-watchdog-widget`, `/usr/local/lib/devloop-role-watchdog-widget`: il watchdog dei ruoli del progetto, istanza `devloop-role-watchdog@widget`, che entra solo nella casella del progetto (#602) |
+| `SENTINEL_USER` | `role-sentinel-widget`: la sentinella dei ruoli a riposo del progetto, istanza `devloop-role-sentinel@widget`, dalla copia del watchdog, che entra solo nella casella del progetto (#684) |
 | `SUPERVISOR_SOURCE_CLONE`, `COORDINATOR_SOURCE_CLONE` | con `SOURCE_REPO`, `/home/supervisor-acme-devloop/devloop-source-widget` e `/home/coordinator-acme-devloop/devloop-source-widget`: i clone della sorgente, al tag del progetto, da cui i due ruoli coniano i token delle loro app (#571) |
 | `LAUNCHER_DIR` | `/usr/local/lib/devloop/widget`: l'avviatore del tag `SOURCE_REF` del progetto, che nessun altro progetto sovrascrive (#573) |
 

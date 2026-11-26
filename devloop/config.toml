@@ -251,6 +251,11 @@ check = true
 # the loop stops all the same. Which issue gets it is the operator's choice (local overlay).
 [run]
 # alert_issue = 123
+# The roles at rest (issue #684), keys of the host's overlay: the directory of the rest of the
+# roles ($COORDINATION_DIR/rest); while a role is at rest no readiness check nor implementation
+# starts, and after rest_wake_timeout seconds the operator is told.
+# rest_dir = "/var/lib/devloop-coordination/rest"
+# rest_wake_timeout = 300
 
 # `devloop report` (issue #256): the daily summary of devloop's records. With `--publish`, and in
 # `devloop run` at most every `interval` minutes, the dispatcher keeps today's summary in the

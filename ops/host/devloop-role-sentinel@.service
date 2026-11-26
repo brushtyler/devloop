@@ -1,0 +1,37 @@
+# Unità template della sentinella dei ruoli a riposo di devloop (ops/host/devloop-role-sentinel@.service,
+# #684; ADR 0002, precisazione del 2026-11-26). L'istanza è il progetto:
+# devloop-role-sentinel@<progetto> (_default senza PROJECT), come il watchdog dei ruoli. Un servizio
+# sempre attivo, senza modello né chiavi GitHub (ops/host/role-sentinel.sh): mentre un ruolo è a
+# riposo sveglia solo il ruolo interessato. setup-supervisor.sh e setup-coordinator.sh la
+# installano in SYSTEMD_DIR, una volta per host, con il watchdog, e i parametri del progetto
+# (utente, copia di root, casella) in una drop-in della sua istanza,
+# SYSTEMD_DIR/devloop-role-sentinel@<progetto>.service.d/project.conf
+# (ops/host/role-sentinel-project.conf). Un'istanza senza drop-in non parte: manca ExecStart.
+[Unit]
+Description=devloop role sentinel (%i)
+# Una sentinella che non si riavvia (troppi riavvii, o un errore dell'installazione) avvisa
+# l'operatore (#593): devloop notify --sentinel-failed, come per il servizio di devloop.
+OnFailure=devloop-role-sentinel-failed@%i.service
+
+[Service]
+# Pronta con systemd-notify --ready; un segno di vita (WATCHDOG=1) a ogni giro, ogni 5 secondi:
+# una sentinella bloccata per WatchdogSec la ferma systemd, che la riavvia.
+Type=notify
+NotifyAccess=all
+WatchdogSec=120
+Restart=on-failure
+RestartSec=30
+# I cursori del flusso e di run.log e l'ultimo stato del servizio: dell'utente dell'istanza.
+StateDirectory=devloop-role-sentinel/%i
+StateDirectoryMode=0700
+UMask=0027
+NoNewPrivileges=yes
+PrivateTmp=yes
+# Legge il flusso degli eventi e run.log nello state_dir di devloop, anche sotto /home.
+ProtectHome=read-only
+# Scrive solo il segnale di risveglio in rest/ della casella (ReadWritePaths= della drop-in) e
+# nel suo stato.
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target
