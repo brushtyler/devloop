@@ -3001,6 +3001,29 @@ The host that develops this repository runs, since #563, the instance `devloop@d
 template unit of [`ops/`](../../ops/README.md) (`PROJECT=devloop`), with the same users: there the
 commands name `devloop@devloop` instead of `devloop`.
 
+### Roles at rest
+
+With an empty queue the loop uses no tokens, but each role used to wake up at its periodic check
+and re-read its whole context for nothing. Since #684 a role with nothing to do rests instead
+([ADR 0002, precision of
+2026-11-26](../adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-26-il-riposo-dei-ruoli-684)):
+it declares its rest in the mailbox between the roles, writes no heartbeat, and a service of the
+host without a model or keys, the sentinel of the roles, wakes only the role concerned by an
+event, a message, an error of the loop, and once a day at a fixed UTC hour
+([ops/README.md](../../ops/README.md#10-coordinatore-facoltativo), "Il riposo dei ruoli"). The
+watchdog of the roles tells a role at rest from a stopped one.
+
+With `[run] rest_dir` in the overlay ([reference](reference.md#the-roles-at-rest)) the loop stays
+on, but **starts no readiness check and no implementation while a role rests**: the other actions
+run as before. The work it holds wakes the roles at rest, through the sentinel, and starts as
+soon as their rest ends (`rest: … held until the roles leave their rest` in the log, then `the
+roles left their rest: next tick`). If a role does not wake up within `rest_wake_timeout`
+seconds (300) the work stays held and the operator gets a notice (`rest-hold`, [Notices to the
+operator](#notices-to-the-operator)): look at the sessions of the roles, `journalctl -u
+devloop-role-sentinel@<project>` and the watchdog. To start the work without the roles, remove
+the rest state of the role, as root, from the mailbox (`$COORDINATION_DIR/rest/<role>`), or
+remove `rest_dir` from the overlay and restart the loop.
+
 ### Continuous mode
 
 With `max_parallel_actions` above 1, actions run in one of two modes (#227):

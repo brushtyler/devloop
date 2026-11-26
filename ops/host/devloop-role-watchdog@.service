@@ -22,7 +22,9 @@ StateDirectoryMode=0700
 UMask=0027
 NoNewPrivileges=yes
 PrivateTmp=yes
-ProtectHome=yes
+# Legge il lavoro trattenuto da devloop run (#684) nel flusso degli eventi dello state_dir, anche
+# sotto /home.
+ProtectHome=read-only
 # Scrive solo nella casella del progetto (ReadWritePaths= della drop-in) e nel suo stato.
 ProtectSystem=strict
 TimeoutStartSec=120

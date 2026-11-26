@@ -12,7 +12,7 @@ import time
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
-from . import (activity, direction, events, follow, notify, pin, redact, report, runloop,
+from . import (activity, direction, events, follow, notify, pin, redact, report, rest, runloop,
                token, unavailability, watch)
 from .agents import AgentRunner, isolated_env
 from .agentuser import GH_CONFIG, SHARED_DIR, WORKTREES_DIR, AgentUser, AgentUserError, SharedDir
@@ -543,6 +543,10 @@ def build(args):
     dispatcher.config_missing = missing_project_tables(data)
     # The agents run as the dispatcher's user (#490): a warning at the start.
     dispatcher.agent_user_off = agent_user is None
+    # The roles at rest (#684): with [run] rest_dir no new work starts while a role rests.
+    if not read_only:
+        dispatcher.rest = rest.RestHold.from_config(cfg, state, log=tick_log,
+                                                    notifier=dispatcher.notifier)
     return cfg, state, dispatcher
 
 
@@ -959,7 +963,8 @@ def run_loop(cfg, state, dispatcher, timeout, reloader=None):
     return runloop.Loop(tick, producer.wait, state / runloop.STOP_FILE, log=log,
                         alert=alert, alert_issue=issue, idle_timeout=timeout,
                         workers=workers, language=cfg.language,
-                        notify=getattr(dispatcher, 'notifier', None), producer=producer).run()
+                        notify=getattr(dispatcher, 'notifier', None), producer=producer,
+                        rest=getattr(dispatcher, 'rest', None)).run()
 
 
 def main(argv=None):
@@ -1052,6 +1057,9 @@ def main(argv=None):
     notify_cmd.add_argument('--service-failed', metavar='PROJECT',
                             help='the notice of the service of PROJECT in the failed state '
                                  '(the OnFailure= unit of the service)')
+    notify_cmd.add_argument('--sentinel-failed', metavar='PROJECT',
+                            help='the notice of the sentinel of the roles at rest of PROJECT in '
+                                 'the failed state (the OnFailure= unit of the sentinel)')
     argv = sys.argv[1:] if argv is None else list(argv)
     # The command of `token` (ADR 0006, R6) is everything after its --, options included.
     command = None
@@ -1097,14 +1105,20 @@ def run_notify(parser, args):
     0 when sent, not sent again within the interval or without a channel (a line in the log);
     1 when the send failed. ``--test`` sends a test notice whatever the interval, and exits
     with 1 also without a channel; ``--service-failed PROJECT`` is the notice of the unit of a
-    service in the failed state (``ops/host/devloop-failed@.service``)."""
+    service in the failed state (``ops/host/devloop-failed@.service``), ``--sentinel-failed
+    PROJECT`` that of the sentinel of the roles at rest (#684,
+    ``ops/host/devloop-role-sentinel-failed@.service``)."""
     if args.key is not None and not notify.KEY.fullmatch(args.key):
         parser.error('notify: --key takes letters, digits and _ . : @ / - (at most 100)')
-    if args.service_failed is not None and not notify.PROJECT.fullmatch(args.service_failed):
-        parser.error('notify: --service-failed takes the name of a project')
-    given = [args.message is not None, args.test, args.service_failed is not None]
+    for option, value in (('--service-failed', args.service_failed),
+                          ('--sentinel-failed', args.sentinel_failed)):
+        if value is not None and not notify.PROJECT.fullmatch(value):
+            parser.error(f'notify: {option} takes the name of a project')
+    given = [args.message is not None, args.test, args.service_failed is not None,
+             args.sentinel_failed is not None]
     if sum(given) != 1:
-        parser.error('notify: give one of a message, --test or --service-failed PROJECT')
+        parser.error('notify: give one of a message, --test, --service-failed PROJECT or '
+                     '--sentinel-failed PROJECT')
     if args.message is not None and not args.message.strip():
         parser.error('notify: the message is empty')
     notifier, language = notify.from_overlay(args.local_config, log=log)
@@ -1117,6 +1131,9 @@ def run_notify(parser, args):
     if args.service_failed is not None:
         message = t('service_failed', project=args.service_failed)
         key = args.key or f'service-failed:{args.service_failed}'
+    elif args.sentinel_failed is not None:
+        message = t('sentinel_failed', project=args.sentinel_failed)
+        key = args.key or f'sentinel-failed:{args.sentinel_failed}'
     else:
         message, key = args.message, args.key
     return 1 if notifier.notify(message, key=key) == notify.FAILED else 0

@@ -74,6 +74,13 @@ TEXTS = Catalog(
         'alert': 'New alert of devloop on issue #{issue}.',
         'service_failed': ('The devloop service of project {project} is in the failed state '
                            '(systemd): see its journal and the log of the loop.'),
+        'sentinel_failed': ('The sentinel of the roles at rest of project {project} is in the '
+                            'failed state (systemd): the roles at rest are not woken up. See '
+                            'journalctl -u devloop-role-sentinel@{project} and check-host.sh.'),
+        'rest_hold': ('`devloop run` holds {actions}: the roles at rest ({roles}) have not woken '
+                      'up within {seconds} seconds. No readiness check nor implementation starts '
+                      'until they leave their rest: see the sessions of the roles, the sentinel '
+                      'and the watchdog of the roles.'),
         'test': 'Test of the notices of devloop: the channel works.',
     },
     it={
@@ -85,6 +92,13 @@ TEXTS = Catalog(
         'alert': 'Nuovo allarme di devloop sull\'issue #{issue}.',
         'service_failed': ('Il servizio di devloop del progetto {project} è nello stato failed '
                            '(systemd): vedere il suo journal e il log del ciclo.'),
+        'sentinel_failed': ('La sentinella dei ruoli a riposo del progetto {project} è nello '
+                            'stato failed (systemd): i ruoli a riposo non si svegliano. Vedere '
+                            'journalctl -u devloop-role-sentinel@{project} e check-host.sh.'),
+        'rest_hold': ('`devloop run` trattiene {actions}: i ruoli a riposo ({roles}) non si sono '
+                      'svegliati entro {seconds} secondi. Nessun controllo di prontezza né '
+                      'implementazione parte finché non escono dal riposo: vedere le sessioni dei '
+                      'ruoli, la sentinella e il watchdog dei ruoli.'),
         'test': 'Prova degli avvisi di devloop: il canale funziona.',
     })
 

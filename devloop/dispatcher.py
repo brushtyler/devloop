@@ -1127,6 +1127,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         # Continuous mode (#227): set by ``devloop run`` with parallel actions, a tick starts
         # its actions in these ``Workers`` and does not wait for them.
         self.workers = None
+        # The roles at rest (#684, ``rest.RestHold``), set by ``devloop`` with ``[run]
+        # rest_dir``: while a role is at rest no readiness check nor implementation starts.
+        self.rest = None
         # Continuous mode (#301): ``(sha12, since)`` of the new pinned copy whose restart waits
         # for the running actions, or None.
         self._restart = None
@@ -2412,6 +2415,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         # The supervisor's temporary capacity limits in force (#412), for this plan only.
         cfg = self._capacity(dry_run)
         actions = plan(snap, cfg)
+        if not dry_run and self.rest is not None:
+            actions = self.rest.apply(actions)
         prs = {pr.number: pr for pr in snap.prs}
         self.log(f'{"[dry-run] " if dry_run else ""}{pr_counts_line(snap, cfg)}')
         if dry_run:
@@ -2486,6 +2491,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         # The supervisor's temporary capacity limits in force (#412), for this plan only.
         cfg = self._capacity()
         actions = plan(snap, cfg, busy, reserved, merging, implement=not pending)
+        # #684: no readiness check nor implementation while a role is at rest.
+        if self.rest is not None:
+            actions = self.rest.apply(actions)
         # The limit may pass while the snapshot reads GitHub: checked again before any start.
         if pending and self._restart_wait_over(running):
             return []

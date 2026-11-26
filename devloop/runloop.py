@@ -30,6 +30,10 @@ way the next tick plans at once, so a long action no longer holds the others. A 
 does not stop the planning either (#301): the restart from the new copy (``Repinned``) comes from
 the first tick at which nothing runs. A stop, or the
 ``MAX_FAILURES``-th failed tick, waits for the running actions to end before the loop returns.
+
+The roles at rest (#684, ``rest.RestHold``): while a tick holds a readiness check or an
+implementation because a role is at rest, every wait looks at the rest each second, and ends as
+soon as no role is at rest: the next tick starts the work.
 """
 
 import signal
@@ -110,12 +114,15 @@ class Loop:
     ``notify`` (``notify.Notifier``, #593), when given, sends the notice of a stopped loop to the
     operator, after the alert, with the number of its issue. ``producer`` (``events.Producer``,
     #683), when given, is started once the signals are handled and closed when the loop ends: its
-    ``wait`` is then the ``watch``."""
+    ``wait`` is then the ``watch``. ``rest`` (``rest.RestHold``, #684), when given, is polled at
+    every check of a wait while the ticks hold new work for the roles at rest: the wait ends as
+    soon as no role is at rest, and the next tick starts the work."""
 
     def __init__(self, tick, watch, stop_file, *, log, alert=None, alert_issue=0,
                  idle_timeout=IDLE_TIMEOUT, clock=time.monotonic, sleep=time.sleep,
-                 workers=None, language=ENGLISH, notify=None, producer=None):
+                 workers=None, language=ENGLISH, notify=None, producer=None, rest=None):
         self.tick = tick
+        self.rest = rest
         self.producer = producer
         self.notify = notify
         self.language = language
@@ -154,6 +161,17 @@ class Loop:
         self.check_stop()
         if self.workers is not None and self.workers.ended():
             raise Woken()
+        self.check_rest()
+
+    def check_rest(self):
+        """``Woken`` once the work held for the roles at rest may start (#684)."""
+        if self.rest is not None and self.rest.holding() and self.rest.poll():
+            raise Woken()
+
+    def check_idle(self):
+        """The check of a wait with nothing running: ``check_stop`` and ``check_rest``."""
+        self.check_stop()
+        self.check_rest()
 
     def pause(self, seconds, check=None):
         """Sleep ``seconds``, a little at a time; ``Stopped`` as soon as a stop is requested
@@ -284,7 +302,10 @@ class Loop:
         self.log(f'no action: waiting for news on GitHub, at most {self.idle_timeout} seconds')
         start = self._clock()
         try:
-            code = self.watch(self.idle_timeout, self.pause, self.check_stop)
+            code = self.watch(self.idle_timeout, self.pause, self.check_idle)
+        except Woken:
+            self.log('the roles left their rest: next tick')
+            return
         except Stopped:
             raise
         except Exception as exc:  # the next tick runs at the timeout all the same

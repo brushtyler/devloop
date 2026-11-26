@@ -13,7 +13,8 @@
 # servizio, comando devloop dell'host e file del progetto (#588), CLI degli agent (--version, e un `git --version` con il loro strumento di shell,
 # #494) e `devloop apps`, e il coordinatore, se l'overlay del progetto lo dichiara (#571; key_dir e chiave della sua app, ACL e lettura dell'overlay, #549;
 # sudoers e copia di root di questo script, #530; il suo clone, #643), e Claude Code dei ruoli
-# senza aggiornamenti automatici (#643). Con più progetti sullo stesso host si esegue una volta
+# senza aggiornamenti automatici (#643), la sentinella dei ruoli a riposo (unità, utente, ACL) e la
+# directory rest/ della casella (3770, #684). Con più progetti sullo stesso host si esegue una volta
 # per progetto, con i suoi parametri (--params). Per un progetto con SOURCE_REPO, un avviso se il
 # checkout da cui gira non è al tag SOURCE_REF: le copie di root di ops/ si confrontano con
 # quelle del checkout (#687).
@@ -208,7 +209,9 @@ default_key_dirs() {
     for other in "$SYSTEMD_DIR"/devloop*.service; do
         # Le unità del watchdog dei ruoli (#602) e dell'avviso di un servizio caduto (#593) non
         # sono un'installazione.
-        case $(basename "$other") in devloop-role-watchdog* | devloop-failed@*) continue ;; esac
+        case $(basename "$other") in
+            devloop-role-watchdog* | devloop-role-sentinel* | devloop-failed@*) continue ;;
+        esac
         if [ -f "$other" ] && [ "$other" != "$UNIT_FILE" ]; then
             printf '%s\n' "$home/.ghapps-$PROJECT"
             return
@@ -530,8 +533,8 @@ box_listed=' '
 for user in $members; do
     case "$box_listed" in *" $user "*) continue ;; esac
     box_listed="$box_listed$user "
-    # Gli utenti devloop, degli agent e del watchdog hanno già la loro riga.
-    case " $SUPERVISOR_USER $COORDINATOR_USER $DEVLOOP_USER $AGENT_USER $WATCHDOG_USER " in
+    # Gli utenti devloop, degli agent, del watchdog e della sentinella hanno già la loro riga.
+    case " $SUPERVISOR_USER $COORDINATOR_USER $DEVLOOP_USER $AGENT_USER $WATCHDOG_USER $SENTINEL_USER " in
         *" $user "*) continue ;;
     esac
     # Il nome di un utente estraneo non è un parametro del progetto, e il filtro non lo
@@ -542,16 +545,19 @@ for user in $members; do
         fail "un utente che non è un ruolo di questo progetto è nel gruppo $COORDINATION_GROUP: la casella è solo del supervisore e del coordinatore del progetto (il nome e il comando con --verbose; ops/host/migrate.md, \"Utenti dei ruoli per progetto\")"
     fi
 done
+# La directory del riposo dei ruoli (#684) è 3770: con lo sticky bit, la sentinella e i ruoli
+# rimuovono o sostituiscono solo i propri file.
 for dir in $(coordination_dirs); do
     if [ -L "$dir" ] || ! [ -d "$dir" ]; then
         fail "$dir non esiste o non è una directory (setup-supervisor.sh)"
         continue
     fi
+    box_mode=$(coordination_mode "$dir")
     actual=$(stat -c '%a %G' "$dir")
-    if [ "$actual" = "2770 $COORDINATION_GROUP" ]; then
-        ok "$dir: 2770, gruppo $COORDINATION_GROUP"
+    if [ "$actual" = "$box_mode $COORDINATION_GROUP" ]; then
+        ok "$dir: $box_mode, gruppo $COORDINATION_GROUP"
     else
-        fail "$dir è $actual, deve essere 2770 del gruppo $COORDINATION_GROUP"
+        fail "$dir è $actual, deve essere $box_mode del gruppo $COORDINATION_GROUP"
     fi
     owner=$(stat -c '%U' "$dir")
     [ "$owner" = root ] || fail "$dir è di $owner, deve essere di root"
@@ -643,6 +649,22 @@ else
     done
 fi
 
+# check_acls USER PRODUTTORE: le ACL "<directory> <permessi>" che PRODUTTORE (watchdog_acls,
+# sentinel_acls, rest_devloop_acls) dà a USER, ognuna presente ed esatta.
+check_acls() {
+    local user=$1 dir perms entry
+    while read -r dir perms; do
+        [ -d "$dir" ] || continue
+        entry=$(getfacl -p --omit-header "$dir" 2>/dev/null | grep "^user:$user:" | head -n 1)
+        entry=${entry%%[[:space:]]*}
+        if [ "$entry" = "user:$user:$perms" ]; then
+            ok "ACL $entry su $dir"
+        else
+            fail "su $dir serve l'ACL u:$user:$perms, non '${entry:-nessuna}' (setup-supervisor.sh, setup-coordinator.sh)"
+        fi
+    done < <("$2")
+}
+
 # Il watchdog dei ruoli (#602), quando il progetto ha sia il supervisore sia il coordinatore: le
 # unità template dell'host, le drop-in dell'istanza del progetto, il timer abilitato, l'utente,
 # fuori dal gruppo dei ruoli e con le sole ACL sulla casella del progetto, e la copia di root.
@@ -681,21 +703,60 @@ else
         if in_group "$WATCHDOG_USER"; then
             fail "$WATCHDOG_USER è nel gruppo $COORDINATION_GROUP: entra solo nella casella del suo progetto, con le ACL"
         fi
-        while read -r dir perms; do
-            [ -d "$dir" ] || continue
-            entry=$(getfacl -p --omit-header "$dir" 2>/dev/null | grep "^user:$WATCHDOG_USER:" | head -n 1)
-            entry=${entry%%[[:space:]]*}
-            if [ "$entry" = "user:$WATCHDOG_USER:$perms" ]; then
-                ok "ACL $entry su $dir"
-            else
-                fail "su $dir serve l'ACL u:$WATCHDOG_USER:$perms, non '${entry:-nessuna}' (setup-supervisor.sh, setup-coordinator.sh)"
-            fi
-        done < <(watchdog_acls)
+        check_acls "$WATCHDOG_USER" watchdog_acls
     fi
     check_root_path "$WATCHDOG_OPS_DIR/host"
     # shellcheck disable=SC2086  # nomi di file senza spazi
     check_root_files "$WATCHDOG_OPS_DIR" 'setup-supervisor.sh o setup-coordinator.sh' fail \
         $OPS_WATCHDOG_FILES
+fi
+
+# La sentinella dei ruoli a riposo (#684), con il watchdog: le unità template dell'host, la drop-in
+# dell'istanza, il servizio abilitato e attivo, l'utente, fuori dal gruppo dei ruoli e con le sole
+# ACL sulla casella (in rest/ la scrittura del segnale di risveglio), e l'attraversamento della
+# casella e di rest/ per devloop, che legge lo stato di riposo dei ruoli.
+step "Sentinella dei ruoli a riposo: $SENTINEL_UNIT (#684)"
+if [ "$PROJECT_COORDINATOR" != 1 ] || ! user_exists "$COORDINATOR_USER"; then
+    ok "il progetto non ha il coordinatore: nessuna sentinella dei ruoli"
+else
+    for unit in $OPS_SENTINEL_UNITS; do
+        if ! [ -f "$SYSTEMD_DIR/$unit" ]; then
+            fail "$SYSTEMD_DIR/$unit non esiste (setup-supervisor.sh, setup-coordinator.sh; ops/host/migrate.md, \"Il riposo dei ruoli (#684)\")"
+        elif cmp -s "$SYSTEMD_DIR/$unit" <(render "$OPS_DIR/host/$unit"); then
+            ok "$SYSTEMD_DIR/$unit coincide con ops/host/$unit"
+        else
+            warn "$SYSTEMD_DIR/$unit è diverso da ops/host/$unit"
+        fi
+    done
+    if ! [ -f "$SENTINEL_DROPIN" ]; then
+        fail "$SENTINEL_DROPIN non esiste (setup-supervisor.sh, setup-coordinator.sh)"
+    elif cmp -s "$SENTINEL_DROPIN" <(render "$OPS_DIR/host/role-sentinel-project.conf"); then
+        ok "$SENTINEL_DROPIN coincide con ops/host/role-sentinel-project.conf"
+    else
+        warn "$SENTINEL_DROPIN è diverso da ops/host/role-sentinel-project.conf con questi parametri"
+    fi
+    enabled=$(systemctl is-enabled "$SENTINEL_UNIT.service" 2>/dev/null)
+    if [ "$enabled" = enabled ]; then
+        ok "$SENTINEL_UNIT.service è abilitato"
+    else
+        fail "$SENTINEL_UNIT.service non è abilitato (${enabled:-sconosciuto}): setup-supervisor.sh o setup-coordinator.sh"
+    fi
+    active=$(systemctl is-active "$SENTINEL_UNIT.service" 2>/dev/null)
+    if [ "$active" = active ]; then
+        ok "$SENTINEL_UNIT.service è attivo"
+    else
+        fail "$SENTINEL_UNIT.service non è attivo (${active:-sconosciuto}): i ruoli a riposo non si svegliano (journalctl -u $SENTINEL_UNIT)"
+    fi
+    if ! user_exists "$SENTINEL_USER"; then
+        fail "l'utente $SENTINEL_USER non esiste (setup-supervisor.sh, setup-coordinator.sh)"
+    else
+        ok "l'utente $SENTINEL_USER esiste"
+        if in_group "$SENTINEL_USER"; then
+            fail "$SENTINEL_USER è nel gruppo $COORDINATION_GROUP: entra solo nella casella del suo progetto, con le ACL"
+        fi
+        check_acls "$SENTINEL_USER" sentinel_acls
+    fi
+    check_acls "$DEVLOOP_USER" rest_devloop_acls
 fi
 
 # Il flusso degli eventi (#683): devloop run lo scrive nello state_dir, le sveglie dei ruoli lo
@@ -736,6 +797,12 @@ else
     readers="$SUPERVISOR_USER:setup-supervisor.sh"
     [ "$PROJECT_COORDINATOR" = 1 ] && user_exists "$COORDINATOR_USER" \
         && readers="$readers $COORDINATOR_USER:setup-coordinator.sh"
+    # Il watchdog e la sentinella dei ruoli (#684): il lavoro trattenuto da devloop run, e la
+    # sentinella anche gli eventi.
+    for user in "$WATCHDOG_USER" "$SENTINEL_USER"; do
+        [ "$PROJECT_COORDINATOR" = 1 ] && user_exists "$COORDINATOR_USER" && user_exists "$user" \
+            && readers="$readers $user:setup-coordinator.sh"
+    done
     for reader in $readers; do
         user=${reader%%:*}
         setup=${reader#*:}

@@ -5,13 +5,30 @@
 # comando in background, legge le righe quando esce, agisce e la riavvia
 # (docs/devloop/roles/supervisor.md, docs/devloop/roles/coordinator.md).
 #
-#   role-wait.sh --role supervisor|coordinator [--period SECONDI] [--params FILE]
+#   role-wait.sh --role supervisor|coordinator [--period SECONDI] [--params FILE] [--rest]
 #
 # A ogni avvio scrive il battito del ruolo, COORDINATION_DIR/heartbeat/<ruolo>: l'ora (secondi
 # dall'epoca) e il periodo, "<ora> <periodo>", 664 del gruppo dei ruoli. Il watchdog dei ruoli
 # (role-watchdog.sh, il timer devloop-role-watchdog@<progetto>) lo legge: un battito più vecchio
 # di due periodi è un ruolo fermo. Un battito che non si scrive è un avviso su stderr, non ferma
-# il risveglio.
+# il risveglio. Poi toglie lo stato di riposo del ruolo, se c'è (#684): il ruolo riprende i
+# battiti.
+#
+# Con --rest (#684; ADR 0002, precisazione del 2026-11-26) il ruolo entra in riposo, quando a fine
+# turno non ha niente da fare: scrive lo stato di riposo COORDINATION_DIR/rest/<ruolo>, "<inizio>
+# riposo", 664, e non scrive battiti. Se la sua casella ha già un messaggio, o il flusso un evento
+# per lui dopo il suo cursore, non entra in riposo: toglie lo stato, scrive il battito e stampa le
+# righe, come un risveglio qualunque. Altrimenti tiene con flock il lock
+# COORDINATION_DIR/rest/<ruolo>.lock, che prova al watchdog che la sessione del ruolo è viva, e
+# aspetta solo il segnale della sentinella dei ruoli a riposo (role-sentinel.sh),
+# COORDINATION_DIR/rest/<ruolo>.wake, scritto dopo l'inizio del riposo: non legge GitHub, il
+# flusso o la casella, e non fa niente che possa bloccarsi. Esce con 0 e la riga "sentinella:
+# <motivo>" (casella, evento, log, servizio, lavoro trattenuto da devloop run, controllo
+# giornaliero), lasciando lo stato: il ruolo lo toglie rilanciando role-wait.sh senza --rest,
+# entro REST_WAKE_TIMEOUT secondi. Al più REST_MAX_WAIT secondi (25 ore) senza segnale, cioè con il
+# controllo giornaliero della sentinella mancato, esce con "riposo:". Esce con "riposo:" anche se
+# lo stato è stato tolto da altri, e con 1 se il lock è già tenuto (un'altra attesa a riposo del
+# ruolo).
 #
 # Si sveglia, ed esce con 0, su:
 # - un messaggio nella casella del ruolo (to-supervisor/ o to-coordinator/ di COORDINATION_DIR),
@@ -59,9 +76,10 @@
 #   ROLE_WAIT_PERIOD per il supervisore, un'ora), senza eventi: il controllo periodico.
 #
 # Ogni riga dice perché si è svegliata: "casella:", "evento:", "flusso:", "log:", "eventi
-# fermi:", "servizio:", "periodo:". Esce con 2 su un'opzione sbagliata. Non esegue nulla come
-# utente devloop, fuori dal tail di run.log del coordinatore, e non scrive nulla fuori dal battito
-# e dal suo stato, in ~/.local/state/devloop-<ruolo>-wait/<progetto>/ dell'utente del ruolo
+# fermi:", "servizio:", "periodo:"; con --rest "sentinella:" o "riposo:". Esce con 2 su
+# un'opzione sbagliata. Non esegue nulla come utente devloop, fuori dal tail di run.log del
+# coordinatore, e non scrive nulla fuori dal battito, dal riposo del ruolo (lo stato e il lock) e
+# dal suo stato, in ~/.local/state/devloop-<ruolo>-wait/<progetto>/ dell'utente del ruolo
 # (_default senza PROJECT): il cursore del flusso, le righe di run.log già viste, l'ultimo stato
 # del servizio e l'episodio del flusso fermo. Va eseguito come l'utente del ruolo, dalla copia di
 # root che setup-supervisor.sh (SUPERVISOR_OPS_DIR) o setup-coordinator.sh (COORDINATOR_OPS_DIR)
@@ -73,28 +91,32 @@ OPS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 set +e  # un comando che fallisce si gestisce qui, non interrompe la sveglia
 
 LOG_LINES=200
-NEEDS_OPERATOR=agent:needs-operator
-NEEDS_COORDINATOR=agent:needs-coordinator
 # Ogni quanti secondi si leggono la casella (POLL), il flusso (STREAM_POLL) e il log, il servizio
 # e il segno di vita del flusso (LOCAL_POLL).
 POLL=1
 STREAM_POLL=5
 LOCAL_POLL=60
+# Il riposo più lungo senza segnale della sentinella (#684): un giorno e un'ora, oltre il
+# controllo giornaliero.
+REST_MAX_WAIT=90000
 
 usage() {
-    say "Uso: bash $0 --role supervisor|coordinator [--params FILE] [--period SECONDI]"
+    say "Uso: bash $0 --role supervisor|coordinator [--params FILE] [--period SECONDI] [--rest]"
     say
     say '  --role RUOLO      il ruolo che aspetta: supervisor o coordinator'
     say '  --period SECONDI  il controllo periodico (default: ROLE_WAIT_PERIOD, 3600; per il'
     say '                    coordinatore COORDINATOR_WAIT_PERIOD, se impostato)'
     say '  --params FILE     i parametri (default: params.env accanto a questa copia)'
+    say "  --rest            entra in riposo e aspetta solo il segnale della sentinella (#684)"
 }
 
 ROLE=''
 PERIOD=''
+REST=0
 while [ $# -gt 0 ]; do
     case $1 in
         -h | --help) usage; exit 0 ;;
+        --rest) REST=1; shift ;;
         --role)
             [ $# -ge 2 ] || { usage >&2; exit 2; }
             ROLE=$2
@@ -145,8 +167,25 @@ beat() {
     rm -f "$tmp"
     return 1
 }
-beat || printf 'role-wait: non scrivo il battito %s: il watchdog dei ruoli vedrà il %s fermo (setup-supervisor.sh, setup-coordinator.sh)\n' \
-    "$HEARTBEAT" "$ROLE_NAME" >&2
+beat_or_warn() {
+    beat || printf 'role-wait: non scrivo il battito %s: il watchdog dei ruoli vedrà il %s fermo (setup-supervisor.sh, setup-coordinator.sh)\n' \
+        "$HEARTBEAT" "$ROLE_NAME" >&2
+}
+# Il riposo del ruolo (#684): lo stato, il lock e il segnale della sentinella.
+REST_DIR=$COORDINATION_DIR/$COORDINATION_REST
+REST_STATE=$REST_DIR/$ROLE
+# Lo stato di riposo tolto: il ruolo riprende i battiti. Uno stato che non si toglie è un avviso:
+# il watchdog vedrebbe il ruolo a riposo, e la sentinella lo sveglierebbe ancora.
+end_rest() {
+    [ -e "$REST_STATE" ] || return 0
+    rm -f "$REST_STATE" 2>/dev/null \
+        || printf 'role-wait: non tolgo lo stato di riposo %s (setup-supervisor.sh, setup-coordinator.sh)\n' \
+            "$REST_STATE" >&2
+}
+if [ "$REST" = 0 ]; then
+    beat_or_warn
+    end_rest
+fi
 
 BOX=$COORDINATION_DIR/$INBOX
 [ -d "$BOX" ] && [ -r "$BOX" ] && [ -x "$BOX" ] \
@@ -165,45 +204,12 @@ CURSOR=$MINE/events.cursor
 STALE=$MINE/events.stale
 
 # L'issue degli allarmi ([run].alert_issue dell'overlay), se il ruolo la legge.
-ALERT_ISSUE=$(python3 -I -B - "$STATE_PATH/config.local.toml" 2>/dev/null <<'EOF'
-import sys, tomllib
-with open(sys.argv[1], 'rb') as fh:
-    value = (tomllib.load(fh).get('run') or {}).get('alert_issue')
-if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-    print(value)
-EOF
-)
+ALERT_ISSUE=$(ops_alert_issue)
 
-# Una riga del flusso che sveglia il ruolo (docs/devloop/guide.md, "Waking the supervising
-# agent"), con l'ora ("HH:MM ") davanti, come la stampa devloop watch: i filtri la saltano. La
-# riga della base di devloop watch non è un evento per nessuno.
+# Una riga del flusso che sveglia il ruolo: ops_role_event di lib.sh, lo stesso filtro della
+# sentinella dei ruoli a riposo (#684).
 role_event() {
-    local line=$1
-    [[ $line =~ ^[0-9]{2}:[0-9]{2}\ (.*)$ ]] && line=${BASH_REMATCH[1]}
-    [ -n "$line" ] || return 1
-    [[ $line == 'watch baseline:'* ]] && return 1
-    # La routine (#682), riconosciuta da devloop run per l'autore, mai per il testo: l'archivio
-    # del riepilogo giornaliero ("report by"), i commenti del ruolo stesso, il diario dell'altro
-    # ruolo (un suo commento sull'issue degli allarmi).
-    [[ $line =~ ^(PR|issue)\ \#[0-9]+\ (report|$ROLE\ comment)\ by\  ]] && return 1
-    [ -n "$ALERT_ISSUE" ] && [[ $line =~ ^issue\ \#$ALERT_ISSUE\ $OTHER_ROLE\ comment\ by\  ]] \
-        && return 1
-    [ "$ROLE" = supervisor ] && return 0
-    # Una delle due label aggiunta, o fra quelle di un'issue o di una PR nuova ("new PR #N [a,b]
-    # titolo").
-    [[ $line == *" +$NEEDS_OPERATOR"* || $line == *" +$NEEDS_COORDINATOR"* ]] && return 0
-    if [[ $line =~ ^new\ (PR|issue)\ \#[0-9]+\ \[([^]]*)\] ]]; then
-        case ",${BASH_REMATCH[2]}," in
-            *",$NEEDS_OPERATOR,"* | *",$NEEDS_COORDINATOR,"*) return 0 ;;
-        esac
-    fi
-    [[ ${line,,} == *"merge spetta all'operatore"* ]] && return 0
-    [[ $line == 'watch error:'* ]] && return 0
-    # Una risposta dell'operatore (#676): devloop run la distingue da un commento qualunque.
-    [[ $line =~ ^(PR|issue)\ \#[0-9]+\ operator\ reply\ by\  ]] && return 0
-    [ -n "$ALERT_ISSUE" ] && [[ $line =~ ^issue\ \#$ALERT_ISSUE\ (operator\ )?comment\ by\  ]] \
-        && return 0
-    return 1
+    ops_role_event "$ROLE" "$1"
 }
 
 # Il contenuto atomico di FILE: TESTO.
@@ -499,6 +505,52 @@ local_events() {
     # Il servizio fermo resta "servizio:": il flusso fermo conta solo con il servizio attivo.
     [ "$ROLE" = coordinator ] && [ "$state" = active ] && stale_events
 }
+
+# Il riposo (#684): lo stato scritto prima di guardare casella e flusso, così un messaggio o un
+# evento che arriva dopo lo vede la sentinella; ciò che c'è già è un risveglio qualunque.
+if [ "$REST" = 1 ]; then
+    [ -d "$REST_DIR" ] && [ -w "$REST_DIR" ] \
+        || die "non scrivo in $REST_DIR: setup-$ROLE.sh (ops/host/migrate.md, \"Il riposo dei ruoli (#684)\"); senza, la sveglia normale"
+    # Il lock prima di tutto: un'altra attesa a riposo del ruolo che lo tiene resta com'è.
+    LOCK=$REST_STATE.lock
+    exec {LOCK_FD}>>"$LOCK" || die "non apro il lock $LOCK"
+    chmod 664 "$LOCK" 2>/dev/null
+    flock -n "$LOCK_FD" \
+        || die "il lock $LOCK è già tenuto: un'altra attesa a riposo del $ROLE_NAME è in corso"
+    START=$(date +%s)
+    tmp=$(mktemp "$REST_DIR/.tmp-XXXXXX") || die "non scrivo lo stato di riposo in $REST_DIR"
+    if ! { printf '%s riposo\n' "$START" >"$tmp" && chmod 664 "$tmp" && mv -f "$tmp" "$REST_STATE"; }
+    then
+        rm -f "$tmp"
+        die "non scrivo lo stato di riposo $REST_STATE"
+    fi
+    EVENTS=''
+    inbox_events
+    stream_events
+    if [ -n "$EVENTS" ]; then
+        end_rest
+        beat_or_warn
+        printf '%s' "$EVENTS"
+        exit 0
+    fi
+    SECONDS=0
+    while :; do
+        if ! [ -e "$REST_STATE" ]; then
+            say "riposo: lo stato $REST_STATE è stato tolto: il $ROLE_NAME riprende"
+            exit 0
+        fi
+        wake=$(ops_rest_wake "$ROLE")
+        if [ -n "$wake" ] && [ "${wake%% *}" -ge "$START" ]; then
+            say "sentinella: ${wake#* }"
+            exit 0
+        fi
+        if [ "$SECONDS" -ge "$REST_MAX_WAIT" ]; then
+            say "riposo: nessun segnale della sentinella in ${REST_MAX_WAIT}s, il controllo giornaliero è mancato: il controllo periodico"
+            exit 0
+        fi
+        sleep "$POLL"
+    done
+fi
 
 SECONDS=0
 next_local=0

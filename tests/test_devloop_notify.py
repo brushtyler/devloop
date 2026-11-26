@@ -405,10 +405,19 @@ class CommandTests(unittest.TestCase):
         state = json.loads((Path(self.dir.name) / notify.STATE_FILE).read_text())
         self.assertIn('service-failed:_default', state['keys'])
 
+    def test_the_sentinel_failed(self):
+        # #684: the OnFailure= unit of the sentinel of the roles at rest.
+        self.assertEqual(self.run_cli('--sentinel-failed', 'widget'), 0)
+        self.assertIn('sentinella dei ruoli a riposo del progetto widget', FakeChannel.sent[0])
+        self.assertIn('journalctl -u devloop-role-sentinel@widget', FakeChannel.sent[0])
+        state = json.loads((Path(self.dir.name) / notify.STATE_FILE).read_text())
+        self.assertIn('sentinel-failed:widget', state['keys'])
+
     def test_arguments_not_valid(self):
         for argv in ((), ('x', '--test'), ('x', '--key', 'a b'), ('   ',),
                      ('--service-failed', '../x'), ('--service-failed', 'Widget'),
-                     ('--service-failed', '_other')):
+                     ('--service-failed', '_other'), ('--sentinel-failed', '../x'),
+                     ('--service-failed', 'a', '--sentinel-failed', 'a')):
             with self.subTest(argv=argv):
                 self.assertEqual(self.run_cli(*argv), 2)
         self.assertEqual(FakeChannel.sent, [])

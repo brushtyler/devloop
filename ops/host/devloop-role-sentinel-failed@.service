@@ -1,0 +1,15 @@
+# Unità template dell'avviso di una sentinella dei ruoli caduta (ops/host/devloop-role-sentinel-failed@.service,
+# #684): l'OnFailure= di devloop-role-sentinel@<progetto>.service. Come devloop-failed@.service
+# (#593): esegue come root il comando devloop dell'host (ops/host/devloop-command), che passa
+# all'utente devloop del progetto `devloop notify --sentinel-failed <progetto>`, con il canale di
+# [notify] dell'overlay del progetto e lo stesso avviso al più una volta per intervallo. Senza
+# [notify] resta solo una riga nel journal. Comune ai progetti dell'host: setup-supervisor.sh e
+# setup-coordinator.sh la installano in SYSTEMD_DIR, con la sentinella. Non si abilita: la avvia
+# l'OnFailure=.
+[Unit]
+Description=devloop role sentinel failed, notice to the operator (%i)
+
+[Service]
+Type=oneshot
+ExecStart=@DEVLOOP_COMMAND@ --project %i notify --sentinel-failed %i
+TimeoutStartSec=120
