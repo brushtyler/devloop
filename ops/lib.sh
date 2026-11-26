@@ -51,7 +51,8 @@ OPS_SENTINEL_UNITS='devloop-role-sentinel@.service devloop-role-sentinel-failed@
 
 # La casella fra supervisore e coordinatore (#543): sotto COORDINATION_DIR una directory di
 # messaggi per destinatario, ciascuna con la sua done/ per i messaggi letti. Tutte di root, del
-# gruppo COORDINATION_GROUP (supervisore e coordinatore, nessun altro), 2770.
+# gruppo COORDINATION_GROUP (supervisore e coordinatore, nessun altro), 2770; COORDINATION_DIR
+# 3770 (#685: lo sticky bit, così un ruolo non rinomina né sostituisce le directory che contiene).
 COORDINATION_BOXES='to-coordinator to-supervisor'
 # La cartella delle comunicazioni dei ruoli all'operatore (#663), accanto alle due caselle, con la
 # sua done/ e gli stessi permessi: i ruoli ci scrivono, l'operatore la legge dalla sua shell.
@@ -1309,9 +1310,11 @@ coordination_dirs() {
 }
 
 # coordination_mode DIR: il modo di una directory di coordination_dirs: 3770 per quella del
-# riposo (#684), con lo sticky bit, 2770 per le altre.
+# riposo (#684) e per COORDINATION_DIR (#685), con lo sticky bit, 2770 per le altre. Lo sticky bit
+# di COORDINATION_DIR impedisce a un ruolo di rinominare o sostituire le directory di root che
+# contiene, rest/ con la pausa dell'operatore per prima.
 coordination_mode() {
-    if [ "$1" = "$COORDINATION_DIR/$COORDINATION_REST" ]; then
+    if [ "$1" = "$COORDINATION_DIR/$COORDINATION_REST" ] || [ "$1" = "$COORDINATION_DIR" ]; then
         printf '3770'
     else
         printf '2770'
@@ -1320,7 +1323,8 @@ coordination_mode() {
 
 # ensure_coordination USER: la casella fra supervisore e coordinatore (#543). Il gruppo
 # COORDINATION_GROUP con dentro USER, e le directory di coordination_dirs, tutte
-# root:COORDINATION_GROUP 2770 (3770 quella del riposo, #684): i due ruoli si scrivono a vicenda
+# root:COORDINATION_GROUP 2770 (3770 quella del riposo, #684, e COORDINATION_DIR, #685): i due
+# ruoli si scrivono a vicenda
 # e scrivono all'operatore in to-operator/ (#663), nessun altro utente vi entra se non con le ACL
 # del watchdog, della sentinella e di devloop. Una voce che è un link o un file al
 # posto di una directory (la casella di prima, con un file per destinatario) ferma lo script.

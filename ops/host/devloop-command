@@ -165,21 +165,42 @@ case $1 in
         fi
         [ -d "$rest" ] && ! [ -L "$rest" ] \
             || die "manca $rest, la directory del riposo dei ruoli: setup-supervisor.sh e setup-coordinator.sh (ops/host/migrate.md, \"Il riposo dei ruoli (#684)\")"
+        # Lo sticky bit su COORDINATION_DIR e su rest/ (3770): senza, un ruolo, che scrive in
+        # entrambe, rinominerebbe rest/ o la pausa, e la pausa sparirebbe dal percorso che devloop
+        # e i ruoli leggono.
+        ! [ -L "$COORDINATION_DIR" ] && [ -k "$COORDINATION_DIR" ] && [ -k "$rest" ] \
+            || die "$COORDINATION_DIR e $rest devono avere lo sticky bit (3770), o un ruolo toglierebbe la pausa: rieseguire setup-supervisor.sh e setup-coordinator.sh (ops/host/migrate.md, \"La pausa dell'operatore (#685)\")"
+        # Una directory al posto della pausa (non l'ha scritta root): mv la prenderebbe come
+        # destinazione e la pausa non ci sarebbe. Si toglie a mano.
+        if [ -d "$pause_file" ] && ! [ -L "$pause_file" ]; then
+            die "$pause_file è una directory, non la pausa dell'operatore: toglierla (l'ha creata un altro utente) e ripetere devloop --project $project pause"
+        fi
+        # pause_valid [MINE]: la pausa c'è, un file regolare e non un link, "<inizio> pausa", di
+        # root (MINE: appena scritta da questo comando, il temporaneo di root); l'inizio in start.
+        pause_valid() {
+            local why=''
+            start=''
+            [ -f "$pause_file" ] && ! [ -L "$pause_file" ] || return 1
+            [ "${1:-}" = mine ] || [ "$(stat -c %u -- "$pause_file")" = 0 ] || return 1
+            read -r start why <"$pause_file" && [[ $start =~ ^[0-9]{1,12}$ ]] && [ "$why" = pausa ]
+        }
         # Prima la pausa, poi il servizio: i ruoli non si svegliano sul servizio fermo, e un
         # loop che la vede non avvia altri tick.
-        start='' why=''
-        if [ -f "$pause_file" ] && ! [ -L "$pause_file" ] \
-            && [ "$(stat -c %u -- "$pause_file")" = 0 ] && read -r start why <"$pause_file" \
-            && [[ $start =~ ^[0-9]{1,12}$ ]] && [ "$why" = pausa ]; then
+        if pause_valid; then
             printf 'devloop: il progetto %s è già in pausa dal %s\n' "$project" "$(utc "$start")"
         else
-            start=$(date +%s)
+            now=$(date +%s)
             tmp=$(mktemp "$rest/.pause-XXXXXX") || die "non scrivo in $rest"
-            if ! { printf '%s pausa\n' "$start" >"$tmp" && chmod 644 "$tmp" && mv -f -- "$tmp" "$pause_file"; }
+            # mv -T: la destinazione non è mai una directory in cui entrare; un link al suo posto
+            # è sostituito, non seguito.
+            if ! { printf '%s pausa\n' "$now" >"$tmp" && chmod 644 "$tmp" \
+                    && mv -f -T -- "$tmp" "$pause_file"; }
             then
                 rm -f -- "$tmp"
-                die "non scrivo la pausa $pause_file"
+                die "non scrivo la pausa $pause_file: il servizio resta com'è"
             fi
+            pause_valid mine && [ "$start" = "$now" ] \
+                || die "la pausa $pause_file non è quella scritta: il servizio resta com'è"
             printf 'devloop: progetto %s in pausa dal %s\n' "$project" "$(utc "$start")"
         fi
         printf 'devloop: fermo %s: devloop finisce il tick e le azioni in corso, poi si ferma\n' \

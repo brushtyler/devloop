@@ -298,8 +298,8 @@ closes it.
 
 While the pause is on, your wake-up, with or without `--rest`, writes your heartbeat and, with an
 empty mailbox, waits in pause: the state `rest/coordinator` with the reason `pausa`, the lock,
-and only the signal of the sentinel or the end of the pause. A usual wake-up already waiting
-enters the pause by itself. The sentinel wakes you in pause only for a message in
+and only the signal of the sentinel or the end of the pause, however long the pause lasts. A
+usual wake-up or a rest already waiting enters the pause by itself. The sentinel wakes you in pause only for a message in
 `to-coordinator/` or an alarm: a new line of `run.log` with an error (`log:`), or the service
 active again during the pause (`allarme:`); the events, the stopped service, the work and the
 daily check do not, and neither the hourly nor the daily check runs. Its line, `sentinella: …`,

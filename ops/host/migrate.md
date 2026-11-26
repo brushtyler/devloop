@@ -753,11 +753,15 @@ Servono quindi:
 - le copie di root nuove di `ops/` (con `lib.sh`, `host/role-wait.sh`, `host/role-sentinel.sh`,
   `host/role-watchdog.sh` e `host/check-host.sh`), e la sentinella riavviata, che altrimenti gira
   ancora la copia di prima;
+- `$COORDINATION_DIR` con lo sticky bit, 3770 invece di 2770: senza, un ruolo, che vi scrive,
+  rinominerebbe `rest/` e la pausa sparirebbe dal percorso che devloop e i ruoli leggono. `pause`
+  si ferma finché `$COORDINATION_DIR` e `rest/` non hanno lo sticky bit;
 - il pin del codice nuovo di devloop, che non parte durante la pausa e scrive nel flusso degli
   eventi la coda dell'ultimo tick (`events/queue`), per il watchdog.
 
 Nessuna chiave nuova dell'overlay, nessuna unità, nessun sudoers e nessuna ACL nuovi: la pausa
-vive in `rest/`, che il riposo ha già dato a tutti quelli che la leggono. devloop mergia la PR di
+vive in `rest/`, che il riposo ha già dato a tutti quelli che la leggono; cambia solo il modo di
+`$COORDINATION_DIR`. devloop mergia la PR di
 #685 come le altre, ma non fa il pin automatico di quel commit né dei successivi finché
 l'operatore non fa il pin a mano ([Ogni cambio con un passo
 sull'host](#ogni-cambio-con-un-passo-sullhost)): qui è il passo 4.
@@ -781,9 +785,10 @@ procedura](#un-progetto-con-la-sorgente-a-un-tag-nuovo-666)):
    sudo bash <checkout>/ops/host/setup-devloop.sh --params <parametri>
    ```
 
-3. **le copie di root di `ops/`**, prima con `--dry-run`: le azioni nuove sono solo le copie
-   (`SUPERVISOR_OPS_DIR`, `COORDINATOR_OPS_DIR`, `WATCHDOG_OPS_DIR`); poi la sentinella riavviata
-   sulla copia nuova:
+3. **le copie di root di `ops/` e lo sticky bit della casella**, prima con `--dry-run`: le azioni
+   nuove sono solo le copie (`SUPERVISOR_OPS_DIR`, `COORDINATOR_OPS_DIR`, `WATCHDOG_OPS_DIR`) e,
+   su `$COORDINATION_DIR`, `chown root:<COORDINATION_GROUP>` e `chmod 3770`; poi la sentinella
+   riavviata sulla copia nuova:
 
    ```bash
    sudo bash <checkout>/ops/host/setup-supervisor.sh --params <parametri> --dry-run
@@ -801,7 +806,8 @@ procedura](#un-progetto-con-la-sorgente-a-un-tag-nuovo-666)):
    mano fa riprendere il pin automatico;
 
 5. **la verifica**: nessun `ERRORE`, nel passo *Comando devloop* le righe `ok: … coincide con
-   ops/host/devloop-command` e `… devloop-command-project`, e la riga
+   ops/host/devloop-command` e `… devloop-command-project`, nel passo della casella la riga
+   `ok: $COORDINATION_DIR: 3770, gruppo …`, e la riga
    `devloop-role-sentinel@<progetto>.service è attivo`:
 
    ```bash

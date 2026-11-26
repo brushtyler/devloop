@@ -545,8 +545,9 @@ for user in $members; do
         fail "un utente che non è un ruolo di questo progetto è nel gruppo $COORDINATION_GROUP: la casella è solo del supervisore e del coordinatore del progetto (il nome e il comando con --verbose; ops/host/migrate.md, \"Utenti dei ruoli per progetto\")"
     fi
 done
-# La directory del riposo dei ruoli (#684) è 3770: con lo sticky bit, la sentinella e i ruoli
-# rimuovono o sostituiscono solo i propri file.
+# La directory del riposo dei ruoli (#684) e COORDINATION_DIR (#685) sono 3770: con lo sticky bit,
+# la sentinella e i ruoli rimuovono o sostituiscono solo i propri file, e nessun ruolo rinomina
+# rest/ con la pausa dell'operatore.
 for dir in $(coordination_dirs); do
     if [ -L "$dir" ] || ! [ -d "$dir" ]; then
         fail "$dir non esiste o non è una directory (setup-supervisor.sh)"

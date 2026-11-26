@@ -107,7 +107,8 @@ sorveglia ciascuno e cosa fa all'avvio:
   `/var/lib/devloop-coordination-<progetto>`), con `to-coordinator/`, `to-supervisor/` e
   `to-operator/` (#663), ciascuna
   con `done/`, tutte `root:devloop-roles` (`COORDINATION_GROUP`; con `PROJECT`,
-  `devloop-roles-<progetto>`) 2770. Nel gruppo ci sono solo il supervisore e il coordinatore del
+  `devloop-roles-<progetto>`) 2770; `COORDINATION_DIR` stessa è 3770, con lo sticky bit (#685).
+  Nel gruppo ci sono solo il supervisore e il coordinatore del
   progetto, non `devloop` né `devloop-agent` né i ruoli di altri progetti. Un file per messaggio, con un
   nome univoco (data e ora UTC più un suffisso casuale), pubblicato con una rinomina atomica da
   un file temporaneo che comincia con `.`; il destinatario lo legge, poi lo sposta in `done/` o
@@ -1222,15 +1223,18 @@ ripresa (il servizio riparte, i ruoli si svegliano).
 servizio con `systemctl stop`: `devloop run` finisce il tick e le azioni in corso, e a `SIGTERM` non
 avvia altri tick. `resume` toglie la pausa, poi avvia il servizio. Conta solo il file di root: i
 ruoli scrivono in `rest/`, ma un loro file `pause` non è una pausa, e quello di root non lo possono
-togliere né sostituire (lo sticky bit di `rest/`); nessun ruolo ha una regola di sudo per il comando
-`devloop`. Mentre la pausa c'è, `devloop run` (con `rest_dir` nell'overlay) esce subito senza tick,
+togliere né sostituire (lo sticky bit di `rest/`), né rinominare `rest/` per farlo sparire (lo
+sticky bit di `COORDINATION_DIR`, 3770 con #685: `pause` si ferma senza i due); una loro directory
+`pause` al posto del file ferma `pause`, che chiede di toglierla. Nessun ruolo ha una regola di sudo
+per il comando `devloop`. Mentre la pausa c'è, `devloop run` (con `rest_dir` nell'overlay) esce subito senza tick,
 anche se qualcuno avvia il servizio (il supervisore può farlo, con il suo sudoers): solo `resume`
 chiude la pausa. In pausa:
 
 - **i ruoli** aspettano con lo stesso comando, lo stesso stato e la stessa sentinella del riposo, con
   il motivo `pausa`: `role-wait.sh`, con o senza `--rest`, scrive il battito, toglie lo stato di
   prima e, con la casella vuota, scrive lo stato `rest/<ruolo>` "<inizio> pausa", tiene il lock e
-  aspetta; una sveglia normale già in attesa entra in pausa da sé. Esce con `sentinella: <motivo>`
+  aspetta, quanto dura la pausa; una sveglia normale o un riposo già in attesa entrano in pausa da
+  sé, e un segnale della sentinella di prima non li sveglia. Esce con `sentinella: <motivo>`
   al segnale della sentinella, togliendo lo stato e scrivendo il battito, e con `ripresa:` quando
   l'operatore toglie la pausa;
 - **la sentinella** sveglia un ruolo solo per un messaggio nella sua casella o per un suo allarme:

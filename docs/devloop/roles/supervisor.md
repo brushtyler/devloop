@@ -230,8 +230,8 @@ closes it.
 
 While the pause is on, your wake-up, with or without `--rest`, writes your heartbeat and, with an
 empty mailbox, waits in pause: the state `rest/supervisor` with the reason `pausa`, the lock, and
-only the signal of the sentinel or the end of the pause. A usual wake-up already waiting enters
-the pause by itself. The sentinel wakes you in pause only for a message in `to-supervisor/` or an
+only the signal of the sentinel or the end of the pause, however long the pause lasts. A usual
+wake-up or a rest already waiting enters the pause by itself. The sentinel wakes you in pause only for a message in `to-supervisor/` or an
 alarm (`allarme:`, the service active again during the pause); the events, the stopped service,
 the work and the daily check do not. Its line, `sentinella: …`, comes after the wake-up has left
 the pause and written your heartbeat: act on that line (read the message, move it to `done/`),
