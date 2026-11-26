@@ -3694,6 +3694,16 @@ state_dir = "/var/lib/devloop/widget"
   then the service starts and the sessions of the roles restart. The steps, in their order, are
   in [Un progetto con la sorgente a un tag nuovo](../../ops/host/migrate.md#un-progetto-con-la-sorgente-a-un-tag-nuovo-666),
   with its rollback.
+- **Everything from the checkout of the tag** (#687). For such a project every script of
+  `ops/host/` (the sections of `migrate.md`, `setup-*.sh`, `check-host.sh`, `start-role.sh`) runs
+  from a checkout of the operator at the pinned tag, never from one on `main`: the scripts install
+  the root copies of `ops/` of the roles (with `host/role-wait.sh`) from the checkout they run
+  from, so from `main` the project would have the loop of its tag with the wake-ups of `main`. A
+  section of `migrate.md` added on `main` after the tag, even one that says "per ogni progetto
+  dell'host", reaches the project only with the next tag that contains it, through that
+  procedure; so does a fix of `ops/` merged on `main`. `check-host.sh` of a project with
+  `SOURCE_REPO` warns when the checkout it runs from is not at `SOURCE_REF`, since it compares the
+  root copies with those of that checkout.
 
 The facts of the project (`test_cmd`, `[docs.map]`, …) and the restrictions it adds go in the
 [project file](reference.md#project-file) `DIR/project.toml` (ADR 0006, R2), on the host; the
@@ -3724,7 +3734,7 @@ for v0.3.0 (#666); it gives no role new powers.
   file: the same titles a project runs in step 3 of
   [Un progetto con la sorgente a un tag nuovo](../../ops/host/migrate.md#un-progetto-con-la-sorgente-a-un-tag-nuovo-666).
 - **How the projects learn of it.** From the message of the tag, which is enough for that
-  procedure. The coordinator of devloop's repository notes the new tag in the project's journal;
+  procedure, run from a checkout of the new tag (#687). The coordinator of devloop's repository notes the new tag in the project's journal;
   it has no channel with the projects devloop serves, which follow the releases as anyone does.
 
 The commands of the operator, in a checkout of `brushtyler/devloop`, with `<commit>` the pinned
