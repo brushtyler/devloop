@@ -57,6 +57,13 @@ COORDINATION_OPERATOR_BOX=to-operator
 # avvio e il watchdog dei ruoli legge; la directory è come le caselle, senza done/.
 COORDINATION_HEARTBEAT=heartbeat
 
+# Il flusso degli eventi (#683), come devloop/events.py: la directory dello state_dir che devloop
+# run scrive (DIRECTORY), con i segmenti, il segno di vita (ALIVE) e l'identità del flusso. I
+# ruoli la leggono come sé stessi, con l'ACL di sola lettura che setup-supervisor.sh e
+# setup-coordinator.sh mettono (ensure_events_acl).
+EVENTS_DIR=events
+EVENTS_ALIVE=alive
+
 # Nella home dell'utente degli agent (#438), come CLI_DIRS, CLI_SEALED e CLIS di
 # devloop/agentuser.py: le directory delle CLI, di root, del gruppo dell'utente degli agent e con
 # lo sticky bit (1770, #517), dove l'utente degli agent crea e sostituisce le proprie voci ma non
@@ -660,6 +667,9 @@ ops_load_params() {
     # COORDINATOR_WAIT_PERIOD, se params.env lo scrive (#543).
     : "${ROLE_WAIT_PERIOD:=3600}"
     : "${COORDINATOR_WAIT_PERIOD:=$ROLE_WAIT_PERIOD}"
+    # Il flusso fermo (#683): la sveglia del coordinatore lo dice quando il segno di vita del
+    # flusso degli eventi è più vecchio di tanti secondi, con il servizio attivo.
+    : "${EVENTS_STALE_AFTER:=300}"
     # Il nome del progetto nei nomi per progetto dei ruoli (#602): PROJECT, o _default senza
     # PROJECT. '_' non è ammesso in PROJECT, così l'installazione senza PROJECT non coincide mai
     # con un progetto (PROJECT=default compreso): unità, drop-in e stato restano distinti.
@@ -801,7 +811,7 @@ ops_load_params() {
                 || die "$copy non può stare dentro né contenere $inside"
         done
     done
-    for copy in ROLE_WAIT_PERIOD COORDINATOR_WAIT_PERIOD; do
+    for copy in ROLE_WAIT_PERIOD COORDINATOR_WAIT_PERIOD EVENTS_STALE_AFTER; do
         [[ ${!copy} =~ ^[1-9][0-9]{0,6}$ ]] \
             || die "$copy è un numero di secondi, da 1 a 9999999: '${!copy}'"
     done
@@ -1092,6 +1102,39 @@ ensure_traverse_acl() {
         [ -z "$entry" ] || warn "ACL attuale $entry: la riduco a --x"
         run setfacl -m "u:$user:--x" "$dir"
     fi
+}
+
+# ensure_events_acl USER: la lettura del flusso degli eventi del progetto (#683) per USER, il
+# supervisore o il coordinatore, che la sveglia dei ruoli legge come sé stessa. La directory
+# STATE_PATH/events, di DEVLOOP_USER, 750 (la crea, se manca: devloop run vi scrive); su di essa
+# l'ACL u:USER:r-x, e l'ACL di default d:u:USER:r--, che ogni segmento nuovo eredita; su ogni file
+# che c'è già u:USER:r--. Nessuna scrittura: una voce più ampia si riduce. L'attraversamento
+# delle directory sopra (la home di devloop, lo state_dir) lo mettono gli script dei ruoli. Per
+# progetto: l'utente di un ruolo condiviso fra più progetti la riceve sul flusso di ciascun
+# progetto da setup-*.sh di quel progetto.
+ensure_events_acl() {
+    local user=$1 dir=$STATE_PATH/$EVENTS_DIR entries file
+    if [ -L "$dir" ] || { [ -e "$dir" ] && ! [ -d "$dir" ]; }; then
+        warn "$dir non è una directory: rimuoverlo come $DEVLOOP_USER, poi rieseguire questo script"
+        return 0
+    fi
+    if ! [ -d "$STATE_PATH" ]; then
+        warn "$STATE_PATH non esiste: crearlo (setup-devloop.sh), poi rieseguire questo script"
+        return 0
+    fi
+    ensure_dir "$dir" 750 "$DEVLOOP_USER"
+    # getfacl può aggiungere alle righe un commento #effective.
+    entries=$(getfacl -p --omit-header "$dir" 2>/dev/null | sed 's/[[:space:]].*//' || true)
+    if grep -qx "user:$user:r-x" <<<"$entries" && grep -qx "default:user:$user:r--" <<<"$entries"
+    then
+        ok "ACL presenti su $dir: user:$user:r-x, default:user:$user:r--"
+    else
+        run setfacl -m "u:$user:r-x,d:u:$user:r--" "$dir"
+    fi
+    for file in "$dir"/*; do
+        [ -f "$file" ] && ! [ -L "$file" ] || continue
+        ensure_read_acl "$user" "$file"
+    done
 }
 
 # coordination_dirs: le directory della casella, una per riga: COORDINATION_DIR, una directory di

@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Prepara l'host per il coordinatore di devloop (ADR 0002, precisazione del 2026-11-22; #530):
 # l'utente, l'ACL di solo attraversamento sulla home di devloop e quella di sola lettura
-# sull'overlay (#554), per leggere l'overlay, la key_dir
+# sull'overlay (#554), per leggere l'overlay, quella di sola lettura sul flusso degli eventi del
+# progetto (#683), che la sveglia legge come utente del coordinatore, la key_dir
 # della sua GitHub App (700, #549), la casella fra supervisore e coordinatore (#543), una copia di
 # root di check-host.sh e del risveglio dei ruoli role-wait.sh (#602, con il suo involucro
 # coordinator-wait.sh, #543) con i file che leggono e i parametri, un sudoers con soli comandi di
-# lettura e la sveglia (ops/host/sudoers-coordinator), e il watchdog dei ruoli (#602): le unità
+# lettura (ops/host/sudoers-coordinator; senza devloop watch dal #683), e il watchdog dei ruoli (#602): le unità
 # template, e l'istanza del progetto, con il suo utente e le sue ACL, quando c'è il supervisore;
 # il clone del repository gestito, da cui parte la sessione (#643), e con SOURCE_REPO anche un
 # clone della sorgente al tag SOURCE_REF, da cui lanciare scripts/coordinator-token.py (#571);
@@ -122,6 +123,10 @@ step "Accesso allo state_dir: ACL u:$COORDINATOR_USER:--x su $STATE_PATH"
 ensure_traverse_acl "$COORDINATOR_USER" "$STATE_PATH"
 step "Lettura dell'overlay: ACL u:$COORDINATOR_USER:r-- su $OVERLAY"
 ensure_read_acl "$COORDINATOR_USER" "$OVERLAY"
+# Il flusso degli eventi del progetto (#683), che la sveglia del coordinatore legge come sé
+# stessa al posto di devloop watch: sola lettura sulla directory e sui segmenti, anche futuri.
+step "Lettura del flusso degli eventi: ACL u:$COORDINATOR_USER:r-x e d:u:$COORDINATOR_USER:r-- su $STATE_PATH/$EVENTS_DIR (#683)"
+ensure_events_acl "$COORDINATOR_USER"
 
 # La casella fra supervisore e coordinatore (#543), che anche setup-supervisor.sh prepara: il
 # coordinatore vi entra con il gruppo, e la sua sveglia (coordinator-wait.sh) la legge.

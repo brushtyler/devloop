@@ -699,14 +699,20 @@ class RunLoopTest(unittest.TestCase):
         dispatcher = SimpleNamespace(tick=mock.Mock(return_value=[]), gh=gh, identities=None)
         tmp = self.tmp
 
-        class Watcher:
+        class Producer:  # the reader of GitHub of the loop (#683), without reads
             def __init__(self, *args, **kwargs):
-                self.time_left = lambda: 1
+                pass
 
-            def run(self):
+            def start(self, stopped):
+                pass
+
+            def close(self):
+                pass
+
+            def wait(self, seconds, sleep, check):
                 (tmp / 'STOP').touch()
                 return NOTHING_NEW
-        with mock.patch.object(cli.watch, 'Watcher', Watcher), mock.patch.object(cli, 'log'):
+        with mock.patch.object(cli.events, 'Producer', Producer), mock.patch.object(cli, 'log'):
             return cli.run_loop(cfg, self.tmp, dispatcher, 30)
 
     def test_without_an_issue_run_publishes_nothing(self):

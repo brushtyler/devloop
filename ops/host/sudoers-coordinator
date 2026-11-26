@@ -4,10 +4,10 @@
 #
 # Solo comandi di lettura (ADR 0002, precisazione del 2026-11-22), ciascuno con i suoi argomenti
 # esatti, senza caratteri jolly. Come utente devloop: lo stato di devloop (devloop-pinned status),
-# la direzione dell'operatore (devloop-pinned direction, #604) e le ultime righe di run.log, e la lettura di GitHub della sveglia del coordinatore (#543,
-# ops/host/coordinator-wait.sh): devloop-pinned watch con i suoi intervalli e il suo file di
-# stato, distinto da quello del supervisore, con la configurazione di devloop, senza che il
-# coordinatore veda le chiavi del dispatcher. L'unica scrittura, e l'unico comando con argomenti
+# la direzione dell'operatore (devloop-pinned direction, #604) e le ultime righe di run.log. La
+# sveglia del coordinatore (ops/host/role-wait.sh) non esegue più devloop watch (#683): legge come
+# utente del coordinatore il flusso degli eventi che devloop run scrive, con un'ACL di sola
+# lettura. L'unica scrittura, e l'unico comando con argomenti
 # liberi, è l'avviso all'operatore (devloop-pinned notify, #593, scelta N2 (a) dell'operatore):
 # il testo dell'avviso, sul canale di [notify], con il token del bot che solo l'utente devloop
 # legge e la deduplica di devloop. Come root: il journal e lo stato del servizio,
@@ -21,7 +21,6 @@ Defaults>@DEVLOOP_USER@ always_set_home, secure_path="@DEVLOOP_PATH@"
     @LAUNCHER_CMD@ status, \
     @LAUNCHER_CMD@ direction, \
     @LAUNCHER_CMD@ notify *, \
-    @LAUNCHER_CMD@ watch --until-change --interval 60 --timeout 300 --state @STATE_PATH@/coordinator-watch-state.json, \
     /usr/bin/tail -n 200 @STATE_PATH@/run.log, \
     /usr/bin/tail -n 1000 @STATE_PATH@/run.log
 

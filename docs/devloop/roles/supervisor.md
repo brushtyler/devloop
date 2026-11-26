@@ -131,8 +131,8 @@ saw. The operator decides whether to open an issue on devloop's repository.
 
 ## Watching
 
-You follow the continuous stream: every event of `devloop watch`, the escalations, `run.log`,
-and your mailbox `to-supervisor/`. Run the wake-up of the roles as a background command (for
+You follow the continuous stream: every event that devloop reads on GitHub, the escalations,
+`run.log`, and your mailbox `to-supervisor/`. Run the wake-up of the roles as a background command (for
 Claude Code, a Bash command with `run_in_background`), from the root copy that
 `setup-supervisor.sh` installs:
 
@@ -145,20 +145,31 @@ On the host of this repository (`PROJECT=devloop`) the copy is
 session.
 
 It ends at the first of: a message in `to-supervisor/` (`casella:`, which it reports without
-consuming it, at once), any event of `devloop watch` (`evento:`) but the routine, the service
-not active (`servizio:`), or the end of the period, one hour by default (`periodo:`, `--period
-<seconds>`). Read its lines, act, then start it again. The routine does not wake you (#682):
-your own comments (`supervisor comment`, which the watch marks only when you sign with your role
-app, `[roles.supervisor]` as a table), the coordinator's on the issue of the alarms
-`[run].alert_issue`, the issue of the diary (`coordinator comment`), and the archive of the
-daily summary (`report`). The watch marks them by the author it verifies, never by the text.
-The coordinator's other comments, its `/devloop authorize` included, the dispatcher's alerts,
-the operator's comments and the labels wake you as before. You read the diary of the
-coordinator at the periodic check. Exit 1 (`errore:`) means it cannot read GitHub: tell
-the operator. It reads GitHub with `devloop-pinned watch` as devloop's user and your state file,
-the default of devloop, `watch-state.json` of the `state_dir`. The coordinator does not share
-your watch: its wake-up has a state file of its own, so it never takes your events. With
-`[roles.coordinator]` your watch shows the issues the coordinator's app opens and its comments,
+consuming it, at once), any event of the stream of the events (`evento:`) but the routine, a
+jump of the stream (`flusso:`), the service not active (`servizio:`), or the end of the period,
+one hour by default (`periodo:`, `--period <seconds>`). Read its lines, act, then start it
+again. The routine does not wake you (#682): your own comments (`supervisor comment`, which
+devloop marks only when you sign with your role app, `[roles.supervisor]` as a table), the
+coordinator's on the issue of the alarms `[run].alert_issue`, the issue of the diary
+(`coordinator comment`), and the archive of the daily summary (`report`). Devloop marks them by
+the author it verifies, never by the text. The coordinator's other comments, its `/devloop
+authorize` included, the dispatcher's alerts, the operator's comments and the labels wake you as
+before. You read the diary of the coordinator at the periodic check.
+
+The wake-up does not read GitHub, and runs nothing as devloop's user (#683). `devloop run` reads
+GitHub every minute, during a long action too, and writes what changed, the lines of `devloop
+watch`, to the stream of the events of the project, `events/` of the `state_dir`
+([reference](../reference.md#the-stream-of-the-events)). Your wake-up reads it as you, with the
+read-only ACL that `setup-supervisor.sh` gives you, from a cursor of yours in
+`~/.local/state/devloop-supervisor-wait/<project>/`: one per project, so the events of a project
+never wake you for another, and the coordinator has its own. At its first start for a project it
+makes a base at the end of the stream and says so in a `flusso: base …` line, without waking. If
+the stream was replaced, or the events after your cursor are no longer kept (the stream keeps two
+segments of 10 MiB), a `flusso:` line says so and the wake-up goes on from the first event still
+kept: read what you missed on GitHub. A stream it cannot read is a line on stderr: tell the
+operator (`setup-supervisor.sh`, `check-host.sh`). You no longer run `devloop watch` through
+sudo: your sudoers has no rule for it. With
+`[roles.coordinator]` the stream shows the issues the coordinator's app opens and its comments,
 its `/devloop` commands included, as those of the agents' apps (#648): you see an issue of the
 coordinator as soon as it is opened, before anyone queues it. Its issues still open from
 before are reported once, at the first run with `[roles.coordinator]`, as `issue #N author now trusted`.
@@ -193,8 +204,9 @@ its periods. It only detects: it has no GitHub key and changes nothing.
   is. It is the coordinator's to translate into priorities; you read it to understand the order
   it dictates.
 - The logs of the turns and of the loop: `run.log` of the `state_dir`, `devloop status`,
-  `devloop watch` ([Waking the supervising agent](../guide.md#waking-the-supervising-agent)),
-  `devloop report` ([Daily summary](../guide.md#daily-summary)).
+  the stream of the events through your wake-up ([Waking the supervising
+  agent](../guide.md#waking-the-supervising-agent)), `devloop report` ([Daily
+  summary](../guide.md#daily-summary)).
 
 ## Privileges
 
@@ -205,8 +217,9 @@ its periods. It only detects: it has no GitHub key and changes nothing.
   `pull_requests`, and `actions`, `checks` and `statuses` read only: no push, no `contents`. The
   reads too go through that identity (GitHub): you have no personal token of `gh`.
 - On the host, only the commands of `ops/host/sudoers-supervisor`: `devloop-pinned` with
-  `status`, `watch`, `report`, `direction` (#604), `tick --dry-run` and `pin`, as devloop's
-  user, and `systemctl
+  `status`, `report`, `direction` (#604), `tick --dry-run`, `pin` and `notify` (#593), as
+  devloop's user (no `watch` since #683: you read the stream of the events with a read-only
+  ACL), and `systemctl
   start|stop|restart|status` of devloop's service ([ops/README.md](../../../ops/README.md),
   step 7).
 

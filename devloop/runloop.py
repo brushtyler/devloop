@@ -2,8 +2,12 @@
 
 1. A tick runs.
 2. If it ran at least one action, the next one starts at once.
-3. Otherwise the loop waits for news on GitHub, as ``devloop watch --until-change`` does (#173),
-   for at most ``idle_timeout`` seconds; then a tick runs anyway.
+3. Otherwise the loop waits for news on GitHub for at most ``idle_timeout`` seconds; then a
+   tick runs anyway.
+
+The news come from the loop's one reader of GitHub (#683, ``events.Producer``): a thread that
+reads every minute, during a long action too, as ``devloop watch`` does (#173), and writes each
+event to the stream of the events of the state_dir, which the wake-ups of the roles read.
 
 It stops cleanly on ``SIGTERM`` or ``SIGINT``, or when the ``STOP`` file of the state directory
 exists: the tick in progress ends, no other starts, and a wait in progress is cut short. The
@@ -39,11 +43,10 @@ from .pin import Repinned
 from .watch import NOTHING_NEW, failure_class
 
 STOP_FILE = 'STOP'
-# The state of the loop's own watcher, apart from the one of `devloop watch` (one per file).
+# The state of the loop's own watcher, the producer of the stream of the events (#683), apart
+# from the one of `devloop watch` (one per file).
 WATCH_STATE_FILE = 'run-watch-state.json'
 IDLE_TIMEOUT = 900
-# Seconds between two reads of GitHub while the loop waits for news.
-WATCH_INTERVAL = 60
 # The wait after the 1st, 2nd and 3rd failed tick in a row; the 3rd is never waited, since the
 # MAX_FAILURES-th failure stops the loop at once.
 BACKOFF_SECONDS = (60, 300, 1800)
@@ -105,12 +108,15 @@ class Loop:
     without ``[run].alert_issue``, in ``language`` (#635). ``clock`` is monotonic. ``workers``,
     in continuous mode (#227), holds the actions the ticks started and that may still run.
     ``notify`` (``notify.Notifier``, #593), when given, sends the notice of a stopped loop to the
-    operator, after the alert, with the number of its issue."""
+    operator, after the alert, with the number of its issue. ``producer`` (``events.Producer``,
+    #683), when given, is started once the signals are handled and closed when the loop ends: its
+    ``wait`` is then the ``watch``."""
 
     def __init__(self, tick, watch, stop_file, *, log, alert=None, alert_issue=0,
                  idle_timeout=IDLE_TIMEOUT, clock=time.monotonic, sleep=time.sleep,
-                 workers=None, language=ENGLISH, notify=None):
+                 workers=None, language=ENGLISH, notify=None, producer=None):
         self.tick = tick
+        self.producer = producer
         self.notify = notify
         self.language = language
         self.watch = watch
@@ -169,8 +175,12 @@ class Loop:
             return 0
         previous = {sig: signal.signal(sig, self._on_signal) for sig in SIGNALS}
         try:
+            if self.producer is not None:
+                self.producer.start(self.stop_reason)
             return self._loop()
         finally:
+            if self.producer is not None:
+                self.producer.close()
             for sig, handler in previous.items():
                 signal.signal(sig, handler)
             if self.workers is not None:

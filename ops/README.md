@@ -119,11 +119,13 @@ sorveglia ciascuno e cosa fa all'avvio:
   o li rimuove; nessun ruolo la legge, e il risveglio dei ruoli non la guarda. Su un host con i
   ruoli già installati la si aggiunge come in
   [host/migrate.md](host/migrate.md#cartella-to-operator-della-casella-663);
-- **la sorveglianza**: il supervisore segue il flusso continuo (`devloop watch` con il suo file di
-  stato), il coordinatore solo i suoi eventi e un controllo periodico, ciascuno con il risveglio
-  dei ruoli `ops/host/role-wait.sh --role supervisor|coordinator` (#602; per il coordinatore
-  anche `coordinator-wait.sh`, passo 10), che a ogni avvio scrive il battito del ruolo in
-  `heartbeat/` della casella;
+- **la sorveglianza**: il supervisore segue il flusso continuo, il coordinatore solo i suoi
+  eventi e un controllo periodico, ciascuno con il risveglio dei ruoli `ops/host/role-wait.sh
+  --role supervisor|coordinator` (#602; per il coordinatore anche `coordinator-wait.sh`, passo
+  10), che a ogni avvio scrive il battito del ruolo in `heartbeat/` della casella. GitHub lo
+  legge solo `devloop run`, che ne scrive gli eventi nel **flusso degli eventi** dello
+  state_dir (#683, "Il flusso degli eventi" qui sotto); i risvegli lo leggono come utente del
+  ruolo, con un'ACL di sola lettura, senza eseguire `devloop watch`;
 - **il watchdog dei ruoli** (#602): il timer `devloop-role-watchdog@<progetto>`, ogni 5 minuti,
   controlla i battiti e dice nella casella e all'operatore quando un ruolo è fermo (passo 10,
   "Watchdog dei ruoli");
@@ -151,18 +153,19 @@ ops/
                              di root, ACL su state_dir, worktree e sessioni, sudoers dell'avvio
                              degli agent; --unseal per installare e aggiornare le CLI
     setup-supervisor.sh      utente supervisor, ACL di attraversamento su /home/<devloop> e di
-                             lettura su overlay e file di progetto, casella fra i ruoli,
-                             sudoers, clone, key_dir 700, impostazioni di Claude Code
+                             lettura su overlay, file di progetto e flusso degli eventi, casella
+                             fra i ruoli, sudoers, clone, key_dir 700, impostazioni di Claude Code
     setup-coordinator.sh     utente coordinator (facoltativo), ACL di attraversamento su
-                             /home/<devloop> e di lettura sull'overlay, casella fra i ruoli,
+                             /home/<devloop> e di lettura su overlay e flusso degli eventi,
+                             casella fra i ruoli,
                              clone, key_dir 700, copia di root di check-host.sh e della sveglia,
                              sudoers in sola lettura, impostazioni di Claude Code
     setup-project.sh         un progetto con un solo comando: i quattro setup-*.sh nell'ordine,
                              prima tutti con --dry-run, poi con una sola conferma, e i passi a
                              mano rimasti in un solo blocco (#643)
     role-wait.sh             il risveglio di supervisore e coordinatore (--role): esce sui loro
-                             eventi, su un messaggio nella casella o alla fine del periodo, e
-                             a ogni avvio scrive il battito del ruolo
+                             eventi del flusso degli eventi, su un messaggio nella casella o
+                             alla fine del periodo, e a ogni avvio scrive il battito del ruolo
     coordinator-wait.sh      involucro compatibile: role-wait.sh --role coordinator
     role-watchdog.sh         il watchdog dei ruoli: dai battiti, i ruoli fermi nella casella e
                              all'operatore
@@ -743,7 +746,10 @@ e `~/.ghapps`, `~/.claude` e `~/.codex` di devloop restano 700) e dello `state_d
 (`setfacl -m u:supervisor:--x <state_dir>`, #573), gli dà la **lettura
 dell'overlay e del file di progetto** dello `state_dir` con un'ACL, se manca (`setfacl -m
 u:supervisor:r-- <state_dir>/config.local.toml` e `<state_dir>/project.toml`, #543: i due file
-dell'operatore sono di solito 600, e `scripts/supervisor-token.py` legge l'overlay), prepara la
+dell'operatore sono di solito 600, e `scripts/supervisor-token.py` legge l'overlay), gli dà la
+**lettura del flusso degli eventi** del progetto (#683: crea `<state_dir>/events`, di devloop,
+750, se manca, e `setfacl -m u:supervisor:r-x,d:u:supervisor:r--` sulla directory, `r--` sui
+file che ci sono; "Il flusso degli eventi", passo 10), prepara la
 **casella fra supervisore e coordinatore** (il gruppo `devloop-roles` con dentro `supervisor`, e
 `/var/lib/devloop-coordination` con `to-coordinator/`, `to-supervisor/`, `to-operator/` (#663) e
 le loro `done/`, di root, del gruppo, 2770, e `heartbeat/` per i battiti dei ruoli, #602; [I quattro
@@ -774,8 +780,10 @@ app non firma. Dopo ogni sostituzione si riesegue `setup-supervisor.sh` (e
 
 Il **sudoers** (`ops/host/sudoers-supervisor`) permette:
 
-- come `devloop`, solo `scripts/devloop-pinned` con `status`, `status *`, `watch *`, `report *`,
-  `direction` (la direzione dell'operatore, in sola lettura, #604), `tick --dry-run` e `pin *` (con `Defaults>devloop always_set_home, secure_path=…`); con uno
+- come `devloop`, solo `scripts/devloop-pinned` con `status`, `status *`, `report *`,
+  `direction` (la direzione dell'operatore, in sola lettura, #604), `tick --dry-run`, `pin *` e
+  `notify *` (#593) (con `Defaults>devloop always_set_home, secure_path=…`); nessun `watch`
+  dal #683: la sveglia del supervisore legge il flusso degli eventi con la sua ACL; con uno
   `STATE_DIR` diverso dal default o con `SOURCE_REPO`, lo stesso comando dell'unità
   (`/usr/bin/env -C <clone> /usr/bin/python3 <avviatore> --state-dir <state_dir>`);
 - come root, solo `systemctl start|stop|restart devloop` e `systemctl status devloop *`.
@@ -938,7 +946,8 @@ per percorso l'overlay dello `state_dir`, da cui `scripts/coordinator-token.py` 
 restano 700), quello dello `state_dir`, 750 (`setfacl -m u:coordinator:--x <state_dir>`, #573),
 e la **lettura dell'overlay** con un'ACL, se manca (`setfacl -m u:coordinator:r--
 <state_dir>/config.local.toml`, #554: l'overlay dell'operatore è di solito 600; il file di
-progetto no, `coordinator-token.py` non lo legge), lo mette nella **casella fra supervisore e
+progetto no, `coordinator-token.py` non lo legge), la **lettura del flusso degli eventi** del
+progetto, come al supervisore (#683, "Il flusso degli eventi" qui sotto), lo mette nella **casella fra supervisore e
 coordinatore** (il gruppo `devloop-roles` e le directory di `/var/lib/devloop-coordination`, come
 `setup-supervisor.sh`, #543), installa la **copia di root** di
 `check-host.sh` e del risveglio `role-wait.sh` (con `coordinator-wait.sh`, #602), dei file che
@@ -959,17 +968,15 @@ Il **sudoers** permette, ciascun comando con i suoi argomenti esatti, senza cara
 
 - come `devloop`: `scripts/devloop-pinned status` e `scripts/devloop-pinned direction` (la
   direzione dell'operatore, #604; lo stesso comando dell'unità, come per il supervisore),
-  `/usr/bin/tail -n 200` o `-n 1000` di `<state_dir>/run.log` e, per la sveglia
-  (#543), `scripts/devloop-pinned watch --until-change --interval 60 --timeout 300 --state
-  <state_dir>/coordinator-watch-state.json`: il watch gira come `devloop`, con la sua
-  configurazione, e il coordinatore non vede le chiavi del dispatcher; il file di stato è suo,
-  distinto da quello del supervisore (`watch-state.json`), così non ne consuma gli eventi;
+  `/usr/bin/tail -n 200` o `-n 1000` di `<state_dir>/run.log`, e `scripts/devloop-pinned
+  notify` (#593); nessun `devloop-pinned watch` dal #683: la sveglia legge il flusso degli
+  eventi come utente `coordinator`, con la sua ACL;
 - come root: `/usr/bin/journalctl --no-pager -n 200` o `-n 1000 -u devloop`,
   `/usr/bin/systemctl status --no-pager devloop` e
   `/usr/bin/bash /usr/local/lib/devloop-coordinator/host/check-host.sh --read-only`.
 
-Niente che modifichi: né `start`, `stop` o `restart` del servizio, né `pin` o `tick`, né un altro
-`watch`, né un pager o una shell. Per esempio, come `coordinator`:
+Niente che modifichi: né `start`, `stop` o `restart` del servizio, né `pin`, `tick` o `watch`,
+né un pager o una shell. Per esempio, come `coordinator`:
 
 ```bash
 sudo -u devloop /usr/bin/python3 /home/devloop/devloop/scripts/devloop-pinned status
@@ -1001,37 +1008,72 @@ casella (`casella:`, subito, senza consumarlo), un evento del coordinatore su Gi
 all'operatore", un commento sull'issue degli
 allarmi `[run].alert_issue`, una risposta dell'operatore (`operator reply`, #676: un suo commento
 di persona che comincia con un comando `/devloop` o su un'issue o una PR in
-`agent:needs-operator`), un errore del watch; gli altri eventi li salta, anche gli altri
-commenti dell'operatore e la routine, sotto), una riga nuova di
-`run.log` con un `Traceback`, un `ALERT:`, un `401` o il rifiuto dell'avvio (`log:`), il servizio
+`agent:needs-operator`), tre letture di GitHub fallite di fila (`watch error:`); gli altri
+eventi li salta, anche gli altri commenti dell'operatore e la routine, sotto), un salto del
+flusso degli eventi (`flusso:`, sotto), una riga nuova di
+`run.log` con un `Traceback`, un `ALERT:`, un `401` o il rifiuto dell'avvio (`log:`), il flusso
+fermo (`eventi fermi:`, sotto), il servizio
 non attivo (`servizio:`, una volta per cambio di stato), o la fine del periodo
 (`COORDINATOR_WAIT_PERIOD`, per default `ROLE_WAIT_PERIOD`, 3600 secondi, o `--period`;
-`periodo:`). Legge GitHub con il comando del sudoers, al più 300 secondi per giro, poi rilegge
-casella, log e servizio. Il giro gira in background e la casella si controlla ogni secondo anche
-durante il giro: un messaggio sveglia subito il ruolo, il giro finisce da sé e il risveglio
-successivo lo aspetta e ne legge le righe, senza avviarne un altro (serve `flock`, di
-util-linux). Esce con 1 se il watch non riesce (il sudoers non è aggiornato, devloop non parte).
-Tiene il suo stato (le righe di `run.log` già viste, l'ultimo stato del servizio, il giro in
-corso) in `~/.local/state/devloop-coordinator-wait/<progetto>/` del coordinatore (`_default`
-senza `PROJECT`).
+`periodo:`). Legge la casella ogni secondo, il flusso ogni 5 secondi, `run.log`, il servizio e
+il segno di vita del flusso ogni minuto. Tiene il suo stato (il cursore del flusso, le righe di
+`run.log` già viste, l'ultimo stato del servizio, l'episodio del flusso fermo) in
+`~/.local/state/devloop-coordinator-wait/<progetto>/` del coordinatore (`_default` senza
+`PROJECT`).
 
 Il supervisore usa lo stesso script dalla sua copia di root, che `setup-supervisor.sh` installa in
 `SUPERVISOR_OPS_DIR` (`/usr/local/lib/devloop-supervisor`; con `PROJECT`,
 `/usr/local/lib/devloop-supervisor-<progetto>`): `bash
-/usr/local/lib/devloop-supervisor/host/role-wait.sh --role supervisor`. Per lui ogni evento di
-`devloop watch` è un risveglio (non la riga della base, né la routine, sotto), con il suo file di
-stato (`watch-state.json`, il default di devloop) e il comando `watch` del suo sudoers; non legge
-`run.log`, che non è nel suo sudoers. Il suo stato sta in `~/.local/state/devloop-supervisor-wait/`.
+/usr/local/lib/devloop-supervisor/host/role-wait.sh --role supervisor`. Per lui ogni evento del
+flusso è un risveglio (non la riga della base di `devloop watch`, né la routine, sotto), con il
+suo cursore; non legge `run.log`, che non è nel suo sudoers, né il segno di vita. Il suo stato sta
+in `~/.local/state/devloop-supervisor-wait/<progetto>/`.
 
-**La routine non sveglia nessuno dei due ruoli** (#682). `devloop watch` la riconosce per l'autore
+**Il flusso degli eventi** (#683). GitHub lo legge solo `devloop run`: un suo thread, ogni 60
+secondi, anche durante un'azione lunga, scrive gli eventi che `devloop watch` stamperebbe, con le
+stesse distinzioni (label, `operator reply`, allarmi, la routine di #682), in
+`<state_dir>/events/`: `events.log`, in sola aggiunta, una riga per evento con un numero
+progressivo e l'ora UTC; `events.log.1`, il segmento precedente (la **rotazione** avviene a
+**10 MiB**, e si conservano solo il segmento corrente e uno precedente); `alive`, il **segno di
+vita**, l'ora dell'ultima lettura di GitHub riuscita, anche senza eventi; `id`, l'identità del
+flusso. Il formato è nella
+[reference](../docs/devloop/reference.md#the-stream-of-the-events). La directory e i file sono di
+`devloop` (750 e 640): `setup-supervisor.sh` e `setup-coordinator.sh` danno all'utente del ruolo
+**un'ACL di sola lettura** (scelta dell'operatore su #683) sulla directory (`r-x`, con l'ACL di
+default `r--` per i segmenti nuovi) e sui file, e l'attraversamento (`--x`) della home di devloop
+e dello `state_dir`, nient'altro dello `state_dir`. L'ACL è per progetto: l'utente di un ruolo
+condiviso fra più progetti (#643) la riceve sul flusso di ciascun progetto che serve,
+dall'esecuzione di `setup-*.sh` di quel progetto. Il ruolo legge il flusso come sé stesso: le
+sveglie non eseguono `devloop watch` come `devloop`, e i sudoers dei ruoli non hanno più la sua
+regola. `check-host.sh` verifica che il flusso sia scrivibile solo da `devloop` e leggibile dai
+ruoli del progetto, e che i sudoers dei ruoli non abbiano più la regola di `devloop-pinned watch`.
+
+Ogni risveglio tiene il suo **cursore** (l'ultimo evento letto) nel suo stato, uno per ruolo e
+per progetto: un ruolo non consuma gli eventi dell'altro, e un progetto non legge né sposta il
+cursore di un altro. Il filtro su quali eventi svegliano chi resta nel risveglio. **Al primo
+avvio** per un progetto, senza cursore, il risveglio crea la base alla fine del flusso e lo dice
+in una riga (`flusso: base …`), senza svegliarsi. **Dopo la sostituzione del flusso** (un altro
+`id`), o quando il cursore chiede eventi non più conservati, lo dice in una riga (`flusso: …`),
+che sveglia il ruolo, e riprende dal primo evento ancora conservato: nessun evento si perde in
+silenzio. Un flusso che non si legge (manca, o manca l'ACL) è un avviso su stderr, una volta.
+
+**Il flusso fermo**, solo per il coordinatore: con il servizio attivo, se il segno di vita è più
+vecchio di `EVENTS_STALE_AFTER` secondi (un parametro dell'host, `params.env`, default **300**),
+contati dal più recente fra il segno di vita e l'avvio del servizio (`systemctl show`), o è
+assente o illeggibile, il risveglio esce con una riga distinta, `eventi fermi:`, una volta per
+episodio: l'avviso si riarma quando il segno di vita torna recente. Il servizio fermo resta
+`servizio:`. `devloop watch` interattivo resta su GitHub, con le sue opzioni e il suo file di
+stato: il flusso serve solo le sveglie dei ruoli.
+
+**La routine non sveglia nessuno dei due ruoli** (#682). `devloop run` la riconosce per l'autore
 che verifica, mai per il testo: l'archivio di un giorno del riepilogo giornaliero (`report by`, il
 record `report` di `devloop report` scritto dall'identità del dispatcher; l'aggiornamento del
-corpo dell'issue del riepilogo non è un evento del watch), i commenti delle app di ruolo
+corpo dell'issue del riepilogo non è un evento), i commenti delle app di ruolo
 (`supervisor comment`, solo con `[roles.supervisor]` come tabella, e `coordinator comment`, con
 `[roles.coordinator]`). Il risveglio salta l'archivio del riepilogo, i commenti del ruolo stesso e
 quelli dell'altro ruolo sull'issue degli allarmi, l'issue del diario. Restano risvegli, come
 prima, gli altri commenti del dispatcher sull'issue degli allarmi (i suoi avvisi), i commenti
-dell'operatore, le label e ogni commento che il watch non attribuisce a un ruolo: un supervisore
+dell'operatore, le label e ogni commento che devloop non attribuisce a un ruolo: un supervisore
 senza la sua app di ruolo firma con l'app del suo agent, e i suoi commenti svegliano come prima; un
 diario tenuto su un'altra issue sveglia ancora il supervisore.
 

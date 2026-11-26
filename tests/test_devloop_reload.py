@@ -165,11 +165,17 @@ class RunLoopTests(FilesCase):
         d._do_implement = implement
         waits = []
 
-        class Watcher:
-            def __init__(watcher, client, trust, state, *, interval, timeout, sleep, out, err):
-                watcher.time_left = lambda: 1
+        class Producer:  # the reader of GitHub of the loop (#683): its waits, without reads
+            def __init__(producer, watcher, stream, *, log):
+                pass
 
-            def run(watcher):
+            def start(producer, stopped):
+                pass
+
+            def close(producer):
+                pass
+
+            def wait(producer, seconds, sleep, check):
                 waits.append(1)
                 if len(waits) == 1:  # the operator edits the overlay during the wait
                     self.overlay('max_open_prs = 2\nmax_parallel_actions = 3\n')
@@ -181,7 +187,7 @@ class RunLoopTests(FilesCase):
                         return 0
                 (self.tmp / 'STOP').touch()  # a test that fails ends anyway
                 return NOTHING_NEW
-        with mock.patch.object(cli.watch, 'Watcher', Watcher), mock.patch.object(cli, 'log'):
+        with mock.patch.object(cli.events, 'Producer', Producer), mock.patch.object(cli, 'log'):
             code = cli.run_loop(self.cfg, self.tmp, d, 900, self.reloader)
         self.assertEqual(code, 0)
         self.assertEqual(snapshots[:2], [1, 2])

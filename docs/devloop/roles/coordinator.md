@@ -190,14 +190,33 @@ session. `coordinator-wait.sh --period 3600`, the wake-up of before, is the same
 It ends at the first of: a message in `to-coordinator/` (`casella:`, which it reports without
 consuming it, at once), an event of yours on GitHub (`evento:`: `agent:needs-operator` or
 `agent:needs-coordinator` added, "il merge spetta all'operatore", a comment on the issue of the
-alarms `[run].alert_issue` but the routine, an `operator reply`, an error of the watch), a new line of `run.log` with a `Traceback`, an
-`ALERT:`, a `401` or the refusal of the start (`log:`), the service not active (`servizio:`), or
-the end of the period, one hour by
-default (`periodo:`, `--period <seconds>`). Read its lines, act, then start it again. Exit 1
-(`errore:`) means it cannot read GitHub: tell the operator. It reads GitHub with
-`devloop-pinned watch` as devloop's user and a state file of its own,
-`coordinator-watch-state.json` of the `state_dir`: never run `devloop watch` with the
-supervisor's state file, whose events would be lost to the supervisor.
+alarms `[run].alert_issue` but the routine, an `operator reply`, three failed reads of GitHub,
+`watch error:`), a jump of the stream (`flusso:`), a new line of `run.log` with a `Traceback`,
+an `ALERT:`, a `401` or the refusal of the start (`log:`), the stream stopped (`eventi
+fermi:`), the service not active (`servizio:`), or the end of the period, one hour by default
+(`periodo:`, `--period <seconds>`). Read its lines, act, then start it again.
+
+The wake-up does not read GitHub, and runs nothing as devloop's user but the `tail` of
+`run.log` (#683). `devloop run` reads GitHub every minute, during a long action too, and writes
+what changed, the lines of `devloop watch`, to the stream of the events of the project, `events/`
+of the `state_dir` ([reference](../reference.md#the-stream-of-the-events)). Your wake-up reads it
+as you, with the read-only ACL that `setup-coordinator.sh` gives you, from a cursor of yours in
+`~/.local/state/devloop-coordinator-wait/<project>/`: one per project, apart from the
+supervisor's, so neither takes the events of the other, and a project never wakes you for
+another. At its first start for a project it makes a base at the end of the stream and says so in
+a `flusso: base …` line, without waking. If the stream was replaced, or the events after your
+cursor are no longer kept (two segments of 10 MiB), a `flusso:` line says so and the wake-up goes
+on from the first event still kept: read what you missed on GitHub.
+
+`eventi fermi:` means that, with the service active, the sign of life of the stream (the time of
+the latest read of GitHub that succeeded) is older than `EVENTS_STALE_AFTER` seconds of the
+parameters of the host (300), counted from the latest of that time and the start of the service,
+or that it is missing or unreadable: the loop no longer reads GitHub, or no longer writes the
+stream, and no event reaches the roles. It comes once per episode, and again only after the
+stream has recovered. Look at `run.log` and the journal of the service; tell the operator, with
+the summary, if it does not recover (a missing ACL is `setup-coordinator.sh`, which
+`check-host.sh` reports). A stopped service stays `servizio:`. You no longer run `devloop watch`
+through sudo: your sudoers has no rule for it.
 
 An `operator reply` (#676) is a comment the operator wrote in person, without an attribution
 header, whose first line is a `/devloop` command (`approve`, `retry`, `recheck`, …) or which is
@@ -207,10 +226,10 @@ not wake you: you read them at the periodic check. What to do at this wake-up is
 "Replies of the operator".
 
 The routine does not wake you either (#682): your own comments (`coordinator comment`), the
-supervisor's on the issue of the alarms, the issue of the diary (`supervisor comment`, which the
-watch marks only when the supervisor signs with its role app, `[roles.supervisor]` as a table),
-and the archive of the daily summary (`report`, from the dispatcher's identity only). The watch
-marks them by the author it verifies, never by the text: a copy of the summary written by anyone
+supervisor's on the issue of the alarms, the issue of the diary (`supervisor comment`, which
+devloop marks only when the supervisor signs with its role app, `[roles.supervisor]` as a
+table), and the archive of the daily summary (`report`, from the dispatcher's identity only).
+Devloop marks them by the author it verifies, never by the text: a copy of the summary written by anyone
 else is a comment, which on the issue of the alarms wakes you. The dispatcher's other comments
 there, its alerts ("Passo sull'host da fare prima del pin" and the others), wake you as before.
 You read the supervisor's diary at the periodic check.
@@ -317,8 +336,9 @@ the mailbox.
   ([ops/README.md](../../../ops/README.md), step 10), that is `devloop-pinned status` and
   `devloop-pinned direction` (#604), `tail` of
   `run.log`, `journalctl` and `systemctl status` of devloop's service, and
-  `check-host.sh --read-only` from the copy of root; and `devloop-pinned watch` with its own
-  state file, only through `coordinator-wait.sh`. Nothing that changes the host. Writing in the
+  `check-host.sh --read-only` from the copy of root; and, as yourself, the read of the stream
+  of the events of the project with a read-only ACL (#683: no `devloop-pinned watch`). Nothing
+  that changes the host. Writing in the
   mailbox (Channel with the supervisor) is the only write of yours on the host outside your
   home.
 
@@ -561,9 +581,9 @@ the mailbox.
   judgement.
 - Never ask the operator to check the state of devloop or to wait for a tick, and never give
   them a command you have not checked in the guide for that case.
-- Never change the host: no `start`, `stop` or `restart` of the service, no `pin` or `tick`, no
-  `watch` but the one of `coordinator-wait.sh`, no pager or shell as another user, nothing
-  outside the sudoers.
+- Never change the host: no `start`, `stop` or `restart` of the service, no `pin`, `tick` or
+  `watch`, no pager or shell as another user, nothing outside the sudoers; never write the
+  stream of the events, nor your cursor by hand.
 - Never run a step on the host: that is the agent of the host's, launched by the operator
   ([host runbook](host.md)).
 - Never write to the roles of another project, devloop's repository included, nor read or write
