@@ -1021,10 +1021,12 @@ class CoordinatorAuthorTest(unittest.TestCase):
     def test_with_the_coordinator_its_issue_and_comments_are_reported(self):
         h, code = self.news(roles_trust())
         self.assertEqual(code, 0)
+        # Its comments are marked as the coordinator's (#682).
         self.assertEqual(h.lines(), [f'new issue #620 [agent:needs-supervisor] {TEXT[0]}',
-                                     f'issue #620 comment by {COORD}: /devloop authorize',
-                                     f'PR #10 comment by {COORD}: /devloop retry',
-                                     f'PR #10 comment by {COORD}: ## Review'])
+                                     f'issue #620 coordinator comment by {COORD}: /devloop '
+                                     'authorize',
+                                     f'PR #10 coordinator comment by {COORD}: /devloop retry',
+                                     f'PR #10 coordinator comment by {COORD}: ## Review'])
         self.assertTrue(h.trust.trusted(COORD))
         # Its issue is followed as a trusted one: no admission is read.
         self.assertNotIn('labeled_events', h.gh.calls)
@@ -1045,6 +1047,70 @@ class CoordinatorAuthorTest(unittest.TestCase):
         self.assertEqual(h.lines(), ['new issue #620 by an untrusted author (ignored)'])
         self.assertFalse(trust.trusted(COORD))
         self.assertNotIn(TEXT[0], '\n'.join(h.out) + h.path.read_text())
+
+
+class RoutineTest(unittest.TestCase):
+    """The routine of the roles (#682), marked by the author the watch verifies, never by the
+    text: the archive of the daily summary from the dispatcher's identity is a ``report``, the
+    comments of the role apps are a ``supervisor comment`` or a ``coordinator comment``."""
+
+    REPORT = marker('report', {'event': 'archive', 'day': '2026-11-25', 'open': False})
+    SUMMARY = f'> [!NOTE]\n> **Agent:** devloop\n\n## Riepilogo del 2026-11-25\n\n{REPORT}'
+
+    def trust(self, supervisor_app=True):
+        return watch.Trust({OPERATOR}, dict(WRITERS, supervisor=SUP), 'agent:ready',
+                           supervisor=SUP, coordinator=COORD,
+                           devloop={CLAUDE, CODEX, DISPATCH, SUP, COORD},
+                           supervisor_app=supervisor_app)
+
+    def news(self, trust, comments):
+        h = Harness(self, trust=trust)
+        h.gh.add_issue(76)
+        h.gh.add_issue(316)
+        h.run(timeout=1)
+        h.out.clear()
+        for cid, (number, login, body) in enumerate(comments, 900):
+            h.gh.comment(cid, number, login, body)
+        self.assertEqual(h.run(timeout=1)[0], 0)
+        return h.lines()
+
+    def test_the_summary_and_the_roles_comments_are_marked(self):
+        self.assertEqual(self.news(self.trust(), [
+            (316, DISPATCH, self.SUMMARY),
+            (76, SUP, '> [!NOTE]\n> **Agent:** supervisor\n\n## Diario del 2026-11-26'),
+            (76, COORD, '> [!NOTE]\n> **Agent:** coordinator\n\n## Diario del 2026-11-26'),
+            (76, DISPATCH, "> [!NOTE]\n\n## Passo sull'host da fare prima del pin"),
+        ]), [
+            f'issue #316 report by {DISPATCH}: ## Riepilogo del 2026-11-25',
+            f'issue #76 supervisor comment by {SUP}: ## Diario del 2026-11-26',
+            f'issue #76 coordinator comment by {COORD}: ## Diario del 2026-11-26',
+            # Any other comment of the dispatcher, its alerts, is a comment as before.
+            f"issue #76 comment by {DISPATCH}: ## Passo sull'host da fare prima del pin",
+        ])
+
+    def test_a_copy_of_the_summary_by_anyone_else_is_no_report(self):
+        today = marker('report', {'event': 'today', 'day': '2026-11-25'})
+        self.assertEqual(self.news(self.trust(), [
+            (316, CLAUDE, self.SUMMARY),
+            (316, OPERATOR, '## Riepilogo del 2026-11-25\n\n' + self.REPORT),
+            (316, COORD, self.SUMMARY),
+            (316, STRANGER, self.SUMMARY),
+            # Only an archive is a comment of the summary: "today" lives in the body.
+            (316, DISPATCH, f'## Riepilogo del 2026-11-25\n\n{today}'),
+        ]), [
+            f'issue #316 comment by {CLAUDE}: ## Riepilogo del 2026-11-25',
+            f'issue #316 operator comment by {OPERATOR}: ## Riepilogo del 2026-11-25',
+            f'issue #316 coordinator comment by {COORD}: ## Riepilogo del 2026-11-25',
+            f'issue #316 comment by {DISPATCH}: ## Riepilogo del 2026-11-25',
+        ])
+
+    def test_without_its_role_app_the_supervisor_is_no_role(self):
+        # It signs with its agent's app, which the agents' turns share: a comment as before.
+        trust = self.trust(supervisor_app=False)
+        self.assertEqual(trust.roles, {COORD: 'coordinator'})
+        self.assertEqual(self.news(trust, [(76, SUP, '## Diario del 2026-11-26')]),
+                         [f'issue #76 comment by {SUP}: ## Diario del 2026-11-26'])
+        self.assertEqual(watch.Trust({OPERATOR}, WRITERS, 'agent:ready').roles, {})
 
 
 def previous_trust():
@@ -1094,7 +1160,7 @@ class TrustChangeTest(unittest.TestCase):
                 self.assertEqual(h.run(timeout=1)[0], 0)
                 self.assertEqual(h.lines(), [
                     'issue #620 labels +agent:ready -agent:needs-supervisor',
-                    f'issue #620 comment by {COORD}: /devloop authorize'])
+                    f'issue #620 coordinator comment by {COORD}: /devloop authorize'])
 
     def test_a_closed_issue_of_the_coordinator_is_read_again(self):
         for versioned in (False, True):
@@ -1110,7 +1176,8 @@ class TrustChangeTest(unittest.TestCase):
                 self.upgrade(h, versioned)
                 h.gh.comment(802, 620, COORD, '/devloop retry')
                 self.assertEqual(h.run(timeout=1)[0], 0)
-                self.assertEqual(h.lines(), [f'issue #620 comment by {COORD}: /devloop retry'])
+                self.assertEqual(h.lines(),
+                                 [f'issue #620 coordinator comment by {COORD}: /devloop retry'])
                 self.assertEqual(json.loads(h.path.read_text())['closed']['620'], 'issue')
 
     def test_an_issue_closed_in_the_round_of_the_change_is_read_again(self):
@@ -1122,7 +1189,8 @@ class TrustChangeTest(unittest.TestCase):
         h.gh.authors[620] = (COORD, False)
         h.gh.comment(801, 620, COORD, '/devloop retry')
         self.assertEqual(h.run(timeout=1)[0], 0)
-        self.assertEqual(h.lines(), [f'issue #620 comment by {COORD}: /devloop retry'])
+        self.assertEqual(h.lines(),
+                         [f'issue #620 coordinator comment by {COORD}: /devloop retry'])
 
     def test_an_admitted_issue_closed_in_the_round_of_the_change_is_read_again(self):
         # Admitted under the previous trust and closed during the upgrade: not cached as external,
@@ -1147,7 +1215,8 @@ class TrustChangeTest(unittest.TestCase):
                                          'at': '2026-11-16T10:00:00Z'})
                 h.gh.comment(801, 620, COORD, '/devloop retry')
                 self.assertEqual(h.run(timeout=1)[0], 0)
-                self.assertEqual(h.lines(), [f'issue #620 comment by {COORD}: /devloop retry'])
+                self.assertEqual(h.lines(),
+                                 [f'issue #620 coordinator comment by {COORD}: /devloop retry'])
                 self.assertEqual(json.loads(h.path.read_text())['closed']['620'], 'issue')
 
     def test_the_same_authors_keep_what_was_read(self):

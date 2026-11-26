@@ -143,6 +143,10 @@ class IdentityTests(unittest.TestCase):
     def test_the_watcher_trusts_the_role_app_only_when_it_is_the_supervisor(self):
         self.assertNotIn(SUPERVISOR_APP, Trust.from_config(CFG).apps)
         self.assertIn(SUPERVISOR_APP, Trust.from_config(ROLE).apps)
+        # #682: only the role app makes a comment a "supervisor comment"; the agent's app the
+        # supervisor of AUTO signs with is shared with the agents' turns.
+        self.assertEqual(Trust.from_config(ROLE).roles, {SUPERVISOR_APP: 'supervisor'})
+        self.assertEqual(Trust.from_config(AUTO).roles, {})
 
 
 class IdentityOfTheSupervisorTests(unittest.TestCase):

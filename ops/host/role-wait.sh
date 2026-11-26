@@ -30,6 +30,17 @@
 #   commento di persona la cui prima riga, dopo l'intestazione, è un comando /devloop, o su
 #   un'issue o una PR in agent:needs-operator; lo distingue devloop watch, che conosce le label),
 #   un errore del watch. Non sugli altri commenti dell'operatore ("operator comment");
+#   nessuno dei due ruoli, poi, sulla routine (#682), che devloop watch riconosce per l'autore
+#   che verifica, mai per il testo: l'archivio del riepilogo giornaliero ("report by", il record
+#   report di devloop report scritto dall'identità del dispatcher; l'aggiornamento del corpo
+#   dell'issue del riepilogo non è un evento del watch), i commenti del ruolo stesso
+#   ("supervisor comment" o "coordinator comment") e il diario dell'altro ruolo, cioè un suo
+#   commento sull'issue degli allarmi, l'issue del diario (un diario tenuto su un'altra issue
+#   sveglia il supervisore come prima). Un ruolo è riconosciuto solo con la sua app: il
+#   coordinatore con [roles.coordinator], il supervisore con [roles.supervisor] come tabella;
+#   senza, il supervisore firma con l'app del suo agent e i suoi commenti restano "comment",
+#   che svegliano come prima. Gli altri commenti del dispatcher sull'issue degli allarmi (i
+#   suoi avvisi) svegliano il coordinatore;
 # - solo per il coordinatore, una riga nuova di run.log (tail -n 200 come utente devloop, dal suo
 #   sudoers) con un Traceback, un allarme (ALERT:), un 401 o "Bad credentials", o il rifiuto
 #   dell'avvio ("devloop: ...", l'uscita del comando);
@@ -94,8 +105,8 @@ while [ $# -gt 0 ]; do
 done
 
 case $ROLE in
-    supervisor) INBOX=to-supervisor ROLE_NAME=supervisore WATCH_STATE_NAME=watch-state.json ;;
-    coordinator) INBOX=to-coordinator ROLE_NAME=coordinatore WATCH_STATE_NAME=coordinator-watch-state.json ;;
+    supervisor) INBOX=to-supervisor ROLE_NAME=supervisore WATCH_STATE_NAME=watch-state.json OTHER_ROLE=coordinator ;;
+    coordinator) INBOX=to-coordinator ROLE_NAME=coordinatore WATCH_STATE_NAME=coordinator-watch-state.json OTHER_ROLE=supervisor ;;
     *) printf '%s: --role vuole supervisor o coordinator\n' "$(basename "$0")" >&2; exit 2 ;;
 esac
 
@@ -166,6 +177,12 @@ role_event() {
     [[ $line =~ ^[0-9]{2}:[0-9]{2}\ (.*)$ ]] && line=${BASH_REMATCH[1]}
     [ -n "$line" ] || return 1
     [[ $line == 'watch baseline:'* ]] && return 1
+    # La routine (#682), riconosciuta da devloop watch per l'autore, mai per il testo: l'archivio
+    # del riepilogo giornaliero ("report by"), i commenti del ruolo stesso, il diario dell'altro
+    # ruolo (un suo commento sull'issue degli allarmi).
+    [[ $line =~ ^(PR|issue)\ \#[0-9]+\ (report|$ROLE\ comment)\ by\  ]] && return 1
+    [ -n "$ALERT_ISSUE" ] && [[ $line =~ ^issue\ \#$ALERT_ISSUE\ $OTHER_ROLE\ comment\ by\  ]] \
+        && return 1
     [ "$ROLE" = supervisor ] && return 0
     # Una delle due label aggiunta, o fra quelle di un'issue o di una PR nuova ("new PR #N [a,b]
     # titolo").
