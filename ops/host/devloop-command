@@ -6,8 +6,18 @@
 # Esegue il launcher di un progetto come la sua unità systemd: come l'utente devloop del progetto
 # (sudo -u … -H), nel suo clone, con il suo PATH e il suo LAUNCHER_CMD, quindi la copia fissata del
 # servizio e lo --state-dir del progetto. Sottocomando e argomenti arrivano al launcher così come
-# sono: devloop pin origin/main, devloop status, devloop follow issue-<N>. Nessun sottocomando è
-# di questo involucro, che ha solo l'opzione --project prima del sottocomando.
+# sono: devloop pin origin/main, devloop status, devloop follow issue-<N>. Gli unici sottocomandi
+# di questo involucro, che ha solo l'opzione --project prima del sottocomando, sono pause e resume.
+#
+# pause e resume (#685; scelta R4 (a)): la pausa decisa dall'operatore, anche con issue e PR
+# aperte. pause scrive, come root, la pausa COORDINATION_DIR/rest/pause ("<inizio> pausa", 644 di
+# root: i ruoli, che scrivono in rest/, non la possono togliere né sostituire, per lo sticky bit),
+# poi ferma il servizio (systemctl stop: devloop finisce il tick e le azioni in corso, senza
+# avviarne altre). I ruoli entrano in pausa (ops/host/role-wait.sh), la sentinella li sveglia solo
+# per un messaggio o un allarme, il watchdog dei ruoli li vede in pausa, e devloop run non parte
+# finché la pausa c'è, anche se qualcuno avvia il servizio. resume toglie la pausa, poi riavvia il
+# servizio: i ruoli in pausa si svegliano. Solo l'operatore li esegue: sono come root, e nessun
+# ruolo ha una regola di sudo per questo comando.
 #
 # I progetti sono i file params-<progetto>.env della directory dei progetti (params-_default.env
 # per l'installazione senza PROJECT), che setup-devloop.sh scrive da ops/host/devloop-command-project:
@@ -33,6 +43,12 @@ state_dir), passandogli sottocomando e argomenti così come sono:
   devloop status
   devloop pin origin/main
   devloop --project widget follow issue-12
+
+Due sottocomandi sono di questo comando (#685), solo per l'operatore:
+
+  devloop [--project NOME] pause   la pausa: ferma il servizio e mette in pausa i ruoli
+  devloop [--project NOME] resume  la ripresa: toglie la pausa e riavvia il servizio; i ruoli
+                                   si svegliano
 
   --project NOME  il progetto (params-NOME.env dei progetti installati; _default è
                   l'installazione senza PROJECT). Senza, il solo progetto installato.
@@ -103,12 +119,13 @@ fi
 
 file=$PROJECTS_DIR/params-$project.env
 trusted "$file" || die "$file deve essere di root e non scrivibile da altri"
-DEVLOOP_USER='' DEVLOOP_CLONE='' DEVLOOP_PATH='' LAUNCHER_CMD=''
+DEVLOOP_USER='' DEVLOOP_CLONE='' DEVLOOP_PATH='' LAUNCHER_CMD='' SERVICE_NAME='' COORDINATION_DIR=''
 while IFS= read -r line || [ -n "$line" ]; do
     case $line in '' | '#'*) continue ;; esac
     key=${line%%=*}
     case $key in
-        DEVLOOP_USER | DEVLOOP_CLONE | DEVLOOP_PATH | LAUNCHER_CMD) printf -v "$key" '%s' "${line#*=}" ;;
+        DEVLOOP_USER | DEVLOOP_CLONE | DEVLOOP_PATH | LAUNCHER_CMD | SERVICE_NAME | COORDINATION_DIR)
+            printf -v "$key" '%s' "${line#*=}" ;;
         *) die "$file: riga non riconosciuta: $key (rieseguire setup-devloop.sh)" ;;
     esac
 done <"$file"
@@ -119,6 +136,82 @@ done <"$file"
 [[ $DEVLOOP_PATH =~ ^[A-Za-z0-9._/:-]+$ ]] || die "$file: DEVLOOP_PATH non valido: '$DEVLOOP_PATH'"
 [[ $LAUNCHER_CMD =~ ^/[A-Za-z0-9._/\ -]+$ ]] || die "$file: LAUNCHER_CMD non valido: '$LAUNCHER_CMD'"
 read -r -a launcher <<<"$LAUNCHER_CMD"
+
+# La pausa e la ripresa dell'operatore (#685), come root.
+case $1 in
+    pause | resume)
+        [ $# -eq 1 ] || die "$1 non vuole argomenti"
+        [ -n "$SERVICE_NAME" ] && [ -n "$COORDINATION_DIR" ] \
+            || die "$file: mancano SERVICE_NAME e COORDINATION_DIR, che $1 usa: rieseguire setup-devloop.sh (ops/host/migrate.md, \"La pausa dell'operatore (#685)\")"
+        [[ $SERVICE_NAME =~ ^[A-Za-z0-9_-]+(@[a-z0-9_-]+)?$ ]] \
+            || die "$file: SERVICE_NAME non valido: '$SERVICE_NAME'"
+        [[ $COORDINATION_DIR =~ ^/[A-Za-z0-9._/-]*$ ]] \
+            || die "$file: COORDINATION_DIR non valido: '$COORDINATION_DIR'"
+        rest=$COORDINATION_DIR/rest
+        pause_file=$rest/pause
+        utc() { date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ; }
+        if [ "$1" = resume ]; then
+            # Prima la pausa, poi il servizio: devloop run non parte finché la pausa c'è.
+            if [ -e "$pause_file" ] || [ -L "$pause_file" ]; then
+                rm -f -- "$pause_file" || die "non tolgo la pausa $pause_file"
+                printf 'devloop: pausa del progetto %s tolta\n' "$project"
+            else
+                printf 'devloop: il progetto %s non era in pausa\n' "$project"
+            fi
+            systemctl start "$SERVICE_NAME" \
+                || die "systemctl start $SERVICE_NAME non riuscito: la pausa è tolta, il servizio no (journalctl -u $SERVICE_NAME)"
+            printf 'devloop: %s avviato; i ruoli in pausa si svegliano\n' "$SERVICE_NAME"
+            exit 0
+        fi
+        [ -d "$rest" ] && ! [ -L "$rest" ] \
+            || die "manca $rest, la directory del riposo dei ruoli: setup-supervisor.sh e setup-coordinator.sh (ops/host/migrate.md, \"Il riposo dei ruoli (#684)\")"
+        # Lo sticky bit su COORDINATION_DIR e su rest/ (3770): senza, un ruolo, che scrive in
+        # entrambe, rinominerebbe rest/ o la pausa, e la pausa sparirebbe dal percorso che devloop
+        # e i ruoli leggono.
+        ! [ -L "$COORDINATION_DIR" ] && [ -k "$COORDINATION_DIR" ] && [ -k "$rest" ] \
+            || die "$COORDINATION_DIR e $rest devono avere lo sticky bit (3770), o un ruolo toglierebbe la pausa: rieseguire setup-supervisor.sh e setup-coordinator.sh (ops/host/migrate.md, \"La pausa dell'operatore (#685)\")"
+        # Una directory al posto della pausa (non l'ha scritta root): mv la prenderebbe come
+        # destinazione e la pausa non ci sarebbe. Si toglie a mano.
+        if [ -d "$pause_file" ] && ! [ -L "$pause_file" ]; then
+            die "$pause_file è una directory, non la pausa dell'operatore: toglierla (l'ha creata un altro utente) e ripetere devloop --project $project pause"
+        fi
+        # pause_valid [MINE]: la pausa c'è, un file regolare e non un link, "<inizio> pausa", di
+        # root (MINE: appena scritta da questo comando, il temporaneo di root); l'inizio in start.
+        pause_valid() {
+            local why=''
+            start=''
+            [ -f "$pause_file" ] && ! [ -L "$pause_file" ] || return 1
+            [ "${1:-}" = mine ] || [ "$(stat -c %u -- "$pause_file")" = 0 ] || return 1
+            read -r start why <"$pause_file" && [[ $start =~ ^[0-9]{1,12}$ ]] && [ "$why" = pausa ]
+        }
+        # Prima la pausa, poi il servizio: i ruoli non si svegliano sul servizio fermo, e un
+        # loop che la vede non avvia altri tick.
+        if pause_valid; then
+            printf 'devloop: il progetto %s è già in pausa dal %s\n' "$project" "$(utc "$start")"
+        else
+            now=$(date +%s)
+            tmp=$(mktemp "$rest/.pause-XXXXXX") || die "non scrivo in $rest"
+            # mv -T: la destinazione non è mai una directory in cui entrare; un link al suo posto
+            # è sostituito, non seguito.
+            if ! { printf '%s pausa\n' "$now" >"$tmp" && chmod 644 "$tmp" \
+                    && mv -f -T -- "$tmp" "$pause_file"; }
+            then
+                rm -f -- "$tmp"
+                die "non scrivo la pausa $pause_file: il servizio resta com'è"
+            fi
+            pause_valid mine && [ "$start" = "$now" ] \
+                || die "la pausa $pause_file non è quella scritta: il servizio resta com'è"
+            printf 'devloop: progetto %s in pausa dal %s\n' "$project" "$(utc "$start")"
+        fi
+        printf 'devloop: fermo %s: devloop finisce il tick e le azioni in corso, poi si ferma\n' \
+            "$SERVICE_NAME"
+        systemctl stop "$SERVICE_NAME" \
+            || die "systemctl stop $SERVICE_NAME non riuscito: la pausa c'è, e devloop run non avvia altri tick (journalctl -u $SERVICE_NAME)"
+        printf 'devloop: %s fermo e i ruoli in pausa; per riprendere: devloop --project %s resume\n' \
+            "$SERVICE_NAME" "$project"
+        exit 0
+        ;;
+esac
 
 # Nel clone, come WorkingDirectory dell'unità: sudo tiene la directory corrente.
 cd "$DEVLOOP_CLONE" || die "$DEVLOOP_CLONE non è accessibile"

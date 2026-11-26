@@ -51,7 +51,8 @@ OPS_SENTINEL_UNITS='devloop-role-sentinel@.service devloop-role-sentinel-failed@
 
 # La casella fra supervisore e coordinatore (#543): sotto COORDINATION_DIR una directory di
 # messaggi per destinatario, ciascuna con la sua done/ per i messaggi letti. Tutte di root, del
-# gruppo COORDINATION_GROUP (supervisore e coordinatore, nessun altro), 2770.
+# gruppo COORDINATION_GROUP (supervisore e coordinatore, nessun altro), 2770; COORDINATION_DIR
+# 3770 (#685: lo sticky bit, così un ruolo non rinomina né sostituisce le directory che contiene).
 COORDINATION_BOXES='to-coordinator to-supervisor'
 # La cartella delle comunicazioni dei ruoli all'operatore (#663), accanto alle due caselle, con la
 # sua done/ e gli stessi permessi: i ruoli ci scrivono, l'operatore la legge dalla sua shell.
@@ -66,6 +67,10 @@ COORDINATION_HEARTBEAT=heartbeat
 # il file del suo lock <ruolo>.lock (tenuto con flock da role-wait.sh --rest mentre aspetta) e,
 # della sentinella, il segnale di risveglio <ruolo>.wake ("<ora> <motivo>").
 COORDINATION_REST=rest
+# La pausa dell'operatore (#685), PAUSE_FILE di devloop/rest.py: rest/pause, "<inizio> pausa", che
+# solo il comando devloop dell'host scrive, come root (pause), e toglie (resume). Conta solo il
+# file di root (ops_pause_start): i ruoli scrivono in rest/, ma non aprono né chiudono la pausa.
+REST_PAUSE=pause
 
 # Il flusso degli eventi (#683), come devloop/events.py: la directory dello state_dir che devloop
 # run scrive (DIRECTORY), con i segmenti, il segno di vita (ALIVE) e l'identità del flusso. I
@@ -83,6 +88,10 @@ EVENTS_HOLD=hold
 # nella directory del flusso al suo avvio: la legge chi legge il flusso ma non l'overlay, la
 # sentinella dei ruoli a riposo (ops_alert_issue).
 EVENTS_ALERT_ISSUE=alert_issue
+# La coda dell'ultimo tick (#685, QUEUE_FILE di devloop/rest.py), "<da quando> <coda>": il
+# watchdog dei ruoli la dice durante la pausa dell'operatore, perché il lavoro in attesa non si
+# dimentichi.
+EVENTS_QUEUE=queue
 
 # Nella home dell'utente degli agent (#438), come CLI_DIRS, CLI_SEALED e CLIS di
 # devloop/agentuser.py: le directory delle CLI, di root, del gruppo dell'utente degli agent e con
@@ -1273,6 +1282,20 @@ ops_rest_wake() {
     printf '%s %s\n' "$at" "$why"
 }
 
+# ops_pause_start: l'inizio (secondi dall'epoca) della pausa dell'operatore (#685), da
+# COORDINATION_DIR/rest/pause, un file regolare di root, non un link, "<inizio> pausa"; nulla, e
+# 1, senza pausa. Il file di un altro utente non è una pausa, come per devloop (operator_pause di
+# devloop/rest.py): i ruoli scrivono in rest/, ma la pausa la apre e la chiude solo l'operatore.
+ops_pause_start() {
+    local file=$COORDINATION_DIR/$COORDINATION_REST/$REST_PAUSE owner='' kind='' at='' why=''
+    [ -f "$file" ] && ! [ -L "$file" ] || return 1
+    read -r owner kind < <(stat -c '%u %F' -- "$file" 2>/dev/null) || return 1
+    [ "$owner" = 0 ] && [ "$kind" = 'regular file' ] || return 1
+    read -r at why <"$file" 2>/dev/null || return 1
+    [[ $at =~ ^[0-9]{1,12}$ ]] && [[ $why == pausa || $why == 'pausa '* ]] || return 1
+    printf '%s\n' "$at"
+}
+
 # coordination_dirs: le directory della casella, una per riga: COORDINATION_DIR, una directory di
 # messaggi per destinatario (COORDINATION_BOXES e COORDINATION_OPERATOR_BOX, #663) con la sua
 # done/, e quella dei battiti (#602, COORDINATION_HEARTBEAT).
@@ -1287,9 +1310,11 @@ coordination_dirs() {
 }
 
 # coordination_mode DIR: il modo di una directory di coordination_dirs: 3770 per quella del
-# riposo (#684), con lo sticky bit, 2770 per le altre.
+# riposo (#684) e per COORDINATION_DIR (#685), con lo sticky bit, 2770 per le altre. Lo sticky bit
+# di COORDINATION_DIR impedisce a un ruolo di rinominare o sostituire le directory di root che
+# contiene, rest/ con la pausa dell'operatore per prima.
 coordination_mode() {
-    if [ "$1" = "$COORDINATION_DIR/$COORDINATION_REST" ]; then
+    if [ "$1" = "$COORDINATION_DIR/$COORDINATION_REST" ] || [ "$1" = "$COORDINATION_DIR" ]; then
         printf '3770'
     else
         printf '2770'
@@ -1298,7 +1323,8 @@ coordination_mode() {
 
 # ensure_coordination USER: la casella fra supervisore e coordinatore (#543). Il gruppo
 # COORDINATION_GROUP con dentro USER, e le directory di coordination_dirs, tutte
-# root:COORDINATION_GROUP 2770 (3770 quella del riposo, #684): i due ruoli si scrivono a vicenda
+# root:COORDINATION_GROUP 2770 (3770 quella del riposo, #684, e COORDINATION_DIR, #685): i due
+# ruoli si scrivono a vicenda
 # e scrivono all'operatore in to-operator/ (#663), nessun altro utente vi entra se non con le ACL
 # del watchdog, della sentinella e di devloop. Una voce che è un link o un file al
 # posto di una directory (la casella di prima, con un file per destinatario) ferma lo script.

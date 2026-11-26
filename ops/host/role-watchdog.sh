@@ -27,6 +27,13 @@
 #   segnala come un ruolo fermo;
 # - fermo: nessun riposo valido, e il battito manca o è più vecchio di due periodi (il periodo è
 #   quello scritto nel battito, "<ora> <periodo>").
+# Durante la pausa dell'operatore (#685: COORDINATION_DIR/rest/pause, di root, che scrive solo
+# `devloop --project <progetto> pause`, ops_pause_start di lib.sh) un ruolo che aspetta con il suo
+# stato e il suo lock è **in pausa**, non a riposo: il lavoro in attesa non è un'anomalia, le altre
+# anomalie del riposo restano. Del progetto, una volta per pausa, un'informazione nel journal, «in
+# pausa per ordine dell'operatore dal …», con il lavoro in attesa (le issue e le PR aperte della
+# coda dell'ultimo tick, che devloop run scrive nel file queue del flusso degli eventi), perché la
+# pausa non si dimentichi.
 # Un ruolo fermo o in anomalia:
 # - il supervisore, con il coordinatore attivo o a riposo: un messaggio in to-coordinator/;
 # - il coordinatore, con il supervisore attivo o a riposo: un messaggio in to-supervisor/ e un
@@ -120,11 +127,30 @@ fi
 NOW=$(date +%s)
 REST=$COORDINATION_DIR/$COORDINATION_REST
 HOLD=$STATE_PATH/$EVENTS_DIR/$EVENTS_HOLD
+QUEUE=$STATE_PATH/$EVENTS_DIR/$EVENTS_QUEUE
 # Lo stato della sentinella, letto solo con un ruolo a riposo.
 SENTINEL=''
+# L'inizio della pausa dell'operatore (#685), vuoto senza pausa.
+PAUSE=$(ops_pause_start) || PAUSE=''
 
 # utc SECONDI: l'ora UTC di SECONDI dall'epoca.
 utc() { date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ; }
+
+# waiting_work: il lavoro in attesa durante la pausa (#685), dalla coda dell'ultimo tick che
+# devloop run scrive nel flusso degli eventi ("<da quando> <coda>").
+waiting_work() {
+    local at='' text=''
+    if [ -f "$QUEUE" ] && read -r at text <"$QUEUE" 2>/dev/null && [[ $at =~ ^[0-9]{1,12}$ ]]
+    then
+        if [ -n "$text" ]; then
+            printf 'lavoro in attesa: %s (la coda di devloop run dalle %s)' "$text" "$(utc "$at")"
+        else
+            printf 'nessun lavoro in attesa (la coda di devloop run è vuota dalle %s)' "$(utc "$at")"
+        fi
+    else
+        printf 'lavoro in attesa non noto: devloop run non ha scritto %s' "$QUEUE"
+    fi
+}
 
 # lock_held ROLE: il lock del riposo di ROLE è tenuto (da role-wait.sh --rest, in esclusiva): un
 # lock condiviso non si ottiene. Il file si apre in sola lettura, senza crearlo.
@@ -141,7 +167,7 @@ lock_held() {
 # dello stato (per non ripetere gli avvisi: l'inizio del riposo e le anomalie), in BEAT_WHY il
 # perché; torna 1 se ROLE non è a riposo.
 rest() {
-    local role=$1 start wake at why oldest age text queue='coda vuota' anomalies=()
+    local role=$1 start wake at why oldest age text queue='coda vuota' anomalies=() name since
     start=$(ops_rest_start "$role") || return 1
     if [ -z "$SENTINEL" ]; then
         SENTINEL=$(systemctl is-active "$SENTINEL_UNIT.service" 2>/dev/null)
@@ -163,7 +189,9 @@ rest() {
         # Il file del lavoro con un ruolo a riposo, che devloop run scrive con un controllo di
         # prontezza o un'implementazione trattenuti o con la coda non vuota (anche solo di issue
         # bloccate da prerequisiti, che nessuna azione avvia): "<prima volta> <ruoli> <lavoro>".
-        if [ -f "$HOLD" ] && read -r at why text <"$HOLD" 2>/dev/null && [[ $at =~ ^[0-9]{1,12}$ ]]
+        # In pausa (#685) il lavoro aspetta l'operatore: non è un'anomalia.
+        if [ -z "$PAUSE" ] && [ -f "$HOLD" ] && read -r at why text <"$HOLD" 2>/dev/null \
+            && [[ $at =~ ^[0-9]{1,12}$ ]]
         then
             queue="c'è lavoro dalle $(utc "$at") (${text:-lavoro}), la sentinella lo sveglia"
             [ $((NOW - at)) -gt "$REST_WAKE_TIMEOUT" ] \
@@ -178,15 +206,27 @@ rest() {
                 && anomalies+=("casella:un messaggio aspetta in to-$role/ da $((age / 60)) minuti, più di ${REST_MAILBOX_AGE}s (REST_MAILBOX_AGE)")
         fi
     fi
+    if [ -n "$PAUSE" ]; then
+        name=pausa
+        since="in pausa per ordine dell'operatore dal $(utc "$PAUSE")"
+    else
+        name=riposo
+        since="a riposo dal $(utc "$start")"
+    fi
     if [ ${#anomalies[@]} -eq 0 ]; then
-        BEAT_STATE=riposo
-        BEAT_KEY="riposo@$start"
-        BEAT_WHY="a riposo dal $(utc "$start"), $queue"
+        BEAT_STATE=$name
+        if [ -n "$PAUSE" ]; then
+            BEAT_KEY="pausa@$PAUSE"
+            BEAT_WHY=$since
+        else
+            BEAT_KEY="riposo@$start"
+            BEAT_WHY="$since, $queue"
+        fi
         return 0
     fi
     BEAT_STATE=anomalia
     BEAT_KEY="anomalia@$start"
-    BEAT_WHY="a riposo dal $(utc "$start"), ma"
+    BEAT_WHY="$since, ma"
     for text in "${anomalies[@]}"; do
         BEAT_KEY="$BEAT_KEY:${text%%:*}"
         BEAT_WHY="$BEAT_WHY ${text#*:};"
@@ -237,6 +277,8 @@ COORDINATOR_STATE=$BEAT_STATE COORDINATOR_KEY=$BEAT_KEY COORDINATOR_WHY=$BEAT_WH
 rm -f "$STATE/failed"
 
 NEW="supervisor=$SUPERVISOR_KEY coordinator=$COORDINATOR_KEY"
+# La pausa dell'operatore (#685) nello stato salvato, per dirla una volta per pausa.
+[ -z "$PAUSE" ] || NEW="$NEW pause=$PAUSE"
 OLD=$(cat "$STATE/last" 2>/dev/null || printf 'supervisor=ok coordinator=ok')
 say "$WHO: supervisore $SUPERVISOR_STATE ($SUPERVISOR_WHY), coordinatore $COORDINATOR_STATE ($COORDINATOR_WHY)"
 if [ "$NEW" = "$OLD" ]; then
@@ -254,6 +296,8 @@ alarms() {
     for part in $1; do
         role=${part%%=*}
         key=${part#*=}
+        # La pausa (#685) non è un allarme.
+        case $role in supervisor | coordinator) ;; *) continue ;; esac
         bad "$key" || key=ok
         out="$out $role=$key"
     done
@@ -271,6 +315,10 @@ for role in supervisor coordinator; do
         say "informazione: $WHO: il $name è $why"
     fi
 done
+# La pausa dell'operatore (#685): un'informazione, una volta per pausa, con il lavoro in attesa.
+if [ -n "$PAUSE" ] && [[ " $OLD " != *" pause=$PAUSE "* ]]; then
+    say "informazione: $WHO: in pausa per ordine dell'operatore dal $(utc "$PAUSE"), $(waiting_work); la riprende solo l'operatore (devloop resume)"
+fi
 
 # L'avviso all'operatore: `devloop notify` del progetto quando ci sarà (#593); finché non c'è,
 # il journal (questa riga) e le caselle.

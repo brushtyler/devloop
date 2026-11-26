@@ -34,6 +34,10 @@ the first tick at which nothing runs. A stop, or the
 The roles at rest (#684, ``rest.RestHold``): while a tick holds a readiness check or an
 implementation because a role is at rest, every wait looks at the rest each second, and ends as
 soon as no role is at rest: the next tick starts the work.
+
+The pause of the operator (#685, ``rest.operator_pause``) is a stop as the ``STOP`` file is: while
+it is on, ``devloop run`` exits at once, without a tick, and a loop that sees it begin stops after
+the tick in progress. The operator's ``pause`` stops the service with ``SIGTERM`` all the same.
 """
 
 import signal
@@ -148,7 +152,13 @@ class Loop:
             return self.signalled
         if self.stop_file.exists():
             return f'the {self.stop_file.name} file'
+        if self.paused():
+            return 'the pause of the operator'
         return None
+
+    def paused(self):
+        """Whether the operator's pause is on (#685, ``rest.operator_pause``)."""
+        return self.rest is not None and self.rest.paused() is not None
 
     def check_stop(self):
         """``Stopped`` when a stop is requested: the watcher calls it before each read of
@@ -190,6 +200,10 @@ class Loop:
         """Run until a stop (0) or ``MAX_FAILURES`` failed ticks in a row (``FAILED``)."""
         if self.stop_file.exists():
             self.log(f'{self.stop_file} exists: no tick runs until the operator removes it')
+            return 0
+        if self.paused():
+            self.log('the operator has paused devloop (#685): no tick runs until the operator '
+                     'resumes it, with the devloop command of the host, resume')
             return 0
         previous = {sig: signal.signal(sig, self._on_signal) for sig in SIGNALS}
         try:

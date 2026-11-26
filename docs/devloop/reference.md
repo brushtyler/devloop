@@ -320,6 +320,7 @@ cannot write it. No key configures it.
 | `id` | the identity of the stream, written when it is created: a reader whose cursor names another one knows the stream was replaced |
 | `alert_issue` | the issue of the alerts of the loop (`[run].alert_issue`), written at the start of `devloop run`, an empty line without one: the sentinel of the roles at rest (#684), which may not read the overlay, tells by it the diary of a role on that issue from the comments that wake the other one |
 | `hold` | the work with a role at rest (#684, [the roles at rest](#the-roles-at-rest)), only while there is some |
+| `queue` | the queue of the latest tick, `<since> <queue>` (#685, [the roles at rest](#the-roles-at-rest)): the watchdog of the roles tells it during the pause of the operator |
 
 Each line is one `write` of an append-only descriptor, written before the state of the
 loop's watcher (`run-watch-state.json`) is saved: an interruption in between repeats an event at
@@ -382,6 +383,16 @@ read) is not taken for no rest: the work stays held, `unknown` stands for the ro
 can be read again. A dry run and `devloop status` show the plan without the hold. A value that
 is not an absolute path, or a timeout that is not a whole number of at least 1, stops devloop at
 startup.
+
+With `rest_dir`, each tick also writes the queue of its snapshot to `events/queue`, `<since>
+<queue>` (the same items as `queue:` of `events/hold`, the time alone with an empty queue), with
+the time it was first that queue, whether or not a role rests: during the pause of the operator
+the watchdog of the roles tells it as the work that waits. The pause of the operator (#685,
+[guide](guide.md#the-pause-of-the-operator)) is the file `pause` of `rest_dir`, `<start> pausa`,
+which only the devloop command of the host writes, as root (`pause`), and removes (`resume`):
+only a regular file of root counts, not a link nor the file of a role. While it is there `devloop
+run` exits at once, without a tick, as with the `STOP` file, and a loop that sees it begin stops
+after the tick in progress.
 
 ### Project file
 

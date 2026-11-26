@@ -16,6 +16,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -2253,7 +2254,9 @@ class DryRunTests(OpsTestCase):
         (projects / 'params-_default.env').write_text(render('host/devloop-command-project', {
             'DEVLOOP_USER': ME, 'DEVLOOP_CLONE': str(clone),
             'DEVLOOP_PATH': f'{devloop}/.local/bin:/usr/local/bin:/usr/bin:/bin',
-            'LAUNCHER_CMD': f'/usr/bin/python3 {clone}/scripts/devloop-pinned'}))
+            'LAUNCHER_CMD': f'/usr/bin/python3 {clone}/scripts/devloop-pinned',
+            # #685: the service and the mailbox, for pause and resume.
+            'SERVICE_NAME': 'devloop', 'COORDINATION_DIR': str(self.tmp / 'coordination')}))
         (self.tmp / 'bin-root').mkdir()
         (self.tmp / 'bin-root/devloop').write_text(render('host/devloop-command', {
             'DEVLOOP_PROJECTS_DIR': str(projects)}))
@@ -2437,9 +2440,12 @@ class DryRunTests(OpsTestCase):
                       f'{state}/events\n', out)
         self.assertIn(f'  ok: il gruppo {GROUP} esiste\n', out)
         self.assertIn(f'  [dry-run] usermod -aG {GROUP} {FAKE_SUPERVISOR}\n', out)
+        # The box itself is sticky (#685): a role does not rename rest/ with the pause.
         for path in dirs:
-            self.assertIn(f'  [dry-run] install -d -m 2770 -o root -g {GROUP} {path}\n', out)
-        # Present, the ACL stays; the directories of the tests are not root's: corrected.
+            mode = '3770' if path == box else '2770'
+            self.assertIn(f'  [dry-run] install -d -m {mode} -o root -g {GROUP} {path}\n', out)
+        # Present, the ACL stays; the directories of the tests are not root's: corrected; the
+        # box of before #685, 2770, becomes sticky.
         self.shim('getfacl', 'echo "user::rw-"\n'
                              f'echo "user:{FAKE_SUPERVISOR}:r--\t#effective:r--"\necho "other::---"')
         for path in dirs:
@@ -2453,8 +2459,9 @@ class DryRunTests(OpsTestCase):
         self.assertIn(f'  ATTENZIONE: ACL attuale user:{FAKE_SUPERVISOR}:r--: la riduco a --x\n'
                       f'  [dry-run] setfacl -m u:{FAKE_SUPERVISOR}:--x {state}\n', out)
         for path in dirs:
+            mode = '3770' if path == box else '2770'
             self.assertIn(f'  [dry-run] chown root:{GROUP} {path}\n'
-                          f'  [dry-run] chmod 2770 {path}\n', out)
+                          f'  [dry-run] chmod {mode} {path}\n', out)
         # The mailbox of before, one file per destination, is not changed: the script stops.
         shutil.rmtree(box / 'to-coordinator')
         (box / 'to-coordinator').write_text('a message\n')
@@ -4404,7 +4411,7 @@ esac''')
                       out)
         self.assertIn(f'ok: {home}/supervisor/devloop è già un clone di brushtyler/devloop', out)
         self.assertIn(f'-o supervisor -g supervisor {home}/supervisor/.ghapps\n', out)
-        self.assertIn(f'install -d -m 2770 -o root -g {GROUP} {box}\n', out)
+        self.assertIn(f'install -d -m 3770 -o root -g {GROUP} {box}\n', out)
         out = outs['setup-coordinator.sh']
         self.assertIn("ok: l'utente coordinator esiste\n", out)
         self.assertIn(f'scriverebbe {sudoers}/devloop-coordinator (mode 440', out)
@@ -4536,16 +4543,22 @@ fi
 exec {shlex.quote(STAT)} "$@"''')
         self.shim('sudo', f'printf "%s\\0" "$PWD" "$@" > {shlex.quote(str(self.sudo))}')
 
-    def project(self, name, user=None, launcher=None, extra=''):
-        """The file of the project ``name`` as setup-devloop.sh writes it, with its clone."""
+    def project(self, name, user=None, launcher=None, extra='', service=None, box=None):
+        """The file of the project ``name`` as setup-devloop.sh writes it, with its clone. Without
+        ``service`` and ``box`` (#685), as it was written before #685: without SERVICE_NAME and
+        COORDINATION_DIR."""
         clone = self.tmp / 'clones' / name
         clone.mkdir(parents=True)
         path = self.projects / f'params-{name}.env'
-        path.write_text(render('host/devloop-command-project', {
+        text = render('host/devloop-command-project', {
             'DEVLOOP_USER': user or f'devloop-{name.strip("_")}', 'DEVLOOP_CLONE': str(clone),
             'DEVLOOP_PATH': f'/home/devloop-{name}/.local/bin:/usr/bin:/bin',
-            'LAUNCHER_CMD': launcher or f'/usr/bin/python3 {clone}/scripts/devloop-pinned'})
-            + extra)
+            'LAUNCHER_CMD': launcher or f'/usr/bin/python3 {clone}/scripts/devloop-pinned',
+            'SERVICE_NAME': service or '', 'COORDINATION_DIR': str(box or '')})
+        if service is None:
+            text = ''.join(line for line in text.splitlines(True)
+                           if not line.startswith(('SERVICE_NAME=', 'COORDINATION_DIR=')))
+        path.write_text(text + extra)
         path.chmod(0o644)
         return clone
 
@@ -4693,6 +4706,180 @@ exec {shlex.quote(STAT)} "$@"''')
                 self.assertIn(why, done.stderr)
                 self.assertIsNone(self.sudo_call())
 
+    # The pause of the operator (#685) -----------------------------------------------------
+
+    def paused_project(self, name='widget', service='devloop@widget'):
+        """A project with the service and the mailbox of #685 in its file, and the directory of
+        the rest of the roles. ``systemctl`` records whether the pause is there when it runs;
+        ``chmod`` is the real one (the pause is 644)."""
+        box = self.tmp / f'coordination-{name}'
+        (box / 'rest').mkdir(parents=True)
+        # Both sticky, as setup-supervisor.sh leaves them (#685).
+        box.chmod(0o3770)
+        (box / 'rest').chmod(0o3770)
+        self.project(name, service=service, box=box)
+        (self.bin / 'chmod').unlink(missing_ok=True)
+        pause = box / 'rest/pause'
+        self.shim('systemctl', f'''if [ -e {shlex.quote(str(pause))} ]; then at=paused; else at=running; fi
+echo "systemctl $* ($at)" >> "$OPS_TEST_CALLS"''')
+        return pause
+
+    def test_pause_writes_the_pause_then_stops_the_service_and_resume_undoes_it(self):
+        pause = self.paused_project()
+        before = int(time.time())
+        done = self.devloop('--project', 'widget', 'pause')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        start, reason = pause.read_text().split()
+        self.assertLessEqual(before, int(start))
+        self.assertEqual(reason, 'pausa')
+        self.assertEqual(stat.S_IMODE(pause.stat().st_mode), 0o644)
+        # The pause first: the roles do not wake on the stopped service, and a loop that sees it
+        # starts no other tick.
+        self.assertEqual(self.mutating_calls(), ['systemctl stop devloop@widget (paused)'])
+        self.assertIn('devloop: progetto widget in pausa dal ', done.stdout)
+        self.assertIn('devloop: devloop@widget fermo e i ruoli in pausa; per riprendere: '
+                      'devloop --project widget resume\n', done.stdout)
+        # Nothing of the launcher runs, and no temporary file is left.
+        self.assertIsNone(self.sudo_call())
+        self.assertEqual(sorted(p.name for p in pause.parent.iterdir()), ['pause'])
+        # The resume: the pause goes first, then the service starts.
+        done = self.devloop('--project', 'widget', 'resume')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertFalse(pause.exists())
+        self.assertEqual(self.mutating_calls(), ['systemctl stop devloop@widget (paused)',
+                                                 'systemctl start devloop@widget (running)'])
+        self.assertIn('devloop: pausa del progetto widget tolta\n', done.stdout)
+        self.assertIn('devloop: devloop@widget avviato; i ruoli in pausa si svegliano\n',
+                      done.stdout)
+        # A resume without a pause starts the service all the same (a resume that stopped half
+        # way, run again).
+        done = self.devloop('--project', 'widget', 'resume')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn('il progetto widget non era in pausa', done.stdout)
+
+    def test_a_pause_again_keeps_the_start_of_the_pause_of_root(self):
+        pause = self.paused_project()
+        pause.write_text('1764115200 pausa\n')
+        # The file of root (a fake stat): the same pause.
+        projects = shlex.quote(str(self.projects))
+        self.shim('stat', f'''if [ "$1" = -c ] && [ "$2" = '%u %a' ] && [ $# -eq 3 ]; then
+    case "$3" in {projects}|{projects}/*)
+        echo "0 $({shlex.quote(STAT)} -c %a "$3")"; exit 0 ;;
+    esac
+fi
+if [ "$1" = -c ] && [ "$2" = %u ] && [ "$4" = {shlex.quote(str(pause))} ]; then echo 0; exit 0; fi
+exec {shlex.quote(STAT)} "$@"''')
+        done = self.devloop('pause')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn('devloop: il progetto widget è già in pausa dal 2025-11-26T00:00:00Z\n',
+                      done.stdout)
+        self.assertEqual(pause.read_text(), '1764115200 pausa\n')
+        self.assertEqual(self.mutating_calls(), ['systemctl stop devloop@widget (paused)'])
+
+    def test_a_pause_written_by_another_user_is_replaced(self):
+        # A role writes in rest/: its file is no pause, and the operator's takes its place.
+        pause = self.paused_project()
+        pause.write_text('1 pausa\n')
+        done = self.devloop('pause')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertNotEqual(pause.read_text(), '1 pausa\n')
+        self.assertIn('devloop: progetto widget in pausa dal ', done.stdout)
+
+    def test_pause_needs_the_sticky_bit_on_the_box_and_on_rest(self):
+        # Without it, a role, which writes in both, would rename rest/ (or the pause) and the
+        # pause would vanish from the path that devloop and the roles read.
+        pause = self.paused_project()
+        box = pause.parent.parent
+        for path in (box, pause.parent):
+            with self.subTest(path=path.name):
+                path.chmod(0o2770)
+                done = self.devloop('pause')
+                self.assertEqual(done.returncode, 2)
+                self.assertIn('devono avere lo sticky bit (3770), o un ruolo toglierebbe la pausa: '
+                              'rieseguire setup-supervisor.sh e setup-coordinator.sh '
+                              '(ops/host/migrate.md, "La pausa dell\'operatore (#685)")',
+                              done.stderr)
+                self.assertFalse(pause.exists())
+                path.chmod(0o3770)
+        self.assertEqual(self.mutating_calls(), [])
+
+    def test_a_directory_in_place_of_the_pause_stops_pause_before_the_service(self):
+        # mv would move the pause into it, and no reader would see a pause: the command stops,
+        # and the service runs on.
+        pause = self.paused_project()
+        pause.mkdir()
+        done = self.devloop('pause')
+        self.assertEqual(done.returncode, 2)
+        self.assertIn(f'{pause} è una directory, non la pausa dell\'operatore: toglierla',
+                      done.stderr)
+        self.assertEqual(list(pause.iterdir()), [])
+        self.assertEqual(sorted(p.name for p in pause.parent.iterdir()), ['pause'])
+        self.assertEqual(self.mutating_calls(), [])
+        # A link to a directory is replaced, not followed: the pause is a file, and the
+        # directory it pointed to stays empty.
+        pause.rmdir()
+        elsewhere = self.tmp / 'elsewhere'
+        elsewhere.mkdir()
+        pause.symlink_to(elsewhere)
+        done = self.devloop('pause')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertFalse(pause.is_symlink())
+        self.assertTrue(pause.is_file())
+        self.assertEqual(pause.read_text().split()[1:], ['pausa'])
+        self.assertEqual(list(elsewhere.iterdir()), [])
+        self.assertEqual(self.mutating_calls(), ['systemctl stop devloop@widget (paused)'])
+
+    def test_only_the_operator_pauses_and_resumes(self):
+        # Another user runs it again with sudo, which asks the operator's credentials: no role
+        # has a rule of sudo for this command (sudoers-supervisor, sudoers-coordinator).
+        pause = self.paused_project()
+        for subcommand in ('pause', 'resume'):
+            with self.subTest(subcommand=subcommand):
+                done = self.devloop('--project', 'widget', subcommand, uid=1000)
+                self.assertEqual(done.returncode, 0, done.stderr)
+                self.assertEqual(self.sudo_call(), (str(self.tmp), [
+                    '--', str(self.command), '--project', 'widget', subcommand]))
+                self.assertFalse(pause.exists())
+        self.assertEqual(self.mutating_calls(), [])
+        for sudoers in ('sudoers-supervisor', 'sudoers-coordinator', 'sudoers-agent'):
+            text = (OPS / 'host' / sudoers).read_text()
+            self.assertNotIn('@DEVLOOP_COMMAND@', text)
+            self.assertNotIn(' pause', text)
+            self.assertNotIn(' resume', text)
+
+    def test_pause_needs_the_new_file_of_the_project_and_no_arguments(self):
+        # A file of the project written before #685: the other subcommands work as before.
+        clone = self.project('widget')
+        done = self.devloop('pause')
+        self.assertEqual(done.returncode, 2)
+        self.assertIn('mancano SERVICE_NAME e COORDINATION_DIR, che pause usa: rieseguire '
+                      'setup-devloop.sh', done.stderr)
+        done = self.devloop('status')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.sudo_call(),
+                         self.launched(clone, 'devloop-widget', 'widget', 'status'))
+        shutil.rmtree(self.tmp / 'clones')
+        self.paused_project()
+        done = self.devloop('pause', 'now')
+        self.assertEqual(done.returncode, 2)
+        self.assertIn('pause non vuole argomenti', done.stderr)
+        for extra, why in (('SERVICE_NAME=devloop;id\n', 'SERVICE_NAME non valido'),
+                           ('COORDINATION_DIR=$(id)\n', 'COORDINATION_DIR non valido')):
+            with self.subTest(extra=extra):
+                path = self.projects / 'params-widget.env'
+                path.write_text(path.read_text() + extra)
+                done = self.devloop('pause')
+                self.assertEqual(done.returncode, 2)
+                self.assertIn(why, done.stderr)
+                path.write_text(''.join(line for line in path.read_text().splitlines(True)
+                                        if line != extra))
+        # Without the directory of the rest of the roles (#684) there is no pause.
+        (self.tmp / 'coordination-widget/rest').rmdir()
+        done = self.devloop('pause')
+        self.assertEqual(done.returncode, 2)
+        self.assertIn('la directory del riposo dei ruoli', done.stderr)
+        self.assertEqual(self.mutating_calls(), [])
+
 
 class PutFileTests(unittest.TestCase):
     """put_file of ops/lib.sh, called the way the scripts call it: in an `if` or with `|| true`,
@@ -4796,8 +4983,8 @@ class CheckHostTests(OpsTestCase):
         for path in self.box_dirs():
             path.mkdir(parents=True)
             os.chown(path, -1, os.getgid())
-            # The rest of the roles (#684) with the sticky bit.
-            path.chmod(0o3770 if path.name == 'rest' else 0o2770)
+            # The rest of the roles (#684) and the box (#685) with the sticky bit.
+            path.chmod(0o3770 if path in (self.box, self.box / 'rest') else 0o2770)
         (self.tmp / 'systemd').mkdir()
         (self.tmp / 'systemd/devloop.service').write_text(render('host/devloop.service', {
             'REPO': 'brushtyler/devloop', 'DEVLOOP_USER': ME,
@@ -5217,7 +5404,8 @@ class CheckHostTests(OpsTestCase):
         entry.write_text(render('host/devloop-command-project', {
             'DEVLOOP_USER': ME, 'DEVLOOP_CLONE': str(clone),
             'DEVLOOP_PATH': f'{self.devloop}/.local/bin:/usr/local/bin:/usr/bin:/bin',
-            'LAUNCHER_CMD': f'/usr/bin/python3 {clone}/scripts/devloop-pinned'}))
+            'LAUNCHER_CMD': f'/usr/bin/python3 {clone}/scripts/devloop-pinned',
+            'SERVICE_NAME': 'devloop', 'COORDINATION_DIR': str(self.tmp / 'coordination')}))
         entry.chmod(0o644)
         # Outside root, the files are the user's: an error each, and the contents coincide.
         done, errors = self.check()
@@ -5913,6 +6101,12 @@ exec "$@"''')
         done, _ = self.check()
         self.assertIn(f'  ERRORE: {self.box}/rest è 2770 {GROUP}, deve essere 3770 del gruppo '
                       f'{GROUP}\n', done.stdout)
+        # Nor the box (#685): a role would rename rest/, and the pause with it.
+        (self.box / 'rest').chmod(0o3770)
+        self.box.chmod(0o2770)
+        done, _ = self.check()
+        self.assertIn(f'  ERRORE: {self.box} è 2770 {GROUP}, deve essere 3770 del gruppo '
+                      f'{GROUP}\n', done.stdout)
         self.assertEqual(self.mutating_calls(), [])
 
     def test_the_key_dir_of_the_coordinator_is_checked(self):
@@ -6112,7 +6306,7 @@ exec "$@"''')
         self.assertIn(f'  ok: il gruppo {GROUP} esiste\n', out)
         self.assertIn(f'  ok: {ME} è nel gruppo {GROUP}\n', out)
         for path in self.box_dirs():
-            mode = '3770' if path.name == 'rest' else '2770'
+            mode = '3770' if path in (self.box, self.box / 'rest') else '2770'
             self.assertIn(f'  ok: {path}: {mode}, gruppo {GROUP}\n', out)
         # Without the supervisor's ACL (an overlay replaced with install), an error per file.
         self.acl(f'user:{ME}:--x', reads='')
@@ -6435,6 +6629,17 @@ echo "sudo $*" >> "$OPS_TEST_CALLS"''')
         self.assertEqual(done.returncode, 1)
         self.assertEqual(len(errors), 1, errors)
         self.assertIn('devloop è fallito', errors[0])
+        # The service stopped by the pause of the operator (#685) is the pause, not a warning.
+        self.service('inactive')
+        rest = self.tmp / 'coordination/rest'
+        rest.mkdir(parents=True, exist_ok=True)
+        operator_pause(self, rest, 1764115200)
+        done, errors = self.check('--no-apps')
+        self.assertEqual(errors, [])
+        self.assertIn("  in pausa per ordine dell'operatore dal 2025-11-26T00:00:00Z: devloop run "
+                      "non parte finché l'operatore non la toglie (devloop resume)", done.stdout)
+        self.assertIn("ok: devloop non è attivo (inactive): la pausa dell'operatore", done.stdout)
+        self.assertNotIn('ATTENZIONE: devloop non è attivo', done.stdout)
 
     def test_a_missing_unit_is_an_error(self):
         (self.tmp / 'systemd/devloop.service').unlink()
@@ -7359,6 +7564,252 @@ class RoleWaitTests(WakeUpCase):
         self.assertIn(f'non scrivo in {self.rest}', done.stderr)
         self.assertIn('la sveglia normale', done.stderr)
 
+    # The pause of the operator (#685) -----------------------------------------------------
+
+    def background(self, *args):
+        """role-wait.sh with ``args``, in the background."""
+        command, env = self.wait_command(*args)
+        proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, env=env, stdin=subprocess.DEVNULL)
+
+        def stop():
+            if proc.poll() is None:
+                proc.kill()
+            proc.communicate()
+        self.addCleanup(stop)
+        return proc
+
+    def in_pause(self, role):
+        """The state of ``role`` says pausa, and its lock is held."""
+        state = self.rest / role
+        return (self.lock_held(role) and state.exists()
+                and state.read_text().split()[1:] == ['pausa'])
+
+    def test_in_pause_the_wait_waits_only_for_the_sentinel_and_the_resume(self):
+        for role, line in (('supervisor', 'PR #5 CI pass @abc1234'),
+                           ('coordinator', 'PR #12 labels +agent:needs-operator')):
+            for args in ((), ('--rest',)):
+                with self.subTest(role=role, args=args):
+                    self.as_role(role)
+                    self.prime(role)
+                    pause = operator_pause(self, self.rest, int(time.time()) - 60)
+                    proc = self.background(*args)
+                    self.until(lambda: self.in_pause(role), 'the wait in pause')
+                    # The stream does not wake a role in pause, nor the service stopped by the
+                    # operator.
+                    self.publish([line])
+                    self.service_state.write_text('inactive\n')
+                    time.sleep(1.5)
+                    self.assertIsNone(proc.poll())
+                    # The operator resumes: the role wakes up, out of the pause, with its
+                    # heartbeat.
+                    (self.heartbeats / role).unlink(missing_ok=True)
+                    pause.unlink()
+                    self.service_state.write_text('active\n')
+                    out, err = proc.communicate(timeout=20)
+                    self.assertEqual((proc.returncode, out), (
+                        0, "ripresa: l'operatore ha tolto la pausa: il "
+                           f"{'supervisore' if role == 'supervisor' else 'coordinatore'} "
+                           'riprende, con la sveglia normale\n'), err)
+                    self.assertFalse((self.rest / role).exists())
+                    self.assertTrue((self.heartbeats / role).exists())
+                    self.assertFalse(self.lock_held(role))
+                    # The event is still after its cursor, for the usual wake-up.
+                    done = self.wait()
+                    self.assertEqual(done.stdout, f'evento: {self.STAMP}{line}\n', done.stderr)
+        self.assertEqual(self.mutating_calls(), [])
+
+    def test_a_wait_in_progress_enters_the_pause_when_it_begins(self):
+        self.as_role('coordinator')
+        proc = self.background()
+        time.sleep(1.5)
+        self.assertIsNone(proc.poll())
+        self.assertFalse((self.rest / 'coordinator').exists())
+        pause = operator_pause(self, self.rest, int(time.time()))
+        self.until(lambda: self.in_pause('coordinator'), 'the wait in pause')
+        # Woken by the sentinel in pause (a message, an alarm): out of the pause at once, with
+        # its heartbeat; the pause of the operator stays.
+        start = int((self.rest / 'coordinator').read_text().split()[0])
+        (self.heartbeats / 'coordinator').unlink()
+        (self.rest / 'coordinator.wake').write_text(
+            f'{start} casella: 1 messaggi in {self.box}\n')
+        out, err = proc.communicate(timeout=20)
+        self.assertEqual((proc.returncode, out),
+                         (0, f'sentinella: casella: 1 messaggi in {self.box}\n'), err)
+        self.assertFalse((self.rest / 'coordinator').exists())
+        self.assertTrue((self.heartbeats / 'coordinator').exists())
+        self.assertTrue(pause.exists())
+        # A message waiting: the wake-up gives it at once, still in pause, and does not wait.
+        message = self.box / '20261126T101500Z-a1b2c3.txt'
+        message.write_text('x\n')
+        done = self.wait('--rest')
+        self.assertEqual(done.stdout, f'casella: 1 messaggi in {self.box}: {message.name}\n',
+                         done.stderr)
+        self.assertFalse((self.rest / 'coordinator').exists())
+        self.assertTrue(pause.exists())
+
+    def test_a_rest_that_sees_a_pause_wakes_at_the_resume(self):
+        self.as_role('supervisor')
+        proc = self.resting('supervisor')
+        pause = operator_pause(self, self.rest, int(time.time()))
+        time.sleep(1.5)
+        self.assertIsNone(proc.poll())
+        pause.unlink()
+        out, err = proc.communicate(timeout=20)
+        self.assertTrue(out.startswith("ripresa: l'operatore ha tolto la pausa"), out + err)
+        self.assertFalse((self.rest / 'supervisor').exists())
+
+    def test_a_rest_that_enters_the_pause_says_pausa_and_ignores_the_signals_of_before(self):
+        self.as_role('supervisor')
+        proc = self.resting('supervisor')
+        rest_start = int((self.rest / 'supervisor').read_text().split()[0])
+        pause = operator_pause(self, self.rest, int(time.time()))
+        # The state of the role says pausa, with a new start after the pause began.
+        self.until(lambda: self.in_pause('supervisor'), 'the rest in pause')
+        start = int((self.rest / 'supervisor').read_text().split()[0])
+        self.assertGreater(start, rest_start)
+        # A signal of the sentinel of the rest, from a round begun before the pause (written
+        # late, with the time of that round): no wake-up in pause.
+        (self.rest / 'supervisor.wake').write_text(
+            f'{rest_start} evento: 10:15 PR #5 CI pass @abc1234\n')
+        time.sleep(2.5)
+        self.assertIsNone(proc.poll())
+        self.assertTrue(self.in_pause('supervisor'))
+        # The signal of the sentinel in pause, after the new start: the role wakes up, out of
+        # the pause.
+        (self.rest / 'supervisor.wake').write_text(f'{start} casella: 1 messaggi in {self.box}\n')
+        out, err = proc.communicate(timeout=20)
+        self.assertEqual((proc.returncode, out),
+                         (0, f'sentinella: casella: 1 messaggi in {self.box}\n'), err)
+        self.assertFalse((self.rest / 'supervisor').exists())
+        self.assertTrue(pause.exists())
+
+    def test_an_alarm_of_the_sentinel_while_the_rest_enters_the_pause_wakes_the_role(self):
+        # The real sentinel, as its own user, on the same mailbox, rest/ and run.log.
+        sentinel_state = self.tmp / 'sentinel-state'
+        sentinel_state.mkdir()
+        log = self.state / 'run.log'
+        log.write_text('10:00:00 tick ok\n')
+        # params() writes one file: the sentinel's is a copy, before the role's replaces it.
+        sentinel_params = self.tmp / 'sentinel-params.env'
+        shutil.copy(self.params(
+            DEVLOOP_USER=FAKE_DEVLOOP, SUPERVISOR_USER=FAKE_SUPERVISOR, AGENT_USER=FAKE_AGENT,
+            COORDINATOR_USER=FAKE_COORDINATOR, SENTINEL_USER=ME, STATE_DIR=str(self.state)),
+            sentinel_params)
+        self.as_role('coordinator')
+        self.prime('coordinator')
+
+        def sentinel():
+            environ = dict(os.environ,
+                           PATH=f'{self.bin}:{os.environ.get("PATH", "/usr/bin:/bin")}',
+                           OPS_TEST_CALLS=str(self.calls), STATE_DIRECTORY=str(sentinel_state),
+                           LC_ALL='C.UTF-8')
+            environ.pop('NOTIFY_SOCKET', None)
+            done = subprocess.run([BASH, str(OPS / 'host/role-sentinel.sh'), '--params',
+                                   str(sentinel_params), '--once'], capture_output=True,
+                                  text=True, env=environ, stdin=subprocess.DEVNULL, timeout=120)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            return done
+        sentinel()  # the base of the stream and of run.log
+        proc = self.resting('coordinator')
+        # The rest has not seen the pause yet when the sentinel, in pause, writes its alarm: the
+        # cursor of run.log goes past the error, and no later round writes it again.
+        os.kill(proc.pid, signal.SIGSTOP)
+        try:
+            pause = operator_pause(self, self.rest, int(time.time()))
+            with log.open('a') as fh:
+                fh.write('Traceback (most recent call last):\n')
+            self.assertIn('sveglio il coordinator: log: Traceback', sentinel().stdout)
+            time.sleep(1.1)  # the new start of the pause, a second later than the alarm
+        finally:
+            os.kill(proc.pid, signal.SIGCONT)
+        out, err = proc.communicate(timeout=20)
+        self.assertEqual((proc.returncode, out),
+                         (0, 'sentinella: log: Traceback (most recent call last):\n'), err)
+        self.assertFalse((self.rest / 'coordinator').exists())
+        self.assertTrue(pause.exists())
+
+    def short_rest_limit(self):
+        """A copy of ops/ whose role-wait.sh ends a rest without signal after 2s, not 25h."""
+        copy = self.tmp / 'ops-copy'
+        (copy / 'host').mkdir(parents=True)
+        shutil.copy(OPS / 'lib.sh', copy / 'lib.sh')
+        text = (OPS / self.SCRIPT).read_text()
+        self.assertIn('\nREST_MAX_WAIT=90000\n', text)
+        (copy / self.SCRIPT).write_text(text.replace('\nREST_MAX_WAIT=90000\n',
+                                                     '\nREST_MAX_WAIT=2\n'))
+        return copy
+
+    def test_in_pause_the_limit_of_the_rest_does_not_end_the_wait(self):
+        copy = self.short_rest_limit()
+        self.as_role('coordinator')
+        self.prime('coordinator')
+        command, env = self.wait_command('--rest')
+        command[1] = str(copy / self.SCRIPT)
+        # Out of the pause the limit holds: the rest ends after 2s without a signal.
+        done = subprocess.run(command, capture_output=True, text=True, env=env,
+                              stdin=subprocess.DEVNULL, timeout=60)
+        self.assertEqual(done.stdout, 'riposo: nessun segnale della sentinella in 2s, il '
+                         'controllo giornaliero è mancato: il controllo periodico\n', done.stderr)
+        (self.rest / 'coordinator').unlink()
+        # In pause it does not: only a message, an alarm of the sentinel or the resume.
+        pause = operator_pause(self, self.rest, int(time.time()))
+        proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, env=env, stdin=subprocess.DEVNULL)
+
+        def stop():
+            if proc.poll() is None:
+                proc.kill()
+            proc.communicate()
+        self.addCleanup(stop)
+        self.until(lambda: self.in_pause('coordinator'), 'the wait in pause')
+        time.sleep(4)
+        self.assertIsNone(proc.poll())
+        self.assertTrue(self.in_pause('coordinator'))
+        pause.unlink()
+        out, err = proc.communicate(timeout=20)
+        self.assertTrue(out.startswith("ripresa: l'operatore ha tolto la pausa"), out + err)
+        self.assertFalse((self.rest / 'coordinator').exists())
+
+    def test_a_role_neither_opens_nor_closes_the_pause(self):
+        # A file of the role (or of anyone but root) is no pause: the wake-up goes on as usual.
+        self.as_role('supervisor')
+        self.prime('supervisor')
+        fake = operator_pause(self, self.rest, int(time.time()), root=False)
+        self.publish(['PR #5 CI pass @abc1234'])
+        done = self.wait()
+        self.assertEqual(done.stdout, f'evento: {self.STAMP}PR #5 CI pass @abc1234\n',
+                         done.stderr)
+        self.assertFalse((self.rest / 'supervisor').exists())
+        fake.unlink()
+        # The wake-up of a role never removes the pause of the operator: the end of a rest, the
+        # wake-up in pause and the usual wake-up remove only the state of the role.
+        pause = operator_pause(self, self.rest, int(time.time()))
+        message = self.tmp / 'coordination/to-supervisor/m.txt'
+        message.write_text('x\n')
+        for args in ((), ('--rest',)):
+            with self.subTest(args=args):
+                done = self.wait(*args)
+                self.assertTrue(done.stdout.startswith('casella: 1 messaggi'), done.stdout)
+                self.assertTrue(pause.exists())
+
+
+def operator_pause(case, rest_dir, start, root=True):
+    """The pause of the operator (#685), ``rest_dir/pause``, ``<start> pausa``, as the devloop
+    command of the host writes it as root. Only root's file counts (ops_pause_start of lib.sh):
+    with ``root`` a fake ``stat`` in the PATH of ``case``'s scripts shows it as root's, since the
+    tests cannot give it to root; without, it stays the file of the user of the tests, as one
+    that a role would write."""
+    path = Path(rest_dir) / 'pause'
+    path.write_text(f'{start} pausa\n')
+    if root:
+        case.shim('stat', f'''if [ "$1" = -c ] && [ "$2" = '%u %F' ] && [ "$3" = -- ] \\
+    && [ "$4" = {shlex.quote(str(path))} ] && [ -f "$4" ] && ! [ -L "$4" ]; then
+    echo '0 regular file'; exit 0
+fi
+exec {shlex.quote(STAT)} "$@"''')
+    return path
+
 
 FAKE_SENTINEL = 'opsdry-sentinel'
 
@@ -7631,6 +8082,58 @@ class RoleSentinelTests(WakeUpCase):
         # A sign of life at every round, to systemd.
         script = (OPS / 'host/role-sentinel.sh').read_text()
         self.assertIn('    notify WATCHDOG=1\n    round\n', script)
+
+    # The pause of the operator (#685) -----------------------------------------------------
+
+    def test_in_pause_only_a_message_or_an_alarm_wakes_a_role(self):
+        # Rests that began before the last daily check: out of the pause, it would wake them.
+        old = self.STREAM_AT - 3 * 86400
+        self.at_rest('supervisor', start=old)
+        self.at_rest('coordinator', start=old)
+        operator_pause(self, self.rest, self.STREAM_AT - 120)
+        # Neither the events, nor the service stopped by the operator, nor the work held.
+        self.publish(['PR #5 CI pass @abc1234', 'PR #12 labels +agent:needs-operator'])
+        self.service_state.write_text('inactive\n')
+        (self.state / 'events/hold').write_text(
+            '1764115200 supervisor,coordinator held: implement #12; queue: issue #12\n')
+        done = self.sentinel()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.woken(), {})
+        # A message wakes the role of its mailbox.
+        (self.box_dir / 'to-supervisor/m.txt').write_text('x\n')
+        self.sentinel()
+        self.assertEqual(self.woken(),
+                         {'supervisor': f'casella: 1 messaggi in {self.box_dir}/to-supervisor'})
+        # An error of the loop is an alarm for the coordinator.
+        with self.log.open('a') as fh:
+            fh.write('Traceback (most recent call last):\n')
+        self.sentinel()
+        self.assertEqual(self.woken()['coordinator'],
+                         'log: Traceback (most recent call last):')
+
+    def test_in_pause_the_service_active_again_is_an_alarm_for_both(self):
+        self.at_rest('supervisor')
+        self.at_rest('coordinator')
+        operator_pause(self, self.rest, self.STREAM_AT - 120)
+        self.service_state.write_text('inactive\n')
+        self.sentinel()
+        self.assertEqual(self.woken(), {})
+        # Started by someone else than the operator's resume.
+        self.service_state.write_text('active\n')
+        self.sentinel()
+        woken = self.woken()
+        self.assertEqual(set(woken), {'supervisor', 'coordinator'})
+        self.assertTrue(woken['supervisor'].startswith(
+            'allarme: devloop è di nuovo attivo durante la pausa dell\'operatore'),
+            woken['supervisor'])
+
+    def test_a_pause_not_of_root_changes_nothing(self):
+        # A role cannot open the pause: its file leaves the sentinel as at rest.
+        self.at_rest('supervisor')
+        operator_pause(self, self.rest, self.STREAM_AT - 120, root=False)
+        self.publish(['PR #5 CI pass @abc1234'])
+        self.sentinel()
+        self.assertEqual(self.woken(), {'supervisor': f'evento: {self.STAMP}PR #5 CI pass @abc1234'})
 
 
 @unittest.skipIf(BASH is None, 'bash is not installed')
@@ -7944,6 +8447,77 @@ class RoleWatchdogTests(OpsTestCase):
         self.assertIn('il lock', sent[0])
         self.assertIn("avviso all'operatore: watchdog dei ruoli, progetto alpha "
                       '(brushtyler/alpha): il coordinatore è a riposo dal', done.stdout)
+
+    # The pause of the operator (#685) -----------------------------------------------------
+
+    def test_in_pause_the_roles_are_in_pause_with_the_waiting_work_told_once(self):
+        self.sentinel_state('active')
+        box = self.project('alpha')
+        now = int(time.time())
+        start = now - 7200
+        operator_pause(self, box / 'rest', start)
+        since = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(start))
+        self.at_rest('alpha', 'supervisor')
+        self.at_rest('alpha', 'coordinator')
+        # Work that waits: at rest it would be an anomaly, in pause it is what the operator
+        # stopped. The queue of the latest tick, as devloop run writes it.
+        events_dir = self.tmp / 'state-alpha/events'
+        (events_dir / 'hold').write_text(f'{now - 7300} supervisor,coordinator queue: issue #7\n')
+        (events_dir / 'queue').write_text(f'{now - 7300} issue #7, PR #9\n')
+        queued = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(now - 7300))
+        done = self.watchdog('alpha')
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn(f"supervisore pausa (in pausa per ordine dell'operatore dal {since}), "
+                      f"coordinatore pausa (in pausa per ordine dell'operatore dal {since})",
+                      done.stdout)
+        self.assertIn("informazione: progetto alpha (brushtyler/alpha): in pausa per ordine "
+                      f"dell'operatore dal {since}, lavoro in attesa: issue #7, PR #9 (la coda "
+                      f'di devloop run dalle {queued}); la riprende solo l\'operatore (devloop '
+                      'resume)\n', done.stdout)
+        self.assertNotIn("avviso all'operatore", done.stdout)
+        for name in ('to-coordinator', 'to-supervisor'):
+            self.assertEqual(self.messages('alpha', name), [])
+        # Once per pause.
+        done = self.watchdog('alpha')
+        self.assertIn('stato invariato', done.stdout)
+        self.assertNotIn('informazione', done.stdout)
+        # A new pause is told again; without the queue of devloop run, the work is not known.
+        (events_dir / 'queue').unlink()
+        operator_pause(self, box / 'rest', now - 60)
+        done = self.watchdog('alpha')
+        self.assertIn("in pausa per ordine dell'operatore dal", done.stdout)
+        self.assertIn('lavoro in attesa non noto: devloop run non ha scritto '
+                      f'{events_dir}/queue', done.stdout)
+        self.assertEqual(self.mutating_calls(), [])
+
+    def test_in_pause_the_other_anomalies_of_a_rest_stay(self):
+        self.sentinel_state('active')
+        box = self.project('alpha')
+        operator_pause(self, box / 'rest', int(time.time()) - 600)
+        self.beat('alpha', 'supervisor', 60)
+        self.at_rest('alpha', 'coordinator', lock=False)
+        done = self.watchdog('alpha')
+        sent = self.messages('alpha', 'to-supervisor')
+        self.assertEqual(len(sent), 1, done.stdout)
+        self.assertIn("il coordinatore è in pausa per ordine dell'operatore dal ", sent[0])
+        self.assertIn('il lock', sent[0])
+        self.assertIn("avviso all'operatore", done.stdout)
+
+    def test_a_pause_not_of_root_is_a_rest_with_its_anomalies(self):
+        # A role cannot open the pause: with its file, the work held is still an anomaly.
+        self.sentinel_state('active')
+        box = self.project('alpha')
+        operator_pause(self, box / 'rest', int(time.time()) - 600, root=False)
+        self.beat('alpha', 'coordinator', 60)
+        self.at_rest('alpha', 'supervisor')
+        (self.tmp / 'state-alpha/events/hold').write_text(
+            f'{int(time.time()) - 400} supervisor queue: issue #7\n')
+        done = self.watchdog('alpha')
+        sent = self.messages('alpha', 'to-coordinator')
+        self.assertEqual(len(sent), 1, done.stdout)
+        self.assertIn('il supervisore è a riposo dal', sent[0])
+        self.assertIn("c'è lavoro: queue: issue #7", sent[0])
+        self.assertNotIn('pausa', done.stdout)
 
     def test_the_instances_of_two_projects_are_isolated(self):
         # Two projects on the same host: each instance reads and writes only its own mailbox.

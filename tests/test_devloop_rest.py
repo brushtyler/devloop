@@ -3,10 +3,12 @@
 import dataclasses
 import os
 import shutil
+import signal
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from devloop import config, rest, runloop
 from devloop.config import ConfigError, RunPolicy, parse_run
@@ -297,6 +299,133 @@ class LoopRestTests(RestCase):
         self.assertEqual(len(ticks), 2)
         self.assertEqual(len(checks), 3)
         self.assertIn('the roles left their rest: next tick', lines)
+
+
+class PauseCase(RestCase):
+    """The pause of the operator (#685): ``<rest_dir>/pause``, root's. The tests own their files:
+    ``OPERATOR_UID`` is the user of the tests unless a test says otherwise."""
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.object(rest, 'OPERATOR_UID', os.getuid())
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def pause(self, text='1764115200 pausa\n'):
+        (self.rest_dir / rest.PAUSE_FILE).write_text(text)
+
+
+class OperatorPauseTests(PauseCase):
+    def test_the_pause_of_the_operator_is_a_file_of_root_with_its_start(self):
+        self.assertIsNone(rest.operator_pause(self.rest_dir))
+        self.pause()
+        self.assertEqual(rest.operator_pause(self.rest_dir), 1764115200)
+        self.assertEqual(self.hold().paused(), 1764115200)
+
+    def test_nobody_but_the_operator_opens_the_pause(self):
+        # A role writes in rest_dir: its file is no pause, whatever it says.
+        self.pause()
+        with mock.patch.object(rest, 'OPERATOR_UID', os.getuid() + 1):
+            self.assertIsNone(rest.operator_pause(self.rest_dir))
+        # Nor a link to a file of root, nor another text, nor a directory.
+        (self.rest_dir / rest.PAUSE_FILE).unlink()
+        target = self.tmp / 'root-file'
+        target.write_text('1764115200 pausa\n')
+        (self.rest_dir / rest.PAUSE_FILE).symlink_to(target)
+        self.assertIsNone(rest.operator_pause(self.rest_dir))
+        (self.rest_dir / rest.PAUSE_FILE).unlink()
+        for text in ('1764115200 riposo\n', 'pausa\n', '', '1764115200 pausax\n'):
+            with self.subTest(text=text):
+                self.pause(text)
+                self.assertIsNone(rest.operator_pause(self.rest_dir))
+        (self.rest_dir / rest.PAUSE_FILE).unlink()
+        (self.rest_dir / rest.PAUSE_FILE).mkdir()
+        self.assertIsNone(rest.operator_pause(self.rest_dir))
+
+    def test_each_tick_writes_the_queue_for_the_watchdog_of_the_pause(self):
+        hold = self.hold()
+        queue_file = self.state / 'events' / rest.QUEUE_FILE
+        snap = Snapshot(prs=[SimpleNamespace(number=9)], ready_issues=[{'number': 7}],
+                        working_issues=[])
+        # Nobody at rest: the queue is written all the same, and nothing is held.
+        self.assertEqual(hold.apply(self.ACTIONS, snap), self.ACTIONS)
+        self.assertEqual(queue_file.read_text(), '1000000 issue #7, PR #9\n')
+        self.assertEqual(queue_file.stat().st_mode & 0o777, 0o640)
+        # The same queue later: the time of its first sight stays.
+        self.clock.now += 60
+        hold.apply([], snap)
+        self.assertEqual(queue_file.read_text(), '1000000 issue #7, PR #9\n')
+        # An empty queue: the time alone.
+        hold.apply([], Snapshot(prs=[], ready_issues=[], working_issues=[]))
+        self.assertEqual(queue_file.read_text(), '1000060\n')
+        # Without a snapshot (a plan of nothing to read) the file stays.
+        hold.apply([])
+        self.assertEqual(queue_file.read_text(), '1000060\n')
+
+    ACTIONS = RestHoldTests.ACTIONS
+
+
+class LoopPauseTests(PauseCase):
+    """runloop.Loop with the pause of the operator: it stops, and it does not start."""
+
+    def loop(self, tick, lines):
+        def watch(timeout, sleep, check):
+            for _ in range(3):
+                check()
+            return NOTHING_NEW
+        return runloop.Loop(tick, watch, self.tmp / 'STOP', log=lines.append, idle_timeout=900,
+                            sleep=lambda s: None, rest=self.hold())
+
+    def test_while_paused_the_loop_does_not_start(self):
+        # A service started by anyone but the operator's resume (the supervisor may start it).
+        self.pause()
+        ticks, lines = [], []
+        self.assertEqual(self.loop(lambda: ticks.append(1) or [], lines).run(), 0)
+        self.assertEqual(ticks, [])
+        self.assertIn('the operator has paused devloop (#685): no tick runs until the operator '
+                      'resumes it', lines[0])
+
+    def test_a_pause_that_begins_stops_the_loop_after_the_tick_in_progress(self):
+        ticks, lines = [], []
+
+        def tick():
+            ticks.append(1)
+            self.pause()
+            return [Action('review', 4)]  # with actions, another tick would follow at once
+        self.assertEqual(self.loop(tick, lines).run(), 0)
+        self.assertEqual(ticks, [1])
+        self.assertIn('stop requested (the pause of the operator): no further tick', lines)
+
+    def test_the_sigterm_of_pause_stops_the_loop_cleanly_without_other_ticks(self):
+        # `devloop pause` stops the service: SIGTERM, during a tick or a wait.
+        ticks, lines = [], []
+
+        def tick():
+            ticks.append(1)
+            os.kill(os.getpid(), signal.SIGTERM)
+            return [Action('implement', 8)]
+        before = signal.getsignal(signal.SIGTERM)
+        self.assertEqual(self.loop(tick, lines).run(), 0)
+        self.assertEqual(ticks, [1])
+        self.assertIn('stop requested (SIGTERM): no further tick', lines)
+        self.assertIs(signal.getsignal(signal.SIGTERM), before)
+        # And during the wait for news.
+        ticks.clear()
+
+        def idle():
+            ticks.append(1)
+            return []
+
+        def watch(timeout, sleep, check):
+            os.kill(os.getpid(), signal.SIGTERM)
+            check()
+            raise AssertionError('the check did not stop the wait')
+        lines.clear()
+        loop = runloop.Loop(idle, watch, self.tmp / 'STOP', log=lines.append, idle_timeout=900,
+                            sleep=lambda s: None, rest=self.hold())
+        self.assertEqual(loop.run(), 0)
+        self.assertEqual(ticks, [1])
+        self.assertIn('stop requested (SIGTERM): no further tick', lines)
 
 
 if __name__ == '__main__':

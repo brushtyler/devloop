@@ -107,7 +107,8 @@ sorveglia ciascuno e cosa fa all'avvio:
   `/var/lib/devloop-coordination-<progetto>`), con `to-coordinator/`, `to-supervisor/` e
   `to-operator/` (#663), ciascuna
   con `done/`, tutte `root:devloop-roles` (`COORDINATION_GROUP`; con `PROJECT`,
-  `devloop-roles-<progetto>`) 2770. Nel gruppo ci sono solo il supervisore e il coordinatore del
+  `devloop-roles-<progetto>`) 2770; `COORDINATION_DIR` stessa è 3770, con lo sticky bit (#685).
+  Nel gruppo ci sono solo il supervisore e il coordinatore del
   progetto, non `devloop` né `devloop-agent` né i ruoli di altri progetti. Un file per messaggio, con un
   nome univoco (data e ora UTC più un suffisso casuale), pubblicato con una rinomina atomica da
   un file temporaneo che comincia con `.`; il destinatario lo legge, poi lo sposta in `done/` o
@@ -134,6 +135,9 @@ sorveglia ciascuno e cosa fa all'avvio:
 - **il riposo** (#684): a coda vuota un ruolo entra in riposo e non batte; lo sveglia la
   sentinella `devloop-role-sentinel@<progetto>`, e il loop non avvia lavoro nuovo finché un ruolo
   riposa (passo 10, "Il riposo dei ruoli");
+- **la pausa** (#685): l'operatore ferma tutto, anche con issue e PR aperte, con `devloop
+  --project <progetto> pause`, e lo fa ripartire con `resume`; i ruoli aspettano in pausa (passo
+  10, "La pausa dell'operatore");
 - **l'avvio**: ogni ruolo rilegge la sua casella, il diario (#76) e il riepilogo (#316), poi
   riprende a sorvegliare.
 
@@ -193,7 +197,8 @@ ops/
                              --service-failed <progetto>` con il comando devloop (#593)
     tmpfiles-devloop-repos.conf  directory dei lock per repository, comune all'host
     devloop-command          il comando devloop dell'host: il launcher di un progetto come la
-                             sua unità, scelto con --project (con segnaposto)
+                             sua unità, scelto con --project (con segnaposto); pause e resume,
+                             la pausa dell'operatore (#685)
     devloop-command-project  il file di un progetto per il comando devloop (con segnaposto)
     sudoers-agent            sudoers con cui devloop avvia CLI e test come utente degli agent
     sudoers-supervisor       sudoers minimale del supervisore (con segnaposto @NOME@)
@@ -524,7 +529,10 @@ installato; con più progetti si ferma e li elenca. Legge i file dei progetti ri
 eseguirli, e rifiuta un file o una directory che non sono di root o che altri possono scrivere.
 Per togliere un progetto dal comando si rimuove il suo file da `DEVLOOP_PROJECTS_DIR`. Non
 sostituisce i sudoers di supervisore e coordinatore, che usano i comandi esatti del launcher (passi
-7 e 10). Il comando non ha sottocomandi suoi: ogni sottocomando è di devloop.
+7 e 10). Il comando ha solo due sottocomandi suoi, `pause` e `resume`, la pausa dell'operatore
+(#685, passo 10, "La pausa dell'operatore"), per cui il file del progetto ha anche il nome del
+servizio (`SERVICE_NAME`) e la casella fra i ruoli (`COORDINATION_DIR`); ogni altro sottocomando è
+di devloop.
 
 Per ssdlc servono anche il **file di progetto** e le chiavi che l'overlay riceve con l'ADR 0006,
 R3 e R6: lo script non li crea. L'operatore copia [`ssdlc/project.toml`](host/ssdlc/project.toml) in
@@ -1202,6 +1210,46 @@ eventi, con l'unità che legge lo `state_dir` (`ProtectHome=read-only`). `setup-
 `rest/` (3770), le unità e la drop-in della sentinella, il servizio abilitato e attivo, il suo
 utente fuori dal gruppo e le ACL della sentinella e di devloop. Su un host già attivo:
 [host/migrate.md](host/migrate.md#il-riposo-dei-ruoli-684).
+
+**La pausa dell'operatore** (#685; [ADR 0002, precisazione del 2026-11-26 sulla
+pausa](../docs/adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-26-la-pausa-delloperatore-685)).
+Il riposo vale solo quando non c'è niente da fare; la **pausa** ferma tutto anche con issue e PR
+aperte, ed è il secondo motivo dello stesso meccanismo. La apre e la chiude **solo l'operatore**,
+come root, con il comando `devloop` dell'host (passo 4): `devloop --project <progetto> pause`
+per la pausa (il servizio fermo, i ruoli in pausa), `devloop --project <progetto> resume` per la
+ripresa (il servizio riparte, i ruoli si svegliano).
+
+`pause` scrive la pausa `COORDINATION_DIR/rest/pause` ("<inizio> pausa", 644 di root), poi ferma il
+servizio con `systemctl stop`: `devloop run` finisce il tick e le azioni in corso, e a `SIGTERM` non
+avvia altri tick. `resume` toglie la pausa, poi avvia il servizio. Conta solo il file di root: i
+ruoli scrivono in `rest/`, ma un loro file `pause` non è una pausa, e quello di root non lo possono
+togliere né sostituire (lo sticky bit di `rest/`), né rinominare `rest/` per farlo sparire (lo
+sticky bit di `COORDINATION_DIR`, 3770 con #685: `pause` si ferma senza i due); una loro directory
+`pause` al posto del file ferma `pause`, che chiede di toglierla. Nessun ruolo ha una regola di sudo
+per il comando `devloop`. Mentre la pausa c'è, `devloop run` (con `rest_dir` nell'overlay) esce subito senza tick,
+anche se qualcuno avvia il servizio (il supervisore può farlo, con il suo sudoers): solo `resume`
+chiude la pausa. In pausa:
+
+- **i ruoli** aspettano con lo stesso comando, lo stesso stato e la stessa sentinella del riposo, con
+  il motivo `pausa`: `role-wait.sh`, con o senza `--rest`, scrive il battito, toglie lo stato di
+  prima e, con la casella vuota, scrive lo stato `rest/<ruolo>` "<inizio> pausa", tiene il lock e
+  aspetta, quanto dura la pausa; una sveglia normale o un riposo già in attesa entrano in pausa da
+  sé, e un segnale della sentinella di prima non li sveglia. Esce con `sentinella: <motivo>`
+  al segnale della sentinella, togliendo lo stato e scrivendo il battito, e con `ripresa:` quando
+  l'operatore toglie la pausa;
+- **la sentinella** sveglia un ruolo solo per un messaggio nella sua casella o per un suo allarme:
+  per il coordinatore una riga di `run.log` con un errore, e per entrambi il servizio di devloop di
+  nuovo attivo durante la pausa (`allarme:`). Non per gli eventi del flusso, il servizio fermo, il
+  lavoro trattenuto né il controllo giornaliero;
+- **il watchdog dei ruoli** vede in **pausa** un ruolo che aspetta con il suo stato e il suo lock:
+  il lavoro in attesa non è un'anomalia, le altre anomalie del riposo restano (la sentinella non
+  attiva, il lock non tenuto, il ruolo svegliato che non riprende, un messaggio vecchio nella
+  casella). Del progetto scrive nel journal, una volta per pausa, un'informazione, «in pausa per
+  ordine dell'operatore dal …», con il lavoro in attesa: le issue e le PR della coda dell'ultimo
+  tick, che `devloop run` scrive nel file `queue` del flusso degli eventi;
+- **`check-host.sh`** dice la pausa, e il servizio fermo non è un avviso.
+
+Su un host già attivo: [host/migrate.md](host/migrate.md#la-pausa-delloperatore-685).
 
 **App del coordinatore** (#549). Il coordinatore firma comandi, commenti e label con un'app sua,
 `<APP_PREFIX>coordinator`, che l'operatore crea come le altre (passo 2), dal manifest

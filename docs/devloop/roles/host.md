@@ -106,5 +106,8 @@ precisazione of
 - Never change the overlay, the project file or the keys beyond what the procedure says; never
   read, print or copy a private key or a token.
 - Never start devloop's loop again before the procedure says so.
+- Never pause or resume a project (`devloop --project <project> pause` or `resume`, #685), nor
+  write or remove `rest/pause` of the mailbox: only the operator opens and closes the pause, in
+  person. A procedure that meets a pause in progress stops and asks the operator.
 - Never write in the mailbox of another project without the operator's explicit request, and
   never report a defect of devloop to the roles of devloop's repository (Other projects).

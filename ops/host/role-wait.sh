@@ -30,6 +30,23 @@
 # lo stato è stato tolto da altri, e con 1 se il lock è già tenuto (un'altra attesa a riposo del
 # ruolo).
 #
+# La pausa dell'operatore (#685) è lo stesso stato con il motivo "pausa": la apre e la chiude solo
+# l'operatore, con `devloop --project <progetto> pause` e `resume` (ops/host/devloop-command), che
+# scrive e toglie, come root, COORDINATION_DIR/rest/pause e ferma e riavvia il servizio. Mentre la
+# pausa c'è (ops_pause_start di lib.sh: conta solo il file di root), questo comando, con o senza
+# --rest, scrive il battito, toglie lo stato di prima e, se la casella è vuota, aspetta in pausa:
+# lo stato "<inizio> pausa", lo stesso lock, solo il segnale della sentinella (che in pausa sveglia
+# solo per un messaggio nella casella o un suo allarme) e la fine della pausa. Una sveglia normale
+# già in attesa entra in pausa da sé quando la pausa comincia, e così un riposo: il suo stato
+# diventa "<inizio nuovo> pausa", e un segnale della sentinella scritto prima (un evento del
+# riposo) non lo sveglia più. In pausa il limite di REST_MAX_WAIT non vale: l'attesa dura quanto
+# la pausa. Al segnale toglie lo stato e scrive
+# il battito prima di uscire con "sentinella: <motivo>": in pausa il ruolo non ha eventi da leggere
+# con il suo cursore. Alla fine della pausa toglie lo stato, scrive il battito ed esce con
+# "ripresa:", anche da un riposo durante il quale la pausa è cominciata. Un ruolo non apre né
+# chiude la pausa: non scrive rest/pause, e il file di root non lo può togliere né rinominare, e
+# così rest/ (lo sticky bit di rest/ e di COORDINATION_DIR).
+#
 # Si sveglia, ed esce con 0, su:
 # - un messaggio nella casella del ruolo (to-supervisor/ o to-coordinator/ di COORDINATION_DIR),
 #   letta ogni secondo: lo segnala senza consumarlo; il ruolo lo legge, poi lo sposta in done/ o
@@ -76,7 +93,8 @@
 #   ROLE_WAIT_PERIOD per il supervisore, un'ora), senza eventi: il controllo periodico.
 #
 # Ogni riga dice perché si è svegliata: "casella:", "evento:", "flusso:", "log:", "eventi
-# fermi:", "servizio:", "periodo:"; con --rest "sentinella:" o "riposo:". Esce con 2 su
+# fermi:", "servizio:", "periodo:"; con --rest "sentinella:" o "riposo:"; in pausa "sentinella:"
+# o "ripresa:". Esce con 2 su
 # un'opzione sbagliata. Non esegue nulla come utente devloop, fuori dal tail di run.log del
 # coordinatore, e non scrive nulla fuori dal battito, dal riposo del ruolo (lo stato e il lock) e
 # dal suo stato, in ~/.local/state/devloop-<ruolo>-wait/<progetto>/ dell'utente del ruolo
@@ -506,9 +524,39 @@ local_events() {
     [ "$ROLE" = coordinator ] && [ "$state" = active ] && stale_events
 }
 
-# Il riposo (#684): lo stato scritto prima di guardare casella e flusso, così un messaggio o un
-# evento che arriva dopo lo vede la sentinella; ciò che c'è già è un risveglio qualunque.
-if [ "$REST" = 1 ]; then
+# L'ora UTC di SECONDI dall'epoca.
+utc() { date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ; }
+
+# rest_state MOTIVO: lo stato del ruolo, "<START> <MOTIVO>", atomico.
+rest_state() {
+    local tmp
+    tmp=$(mktemp "$REST_DIR/.tmp-XXXXXX") || die "non scrivo lo stato di riposo in $REST_DIR"
+    if ! { printf '%s %s\n' "$START" "$1" >"$tmp" && chmod 664 "$tmp" && mv -f "$tmp" "$REST_STATE"; }
+    then
+        rm -f "$tmp"
+        die "non scrivo lo stato di riposo $REST_STATE"
+    fi
+}
+
+# pause_signal "<ORA> <MOTIVO>": vero per un segnale della sentinella che sveglia anche in pausa
+# (un messaggio, una riga di run.log con un errore, un allarme della pausa) scritto dopo l'inizio
+# di questa attesa, FIRST_START, anche se prima dell'inizio nuovo della pausa cominciata durante
+# il riposo: gli altri motivi del riposo (un evento, il servizio fermo, il lavoro, il controllo
+# giornaliero) in pausa non svegliano.
+pause_signal() {
+    [ "${1%% *}" -ge "$FIRST_START" ] || return 1
+    case ${1#* } in
+        'casella: '* | 'log: '* | 'allarme: '*) return 0 ;;
+    esac
+    return 1
+}
+
+# rest_wait: il riposo (#684) o, mentre la pausa dell'operatore c'è, la pausa (#685); non torna.
+# Lo stato scritto prima di guardare casella e flusso, così un messaggio o un evento che arriva
+# dopo lo vede la sentinella; ciò che c'è già è un risveglio qualunque. In pausa conta solo la
+# casella: il flusso resta al cursore del ruolo.
+rest_wait() {
+    local motive=riposo wake paused=0 pause_seen=0
     [ -d "$REST_DIR" ] && [ -w "$REST_DIR" ] \
         || die "non scrivo in $REST_DIR: setup-$ROLE.sh (ops/host/migrate.md, \"Il riposo dei ruoli (#684)\"); senza, la sveglia normale"
     # Il lock prima di tutto: un'altra attesa a riposo del ruolo che lo tiene resta com'è.
@@ -518,15 +566,14 @@ if [ "$REST" = 1 ]; then
     flock -n "$LOCK_FD" \
         || die "il lock $LOCK è già tenuto: un'altra attesa a riposo del $ROLE_NAME è in corso"
     START=$(date +%s)
-    tmp=$(mktemp "$REST_DIR/.tmp-XXXXXX") || die "non scrivo lo stato di riposo in $REST_DIR"
-    if ! { printf '%s riposo\n' "$START" >"$tmp" && chmod 664 "$tmp" && mv -f "$tmp" "$REST_STATE"; }
-    then
-        rm -f "$tmp"
-        die "non scrivo lo stato di riposo $REST_STATE"
+    FIRST_START=$START
+    if ops_pause_start >/dev/null; then
+        motive=pausa paused=1 pause_seen=1
     fi
+    rest_state "$motive"
     EVENTS=''
     inbox_events
-    stream_events
+    [ "$paused" = 1 ] || stream_events
     if [ -n "$EVENTS" ]; then
         end_rest
         beat_or_warn
@@ -535,21 +582,58 @@ if [ "$REST" = 1 ]; then
     fi
     SECONDS=0
     while :; do
+        if ops_pause_start >/dev/null; then
+            paused=1
+            if [ "$pause_seen" = 0 ]; then
+                # La pausa cominciata durante il riposo: lo stato dice "pausa", con un inizio
+                # nuovo, un secondo avanti. Così un segnale della sentinella di prima (un evento
+                # del riposo, anche se scritto nello stesso secondo, da un giro cominciato prima
+                # della pausa) non sveglia il ruolo in pausa. Un messaggio o un allarme scritto
+                # dopo l'inizio del riposo ma prima dell'inizio nuovo, invece, sveglia: la
+                # sentinella non lo riscrive (i cursori di run.log e del servizio sono già
+                # avanti), e lo vede pause_signal.
+                pause_seen=1
+                START=$(($(date +%s) + 1))
+                rest_state pausa
+            fi
+        else
+            paused=0
+            if [ "$pause_seen" = 1 ]; then
+                end_rest
+                beat_or_warn
+                say "ripresa: l'operatore ha tolto la pausa: il $ROLE_NAME riprende, con la sveglia normale"
+                exit 0
+            fi
+        fi
         if ! [ -e "$REST_STATE" ]; then
             say "riposo: lo stato $REST_STATE è stato tolto: il $ROLE_NAME riprende"
             exit 0
         fi
         wake=$(ops_rest_wake "$ROLE")
-        if [ -n "$wake" ] && [ "${wake%% *}" -ge "$START" ]; then
+        if [ -n "$wake" ] && { [ "${wake%% *}" -ge "$START" ] \
+            || { [ "$paused" = 1 ] && pause_signal "$wake"; }; }; then
+            # In pausa il ruolo non ha eventi da leggere: esce dalla pausa qui, e il suo
+            # prossimo comando di attesa la riprende.
+            if [ "$paused" = 1 ]; then
+                end_rest
+                beat_or_warn
+            fi
             say "sentinella: ${wake#* }"
             exit 0
         fi
-        if [ "$SECONDS" -ge "$REST_MAX_WAIT" ]; then
+        # Il limite del riposo, solo fuori dalla pausa: in pausa svegliano il ruolo solo i
+        # messaggi, gli allarmi della sentinella e la fine della pausa.
+        if [ "$paused" = 0 ] && [ "$SECONDS" -ge "$REST_MAX_WAIT" ]; then
             say "riposo: nessun segnale della sentinella in ${REST_MAX_WAIT}s, il controllo giornaliero è mancato: il controllo periodico"
             exit 0
         fi
         sleep "$POLL"
     done
+}
+
+# Con --rest, o durante la pausa dell'operatore (#685), l'attesa a riposo o in pausa.
+if [ "$REST" = 1 ] || ops_pause_start >/dev/null; then
+    rest_wait
 fi
 
 SECONDS=0
@@ -558,6 +642,10 @@ next_stream=0
 while :; do
     EVENTS=''
     inbox_events
+    # La pausa che comincia durante l'attesa (#685): con la casella vuota, l'attesa in pausa.
+    if [ -z "$EVENTS" ] && ops_pause_start >/dev/null; then
+        rest_wait
+    fi
     if [ "$SECONDS" -ge "$next_local" ]; then
         local_events
         next_local=$((SECONDS + LOCAL_POLL))
