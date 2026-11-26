@@ -22,9 +22,21 @@ A rest that cannot be verified (``rest_dir`` missing, or a directory devloop can
 of the host is missing) is not taken for no rest: the actions stay held, ``UNKNOWN`` takes the
 place of the roles in the file, and the operator is told once, with ``devloop notify``, until the
 directory can be read again.
+
+The pause of the operator (#685, choice R4 (a)) is the second reason of the same mechanism: the
+host command ``devloop --project <p> pause``, run by the operator as root, writes
+``<rest_dir>/pause``, ``<start> pausa``, and stops the service; ``resume`` removes it and starts
+the service again. Only root's file counts (``operator_pause``): a role, which may write in
+``rest_dir``, cannot open the pause, nor remove root's file there (the sticky bit). While it is
+on, ``devloop run`` starts no tick (``runloop.Loop`` stops at once, or after the tick in
+progress): a service started by anyone but the operator's ``resume`` does not end the pause. So
+that the watchdog of the roles can tell the work that waits in a pause, each tick also writes
+``QUEUE_FILE`` in the directory of the stream of the events, ``<since> <queue>``: the queue of
+its snapshot, and since when it is the same.
 """
 
 import os
+import re
 import secrets
 import stat
 import time
@@ -35,6 +47,12 @@ from .i18n import ENGLISH
 from .notify import TEXTS as NOTIFY_TEXTS
 
 HOLD_FILE = 'hold'
+# The queue of the latest tick (#685), for the watchdog of the roles during a pause.
+QUEUE_FILE = 'queue'
+# The pause of the operator (#685) in ``rest_dir``: a file of root only.
+PAUSE_FILE = 'pause'
+OPERATOR_UID = 0
+PAUSE_LINE = re.compile(r'([0-9]{1,12}) pausa( [^\n]*)?\n?')
 # The actions that start new work: held while a role is at rest.
 HELD = ('preflight', 'implement')
 ROLES = ('supervisor', 'coordinator')
@@ -56,6 +74,34 @@ def queue(snapshot):
             + [f'PR #{number}' for number in sorted(pr.number for pr in snapshot.prs)])
 
 
+def shown(waiting):
+    """The items of the queue ``waiting``, at most ``QUEUE_SHOWN`` of them named."""
+    more = len(waiting) - QUEUE_SHOWN
+    return ', '.join(waiting[:QUEUE_SHOWN]) + (f' and {more} more' if more > 0 else '')
+
+
+def operator_pause(rest_dir):
+    """The start (seconds since the epoch) of the pause of the operator (#685), or None: the file
+    ``PAUSE_FILE`` of ``rest_dir``, a regular file of root (``OPERATOR_UID``, not a link) that
+    says ``<start> pausa``. Any other file there, one of a role included, is no pause; nor is a
+    file that cannot be read."""
+    try:
+        fd = os.open(Path(rest_dir) / PAUSE_FILE, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != OPERATOR_UID:
+            return None
+        text = os.read(fd, 200).decode('utf-8', 'replace')
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    match = PAUSE_LINE.fullmatch(text)
+    return int(match.group(1)) if match else None
+
+
 class RestHold:
     """The hold of new work for the roles at rest of ``rest_dir``, with ``HOLD_FILE`` in
     ``state_dir/events``. ``timeout`` is ``[run] rest_wake_timeout``; ``notifier``
@@ -66,6 +112,7 @@ class RestHold:
                  clock=time.time, language=ENGLISH):
         self.rest_dir = Path(rest_dir)
         self.hold_path = Path(state_dir) / DIRECTORY / HOLD_FILE
+        self.queue_path = Path(state_dir) / DIRECTORY / QUEUE_FILE
         self.timeout = timeout
         self.log = log
         self.notifier = notifier
@@ -121,11 +168,18 @@ class RestHold:
             t = NOTIFY_TEXTS.texts(self.language)
             self.notifier.notify(t('rest_unreadable', error=error), key='rest-unreadable')
 
+    def paused(self):
+        """The start of the pause of the operator (``operator_pause``), or None."""
+        return operator_pause(self.rest_dir)
+
     def apply(self, actions, snapshot=None):
         """``actions`` without those of ``HELD`` while a role is at rest, or while the rest
-        cannot be verified; ``snapshot``, the one of the plan, gives the queue (``queue``)."""
+        cannot be verified; ``snapshot``, the one of the plan, gives the queue (``queue``), also
+        written to ``QUEUE_FILE``."""
         held = [a for a in actions if a.kind in HELD]
         waiting = queue(snapshot)
+        if snapshot is not None:
+            self._write_queue(waiting)
         roles = self.resting() if held or waiting else ()
         if roles == ():
             self.release()
@@ -139,9 +193,7 @@ class RestHold:
         if listed:
             work.append(f'held: {listed}')
         if waiting:
-            more = len(waiting) - QUEUE_SHOWN
-            work.append('queue: ' + ', '.join(waiting[:QUEUE_SHOWN])
-                        + (f' and {more} more' if more > 0 else ''))
+            work.append('queue: ' + shown(waiting))
         who = UNKNOWN if roles is None else ','.join(roles)
         self._write(f'{int(self.since)} {who} {"; ".join(work)}\n')
         if roles is None:
@@ -198,25 +250,40 @@ class RestHold:
             self.notifier.notify(t('rest_hold', actions=self.held, roles=roles,
                                    seconds=self.timeout), key='rest-hold')
 
-    def _write(self, text):
-        """``HOLD_FILE`` with ``text``, atomically, ``FILE_MODE``: the default ACL of the
-        directory of the stream gives its readers the reading of it."""
-        directory = self.hold_path.parent
+    def _write_queue(self, waiting):
+        """``QUEUE_FILE``, ``<since> <queue>`` (``<since>`` alone with an empty queue): the time
+        changes only with the queue."""
+        items = shown(waiting)
         try:
-            if self.hold_path.read_text(encoding='utf-8') == text:
+            old = self.queue_path.read_text(encoding='utf-8').rstrip('\n').split(' ', 1)
+            if old[0].isdigit() and (old[1] if len(old) > 1 else '') == items:
                 return
         except OSError:
             pass
-        tmp = directory / f'.{HOLD_FILE}.{secrets.token_hex(4)}'
+        text = f'{int(self.clock())} {items}'.rstrip() + '\n'
+        self._write(text, self.queue_path,
+                    'the watchdog of the roles does not see the work that waits in a pause')
+
+    def _write(self, text, path=None,
+               consequence='the sentinel does not wake the roles for the work'):
+        """``path`` (``HOLD_FILE`` by default) with ``text``, atomically, ``FILE_MODE``: the
+        default ACL of the directory of the stream gives its readers the reading of it."""
+        path = path or self.hold_path
+        directory = path.parent
+        try:
+            if path.read_text(encoding='utf-8') == text:
+                return
+        except OSError:
+            pass
+        tmp = directory / f'.{path.name}.{secrets.token_hex(4)}'
         try:
             directory.mkdir(mode=DIR_MODE, parents=True, exist_ok=True)
             fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, FILE_MODE)
             with os.fdopen(fd, 'w', encoding='utf-8') as fh:
                 fh.write(text)
-            os.replace(tmp, self.hold_path)
+            os.replace(tmp, path)
         except OSError as exc:
-            self.log(f'rest: {self.hold_path} could not be written ({type(exc).__name__}): the '
-                     'sentinel does not wake the roles for the work')
+            self.log(f'rest: {path} could not be written ({type(exc).__name__}): {consequence}')
             try:
                 os.unlink(tmp)
             except OSError:

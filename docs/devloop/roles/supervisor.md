@@ -219,11 +219,36 @@ session is resumed (the operator says so in your mailbox after the probe of the 
 or `--rest` ends with an error (no `rest/` in the mailbox, a lock held by another wait), do not
 rest: use the usual wake-up, with its periodic check, as before.
 
+## Pause
+
+The operator may pause the project, open issues and pull requests included (#685; [ADR 0002,
+precision of 2026-11-26 on the
+pause](../../adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-26-la-pausa-delloperatore-685)):
+`devloop --project <project> pause`, as root, writes the pause `rest/pause` of the mailbox and
+stops the service; `resume` removes it and starts the service again. Only the operator opens and
+closes it.
+
+While the pause is on, your wake-up, with or without `--rest`, writes your heartbeat and, with an
+empty mailbox, waits in pause: the state `rest/supervisor` with the reason `pausa`, the lock, and
+only the signal of the sentinel or the end of the pause. A usual wake-up already waiting enters
+the pause by itself. The sentinel wakes you in pause only for a message in `to-supervisor/` or an
+alarm (`allarme:`, the service active again during the pause); the events, the stopped service,
+the work and the daily check do not. Its line, `sentinella: …`, comes after the wake-up has left
+the pause and written your heartbeat: act on that line (read the message, move it to `done/`),
+then start the wake-up again, which goes back into the pause. The resume wakes you with a
+`ripresa:` line: start the usual wake-up, which gives you the events after your cursor, and
+resume watching.
+
+In pause you start nothing that the pause stopped: no `systemctl start` of the service (devloop
+would exit at once all the same, without a tick), no pin, no escalation to decide. Answer only
+what the message or the alarm asks; what waits for the loop waits for the resume. An alarm of the
+service active during the pause goes to the operator (Notices to the operator).
+
 ## Stopped roles
 
 The watchdog of the roles (`devloop-role-watchdog@<project>`, ADR 0002, second precision of
-2026-11-23, point 6, and precision of 2026-11-26 on the rest) sees each role in one of three
-states. It only detects: it has no GitHub key and changes nothing.
+2026-11-23, point 6, and precisions of 2026-11-26 on the rest and the pause) sees each role in
+one of four states. It only detects: it has no GitHub key and changes nothing.
 
 - **Active**: regular heartbeats.
 - **At rest**: the rest declared, the sentinel active, the lock held: a line of information in
@@ -233,6 +258,9 @@ states. It only detects: it has no GitHub key and changes nothing.
   declared with work waiting (the queue not empty or work held, as `devloop run` writes them, for
   more than `REST_WAKE_TIMEOUT`, or a message in its mailbox for more than `REST_MAILBOX_AGE`,
   300 seconds).
+- **In pause** (#685): during the pause of the operator, a role that waits with its state and its
+  lock. The work waiting is no anomaly; the others of the rest stay. Once per pause, a line of
+  information in its journal: «in pausa per ordine dell'operatore dal …», with the work waiting.
 - **Stopped**: no valid rest, and the heartbeat missing or older than two of its periods.
 
 - When the coordinator is stopped, or at rest with an anomaly, it leaves a message in
@@ -441,5 +469,7 @@ coordinator in the mailbox.
   `--allow-host-details`, logged, is only for a case the operator asked for.
 - Never run on the host anything outside the sudoers above, and never a step on the host: those
   are the agent of the host's, launched by the operator ([host runbook](host.md)).
+- Never open or close the pause of the operator (#685): never write or remove `rest/pause`, and
+  never start the service while the pause is on.
 - Never write to the roles of another project, devloop's repository included, nor read or write
   its mailbox: a defect of devloop goes to the operator (Other projects).

@@ -3028,6 +3028,35 @@ holds the work all the same and the operator gets the notice `rest-unreadable`: 
 root, from the mailbox (`$COORDINATION_DIR/rest/<role>`), or remove `rest_dir` from the overlay
 and restart the loop.
 
+### The pause of the operator
+
+The rest holds only when there is nothing to do. To stop everything, open issues and pull
+requests included, the operator pauses the project (#685; [ADR 0002, precision of 2026-11-26 on
+the
+pause](../adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-26-la-pausa-delloperatore-685)),
+with the devloop command of the host, as root:
+
+```bash
+devloop --project <project> pause    # the service stopped, the roles in pause
+devloop --project <project> resume   # the service started again, the roles woken up
+```
+
+`pause` writes the pause, `$COORDINATION_DIR/rest/pause`, root's, then stops the service: the
+loop ends the tick and the actions in progress, and at `SIGTERM` starts no other tick. `resume`
+removes the pause, then starts the service. Only the operator opens and closes it: only root's
+file counts, the roles cannot remove it from `rest/`, and no role has a rule of sudo for the
+command. While the pause is on, `devloop run` (with `[run] rest_dir`) starts no tick: it exits at
+once (`the operator has paused devloop (#685): no tick runs until the operator resumes it` in the
+log), even when someone else starts the service, and a loop that sees the pause begin stops after
+the tick in progress (`stop requested (the pause of the operator)`). The roles wait in pause with
+the same command and state as at rest, the reason `pausa`; only a message in their mailbox or an
+alarm of the sentinel wakes them (an error in `run.log` for the coordinator, the service active
+again during the pause), and the resume wakes them all. The watchdog of the roles sees them in
+pause, and tells once per pause, in its journal, that the project is in pause by order of the
+operator since when, with the work waiting: the queue of the latest tick, which each tick writes
+to `events/queue` ([reference](reference.md#the-roles-at-rest)). The procedure is in
+[ops/README.md](../../ops/README.md#10-coordinatore-facoltativo), "La pausa dell'operatore".
+
 ### Continuous mode
 
 With `max_parallel_actions` above 1, actions run in one of two modes (#227):

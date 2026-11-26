@@ -732,6 +732,101 @@ versione di prima rimette le copie e le ACL di prima del watchdog. La directory 
 l'utente della sentinella restano senza effetto; per toglierli, come root, `rm -r
 <COORDINATION_DIR>/rest` e `userdel <SENTINEL_USER>`.
 
+## La pausa dell'operatore (#685)
+
+Il passo sull'host di #685, su un host con il riposo dei ruoli di
+[#684](#il-riposo-dei-ruoli-684) già fatto (la directory `rest/`, la sentinella e `rest_dir`
+nell'overlay). Con #685 l'operatore ferma tutto, anche con issue e PR aperte, con il comando
+`devloop` dell'host ([#588](#comando-devloop-dellhost-588)): `devloop --project <progetto> pause`
+scrive come root la pausa `$COORDINATION_DIR/rest/pause` e ferma il servizio; `resume` la toglie
+e riavvia il servizio. In pausa i ruoli aspettano con `role-wait.sh` come a riposo, con il motivo
+`pausa`, la sentinella li sveglia solo per un messaggio o un allarme, il watchdog dei ruoli li vede
+in pausa e dice una volta il lavoro in attesa, e `devloop run` non parte finché la pausa c'è
+([ops/README.md](../README.md#10-coordinatore-facoltativo), "La pausa dell'operatore"; [ADR
+0002](../../docs/adr/0002-ruoli-e-responsabilita.md), precisazione del 2026-11-26 sulla pausa).
+Servono quindi:
+
+- il file del progetto del comando `devloop` (`$DEVLOOP_PROJECTS_DIR/params-<progetto>.env`) con le
+  due righe nuove `SERVICE_NAME` e `COORDINATION_DIR`, e il comando nuovo con `pause` e `resume`:
+  senza, `pause` e `resume` si fermano e chiedono di rieseguire `setup-devloop.sh`, e gli altri
+  sottocomandi funzionano come prima;
+- le copie di root nuove di `ops/` (con `lib.sh`, `host/role-wait.sh`, `host/role-sentinel.sh`,
+  `host/role-watchdog.sh` e `host/check-host.sh`), e la sentinella riavviata, che altrimenti gira
+  ancora la copia di prima;
+- il pin del codice nuovo di devloop, che non parte durante la pausa e scrive nel flusso degli
+  eventi la coda dell'ultimo tick (`events/queue`), per il watchdog.
+
+Nessuna chiave nuova dell'overlay, nessuna unità, nessun sudoers e nessuna ACL nuovi: la pausa
+vive in `rest/`, che il riposo ha già dato a tutti quelli che la leggono. devloop mergia la PR di
+#685 come le altre, ma non fa il pin automatico di quel commit né dei successivi finché
+l'operatore non fa il pin a mano ([Ogni cambio con un passo
+sull'host](#ogni-cambio-con-un-passo-sullhost)): qui è il passo 4.
+
+### Comandi
+
+Come root, dal checkout dell'operatore aggiornato (`git -C <checkout> fetch origin` e
+`git -C <checkout> checkout --detach origin/main`, con il merge di #685), **per ogni progetto
+dell'host** con supervisore e coordinatore, con il suo file di parametri `<parametri>` (uno con
+`SOURCE_REF` al tag successivo, con [la sua
+procedura](#un-progetto-con-la-sorgente-a-un-tag-nuovo-666)):
+
+1. **il loop fermo**: `systemctl stop <SERVICE_NAME>`. Le sessioni dei ruoli restano;
+
+2. **il comando `devloop` e il file del progetto**, prima con `--dry-run`: le azioni nuove sono la
+   riscrittura del file del progetto e del comando. Un'altra azione che il passo non spiega vuol
+   dire che l'host non corrisponde ai parametri: ci si ferma e si chiede all'operatore:
+
+   ```bash
+   sudo bash <checkout>/ops/host/setup-devloop.sh --params <parametri> --dry-run
+   sudo bash <checkout>/ops/host/setup-devloop.sh --params <parametri>
+   ```
+
+3. **le copie di root di `ops/`**, prima con `--dry-run`: le azioni nuove sono solo le copie
+   (`SUPERVISOR_OPS_DIR`, `COORDINATOR_OPS_DIR`, `WATCHDOG_OPS_DIR`); poi la sentinella riavviata
+   sulla copia nuova:
+
+   ```bash
+   sudo bash <checkout>/ops/host/setup-supervisor.sh --params <parametri> --dry-run
+   sudo bash <checkout>/ops/host/setup-supervisor.sh --params <parametri>
+   sudo bash <checkout>/ops/host/setup-coordinator.sh --params <parametri> --dry-run
+   sudo bash <checkout>/ops/host/setup-coordinator.sh --params <parametri>
+   sudo systemctl restart devloop-role-sentinel@<progetto>.service
+   ```
+
+   Il secondo script trova già fatto ciò che il primo ha fatto. `<progetto>` è `PROJECT`, o
+   `_default` senza `PROJECT`;
+
+4. **il pin a mano**: come utente `DEVLOOP_USER`, `devloop pin origin/main` (con più progetti
+   `devloop --project <progetto> pin origin/main`), poi `systemctl start <SERVICE_NAME>`. Il pin a
+   mano fa riprendere il pin automatico;
+
+5. **la verifica**: nessun `ERRORE`, nel passo *Comando devloop* le righe `ok: … coincide con
+   ops/host/devloop-command` e `… devloop-command-project`, e la riga
+   `devloop-role-sentinel@<progetto>.service è attivo`:
+
+   ```bash
+   sudo bash <checkout>/ops/host/check-host.sh --params <parametri> --no-apps
+   ```
+
+6. **le sessioni dei ruoli**: leggono la parte nuova del loro runbook solo da una sessione nuova,
+   che l'operatore avvia quando vuole con `ops/host/start-role.sh`. Le loro sveglie già in attesa
+   girano la copia di prima finché il ruolo non le rilancia: fino ad allora una pausa ferma il
+   servizio, ma non le mette in pausa.
+
+La pausa la apre e la chiude solo l'operatore, di persona: l'agent dell'host non esegue `pause`
+né `resume`, nemmeno per provarli. La prova, se l'operatore la vuole: `devloop --project
+<progetto> pause`, poi, dopo
+qualche minuto, nel journal del watchdog (`journalctl -u devloop-role-watchdog@<progetto>`) la riga
+`informazione: … in pausa per ordine dell'operatore dal …` con il lavoro in attesa, e
+`check-host.sh` che dice la pausa; poi `devloop --project <progetto> resume`, con il servizio di
+nuovo attivo e i ruoli che si svegliano con una riga `ripresa:`.
+
+**Rollback**: senza pausa in corso (`devloop --project <progetto> resume`, se serve), il passo 2 e
+il passo 3 dal checkout della versione di prima rimettono il comando, il file del progetto e le
+copie di prima, e il pin della versione di prima il codice di prima. Una pausa lasciata da togliere
+a mano si toglie come root con `rm <COORDINATION_DIR>/rest/pause`, poi `systemctl start
+<SERVICE_NAME>`.
+
 ## Configurazione di ssdlc nel suo file di progetto
 
 Con l'ADR 0006, R3, `devloop/config.toml` non contiene più i fatti di ssdlc né le restrizioni che

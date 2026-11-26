@@ -26,6 +26,13 @@
 #   lavoro fermo, il supervisore per tornare a riposo se non ha niente da fare. Così l'attesa a
 #   riposo di un ruolo dura al più un giorno.
 #
+# Durante la pausa dell'operatore (#685: COORDINATION_DIR/rest/pause, di root, ops_pause_start)
+# si ferma tutto, e la sentinella sveglia un ruolo in attesa solo per un messaggio nella sua
+# casella o per un suo allarme: per il coordinatore una riga nuova di run.log con un errore, e per
+# entrambi il servizio di devloop che torna attivo durante la pausa (non lo ha riavviato il resume
+# dell'operatore). Non per gli eventi del flusso, il servizio fermo (lo ha fermato l'operatore), il
+# lavoro trattenuto né il controllo giornaliero. La fine della pausa la vede role-wait.sh da sé.
+#
 # Toglie il proprio segnale quando il ruolo non è più a riposo. A ogni giro, ogni POLL secondi, dà
 # a systemd il segno di vita (systemd-notify WATCHDOG=1, WatchdogSec= dell'unità): una sentinella
 # bloccata la riavvia systemd (Restart=on-failure), e il suo fallimento avvisa l'operatore con
@@ -307,8 +314,9 @@ LOG_FAILED=0
 # Un giro: legge ciò che è nuovo, e sveglia i ruoli a riposo che lo riguarda.
 round() {
     local role start resting='' events='' log='' service last why wake_at at hhmm text line
-    local box count daily
+    local box count daily pause
     NOW=$(date +%s)
+    pause=$(ops_pause_start) || pause=''
     ALERT_ISSUE=$(ops_alert_issue)
     # I cursori del flusso e di run.log avanzano a ogni giro: nuovo è ciò che è arrivato dal giro
     # prima.
@@ -348,6 +356,19 @@ round() {
         box=$COORDINATION_DIR/to-$role
         count=$(find "$box" -mindepth 1 -maxdepth 1 -type f ! -name '.*' 2>/dev/null | wc -l)
         [ "$count" -gt 0 ] && why="casella: $count messaggi in $box"
+        if [ -n "$pause" ]; then
+            # La pausa dell'operatore (#685): solo la casella e gli allarmi.
+            if [ -z "$why" ] && [ "$role" = coordinator ] && [ -n "$log" ]; then
+                while IFS= read -r line; do
+                    [ -n "$line" ] && ops_log_error "$line" && { why="log: ${line:0:300}"; break; }
+                done <<<"$log"
+            fi
+            if [ -z "$why" ] && [ "$service" = active ] && [ "$service" != "$last" ]; then
+                why="allarme: $SERVICE_NAME è di nuovo attivo durante la pausa dell'operatore, cominciata alle $(date -u -d "@$pause" +%Y-%m-%dT%H:%M:%SZ): non l'ha riavviato il resume dell'operatore"
+            fi
+            [ -n "$why" ] && wake "$role" "$why"
+            continue
+        fi
         if [ -z "$why" ] && [ -n "$events" ]; then
             while read -r at hhmm text; do
                 [ "$at" -ge $((start - 1)) ] || continue

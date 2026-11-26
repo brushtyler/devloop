@@ -66,6 +66,10 @@ COORDINATION_HEARTBEAT=heartbeat
 # il file del suo lock <ruolo>.lock (tenuto con flock da role-wait.sh --rest mentre aspetta) e,
 # della sentinella, il segnale di risveglio <ruolo>.wake ("<ora> <motivo>").
 COORDINATION_REST=rest
+# La pausa dell'operatore (#685), PAUSE_FILE di devloop/rest.py: rest/pause, "<inizio> pausa", che
+# solo il comando devloop dell'host scrive, come root (pause), e toglie (resume). Conta solo il
+# file di root (ops_pause_start): i ruoli scrivono in rest/, ma non aprono né chiudono la pausa.
+REST_PAUSE=pause
 
 # Il flusso degli eventi (#683), come devloop/events.py: la directory dello state_dir che devloop
 # run scrive (DIRECTORY), con i segmenti, il segno di vita (ALIVE) e l'identità del flusso. I
@@ -83,6 +87,10 @@ EVENTS_HOLD=hold
 # nella directory del flusso al suo avvio: la legge chi legge il flusso ma non l'overlay, la
 # sentinella dei ruoli a riposo (ops_alert_issue).
 EVENTS_ALERT_ISSUE=alert_issue
+# La coda dell'ultimo tick (#685, QUEUE_FILE di devloop/rest.py), "<da quando> <coda>": il
+# watchdog dei ruoli la dice durante la pausa dell'operatore, perché il lavoro in attesa non si
+# dimentichi.
+EVENTS_QUEUE=queue
 
 # Nella home dell'utente degli agent (#438), come CLI_DIRS, CLI_SEALED e CLIS di
 # devloop/agentuser.py: le directory delle CLI, di root, del gruppo dell'utente degli agent e con
@@ -1271,6 +1279,20 @@ ops_rest_wake() {
     read -r at why <"$COORDINATION_DIR/$COORDINATION_REST/$1.wake" 2>/dev/null || return 1
     [[ $at =~ ^[0-9]{1,12}$ ]] || return 1
     printf '%s %s\n' "$at" "$why"
+}
+
+# ops_pause_start: l'inizio (secondi dall'epoca) della pausa dell'operatore (#685), da
+# COORDINATION_DIR/rest/pause, un file regolare di root, non un link, "<inizio> pausa"; nulla, e
+# 1, senza pausa. Il file di un altro utente non è una pausa, come per devloop (operator_pause di
+# devloop/rest.py): i ruoli scrivono in rest/, ma la pausa la apre e la chiude solo l'operatore.
+ops_pause_start() {
+    local file=$COORDINATION_DIR/$COORDINATION_REST/$REST_PAUSE owner='' kind='' at='' why=''
+    [ -f "$file" ] && ! [ -L "$file" ] || return 1
+    read -r owner kind < <(stat -c '%u %F' -- "$file" 2>/dev/null) || return 1
+    [ "$owner" = 0 ] && [ "$kind" = 'regular file' ] || return 1
+    read -r at why <"$file" 2>/dev/null || return 1
+    [[ $at =~ ^[0-9]{1,12}$ ]] && [[ $why == pausa || $why == 'pausa '* ]] || return 1
+    printf '%s\n' "$at"
 }
 
 # coordination_dirs: le directory della casella, una per riga: COORDINATION_DIR, una directory di

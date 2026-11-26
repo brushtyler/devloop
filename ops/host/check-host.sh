@@ -1132,10 +1132,21 @@ for other in "$SYSTEMD_DIR"/devloop*.service "$SYSTEMD_DIR"/devloop@*.service.d/
     fi
 done
 state=$(systemctl is-active "$SERVICE_NAME" 2>/dev/null)
+# La pausa dell'operatore (#685): il servizio fermo è la pausa, finché l'operatore non la toglie.
+pause=$(ops_pause_start) || pause=''
+if [ -n "$pause" ]; then
+    say "  in pausa per ordine dell'operatore dal $(date -u -d "@$pause" +%Y-%m-%dT%H:%M:%SZ): devloop run non parte finché l'operatore non la toglie (devloop resume)"
+fi
 case $state in
     active) ok "$SERVICE_NAME è attivo" ;;
     failed) fail "$SERVICE_NAME è fallito: journalctl -u $SERVICE_NAME e $LOG" ;;
-    *) warn "$SERVICE_NAME non è attivo (${state:-sconosciuto}): l'avvio è dell'operatore" ;;
+    *)
+        if [ -n "$pause" ]; then
+            ok "$SERVICE_NAME non è attivo (${state:-sconosciuto}): la pausa dell'operatore"
+        else
+            warn "$SERVICE_NAME non è attivo (${state:-sconosciuto}): l'avvio è dell'operatore"
+        fi
+        ;;
 esac
 enabled=$(systemctl is-enabled "$SERVICE_NAME" 2>/dev/null)
 say "  $SERVICE_NAME all'avvio della macchina: ${enabled:-sconosciuto}"
