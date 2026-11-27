@@ -11,7 +11,8 @@
 # worktree, #572; l'ambiente dei turni gli arriva con sudo -E,
 # che sudo-rs ignora), il lock per repository (directory comune, gruppo, overlay; ADR 0006, R8),
 # servizio, comando devloop dell'host e file del progetto (#588), CLI degli agent (--version, e un `git --version` con il loro strumento di shell,
-# #494), che i clone dei ruoli si aggiornino (per un repository privato con la loro app, #717) e
+# #494), che i clone dei ruoli si aggiornino (per un repository privato con la loro app, #717), i
+# permessi delle app dei ruoli contro i loro manifest (scripts/<ruolo>-token.py --check, #726) e
 # `devloop apps`, e il coordinatore, se l'overlay del progetto lo dichiara (#571; key_dir e chiave della sua app, ACL e lettura dell'overlay, #549;
 # sudoers e copia di root di questo script, #530; il suo clone, #643), e Claude Code dei ruoli
 # senza aggiornamenti automatici (#643), la sentinella dei ruoli a riposo (unità, utente, ACL) e la
@@ -28,8 +29,8 @@
 #
 # --dry-run: fa le verifiche locali in sola lettura e stampa, senza eseguirle, quelle che passano
 # da sudo o dalla rete (--version e strumento di shell delle CLI, lettura del log come
-# supervisore, visudo, sudo -E verso l'utente degli agent, devloop apps, la lettura anonima del
-# repository gestito e il fetch autenticato).
+# supervisore, visudo, sudo -E verso l'utente degli agent, devloop apps, il --check delle app dei
+# ruoli, la lettura anonima del repository gestito e il fetch autenticato).
 # --read-only: la verifica del coordinatore (#530): nessuna CLI avviata (né --version né lo
 # strumento di shell: nessun modello, nessuna quota, nessuna scrittura nelle sessioni o nelle
 # cache), niente `devloop apps`, nessuna scrittura (di un repository privato, `devloop fetch
@@ -52,8 +53,8 @@ VERBOSE=0
 usage() {
     say "Uso: sudo bash $0 [--params FILE] [--dry-run] [--no-apps] [--read-only] [--verbose]"
     say
-    say '  --no-apps       non esegue `devloop apps` né la verifica dei clone dei ruoli (che'
-    say '                  interrogano GitHub)'
+    say '  --no-apps       non esegue `devloop apps` né le verifiche dei clone e dei permessi'
+    say '                  delle app dei ruoli (che interrogano GitHub)'
     say '  --read-only     nessuna CLI avviata, niente `devloop apps`, nessuna scrittura (il'
     say '                  coordinatore, #530)'
     say '  --verbose       i percorsi reali dell'"'"'host, per la diagnosi locale: senza, l'"'"'output'
@@ -1388,6 +1389,45 @@ if [ "$CHECK_APPS" = 1 ]; then
         [ -z "$SOURCE_REPO" ] || token_clone=$COORDINATOR_SOURCE_CLONE
         check_role_clone coordinator "$COORDINATOR_USER" "$COORDINATOR_CLONE" \
             "$COORDINATOR_KEY_DIR" "$token_clone"
+    fi
+elif [ "$READ_ONLY" = 1 ]; then
+    say '  saltato (--read-only)'
+else
+    say '  saltato (--no-apps)'
+fi
+
+# check_role_app RUOLO UTENTE KEY_DIR TOKEN_CLONE: i permessi dell'installazione dell'app del ruolo
+# contro il suo manifest, ops/github/apps/RUOLO.json (#726): come l'utente del ruolo, con la sua
+# key_dir, scripts/RUOLO-token.py --check di TOKEN_CLONE (lo stesso da cui il ruolo prende i suoi
+# token), che legge l'installazione con il JWT dell'app: nessun token d'installazione, nessun
+# comando. Permesso mancante o non accettato: errore; in più: avviso; contents: read mancante,
+# per un repository pubblico, avviso. Solo se l'overlay dichiara [apps.RUOLO]: senza, il ruolo
+# firma con l'app del suo agent, che `devloop apps` verifica. Uno script che precede #726 è un
+# avviso. Interroga GitHub: non con --no-apps né con --read-only; con --dry-run stampa soltanto.
+check_role_app() {
+    local role=$1 user=$2 key_dir=$3 token_clone=$4
+    local script=$token_clone/scripts/$role-token.py
+    if ! overlay_declares_app "$OVERLAY_FILE" "$role"; then
+        say "  $OVERLAY_FILE non dichiara [apps.$role]: il ruolo firma con l'app del suo agent, nessuna app $role da verificare"
+        return 0
+    fi
+    if [ "$DRY_RUN" != 1 ] && ! grep -qF -- "CHECK = '--check'" "$script" 2>/dev/null; then
+        warn "$script manca o non ha --check (#726): i permessi dell'app $role non si verificano; aggiornare il clone (con SOURCE_REPO, un SOURCE_REF che lo contiene) e rieseguire setup-$role.sh"
+        return 0
+    fi
+    check_as "$user" "l'app $role ha i permessi di ops/github/apps/$role.json (#726)" \
+        env -C "$token_clone" "DEVLOOP_APP_KEY_DIR=$key_dir" /usr/bin/python3 \
+        "scripts/$role-token.py" --state-dir "$STATE_PATH" --check
+}
+step "Permessi delle app dei ruoli contro i manifest (#726)"
+if [ "$CHECK_APPS" = 1 ]; then
+    token_clone=$SUPERVISOR_CLONE
+    [ -z "$SOURCE_REPO" ] || token_clone=$SUPERVISOR_SOURCE_CLONE
+    check_role_app supervisor "$SUPERVISOR_USER" "$SUPERVISOR_KEY_DIR" "$token_clone"
+    if [ "$PROJECT_COORDINATOR" = 1 ] && user_exists "$COORDINATOR_USER"; then
+        token_clone=$COORDINATOR_CLONE
+        [ -z "$SOURCE_REPO" ] || token_clone=$COORDINATOR_SOURCE_CLONE
+        check_role_app coordinator "$COORDINATOR_USER" "$COORDINATOR_KEY_DIR" "$token_clone"
     fi
 elif [ "$READ_ONLY" = 1 ]; then
     say '  saltato (--read-only)'

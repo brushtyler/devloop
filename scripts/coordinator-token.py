@@ -4,6 +4,7 @@
 Usage:
     python3 scripts/coordinator-token.py [--state-dir DIR] [--perm NAME=LEVEL ...] \\
         [--allow-host-details] -- <command> [args...]
+    python3 scripts/coordinator-token.py [--state-dir DIR] --check
 
 Examples:
     DEVLOOP_APP_KEY_DIR=/home/coordinator/.ghapps python3 scripts/coordinator-token.py \\
@@ -48,6 +49,14 @@ fields, a file read with ``-F key=@file`` and standard input with ``key=@-`` inc
 that still holds an absolute path of the host (under /home/, /etc/, /var/lib/, /usr/local/lib/,
 /run/, /root/) or the name of a key file is refused. --allow-host-details publishes it anyway;
 each use is written on standard error and in the system log (syslog, devloop-publication).
+
+--check (#726), run as the coordinator's user with its key, mints no token, prints none and runs
+no command: it reads the permissions of the app's installation on the project's repository
+(``GET /repos/{repo}/installation`` with the app's JWT) and compares them with
+ops/github/apps/coordinator.json of this clone. A permission of the manifest missing on the
+installation, or there at a lower level (not granted, or not accepted by the owner), is an
+error; one above the manifest a warning. contents=read missing is a warning for a repository
+GitHub gives without credentials (public), an error otherwise. Exit 1 on an error.
 """
 
 import os
@@ -59,7 +68,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from devloop.apps import COORDINATOR, AppAuth, find_key  # noqa: E402
+from devloop.apps import COORDINATOR, AppAuth, check_role_app, find_key  # noqa: E402
 from devloop.config import (DEFAULT_CONFIG, ConfigError, apply_overlay, parse_config,  # noqa: E402
                             read_toml)
 from devloop.redact import allow_option, publication_check  # noqa: E402
@@ -74,6 +83,9 @@ ALLOWED = {'issues': {'read', 'write'}, 'pull_requests': {'read', 'write'},
 STATE = REPO_ROOT / '.devloop'
 LOCAL_CONFIG = 'config.local.toml'
 STATE_DIR = '--state-dir'
+CHECK = '--check'
+# The manifest --check compares the installation with (#726).
+MANIFEST = REPO_ROOT / 'ops' / 'github' / 'apps' / 'coordinator.json'
 # The credentials of the caller, never passed on beside the app's token.
 CREDENTIALS = ('GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN')
 
@@ -121,6 +133,38 @@ def parse(argv):
     return state, permissions or dict(DEFAULT), command
 
 
+def parse_check(argv):
+    """The state_dir of ``[--state-dir DIR] --check`` (#726), None for a command line without
+    --check; with --check, no command, no --perm and no other option."""
+    options = argv[:argv.index('--')] if '--' in argv else argv
+    if CHECK not in options:
+        return None
+    if options != argv:
+        raise SystemExit(f'coordinator-token: {CHECK} mints no token and runs no command: no '
+                         '-- <command> beside it')
+    state, options = STATE, list(argv)
+    while options:
+        if options[0] == CHECK:
+            options = options[1:]
+        elif options[0] == STATE_DIR and len(options) >= 2:
+            state, options = Path(options[1]), options[2:]
+        else:
+            raise SystemExit(f'coordinator-token: {CHECK} mints no token and runs no command: '
+                             f'only {STATE_DIR} DIR beside it, not {options[0]!r}')
+    return state
+
+
+def app_auth(cfg, state):
+    """The coordinator's app on the project's repository, with its key from the key_dir of the
+    user running this script."""
+    configured = cfg.apps.get(COORDINATOR)
+    if configured is None:
+        raise SystemExit(f'coordinator-token: no [apps.coordinator] in the overlay of {state}')
+    key_dir = os.environ.get('DEVLOOP_APP_KEY_DIR') or cfg.app_key_dir
+    return AppAuth(configured.app_id, configured.slug, find_key(key_dir, configured.slug),
+                   cfg.repo)
+
+
 def project_repo(repo):
     """``repo`` of the project as GH_REPO for the command (#571), or exit when the caller's
     GH_REPO names another repository: the token would not reach it. GH_REPO may carry the host
@@ -135,19 +179,24 @@ def project_repo(repo):
     return repo
 
 
-def main(argv):
+def main(argv, out=None):
+    state = parse_check(argv)
+    if state is not None:
+        # #726: the installation against the manifest, with the app's JWT alone.
+        cfg = load_config(state)
+        try:
+            app = app_auth(cfg, state)
+        except (FileNotFoundError, PermissionError) as exc:
+            raise SystemExit(f'coordinator-token: {exc}') from exc
+        return check_role_app(COORDINATOR, app, MANIFEST, out)
     allow, argv = allow_option(argv)
     state, permissions, command = parse(argv)
     # The last check before publishing (#583): no path of the host nor key file in the text.
     stdin = publication_check('coordinator-token', command, allow)
     cfg = load_config(state)
     repo = project_repo(cfg.repo)
-    configured = cfg.apps.get(COORDINATOR)
-    if configured is None:
-        raise SystemExit(f'coordinator-token: no [apps.coordinator] in the overlay of {state}')
     # Only the coordinator's key is read, from the key_dir of the user running this script.
-    key_dir = os.environ.get('DEVLOOP_APP_KEY_DIR') or cfg.app_key_dir
-    app = AppAuth(configured.app_id, configured.slug, find_key(key_dir, configured.slug), cfg.repo)
+    app = app_auth(cfg, state)
     env = {k: v for k, v in os.environ.items() if k not in CREDENTIALS}
     env['GH_TOKEN'] = app.token(permissions)
     # gh acts on the project's repository, not on the origin of the current clone (#571).

@@ -1188,6 +1188,71 @@ procedura](#un-progetto-con-la-sorgente-a-un-tag-nuovo-666).
 come sono, senza token nella loro configurazione. `contents: read` sulle app reali si toglie dalle
 loro impostazioni.
 
+## Permessi delle app dei ruoli contro i manifest (#726)
+
+Il passo sull'host di #726. `scripts/supervisor-token.py` e `scripts/coordinator-token.py` hanno
+`--check`: come l'utente del ruolo, con la sua chiave, leggono i permessi dell'installazione
+dell'app del ruolo con il suo JWT e li confrontano con il manifest (`ops/github/apps/supervisor.json`,
+`coordinator.json`), senza coniare token né eseguire comandi. `check-host.sh` lo esegue, nel passo
+"Permessi delle app dei ruoli contro i manifest (#726)", per il supervisore e, se il progetto lo
+ha, per il coordinatore, quando l'overlay ne dichiara l'app; lo salta con `--no-apps` e con
+`--read-only` ([ops/README.md](../README.md#8-verifica)).
+
+Nessun permesso nuovo né diverso per le app, nessun parametro, nessuna chiave dell'overlay, nessun
+sudoers, nessuna ACL e nessuna unità nuovi. Sull'host cambia solo `host/check-host.sh`, che il
+coordinatore esegue dalla sua copia di root (`COORDINATOR_OPS_DIR`); la copia del supervisore
+(`SUPERVISOR_OPS_DIR`) non lo contiene e non cambia. Gli script dei token vengono dal clone da cui
+ogni ruolo li esegue (il suo clone del repository gestito, o con `SOURCE_REPO` quello della
+sorgente), non da una copia di root. Il codice del loop non cambia: devloop mergia la PR di #726
+come le altre, ma non fa il pin automatico di quel commit né dei successivi finché l'operatore non
+fa il pin a mano ([Ogni cambio con un passo sull'host](#ogni-cambio-con-un-passo-sullhost)): qui è
+il passo 3.
+
+### Comandi
+
+Come root, dal checkout dell'operatore aggiornato (`git -C <checkout> fetch origin` e
+`git -C <checkout> checkout --detach origin/main`, con il merge di #726), **per ogni progetto
+dell'host** con il supervisore, con il suo file di parametri `<parametri>` (uno con `SOURCE_REF`
+al tag successivo, con [la sua procedura](#un-progetto-con-la-sorgente-a-un-tag-nuovo-666)):
+
+1. **il loop fermo**: `systemctl stop <SERVICE_NAME>`. Le sessioni dei ruoli restano;
+
+2. **la copia di root del coordinatore**, solo se il progetto ha il coordinatore, prima con
+   `--dry-run`: l'unica azione nuova è la copia di `host/check-host.sh` in `COORDINATOR_OPS_DIR`.
+   Un'altra azione che il passo non spiega vuol dire che l'host non corrisponde ai parametri: ci si
+   ferma e si chiede all'operatore. `setup-supervisor.sh` non serve: la sua copia non cambia.
+
+   ```bash
+   sudo bash <checkout>/ops/host/setup-coordinator.sh --params <parametri> --dry-run
+   sudo bash <checkout>/ops/host/setup-coordinator.sh --params <parametri>
+   ```
+
+3. **il pin a mano**: come utente `DEVLOOP_USER`, `devloop pin origin/main` (con più progetti
+   `devloop --project <progetto> pin origin/main`), poi `systemctl start <SERVICE_NAME>`. Il pin a
+   mano fa riprendere il pin automatico;
+
+4. **la verifica**, senza `--no-apps`, perché il passo interroga GitHub: nessun `ERRORE`, e nel
+   passo "Permessi delle app dei ruoli contro i manifest (#726)" una riga `ok:` per ogni ruolo che
+   ha l'app nell'overlay. Un `ERRORE` lì è un permesso del manifest che manca all'installazione o
+   che il proprietario non ha ancora accettato: si corregge nelle impostazioni dell'app e
+   nell'installazione ([ops/README.md](../README.md#2-github-app), "I permessi di un'app che
+   esiste già"), non sull'host. Il dettaglio è nell'output del `--check`, che `check-host.sh`
+   mostra:
+
+   ```bash
+   sudo bash <checkout>/ops/host/check-host.sh --params <parametri>
+   ```
+
+Un `ATTENZIONE: … manca o non ha --check (#726)` vuol dire che il clone da cui il ruolo prende i
+suoi token ha ancora gli script di prima: il ruolo lo aggiorna come sempre, e la verifica si
+ripete dopo. **Un progetto con `SOURCE_REF`** (#687) prende gli script dal clone della sorgente
+al suo tag: finché il tag non contiene #726, quell'avviso resta, senza altro effetto. Questa
+sezione la applica al tag che la contiene, con [la sua
+procedura](#un-progetto-con-la-sorgente-a-un-tag-nuovo-666).
+
+**Rollback**: il passo 2 dal checkout della versione di prima rimette la copia di prima di
+`check-host.sh`, e il pin della versione di prima il codice di prima.
+
 ## Configurazione di ssdlc nel suo file di progetto
 
 Con l'ADR 0006, R3, `devloop/config.toml` non contiene più i fatti di ssdlc né le restrizioni che

@@ -471,8 +471,9 @@ manifest in `ops/github/apps/`:
   *Repository permissions*, e nessun permesso di account o di organizzazione). Per le app di cui
   devloop legge la chiave (`dispatcher`, `merger`, le app degli agent, `implementer`) anche
   `python3 -m devloop apps`, che `check-host.sh` esegue, stampa i permessi dell'installazione;
-  per `supervisor` e `coordinator`, di cui devloop non legge la chiave, valgono solo le
-  impostazioni dell'app;
+  per `supervisor` e `coordinator`, di cui devloop non legge la chiave, `--check` dei loro
+  script dei token (#726), che `check-host.sh` esegue come l'utente del ruolo, legge i permessi
+  dell'installazione e li confronta con il manifest (passo 8);
 - **un permesso in più** (che il manifest non ha, o in scrittura dove il manifest lo vuole in
   lettura) si toglie (*No access*) o si abbassa lì, poi *Save changes*: togliere o ridurre un
   permesso non chiede di riaccettare l'installazione;
@@ -943,7 +944,15 @@ con il loro strumento di shell (#494: passa dal modello, con la rete e il login 
 errore se non risponde con `git version` o se nell'output c'è un `permission denied`); che i
 clone dei ruoli si aggiornino (#717: come l'utente del ruolo e senza scrivere nel clone; per un
 repository pubblico, `git ls-remote origin` dal clone, con la sua configurazione; per uno privato,
-che la sua app con `contents=read` legga il repository; non con `--no-apps`); se il
+che la sua app con `contents=read` legga il repository; non con `--no-apps`); i permessi delle
+app dei ruoli contro i loro manifest (#726: per il supervisore e, se il progetto lo ha, per il
+coordinatore, quando l'overlay ne dichiara l'app, `[apps.supervisor]` o `[apps.coordinator]`;
+come l'utente del ruolo, con la sua `key_dir`, `scripts/<ruolo>-token.py --check` dal clone da cui
+il ruolo prende i suoi token, che legge l'installazione con il JWT dell'app, senza coniare token
+né eseguire comandi: un permesso di `ops/github/apps/<ruolo>.json` che manca o che il proprietario
+non ha accettato è un errore, uno in più un avviso; `contents: read` mancante è un avviso per un
+repository pubblico, un errore per uno privato; uno script dei token senza `--check`, di prima di
+#726, è un avviso; non con `--no-apps` né con `--read-only`); se il
 repository gestito è pubblico o privato (#718: un `git ls-remote` anonimo) e, se è privato, che
 l'overlay abbia `[apps.dispatcher]`, che il clone e la copia fissata ci siano e che il fetch del
 clone con il token del dispatcher riesca, come `devloop` (`devloop fetch`; con `--read-only`

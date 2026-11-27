@@ -5921,6 +5921,78 @@ class CheckHostTests(OpsTestCase):
         self.assertEqual(subprocess.run([real_git, '-C', str(clone), 'fetch', '-q', 'origin'],
                                         capture_output=True, env=git_env).returncode, 128)
 
+    def role_apps_section(self, *args):
+        """check-host.sh --dry-run with ``args``: its step on the role apps (#726)."""
+        done, _ = self.check(*args)
+        out = done.stdout
+        return out[out.index('==> Permessi delle app dei ruoli'):out.index('==> Repository gestito')]
+
+    def test_the_role_apps_are_checked_against_their_manifests(self):
+        # #726: when the overlay declares the role's app, scripts/<role>-token.py --check as the
+        # role's user, with its key_dir, from the clone of its token script. A dry run prints
+        # it; --no-apps and --read-only skip it, as devloop apps.
+        step = '==> Permessi delle app dei ruoli contro i manifest (#726)\n'
+        overlay = self.state / 'config.local.toml'
+        self.assertEqual(self.role_apps_section(),
+                         f'{step}  {overlay} non dichiara [apps.supervisor]: il ruolo firma con '
+                         "l'app del suo agent, nessuna app supervisor da verificare\n\n")
+        with overlay.open('a') as fh:
+            fh.write('[apps.supervisor]\napp_id = 11\nslug = "brushtyler-devloop-supervisor"\n')
+        clone = self.supervisor / 'devloop'
+        self.assertEqual(self.role_apps_section(),
+                         f'{step}  [dry-run] sudo -u {ME} -H -- env -C {clone} '
+                         f'DEVLOOP_APP_KEY_DIR={self.supervisor}/.ghapps /usr/bin/python3 '
+                         f'scripts/supervisor-token.py --state-dir {self.state} --check\n\n')
+        for flag in ('--no-apps', '--read-only'):
+            with self.subTest(flag=flag):
+                self.assertEqual(self.role_apps_section(flag), f'{step}  saltato ({flag})\n\n')
+        self.assertEqual(self.mutating_calls(), [])
+
+    def test_the_check_of_a_role_app_counts_its_outcome(self):
+        # #726, check_role_app outside a dry run: the token script of the role's clone, as the
+        # role's user (here the user of the tests, with no sudo), with its key_dir and the
+        # project's state_dir; its exit code is the outcome. A script that predates --check is
+        # a warning, not a failure of a command it does not know.
+        text = (OPS / 'host/check-host.sh').read_text(encoding='utf-8')
+        defs = self.tmp / 'defs.sh'
+        defs.write_text(''.join(re.search(rf'^{name}\(\) {{\n.*?^}}\n', text, re.M | re.S)
+                                .group(0) for name in ('check_as', 'check_role_app')))
+        overlay, source = self.tmp / 'config.local.toml', self.tmp / 'source'
+        overlay.write_text('[apps.coordinator]\napp_id = 7\nslug = "acme-coordinator"\n')
+        (source / 'scripts').mkdir(parents=True)
+        script, seen = source / 'scripts/coordinator-token.py', self.tmp / 'seen'
+
+        def check(role='coordinator', code=0):
+            run = (f'. {shlex.quote(str(OPS / "lib.sh"))}; . {shlex.quote(str(defs))}; '
+                   f'DRY_RUN=0; WARNINGS=0; FAILURES=0; OVERLAY_FILE={overlay}; '
+                   f'STATE_PATH=/srv/state; check_role_app {role} {ME} {self.tmp}/keys {source}; '
+                   'echo "failures=$FAILURES warnings=$WARNINGS"')
+            return subprocess.run([BASH, '-c', run], capture_output=True, text=True,
+                                  env=dict(os.environ, LC_ALL='C.UTF-8', SEEN=str(seen),
+                                           CODE=str(code)),
+                                  stdin=subprocess.DEVNULL, timeout=60).stdout
+
+        self.assertIn(f'  {overlay} non dichiara [apps.supervisor]: il ruolo firma con l\'app '
+                      'del suo agent, nessuna app supervisor da verificare\n'
+                      'failures=0 warnings=0\n', check('supervisor'))
+        missing = (f'  ATTENZIONE: {script} manca o non ha --check (#726): i permessi dell\'app '
+                   'coordinator non si verificano')
+        self.assertIn(missing, check())
+        script.write_text('import sys\nsys.exit(3)\n')  # a script of before #726
+        out = check()
+        self.assertIn(missing, out)
+        self.assertIn('failures=0 warnings=1\n', out)
+        script.write_text("import os, sys\nCHECK = '--check'\n"
+                          "with open(os.environ['SEEN'], 'w') as fh:\n"
+                          "    fh.write(' '.join([os.getcwd(), os.environ['DEVLOOP_APP_KEY_DIR'],"
+                          " *sys.argv[1:]]))\n"
+                          "sys.exit(int(os.environ['CODE']))\n")
+        what = "l'app coordinator ha i permessi di ops/github/apps/coordinator.json (#726)"
+        self.assertIn(f'  ok: {what}\nfailures=0 warnings=0\n', check())
+        self.assertEqual(seen.read_text(),
+                         f'{source} {self.tmp}/keys --state-dir /srv/state --check')
+        self.assertIn(f'  ERRORE: {what}: non riuscito\nfailures=1 warnings=0\n', check(code=1))
+
     def test_claude_code_of_the_roles_does_not_update_itself(self):
         # #643: the settings of Claude Code of the supervisor and of the coordinator turn the
         # automatic updates off, as setup-supervisor.sh and setup-coordinator.sh write them; a
