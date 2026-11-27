@@ -38,6 +38,8 @@ soon as no role is at rest: the next tick starts the work.
 The pause of the operator (#685, ``rest.operator_pause``) is a stop as the ``STOP`` file is: while
 it is on, ``devloop run`` exits at once, without a tick, and a loop that sees it begin stops after
 the tick in progress. The operator's ``pause`` stops the service with ``SIGTERM`` all the same.
+The maintenance of the host (#705, ``rest.host_maintenance``) stops the loop in the same way, also
+after its expiry, until ``maintenance end`` removes it.
 """
 
 import signal
@@ -48,6 +50,7 @@ from .i18n import ENGLISH, Catalog
 from .markdown import dispatcher_header, publishable
 from .notify import TEXTS as NOTIFY_TEXTS
 from .pin import Repinned
+from .rest import describe_maintenance
 from .watch import NOTHING_NEW, failure_class
 
 STOP_FILE = 'STOP'
@@ -154,11 +157,17 @@ class Loop:
             return f'the {self.stop_file.name} file'
         if self.paused():
             return 'the pause of the operator'
+        if self.in_maintenance():
+            return 'the maintenance of the host'
         return None
 
     def paused(self):
         """Whether the operator's pause is on (#685, ``rest.operator_pause``)."""
         return self.rest is not None and self.rest.paused() is not None
+
+    def in_maintenance(self):
+        """The maintenance of the host (#705, ``rest.host_maintenance``), or None."""
+        return self.rest.maintenance() if self.rest is not None else None
 
     def check_stop(self):
         """``Stopped`` when a stop is requested: the watcher calls it before each read of
@@ -204,6 +213,12 @@ class Loop:
         if self.paused():
             self.log('the operator has paused devloop (#685): no tick runs until the operator '
                      'resumes it, with the devloop command of the host, resume')
+            return 0
+        maintenance = self.in_maintenance()
+        if maintenance is not None:
+            self.log(f'the host is in maintenance (#705) {describe_maintenance(maintenance)}: '
+                     'no tick runs until it ends, with the devloop command of the host, '
+                     'maintenance end')
             return 0
         previous = {sig: signal.signal(sig, self._on_signal) for sig in SIGNALS}
         try:

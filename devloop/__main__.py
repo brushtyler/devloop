@@ -674,6 +674,10 @@ def run_pin(args):
                       state, root)
     except ConfigError as exc:
         sys.exit(f'devloop: invalid config: {exc}')
+    # The maintenance of the host (#705): no pin but that of the host command, as root.
+    refusal = rest.maintenance_refusal(cfg.run.rest_dir)
+    if refusal:
+        sys.exit(f'devloop: pin refused, the pinned copy is unchanged: {refusal}')
     # The pin by hand is the one after the step on the host (#462): it releases, under the lock
     # of the pins, the holds whose merge the pinned commit contains (#473).
     released = {}

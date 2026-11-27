@@ -7,7 +7,8 @@
 # (sudo -u … -H), nel suo clone, con il suo PATH e il suo LAUNCHER_CMD, quindi la copia fissata del
 # servizio e lo --state-dir del progetto. Sottocomando e argomenti arrivano al launcher così come
 # sono: devloop pin origin/main, devloop status, devloop follow issue-<N>. Gli unici sottocomandi
-# di questo involucro, che ha solo l'opzione --project prima del sottocomando, sono pause e resume.
+# di questo involucro, che ha solo l'opzione --project prima del sottocomando, sono pause, resume
+# e maintenance.
 #
 # pause e resume (#685; scelta R4 (a)): la pausa decisa dall'operatore, anche con issue e PR
 # aperte. pause scrive, come root, la pausa COORDINATION_DIR/rest/pause ("<inizio> pausa", 644 di
@@ -18,6 +19,20 @@
 # finché la pausa c'è, anche se qualcuno avvia il servizio. resume toglie la pausa, poi riavvia il
 # servizio: i ruoli in pausa si svegliano. Solo l'operatore li esegue: sono come root, e nessun
 # ruolo ha una regola di sudo per questo comando.
+#
+# maintenance start "<sezioni>" e maintenance end (#705): la manutenzione dell'host, che
+# accompagna un passo sull'host (le sezioni di ops/host/migrate.md) e si chiude alla sua fine.
+# start si rifiuta con una manutenzione o una pausa già aperte; crea in modo esclusivo, come root,
+# COORDINATION_DIR/rest/maintenance ("<inizio> manutenzione - <sezioni>", 644 di root), poi ferma
+# il servizio e scrive la scadenza, MAINTENANCE_TIMEOUT secondi (due ore) dopo lo stop; programma
+# con un timer transitorio di systemd l'avviso della scadenza all'operatore (maintenance expired,
+# devloop notify); poi dice quali ruoli aspettano già in manutenzione (lo stato e il lock della
+# loro sveglia, ops/host/role-wait.sh) e aspetta al più MAINTENANCE_ACK_TIMEOUT secondi (300) le
+# conferme degli altri, poi prosegue comunque e scrive nell'output e nel log di sistema chi non ha
+# confermato. Mentre la manutenzione c'è, anche dopo la scadenza, devloop run non fa tick e
+# devloop pin si rifiuta, salvo il pin di questo comando, come root (DEVLOOP_MAINTENANCE_PIN).
+# end toglie la manutenzione e riavvia il servizio, salvo una pausa dell'operatore, che vince; il
+# resume di una pausa durante la manutenzione non lo riavvia.
 #
 # I progetti sono i file params-<progetto>.env della directory dei progetti (params-_default.env
 # per l'installazione senza PROJECT), che setup-devloop.sh scrive da ops/host/devloop-command-project:
@@ -44,11 +59,17 @@ state_dir), passandogli sottocomando e argomenti così come sono:
   devloop pin origin/main
   devloop --project widget follow issue-12
 
-Due sottocomandi sono di questo comando (#685), solo per l'operatore:
+Tre sottocomandi sono di questo comando (#685, #705), come root:
 
   devloop [--project NOME] pause   la pausa: ferma il servizio e mette in pausa i ruoli
   devloop [--project NOME] resume  la ripresa: toglie la pausa e riavvia il servizio; i ruoli
                                    si svegliano
+  devloop [--project NOME] maintenance start "<sezioni>"
+                                   la manutenzione dell'host per le sezioni di migrate.md:
+                                   ferma il servizio, i ruoli aspettano in manutenzione
+  devloop [--project NOME] maintenance end
+                                   la fine della manutenzione: riavvia il servizio (salvo
+                                   una pausa)
 
   --project NOME  il progetto (params-NOME.env dei progetti installati; _default è
                   l'installazione senza PROJECT). Senza, il solo progetto installato.
@@ -120,11 +141,14 @@ fi
 file=$PROJECTS_DIR/params-$project.env
 trusted "$file" || die "$file deve essere di root e non scrivibile da altri"
 DEVLOOP_USER='' DEVLOOP_CLONE='' DEVLOOP_PATH='' LAUNCHER_CMD='' SERVICE_NAME='' COORDINATION_DIR=''
+# I default di ops/lib.sh, per un file scritto prima di #705.
+MAINTENANCE_TIMEOUT=7200 MAINTENANCE_ACK_TIMEOUT=300
 while IFS= read -r line || [ -n "$line" ]; do
     case $line in '' | '#'*) continue ;; esac
     key=${line%%=*}
     case $key in
-        DEVLOOP_USER | DEVLOOP_CLONE | DEVLOOP_PATH | LAUNCHER_CMD | SERVICE_NAME | COORDINATION_DIR)
+        DEVLOOP_USER | DEVLOOP_CLONE | DEVLOOP_PATH | LAUNCHER_CMD | SERVICE_NAME | COORDINATION_DIR \
+            | MAINTENANCE_TIMEOUT | MAINTENANCE_ACK_TIMEOUT)
             printf -v "$key" '%s' "${line#*=}" ;;
         *) die "$file: riga non riconosciuta: $key (rieseguire setup-devloop.sh)" ;;
     esac
@@ -136,20 +160,249 @@ done <"$file"
 [[ $DEVLOOP_PATH =~ ^[A-Za-z0-9._/:-]+$ ]] || die "$file: DEVLOOP_PATH non valido: '$DEVLOOP_PATH'"
 [[ $LAUNCHER_CMD =~ ^/[A-Za-z0-9._/\ -]+$ ]] || die "$file: LAUNCHER_CMD non valido: '$LAUNCHER_CMD'"
 read -r -a launcher <<<"$LAUNCHER_CMD"
+for key in MAINTENANCE_TIMEOUT MAINTENANCE_ACK_TIMEOUT; do
+    [[ ${!key} =~ ^[1-9][0-9]{0,6}$ ]] || die "$file: $key non valido: '${!key}'"
+done
+
+utc() { date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ; }
+
+# box_ready SOTTOCOMANDO SEZIONE: il servizio e la casella fra i ruoli del file del progetto, che
+# pause, resume (#685) e maintenance (#705) usano; SEZIONE è quella di ops/host/migrate.md che li
+# porta. Imposta rest, pause_file e maintenance_file.
+box_ready() {
+    [ -n "$SERVICE_NAME" ] && [ -n "$COORDINATION_DIR" ] \
+        || die "$file: mancano SERVICE_NAME e COORDINATION_DIR, che $1 usa: rieseguire setup-devloop.sh (ops/host/migrate.md, \"$2\")"
+    [[ $SERVICE_NAME =~ ^[A-Za-z0-9_-]+(@[a-z0-9_-]+)?$ ]] \
+        || die "$file: SERVICE_NAME non valido: '$SERVICE_NAME'"
+    [[ $COORDINATION_DIR =~ ^/[A-Za-z0-9._/-]*$ ]] \
+        || die "$file: COORDINATION_DIR non valido: '$COORDINATION_DIR'"
+    rest=$COORDINATION_DIR/rest
+    pause_file=$rest/pause
+    maintenance_file=$rest/maintenance
+}
+
+# rest_ready COSA SEZIONE: rest/ c'è, e con COORDINATION_DIR ha lo sticky bit (3770): senza, un
+# ruolo, che scrive in entrambe, rinominerebbe rest/ o il file di root (la pausa, la
+# manutenzione), che sparirebbe dal percorso che devloop e i ruoli leggono.
+rest_ready() {
+    [ -d "$rest" ] && ! [ -L "$rest" ] \
+        || die "manca $rest, la directory del riposo dei ruoli: setup-supervisor.sh e setup-coordinator.sh (ops/host/migrate.md, \"Il riposo dei ruoli (#684)\")"
+    ! [ -L "$COORDINATION_DIR" ] && [ -k "$COORDINATION_DIR" ] && [ -k "$rest" ] \
+        || die "$COORDINATION_DIR e $rest devono avere lo sticky bit (3770), o un ruolo toglierebbe $1: rieseguire setup-supervisor.sh e setup-coordinator.sh (ops/host/migrate.md, \"$2\")"
+}
+
+# pause_valid [MINE]: la pausa c'è, un file regolare e non un link, "<inizio> pausa", di root
+# (MINE: appena scritta da questo comando, il temporaneo di root); l'inizio in start.
+pause_valid() {
+    local why=''
+    start=''
+    [ -f "$pause_file" ] && ! [ -L "$pause_file" ] || return 1
+    [ "${1:-}" = mine ] || [ "$(stat -c %u -- "$pause_file")" = 0 ] || return 1
+    read -r start why <"$pause_file" && [[ $start =~ ^[0-9]{1,12}$ ]] && [ "$why" = pausa ]
+}
+
+# maintenance_valid [MINE]: la manutenzione dell'host (#705) c'è, un file regolare e non un link,
+# "<inizio> manutenzione <scadenza> <sezioni>", di root (MINE: appena scritta da questo comando);
+# in m_start, m_expiry ("-" finché il servizio non è fermo) e m_sections.
+maintenance_valid() {
+    local word=''
+    m_start='' m_expiry='' m_sections=''
+    [ -f "$maintenance_file" ] && ! [ -L "$maintenance_file" ] || return 1
+    [ "${1:-}" = mine ] || [ "$(stat -c %u -- "$maintenance_file")" = 0 ] || return 1
+    read -r m_start word m_expiry m_sections <"$maintenance_file" \
+        && [[ $m_start =~ ^[0-9]{1,12}$ ]] && [ "$word" = manutenzione ] \
+        && [[ $m_expiry =~ ^([0-9]{1,12}|-)$ ]] && [ -n "$m_sections" ]
+}
+
+# maintenance_text: la manutenzione trovata da maintenance_valid, a parole.
+maintenance_text() {
+    local until
+    if [ "$m_expiry" = - ]; then
+        until='scadenza non ancora fissata'
+    else
+        until="scadenza $(utc "$m_expiry")"
+    fi
+    printf 'dal %s, sezioni: %s, %s' "$(utc "$m_start")" "$m_sections" "$until"
+}
+
+# put_maintenance MINE|NEW TESTO: il file della manutenzione con TESTO, 644 di root, da un
+# temporaneo di root. NEW lo crea in modo esclusivo (ln -T fallisce se il nome c'è già); MINE
+# sostituisce quello che questo comando ha appena creato (mv -T: un link al suo posto è
+# sostituito, non seguito).
+put_maintenance() {
+    local tmp
+    tmp=$(mktemp "$rest/.maintenance-XXXXXX") || return 1
+    if printf '%s\n' "$2" >"$tmp" && chmod 644 "$tmp"; then
+        if [ "$1" = new ]; then
+            ln -T -- "$tmp" "$maintenance_file" && rm -f -- "$tmp" && return 0
+        else
+            mv -f -T -- "$tmp" "$maintenance_file" && return 0
+        fi
+    fi
+    rm -f -- "$tmp"
+    return 1
+}
+
+# note TESTO: una riga dell'output e del log di sistema (logger), per la manutenzione.
+note() {
+    printf 'devloop: %s\n' "$1"
+    logger -t devloop-maintenance -- "progetto $project: $1" 2>/dev/null || true
+}
+
+# role_waits RUOLO INIZIO: RUOLO aspetta in manutenzione, cioè la sua sveglia
+# (ops/host/role-wait.sh) ha scritto lo stato rest/<ruolo>, "<ora> manutenzione", non prima di
+# INIZIO, e tiene il suo lock rest/<ruolo>.lock (un lock condiviso non si ottiene). Il lock si
+# apre solo se è un file regolare: una FIFO di un ruolo fermerebbe il comando.
+role_waits() {
+    local state=$rest/$1 lock=$rest/$1.lock at='' why=''
+    [ -f "$state" ] && ! [ -L "$state" ] && read -r at why <"$state" 2>/dev/null || return 1
+    [[ $at =~ ^[0-9]{1,12}$ ]] && [ "$at" -ge "$2" ] && [ "$why" = manutenzione ] || return 1
+    [ -f "$lock" ] && ! [ -L "$lock" ] || return 1
+    ! flock -n -s "$lock" true 2>/dev/null
+}
+
+# La manutenzione dell'host (#705), come root.
+if [ "$1" = maintenance ]; then
+    box_ready maintenance "La manutenzione dell'host (#705)"
+    case ${2:-} in
+        start)
+            [ $# -eq 3 ] \
+                || die 'maintenance start vuole le sezioni di ops/host/migrate.md del passo, in un solo argomento: devloop maintenance start "<sezioni>"'
+            sections=$3
+            # Una riga sola, che le sveglie e il watchdog dei ruoli ripetono: niente caratteri di
+            # controllo né spazi soli.
+            [ "${#sections}" -le 300 ] && ! [[ $sections =~ [[:cntrl:]] ]] \
+                && [[ $sections =~ [^[:space:]] ]] \
+                || die 'le sezioni sono una riga di testo, al più 300 caratteri, senza caratteri di controllo'
+            sections=$(printf '%s' "$sections" | tr -s ' ')
+            sections=${sections# }
+            rest_ready 'la manutenzione' "La manutenzione dell'host (#705)"
+            if pause_valid; then
+                die "il progetto $project è in pausa dal $(utc "$start"): la manutenzione non si apre durante la pausa dell'operatore, che la toglie con devloop --project $project resume"
+            fi
+            if maintenance_valid; then
+                die "il progetto $project è già in manutenzione ($(maintenance_text)): chiuderla con devloop --project $project maintenance end"
+            fi
+            if [ -e "$maintenance_file" ] || [ -L "$maintenance_file" ]; then
+                die "$maintenance_file c'è ma non è una manutenzione di root: toglierlo (l'ha creato un altro utente) e ripetere devloop --project $project maintenance start"
+            fi
+            # Prima la manutenzione, poi il servizio: un loop che la vede non avvia altri tick,
+            # un pin si rifiuta, e i ruoli entrano in manutenzione prima di vedere il servizio
+            # fermo.
+            now=$(date +%s)
+            put_maintenance new "$now manutenzione - $sections" \
+                || die "non creo la manutenzione $maintenance_file: il servizio resta com'è"
+            maintenance_valid mine && [ "$m_start" = "$now" ] \
+                || die "la manutenzione $maintenance_file non è quella scritta: il servizio resta com'è"
+            note "progetto $project in manutenzione dal $(utc "$now"), sezioni: $sections"
+            printf 'devloop: fermo %s: devloop finisce il tick e le azioni in corso, poi si ferma\n' \
+                "$SERVICE_NAME"
+            systemctl stop "$SERVICE_NAME" \
+                || die "systemctl stop $SERVICE_NAME non riuscito: la manutenzione c'è, e devloop run non avvia altri tick; per chiuderla: devloop --project $project maintenance end (journalctl -u $SERVICE_NAME)"
+            # La scadenza dallo stop (M2): il servizio è davvero fermo quando systemctl stop
+            # torna.
+            stopped=$(date +%s)
+            expiry=$((stopped + MAINTENANCE_TIMEOUT))
+            put_maintenance mine "$now manutenzione $expiry $sections" \
+                || die "non scrivo la scadenza nella manutenzione $maintenance_file: la manutenzione c'è senza scadenza; chiuderla con devloop --project $project maintenance end e ripetere"
+            note "$SERVICE_NAME fermo alle $(utc "$stopped"): la manutenzione scade alle $(utc "$expiry") (MAINTENANCE_TIMEOUT, ${MAINTENANCE_TIMEOUT}s); per chiuderla: devloop --project $project maintenance end"
+            # L'avviso della scadenza (#705): un timer di systemd transitorio, come root, che
+            # alla scadenza riesegue questo comando con maintenance expired; maintenance end lo
+            # ferma. Senza, il watchdog dei ruoli dice la scadenza nel suo journal.
+            self=$(readlink -f -- "$0")
+            systemd-run --quiet --unit="devloop-maintenance-$project-$now" \
+                --description="devloop: scadenza della manutenzione del progetto $project" \
+                --on-active="$((expiry - $(date +%s)))s" --timer-property=AccuracySec=10s \
+                -- "$self" --project "$project" maintenance expired "$now" \
+                || note "avviso: il timer dell'avviso della scadenza non è partito (systemd-run): alla scadenza solo il watchdog dei ruoli la dice, nel suo journal"
+            # Le conferme dei ruoli: un'informazione, non una condizione (l'ok non è una difesa).
+            pending=''
+            for role in supervisor coordinator; do
+                if role_waits "$role" "$now"; then
+                    printf 'devloop: il %s aspetta già in manutenzione\n' "$role"
+                else
+                    printf 'devloop: il %s non aspetta ancora in manutenzione\n' "$role"
+                    pending="$pending $role"
+                fi
+            done
+            if [ -n "$pending" ]; then
+                printf 'devloop: aspetto al più %ss che%s confermino (MAINTENANCE_ACK_TIMEOUT)\n' \
+                    "$MAINTENANCE_ACK_TIMEOUT" "$pending"
+            fi
+            deadline=$((SECONDS + MAINTENANCE_ACK_TIMEOUT))
+            while [ -n "$pending" ] && [ "$SECONDS" -lt "$deadline" ]; do
+                sleep 1
+                left=''
+                for role in $pending; do
+                    if role_waits "$role" "$now"; then
+                        printf 'devloop: il %s aspetta in manutenzione\n' "$role"
+                    else
+                        left="$left $role"
+                    fi
+                done
+                pending=$left
+            done
+            if [ -n "$pending" ]; then
+                note "non hanno confermato entro ${MAINTENANCE_ACK_TIMEOUT}s di aspettare in manutenzione:$pending; la manutenzione prosegue comunque (le difese di devloop run e devloop pin non dipendono dai ruoli)"
+            else
+                note "tutti i ruoli aspettano in manutenzione"
+            fi
+            printf 'devloop: il progetto %s è in manutenzione; alla fine del passo: devloop --project %s maintenance end\n' \
+                "$project" "$project"
+            exit 0
+            ;;
+        end)
+            [ $# -eq 2 ] || die 'maintenance end non vuole argomenti'
+            # Prima la manutenzione, poi il servizio; la pausa dell'operatore resta.
+            if [ -e "$maintenance_file" ] || [ -L "$maintenance_file" ]; then
+                found=''
+                maintenance_valid && found="$(maintenance_text)"
+                rm -f -- "$maintenance_file" || die "non tolgo la manutenzione $maintenance_file"
+                if [ -n "$found" ]; then
+                    note "manutenzione del progetto $project tolta ($found)"
+                    systemctl stop "devloop-maintenance-$project-$m_start.timer" 2>/dev/null || true
+                else
+                    note "tolto $maintenance_file, che non era una manutenzione di root"
+                fi
+            else
+                printf 'devloop: il progetto %s non era in manutenzione\n' "$project"
+            fi
+            if pause_valid; then
+                note "il progetto $project è in pausa dal $(utc "$start"): la pausa dell'operatore vince, $SERVICE_NAME resta fermo finché l'operatore non la toglie (devloop --project $project resume)"
+                exit 0
+            fi
+            systemctl start "$SERVICE_NAME" \
+                || die "systemctl start $SERVICE_NAME non riuscito: la manutenzione è tolta, il servizio no (journalctl -u $SERVICE_NAME)"
+            note "$SERVICE_NAME avviato; i ruoli in manutenzione si svegliano"
+            exit 0
+            ;;
+        expired)
+            # Dal timer di maintenance start: l'avviso all'operatore, se quella manutenzione c'è
+            # ancora ed è scaduta.
+            [ $# -eq 3 ] && [[ $3 =~ ^[0-9]{1,12}$ ]] \
+                || die 'maintenance expired vuole l'"'"'inizio della manutenzione (lo usa il timer di maintenance start)'
+            if ! maintenance_valid || [ "$m_start" != "$3" ]; then
+                printf 'devloop: la manutenzione del progetto %s cominciata alle %s non c'"'"'è più: nessun avviso\n' \
+                    "$project" "$(utc "$3")"
+                exit 0
+            fi
+            if [ "$m_expiry" = - ] || [ "$(date +%s)" -lt "$m_expiry" ]; then
+                printf 'devloop: la manutenzione del progetto %s non è ancora scaduta: nessun avviso\n' "$project"
+                exit 0
+            fi
+            note "la manutenzione del progetto $project è scaduta senza essere chiusa ($(maintenance_text)): l'avviso all'operatore"
+            set -- notify --key "maintenance-expired:$project:$m_start" \
+                "La manutenzione dell'host del progetto $project, cominciata alle $(utc "$m_start") per le sezioni $m_sections, è scaduta alle $(utc "$m_expiry") senza essere chiusa: devloop run non fa tick e devloop pin si rifiuta finché non la si chiude (devloop --project $project maintenance end)."
+            ;;
+        *) die 'maintenance vuole start "<sezioni>" o end' ;;
+    esac
+fi
 
 # La pausa e la ripresa dell'operatore (#685), come root.
 case $1 in
     pause | resume)
         [ $# -eq 1 ] || die "$1 non vuole argomenti"
-        [ -n "$SERVICE_NAME" ] && [ -n "$COORDINATION_DIR" ] \
-            || die "$file: mancano SERVICE_NAME e COORDINATION_DIR, che $1 usa: rieseguire setup-devloop.sh (ops/host/migrate.md, \"La pausa dell'operatore (#685)\")"
-        [[ $SERVICE_NAME =~ ^[A-Za-z0-9_-]+(@[a-z0-9_-]+)?$ ]] \
-            || die "$file: SERVICE_NAME non valido: '$SERVICE_NAME'"
-        [[ $COORDINATION_DIR =~ ^/[A-Za-z0-9._/-]*$ ]] \
-            || die "$file: COORDINATION_DIR non valido: '$COORDINATION_DIR'"
-        rest=$COORDINATION_DIR/rest
-        pause_file=$rest/pause
-        utc() { date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ; }
+        box_ready "$1" "La pausa dell'operatore (#685)"
         if [ "$1" = resume ]; then
             # Prima la pausa, poi il servizio: devloop run non parte finché la pausa c'è.
             if [ -e "$pause_file" ] || [ -L "$pause_file" ]; then
@@ -158,32 +411,23 @@ case $1 in
             else
                 printf 'devloop: il progetto %s non era in pausa\n' "$project"
             fi
+            # La manutenzione dell'host (#705) la chiude il suo end, che riavvia il servizio.
+            if maintenance_valid; then
+                printf 'devloop: il progetto %s è in manutenzione (%s): %s resta fermo fino a devloop --project %s maintenance end\n' \
+                    "$project" "$(maintenance_text)" "$SERVICE_NAME" "$project"
+                exit 0
+            fi
             systemctl start "$SERVICE_NAME" \
                 || die "systemctl start $SERVICE_NAME non riuscito: la pausa è tolta, il servizio no (journalctl -u $SERVICE_NAME)"
             printf 'devloop: %s avviato; i ruoli in pausa si svegliano\n' "$SERVICE_NAME"
             exit 0
         fi
-        [ -d "$rest" ] && ! [ -L "$rest" ] \
-            || die "manca $rest, la directory del riposo dei ruoli: setup-supervisor.sh e setup-coordinator.sh (ops/host/migrate.md, \"Il riposo dei ruoli (#684)\")"
-        # Lo sticky bit su COORDINATION_DIR e su rest/ (3770): senza, un ruolo, che scrive in
-        # entrambe, rinominerebbe rest/ o la pausa, e la pausa sparirebbe dal percorso che devloop
-        # e i ruoli leggono.
-        ! [ -L "$COORDINATION_DIR" ] && [ -k "$COORDINATION_DIR" ] && [ -k "$rest" ] \
-            || die "$COORDINATION_DIR e $rest devono avere lo sticky bit (3770), o un ruolo toglierebbe la pausa: rieseguire setup-supervisor.sh e setup-coordinator.sh (ops/host/migrate.md, \"La pausa dell'operatore (#685)\")"
+        rest_ready 'la pausa' "La pausa dell'operatore (#685)"
         # Una directory al posto della pausa (non l'ha scritta root): mv la prenderebbe come
         # destinazione e la pausa non ci sarebbe. Si toglie a mano.
         if [ -d "$pause_file" ] && ! [ -L "$pause_file" ]; then
             die "$pause_file è una directory, non la pausa dell'operatore: toglierla (l'ha creata un altro utente) e ripetere devloop --project $project pause"
         fi
-        # pause_valid [MINE]: la pausa c'è, un file regolare e non un link, "<inizio> pausa", di
-        # root (MINE: appena scritta da questo comando, il temporaneo di root); l'inizio in start.
-        pause_valid() {
-            local why=''
-            start=''
-            [ -f "$pause_file" ] && ! [ -L "$pause_file" ] || return 1
-            [ "${1:-}" = mine ] || [ "$(stat -c %u -- "$pause_file")" = 0 ] || return 1
-            read -r start why <"$pause_file" && [[ $start =~ ^[0-9]{1,12}$ ]] && [ "$why" = pausa ]
-        }
         # Prima la pausa, poi il servizio: i ruoli non si svegliano sul servizio fermo, e un
         # loop che la vede non avvia altri tick.
         if pause_valid; then
@@ -213,7 +457,20 @@ case $1 in
         ;;
 esac
 
+# Il pin di questo comando durante la manutenzione dell'host (#705): devloop pin si rifiuta in
+# manutenzione, salvo con DEVLOOP_MAINTENANCE_PIN uguale al suo inizio, che solo root passa (i
+# sudoers dei ruoli azzerano l'ambiente). È il pin del passo sull'host, non quello di un ruolo.
+extra=()
+if [ "$1" = pin ] && [[ $COORDINATION_DIR =~ ^/[A-Za-z0-9._/-]+$ ]]; then
+    maintenance_file=$COORDINATION_DIR/rest/maintenance
+    if maintenance_valid; then
+        printf 'devloop: il pin del passo sull'"'"'host, durante la manutenzione (%s)\n' \
+            "$(maintenance_text)" >&2
+        extra=("DEVLOOP_MAINTENANCE_PIN=$m_start")
+    fi
+fi
+
 # Nel clone, come WorkingDirectory dell'unità: sudo tiene la directory corrente.
 cd "$DEVLOOP_CLONE" || die "$DEVLOOP_CLONE non è accessibile"
 exec sudo -u "$DEVLOOP_USER" -H -- /usr/bin/env PATH="$DEVLOOP_PATH" PYTHONUNBUFFERED=1 \
-    "${launcher[@]}" "$@"
+    "${extra[@]}" "${launcher[@]}" "$@"

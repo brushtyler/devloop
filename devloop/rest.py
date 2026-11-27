@@ -33,6 +33,16 @@ progress): a service started by anyone but the operator's ``resume`` does not en
 that the watchdog of the roles can tell the work that waits in a pause, each tick also writes
 ``QUEUE_FILE`` in the directory of the stream of the events, ``<since> <queue>``: the queue of
 its snapshot, and since when it is the same.
+
+The maintenance of the host (#705) is the third reason: the host command ``devloop --project <p>
+maintenance start "<sections>"``, run as root by whoever carries out a step on the host (the
+sections of ``ops/host/migrate.md``), creates ``<rest_dir>/maintenance``, ``<start> manutenzione
+<expiry> <sections>`` (``-`` in place of the expiry until the service is stopped), and stops the
+service; ``maintenance end`` removes it and starts the service again, unless the operator's pause
+is on. Only root's file counts (``host_maintenance``). While it is on, ``devloop run`` starts no
+tick, as in the pause, and ``devloop pin`` refuses (``maintenance_refusal``), also after the
+expiry (choice M5 (a) of the operator): only the pin of the host command itself, as root, during
+that maintenance passes (``MAINTENANCE_PIN``).
 """
 
 import os
@@ -53,6 +63,13 @@ QUEUE_FILE = 'queue'
 PAUSE_FILE = 'pause'
 OPERATOR_UID = 0
 PAUSE_LINE = re.compile(r'([0-9]{1,12}) pausa( [^\n]*)?\n?')
+# The maintenance of the host (#705) in ``rest_dir``: a file of root only, as the pause.
+MAINTENANCE_FILE = 'maintenance'
+MAINTENANCE_LINE = re.compile(r'([0-9]{1,12}) manutenzione ([0-9]{1,12}|-) ([^\n]+)\n?')
+# The environment variable with which the host command, as root, passes its own pin during the
+# maintenance (#705): the start of that maintenance. A role cannot set it (its rules of sudo
+# reset the environment).
+MAINTENANCE_PIN = 'DEVLOOP_MAINTENANCE_PIN'
 # The actions that start new work: held while a role is at rest.
 HELD = ('preflight', 'implement')
 ROLES = ('supervisor', 'coordinator')
@@ -85,21 +102,69 @@ def operator_pause(rest_dir):
     ``PAUSE_FILE`` of ``rest_dir``, a regular file of root (``OPERATOR_UID``, not a link) that
     says ``<start> pausa``. Any other file there, one of a role included, is no pause; nor is a
     file that cannot be read."""
+    match = PAUSE_LINE.fullmatch(_root_file(Path(rest_dir) / PAUSE_FILE, 200) or '')
+    return int(match.group(1)) if match else None
+
+
+def _root_file(path, size):
+    """The text (at most ``size`` bytes) of ``path``, a regular file of root (``OPERATOR_UID``,
+    not a link), or None."""
     try:
-        fd = os.open(Path(rest_dir) / PAUSE_FILE, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
         return None
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_uid != OPERATOR_UID:
             return None
-        text = os.read(fd, 200).decode('utf-8', 'replace')
+        return os.read(fd, size).decode('utf-8', 'replace')
     except OSError:
         return None
     finally:
         os.close(fd)
-    match = PAUSE_LINE.fullmatch(text)
-    return int(match.group(1)) if match else None
+
+
+def host_maintenance(rest_dir):
+    """The maintenance of the host (#705), ``(start, expiry, sections)``, or None: the file
+    ``MAINTENANCE_FILE`` of ``rest_dir``, a regular file of root (not a link) that says ``<start>
+    manutenzione <expiry> <sections>``; ``expiry`` is None until the service is stopped. Any
+    other file there, one of a role included, is no maintenance."""
+    match = MAINTENANCE_LINE.fullmatch(_root_file(Path(rest_dir) / MAINTENANCE_FILE, 1000) or '')
+    if not match:
+        return None
+    expiry = None if match.group(2) == '-' else int(match.group(2))
+    return int(match.group(1)), expiry, match.group(3).strip()
+
+
+def _utc(seconds):
+    return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(seconds))
+
+
+def describe_maintenance(maintenance, now=None):
+    """The maintenance ``(start, expiry, sections)`` in words, for the log and the refusals."""
+    start, expiry, sections = maintenance
+    now = time.time() if now is None else now
+    if expiry is None:
+        until = 'the service is being stopped'
+    elif now >= expiry:
+        until = f'expired at {_utc(expiry)}, not ended yet'
+    else:
+        until = f'until {_utc(expiry)}'
+    return f'since {_utc(start)} ({until}), sections: {sections}'
+
+
+def maintenance_refusal(rest_dir, environ=os.environ):
+    """Why ``devloop pin`` refuses (#705), or None: the maintenance of the host is on (also
+    after its expiry, choice M5 (a)), and the pin is not that of the host command during this
+    maintenance (``MAINTENANCE_PIN`` with its start)."""
+    if not rest_dir:
+        return None
+    maintenance = host_maintenance(rest_dir)
+    if maintenance is None or environ.get(MAINTENANCE_PIN) == str(maintenance[0]):
+        return None
+    return (f'the host is in maintenance (#705) {describe_maintenance(maintenance)}: no pin '
+            'until it ends (maintenance end of the devloop command of the host); the step on '
+            'the host pins with the devloop command of the host, as root')
 
 
 class RestHold:
@@ -171,6 +236,10 @@ class RestHold:
     def paused(self):
         """The start of the pause of the operator (``operator_pause``), or None."""
         return operator_pause(self.rest_dir)
+
+    def maintenance(self):
+        """The maintenance of the host (``host_maintenance``), or None."""
+        return host_maintenance(self.rest_dir)
 
     def apply(self, actions, snapshot=None):
         """``actions`` without those of ``HELD`` while a role is at rest, or while the rest

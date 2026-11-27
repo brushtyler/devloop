@@ -1138,11 +1138,18 @@ pause=$(ops_pause_start) || pause=''
 if [ -n "$pause" ]; then
     say "  in pausa per ordine dell'operatore dal $(date -u -d "@$pause" +%Y-%m-%dT%H:%M:%SZ): devloop run non parte finché l'operatore non la toglie (devloop resume)"
 fi
+# La manutenzione dell'host (#705): il servizio fermo è la manutenzione, finché non la si chiude.
+maintenance=$(ops_maintenance) || maintenance=''
+if [ -n "$maintenance" ]; then
+    say "  in manutenzione $(ops_maintenance_text "$maintenance"): devloop run non fa tick e devloop pin si rifiuta finché non la si chiude (devloop maintenance end)"
+fi
 case $state in
     active) ok "$SERVICE_NAME è attivo" ;;
     failed) fail "$SERVICE_NAME è fallito: journalctl -u $SERVICE_NAME e $LOG" ;;
     *)
-        if [ -n "$pause" ]; then
+        if [ -n "$maintenance" ]; then
+            ok "$SERVICE_NAME non è attivo (${state:-sconosciuto}): la manutenzione dell'host"
+        elif [ -n "$pause" ]; then
             ok "$SERVICE_NAME non è attivo (${state:-sconosciuto}): la pausa dell'operatore"
         else
             warn "$SERVICE_NAME non è attivo (${state:-sconosciuto}): l'avvio è dell'operatore"

@@ -28,7 +28,7 @@ VERIFIED_ARCH=aarch64
 OPS_STATE_DIR=.devloop
 
 # I segnaposto @NOME@ che `render` sostituisce nei file dichiarativi (unità, sudoers).
-OPS_TEMPLATE_VARS='REPO DEVLOOP_USER SUPERVISOR_USER AGENT_USER COORDINATOR_USER DEVLOOP_HOME AGENT_HOME DEVLOOP_CLONE STATE_DIR STATE_PATH LAUNCHER_CMD DEVLOOP_PATH AGENT_PATH SERVICE_NAME REPO_LOCK_DIR REPO_LOCK_GROUP COORDINATOR_OPS_DIR COORDINATION_DIR WATCHDOG_USER WATCHDOG_OPS_DIR SENTINEL_USER DEVLOOP_PROJECTS_DIR DEVLOOP_COMMAND OPS_INSTANCE'
+OPS_TEMPLATE_VARS='REPO DEVLOOP_USER SUPERVISOR_USER AGENT_USER COORDINATOR_USER DEVLOOP_HOME AGENT_HOME DEVLOOP_CLONE STATE_DIR STATE_PATH LAUNCHER_CMD DEVLOOP_PATH AGENT_PATH SERVICE_NAME REPO_LOCK_DIR REPO_LOCK_GROUP COORDINATOR_OPS_DIR COORDINATION_DIR WATCHDOG_USER WATCHDOG_OPS_DIR SENTINEL_USER DEVLOOP_PROJECTS_DIR DEVLOOP_COMMAND OPS_INSTANCE MAINTENANCE_TIMEOUT MAINTENANCE_ACK_TIMEOUT'
 
 # I file di ops/ che check-host.sh legge (#530): setup-coordinator.sh li copia, con i parametri
 # (params.env), nella directory di root COORDINATOR_OPS_DIR, da cui il coordinatore esegue come
@@ -71,6 +71,11 @@ COORDINATION_REST=rest
 # solo il comando devloop dell'host scrive, come root (pause), e toglie (resume). Conta solo il
 # file di root (ops_pause_start): i ruoli scrivono in rest/, ma non aprono né chiudono la pausa.
 REST_PAUSE=pause
+# La manutenzione dell'host (#705), MAINTENANCE_FILE di devloop/rest.py: rest/maintenance,
+# "<inizio> manutenzione <scadenza> <sezioni>" ("-" al posto della scadenza finché il servizio non
+# è fermo), che solo il comando devloop dell'host crea, come root (maintenance start), e toglie
+# (maintenance end). Conta solo il file di root (ops_maintenance), come per la pausa.
+REST_MAINTENANCE=maintenance
 
 # Il flusso degli eventi (#683), come devloop/events.py: la directory dello state_dir che devloop
 # run scrive (DIRECTORY), con i segmenti, il segno di vita (ALIVE) e l'identità del flusso. I
@@ -710,6 +715,12 @@ ops_load_params() {
     : "${REST_DAILY_CHECK:=00:30}"
     : "${REST_WAKE_TIMEOUT:=300}"
     : "${REST_MAILBOX_AGE:=300}"
+    # La manutenzione dell'host (#705): la sua durata, contata dallo stop del servizio (scelta
+    # M2, due ore), e quanto `maintenance start` aspetta che i ruoli confermino di aspettare in
+    # manutenzione prima di proseguire comunque. Il comando devloop li legge dal file del
+    # progetto (devloop-command-project).
+    : "${MAINTENANCE_TIMEOUT:=7200}"
+    : "${MAINTENANCE_ACK_TIMEOUT:=300}"
     # Il nome del progetto nei nomi per progetto dei ruoli (#602): PROJECT, o _default senza
     # PROJECT. '_' non è ammesso in PROJECT, così l'installazione senza PROJECT non coincide mai
     # con un progetto (PROJECT=default compreso): unità, drop-in e stato restano distinti.
@@ -860,7 +871,7 @@ ops_load_params() {
         done
     done
     for copy in ROLE_WAIT_PERIOD COORDINATOR_WAIT_PERIOD EVENTS_STALE_AFTER REST_WAKE_TIMEOUT \
-        REST_MAILBOX_AGE; do
+        REST_MAILBOX_AGE MAINTENANCE_TIMEOUT MAINTENANCE_ACK_TIMEOUT; do
         [[ ${!copy} =~ ^[1-9][0-9]{0,6}$ ]] \
             || die "$copy è un numero di secondi, da 1 a 9999999: '${!copy}'"
     done
@@ -1294,6 +1305,36 @@ ops_pause_start() {
     read -r at why <"$file" 2>/dev/null || return 1
     [[ $at =~ ^[0-9]{1,12}$ ]] && [[ $why == pausa || $why == 'pausa '* ]] || return 1
     printf '%s\n' "$at"
+}
+
+# ops_maintenance: la manutenzione dell'host (#705), da COORDINATION_DIR/rest/maintenance, un file
+# regolare di root, non un link, "<inizio> manutenzione <scadenza> <sezioni>": stampa "<inizio>
+# <scadenza> <sezioni>", con "-" come scadenza finché il servizio non è fermo; nulla, e 1, senza
+# manutenzione. Il file di un altro utente non è una manutenzione, come per devloop
+# (host_maintenance di devloop/rest.py).
+ops_maintenance() {
+    local file=$COORDINATION_DIR/$COORDINATION_REST/$REST_MAINTENANCE owner='' kind=''
+    local at='' word='' expiry='' sections=''
+    [ -f "$file" ] && ! [ -L "$file" ] || return 1
+    read -r owner kind < <(stat -c '%u %F' -- "$file" 2>/dev/null) || return 1
+    [ "$owner" = 0 ] && [ "$kind" = 'regular file' ] || return 1
+    read -r at word expiry sections <"$file" 2>/dev/null || return 1
+    [[ $at =~ ^[0-9]{1,12}$ ]] && [ "$word" = manutenzione ] && [[ $expiry =~ ^([0-9]{1,12}|-)$ ]] \
+        && [ -n "$sections" ] || return 1
+    printf '%s %s %s\n' "$at" "$expiry" "$sections"
+}
+
+# ops_maintenance_text "<inizio> <scadenza> <sezioni>": la manutenzione a parole, per le righe
+# dei ruoli e del watchdog.
+ops_maintenance_text() {
+    local at expiry sections until
+    read -r at expiry sections <<<"$1"
+    if [ "$expiry" = - ]; then
+        until='scadenza non ancora fissata: parte dallo stop del servizio'
+    else
+        until="scadenza $(date -u -d "@$expiry" +%Y-%m-%dT%H:%M:%SZ)"
+    fi
+    printf 'dal %s, sezioni: %s, %s' "$(date -u -d "@$at" +%Y-%m-%dT%H:%M:%SZ)" "$sections" "$until"
 }
 
 # coordination_dirs: le directory della casella, una per riga: COORDINATION_DIR, una directory di

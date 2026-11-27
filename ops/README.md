@@ -138,6 +138,10 @@ sorveglia ciascuno e cosa fa all'avvio:
 - **la pausa** (#685): l'operatore ferma tutto, anche con issue e PR aperte, con `devloop
   --project <progetto> pause`, e lo fa ripartire con `resume`; i ruoli aspettano in pausa (passo
   10, "La pausa dell'operatore");
+- **la manutenzione dell'host** (#705): un passo sull'host si apre con `devloop --project
+  <progetto> maintenance start "<sezioni>"` e si chiude con `maintenance end`; nel frattempo
+  `devloop run` non fa tick, `devloop pin` si rifiuta e i ruoli aspettano in manutenzione (passo
+  10, "La manutenzione dell'host");
 - **l'avvio**: ogni ruolo rilegge la sua casella, il diario (#76) e il riepilogo (#316), poi
   riprende a sorvegliare.
 
@@ -198,7 +202,8 @@ ops/
     tmpfiles-devloop-repos.conf  directory dei lock per repository, comune all'host
     devloop-command          il comando devloop dell'host: il launcher di un progetto come la
                              sua unità, scelto con --project (con segnaposto); pause e resume,
-                             la pausa dell'operatore (#685)
+                             la pausa dell'operatore (#685); maintenance start e end, la
+                             manutenzione dell'host (#705)
     devloop-command-project  il file di un progetto per il comando devloop (con segnaposto)
     sudoers-agent            sudoers con cui devloop avvia CLI e test come utente degli agent
     sudoers-supervisor       sudoers minimale del supervisore (con segnaposto @NOME@)
@@ -529,10 +534,14 @@ installato; con più progetti si ferma e li elenca. Legge i file dei progetti ri
 eseguirli, e rifiuta un file o una directory che non sono di root o che altri possono scrivere.
 Per togliere un progetto dal comando si rimuove il suo file da `DEVLOOP_PROJECTS_DIR`. Non
 sostituisce i sudoers di supervisore e coordinatore, che usano i comandi esatti del launcher (passi
-7 e 10). Il comando ha solo due sottocomandi suoi, `pause` e `resume`, la pausa dell'operatore
-(#685, passo 10, "La pausa dell'operatore"), per cui il file del progetto ha anche il nome del
-servizio (`SERVICE_NAME`) e la casella fra i ruoli (`COORDINATION_DIR`); ogni altro sottocomando è
-di devloop.
+7 e 10). Il comando ha solo tre sottocomandi suoi: `pause` e `resume`, la pausa dell'operatore
+(#685, passo 10, "La pausa dell'operatore"), e `maintenance start "<sezioni>"` e `maintenance end`,
+la manutenzione dell'host (#705, passo 10, "La manutenzione dell'host"), per cui il file del
+progetto ha anche il nome del servizio (`SERVICE_NAME`), la casella fra i ruoli
+(`COORDINATION_DIR`), la durata della manutenzione (`MAINTENANCE_TIMEOUT`) e l'attesa delle
+conferme dei ruoli (`MAINTENANCE_ACK_TIMEOUT`); ogni altro sottocomando è di devloop. Durante la
+manutenzione il suo `pin` passa a devloop l'inizio della manutenzione: è il pin del passo
+sull'host, l'unico che devloop accetta finché la manutenzione c'è.
 
 Per ssdlc servono anche il **file di progetto** e le chiavi che l'overlay riceve con l'ADR 0006,
 R3 e R6: lo script non li crea. L'operatore copia [`ssdlc/project.toml`](host/ssdlc/project.toml) in
@@ -1250,6 +1259,57 @@ chiude la pausa. In pausa:
 - **`check-host.sh`** dice la pausa, e il servizio fermo non è un avviso.
 
 Su un host già attivo: [host/migrate.md](host/migrate.md#la-pausa-delloperatore-685).
+
+**La manutenzione dell'host** (#705). Durante un passo sull'host (le sezioni di
+[host/migrate.md](host/migrate.md)) i ruoli vedrebbero il servizio fermo o fallito senza sapere che
+è voluto, e un avvio o un pin a metà dei passi romperebbe la procedura. La manutenzione è uno
+stato, come la pausa, che accompagna una procedura dell'host: ha una scadenza e si chiude alla
+fine. La apre e la chiude chi fa il passo, come root, con il comando `devloop` dell'host (passo 4);
+chi la usa e come cambiano i runbook dei ruoli lo dice #706.
+
+- **`devloop --project <progetto> maintenance start "<sezioni>"`** si rifiuta se c'è già una
+  manutenzione o una pausa; crea in modo esclusivo `COORDINATION_DIR/rest/maintenance` ("<inizio>
+  manutenzione <scadenza> <sezioni>", 644 di root, con `-` al posto della scadenza finché il
+  servizio non è fermo), poi ferma il servizio e scrive la scadenza, `MAINTENANCE_TIMEOUT` secondi
+  (default **7200**, due ore) da quando il servizio è davvero fermo. Programma con un timer
+  transitorio di systemd (`devloop-maintenance-<progetto>-<inizio>`) l'avviso della scadenza
+  all'operatore, con `devloop notify` (`maintenance expired`, che non avvisa se quella manutenzione
+  è già chiusa; il timer non sopravvive a un riavvio della macchina, il watchdog sì). Poi dice quali
+  ruoli aspettano già in manutenzione (lo stato e il lock tenuti dalla loro sveglia) e quali no,
+  aspetta le loro conferme per al più `MAINTENANCE_ACK_TIMEOUT` secondi (default **300**), poi
+  prosegue comunque e scrive nell'output e nel log di sistema (`logger -t devloop-maintenance`) chi
+  non ha confermato: l'ok è una conferma, non una condizione di sicurezza.
+- **`devloop --project <progetto> maintenance end`** toglie la manutenzione, ferma il timer della
+  scadenza e riavvia il servizio, salvo una pausa dell'operatore aperta nel frattempo, che vince: il
+  servizio resta fermo fino al `resume`. Il `resume` di una pausa durante la manutenzione non
+  riavvia il servizio: lo fa `maintenance end`.
+- **Le difese** non dipendono dai ruoli: mentre `rest/maintenance` di root c'è, anche dopo la
+  scadenza (scelta M5 (a): un tick o un pin su un passo a metà fanno più danni di un progetto
+  fermo), `devloop run` (con `rest_dir` nell'overlay) non fa tick, anche se qualcuno avvia il
+  servizio, e `devloop pin` si rifiuta, con un messaggio che nomina la manutenzione. Passa solo il
+  pin del comando `devloop` dell'host, come root, il pin del passo: il comando dà a devloop
+  l'inizio della manutenzione (`DEVLOOP_MAINTENANCE_PIN`), che i sudoers dei ruoli, che azzerano
+  l'ambiente, non possono dare. Come per la pausa conta solo il file di root, e lo sticky bit di
+  `rest/` e di `COORDINATION_DIR` impedisce a un ruolo di toglierlo.
+- **I ruoli** ricevono ogni cambio una volta (scelta M1), senza messaggi nella casella: la loro
+  sveglia (`role-wait.sh`, normale, a riposo o in pausa) esce con `manutenzione: iniziata …`
+  (l'inizio, le sezioni, la scadenza), `manutenzione: in corso …` se la manutenzione c'era già al
+  suo avvio (anche un ruolo appena ripartito lo sa prima di qualunque azione),
+  `manutenzione: scaduta …` alla scadenza e `manutenzione: finita …` alla fine. Rilanciata durante
+  la manutenzione, aspetta in manutenzione: lo stato `rest/<ruolo>` "<inizio> manutenzione" e il
+  lock, senza battiti; sveglia solo per un messaggio nella casella, non per il servizio fermo, il
+  flusso fermo o gli errori del log.
+- **La sentinella** sveglia un ruolo solo per un messaggio nella sua casella.
+- **Il watchdog dei ruoli** vede **in manutenzione** un ruolo che aspetta con il suo stato e il suo
+  lock: il lavoro in attesa, la sentinella non attiva e i suoi segnali non sono anomalie; il lock
+  non tenuto e un messaggio vecchio nella casella sì. Del progetto scrive nel journal, una volta
+  per manutenzione, un'informazione, «in manutenzione dal …, sezioni …, scadenza …», e alla
+  scadenza, se nessuno l'ha chiusa, una volta, la riga `allarme all'operatore:`.
+- **`check-host.sh`** dice la manutenzione, e il servizio fermo non è un avviso.
+
+Un progetto con `SOURCE_REF` (#687) ha il comando e le sveglie del suo tag: finché il tag non
+contiene #705, per quel progetto la manutenzione non c'è, e i passi sull'host si fanno come prima.
+Su un host già attivo: [host/migrate.md](host/migrate.md#la-manutenzione-dellhost-705).
 
 **App del coordinatore** (#549). Il coordinatore firma comandi, commenti e label con un'app sua,
 `<APP_PREFIX>coordinator`, che l'operatore crea come le altre (passo 2), dal manifest

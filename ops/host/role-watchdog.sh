@@ -34,6 +34,15 @@
 # pausa per ordine dell'operatore dal …», con il lavoro in attesa (le issue e le PR aperte della
 # coda dell'ultimo tick, che devloop run scrive nel file queue del flusso degli eventi), perché la
 # pausa non si dimentichi.
+# Durante la manutenzione dell'host (#705: COORDINATION_DIR/rest/maintenance, di root, che crea
+# solo `devloop --project <progetto> maintenance start`, ops_maintenance di lib.sh) un ruolo che
+# aspetta in manutenzione (lo stato "<inizio> manutenzione" e il lock) è **in manutenzione**: il
+# lavoro in attesa non è un'anomalia, né la sentinella non attiva o i suoi segnali (la sveglia
+# legge da sé la casella); il lock non tenuto e il messaggio vecchio nella casella restano
+# anomalie. Del progetto, una volta per manutenzione, un'informazione nel journal, «in
+# manutenzione dal …, sezioni …, scadenza …»; alla scadenza, se nessuno l'ha chiusa, una volta,
+# la riga "allarme all'operatore:" (l'avviso con devloop notify lo manda il timer di
+# `maintenance start`).
 # Un ruolo fermo o in anomalia:
 # - il supervisore, con il coordinatore attivo o a riposo: un messaggio in to-coordinator/;
 # - il coordinatore, con il supervisore attivo o a riposo: un messaggio in to-supervisor/ e un
@@ -132,6 +141,14 @@ QUEUE=$STATE_PATH/$EVENTS_DIR/$EVENTS_QUEUE
 SENTINEL=''
 # L'inizio della pausa dell'operatore (#685), vuoto senza pausa.
 PAUSE=$(ops_pause_start) || PAUSE=''
+# La manutenzione dell'host (#705), "<inizio> <scadenza> <sezioni>", vuota senza manutenzione; il
+# suo inizio, e se è scaduta.
+MAINT=$(ops_maintenance) || MAINT=''
+MAINT_START='' MAINT_EXPIRED=0
+if [ -n "$MAINT" ]; then
+    read -r MAINT_START MAINT_EXPIRY _ <<<"$MAINT"
+    [ "$MAINT_EXPIRY" != - ] && [ "$NOW" -ge "$MAINT_EXPIRY" ] && MAINT_EXPIRED=1
+fi
 
 # utc SECONDI: l'ora UTC di SECONDI dall'epoca.
 utc() { date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ; }
@@ -168,15 +185,23 @@ lock_held() {
 # perché; torna 1 se ROLE non è a riposo.
 rest() {
     local role=$1 start wake at why oldest age text queue='coda vuota' anomalies=() name since
+    local motive='' waits=0
     start=$(ops_rest_start "$role") || return 1
-    if [ -z "$SENTINEL" ]; then
-        SENTINEL=$(systemctl is-active "$SENTINEL_UNIT.service" 2>/dev/null)
-        SENTINEL=${SENTINEL:-sconosciuto}
-    fi
-    if [ "$SENTINEL" != active ]; then
-        anomalies+=("sentinella:la sentinella $SENTINEL_UNIT non è attiva ($SENTINEL): nessuno sveglia il ruolo")
+    # In manutenzione (#705) la sveglia del ruolo legge da sé la casella e la manutenzione: la
+    # sentinella e i suoi segnali non contano (un passo sull'host può riavviarla).
+    read -r at motive <"$REST/$role" 2>/dev/null
+    [ -n "$MAINT" ] && [ "$motive" = manutenzione ] && waits=1
+    if [ "$waits" = 0 ]; then
+        if [ -z "$SENTINEL" ]; then
+            SENTINEL=$(systemctl is-active "$SENTINEL_UNIT.service" 2>/dev/null)
+            SENTINEL=${SENTINEL:-sconosciuto}
+        fi
+        if [ "$SENTINEL" != active ]; then
+            anomalies+=("sentinella:la sentinella $SENTINEL_UNIT non è attiva ($SENTINEL): nessuno sveglia il ruolo")
+        fi
     fi
     wake=$(ops_rest_wake "$role")
+    [ "$waits" = 1 ] && wake=''
     if [ -n "$wake" ] && [ "${wake%% *}" -ge "$start" ]; then
         at=${wake%% *}
         why=${wake#* }
@@ -189,8 +214,10 @@ rest() {
         # Il file del lavoro con un ruolo a riposo, che devloop run scrive con un controllo di
         # prontezza o un'implementazione trattenuti o con la coda non vuota (anche solo di issue
         # bloccate da prerequisiti, che nessuna azione avvia): "<prima volta> <ruoli> <lavoro>".
-        # In pausa (#685) il lavoro aspetta l'operatore: non è un'anomalia.
-        if [ -z "$PAUSE" ] && [ -f "$HOLD" ] && read -r at why text <"$HOLD" 2>/dev/null \
+        # In pausa (#685) il lavoro aspetta l'operatore, in manutenzione (#705) la sua fine: non è
+        # un'anomalia.
+        if [ -z "$PAUSE" ] && [ -z "$MAINT" ] && [ -f "$HOLD" ] \
+            && read -r at why text <"$HOLD" 2>/dev/null \
             && [[ $at =~ ^[0-9]{1,12}$ ]]
         then
             queue="c'è lavoro dalle $(utc "$at") (${text:-lavoro}), la sentinella lo sveglia"
@@ -206,7 +233,10 @@ rest() {
                 && anomalies+=("casella:un messaggio aspetta in to-$role/ da $((age / 60)) minuti, più di ${REST_MAILBOX_AGE}s (REST_MAILBOX_AGE)")
         fi
     fi
-    if [ -n "$PAUSE" ]; then
+    if [ "$waits" = 1 ]; then
+        name=manutenzione
+        since="in manutenzione $(ops_maintenance_text "$MAINT")"
+    elif [ -n "$PAUSE" ]; then
         name=pausa
         since="in pausa per ordine dell'operatore dal $(utc "$PAUSE")"
     else
@@ -215,7 +245,10 @@ rest() {
     fi
     if [ ${#anomalies[@]} -eq 0 ]; then
         BEAT_STATE=$name
-        if [ -n "$PAUSE" ]; then
+        if [ "$waits" = 1 ]; then
+            BEAT_KEY="manutenzione@$MAINT_START"
+            BEAT_WHY=$since
+        elif [ -n "$PAUSE" ]; then
             BEAT_KEY="pausa@$PAUSE"
             BEAT_WHY=$since
         else
@@ -279,6 +312,11 @@ rm -f "$STATE/failed"
 NEW="supervisor=$SUPERVISOR_KEY coordinator=$COORDINATOR_KEY"
 # La pausa dell'operatore (#685) nello stato salvato, per dirla una volta per pausa.
 [ -z "$PAUSE" ] || NEW="$NEW pause=$PAUSE"
+# E la manutenzione dell'host (#705), per dirla una volta al suo inizio e una alla scadenza.
+if [ -n "$MAINT" ]; then
+    NEW="$NEW maintenance=$MAINT_START"
+    [ "$MAINT_EXPIRED" = 0 ] || NEW="$NEW:scaduta"
+fi
 OLD=$(cat "$STATE/last" 2>/dev/null || printf 'supervisor=ok coordinator=ok')
 say "$WHO: supervisore $SUPERVISOR_STATE ($SUPERVISOR_WHY), coordinatore $COORDINATOR_STATE ($COORDINATOR_WHY)"
 if [ "$NEW" = "$OLD" ]; then
@@ -318,6 +356,19 @@ done
 # La pausa dell'operatore (#685): un'informazione, una volta per pausa, con il lavoro in attesa.
 if [ -n "$PAUSE" ] && [[ " $OLD " != *" pause=$PAUSE "* ]]; then
     say "informazione: $WHO: in pausa per ordine dell'operatore dal $(utc "$PAUSE"), $(waiting_work); la riprende solo l'operatore (devloop resume)"
+fi
+# La manutenzione dell'host (#705): un'informazione, non un allarme, una volta per manutenzione;
+# alla scadenza, se nessuno l'ha chiusa, un allarme all'operatore, una volta. devloop notify lo
+# manda il timer di `maintenance start` (ops/host/devloop-command), come root: il watchdog non
+# ha chiavi né sudo.
+if [ -n "$MAINT" ]; then
+    if [[ " $OLD " != *" maintenance=$MAINT_START "* && " $OLD " != *" maintenance=$MAINT_START:"* ]]
+    then
+        say "informazione: $WHO: in manutenzione $(ops_maintenance_text "$MAINT"); devloop run non fa tick e devloop pin si rifiuta finché non la si chiude (devloop maintenance end)"
+    fi
+    if [ "$MAINT_EXPIRED" = 1 ] && [[ " $OLD " != *" maintenance=$MAINT_START:scaduta "* ]]; then
+        say "allarme all'operatore: $WHO: la manutenzione dell'host $(ops_maintenance_text "$MAINT") è scaduta senza essere chiusa: devloop run e devloop pin restano fermi finché non la si chiude (devloop maintenance end); l'avviso parte con devloop notify dal timer di maintenance start"
+    fi
 fi
 
 # L'avviso all'operatore: `devloop notify` del progetto quando ci sarà (#593); finché non c'è,
