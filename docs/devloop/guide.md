@@ -937,7 +937,9 @@ owns: when the check owns `agent:needs-operator` is described in
 [Readiness check records](protocol.md#readiness-check-records). A note of the supervisor, such as
 its "Decisione per l'operatore" listing the options, does not take the block away from the
 check: only a comment of the supervisor with an escalation or a readiness check record does
-(#468).
+(#468). Nor does the dispatcher's record of a `/devloop authorize` (#722): when the coordinator
+changes the text of an issue the check blocked and authorizes it again, the changed text is
+checked again.
 
 A request of a person, `/devloop recheck` from a trusted user or `agent:ready` added again by
 someone who may admit the issue, needs less (#468): the block need only be still the issue's
@@ -2631,6 +2633,7 @@ $devloop direction        # print the operator's direction in force, from [direc
 $devloop fallback reset agy-reviewer  # forget the models agy-reviewer remembers unavailable (see Memory of unavailable models)
 $devloop token claude -- gh pr comment 70 --body-file reply.md  # run a command as an agent's app of the project (see GitHub identities; scripts/agent-token.py calls it)
 $devloop clone /path/of/the/clone  # the first clone of the managed repository, private too, with a token of the dispatcher's app limited to contents=read; it reads only repo and [apps] of the overlay (reference, "Clone and fetch of the managed repository")
+$devloop fetch --check    # reach the base branch of the managed repository with the dispatcher's token, writing nothing; without --check, its fetch as the loop makes it (reference, "Clone and fetch of the managed repository")
 $devloop notify --key host:disk "disk almost full"  # a notice to the operator on [notify], once per key and interval (see Notices to the operator); --test to check the channel
 ```
 

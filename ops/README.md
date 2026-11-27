@@ -528,7 +528,8 @@ sudo bash ops/host/setup-devloop.sh
 ```
 
 Installa i pacchetti che mancano (`python3`, `git`, `gh`, `openssl`, `acl`, `nodejs`, `npm`, …),
-crea l'utente `devloop` e il suo clone, `state_dir` (750) con `run.log`, l'overlay d'esempio (600,
+crea l'utente `devloop` e il suo clone (di un repository privato, solo dopo overlay e chiavi: [Un
+repository privato](#un-repository-privato)), `state_dir` (750) con `run.log`, l'overlay d'esempio (600,
 solo se non esiste), `~/.ghapps`, `~/.claude` e `~/.codex` con mode 700, `~/.claude/settings.json` con gli
 aggiornamenti automatici spenti (solo se non esiste), e l'unità `devloop.service`. Non avvia il
 servizio. Le CLI degli agent non sono di `devloop`: le prepara il passo 5.
@@ -942,8 +943,12 @@ con il loro strumento di shell (#494: passa dal modello, con la rete e il login 
 errore se non risponde con `git version` o se nell'output c'è un `permission denied`); che i
 clone dei ruoli si aggiornino (#717: come l'utente del ruolo e senza scrivere nel clone; per un
 repository pubblico, `git ls-remote origin` dal clone, con la sua configurazione; per uno privato,
-che la sua app con `contents=read` legga il repository; non con `--no-apps`); e
-`devloop apps`
+che la sua app con `contents=read` legga il repository; non con `--no-apps`); se il
+repository gestito è pubblico o privato (#718: un `git ls-remote` anonimo) e, se è privato, che
+l'overlay abbia `[apps.dispatcher]`, che il clone e la copia fissata ci siano e che il fetch del
+clone con il token del dispatcher riesca, come `devloop` (`devloop fetch`; con `--read-only`
+`devloop fetch --check`, che non scrive nulla: [Un repository privato](#un-repository-privato));
+e `devloop apps`
 (ogni app, la sua installazione e i suoi permessi). Con `--dry-run` stampa, senza eseguirle, le
 verifiche che passano da `sudo` o dalla rete.
 
@@ -1450,6 +1455,59 @@ Poi, a mano: la CLI dell'agent del coordinatore e il suo login, come utente `coo
 Nessun token personale per `gh`: il coordinatore legge e scrive GitHub con la sua app
 ([github/tokens.md](github/tokens.md)). Su un host già attivo i passi sono in
 [host/migrate.md](host/migrate.md#utente-del-coordinatore-530).
+
+### Un repository privato
+
+Il repository gestito può essere privato (#716, #718). devloop lo legge con l'app del dispatcher:
+ogni fetch del loop e il primo clone (`devloop clone`) vanno all'URL HTTPS del repository con un
+token di quell'app limitato a `contents: read`, solo nell'ambiente del comando, mai nella
+configurazione del clone ([Clone and fetch of the managed
+repository](../docs/devloop/reference.md#clone-and-fetch-of-the-managed-repository)). Gli agent
+non cambiano: i loro worktree vengono dal clone del dispatcher, e restano senza credenziali di
+rete.
+
+**I permessi.** Nessuno nuovo per devloop: il manifest del dispatcher ha già `contents: read`
+(passo 2). Le app si creano e si installano sul repository privato come su uno pubblico.
+
+**I parametri.** Un repository privato vuole la sorgente a parte (`SOURCE_REPO` e `SOURCE_REF`:
+devloop viene dal clone della sorgente, pubblica) e uno `STATE_DIR` assoluto, fuori dal clone, che
+nasce dopo lo `state_dir`. Senza, `setup-devloop.sh` si ferma e dice quale manca. I parametri della
+[guida rapida](../docs/devloop/quickstart.md) li hanno già.
+
+**L'ordine dei passi.** `setup-devloop.sh` chiede a GitHub, con un `git ls-remote` anonimo (senza
+configurazione di git, helper delle credenziali né richieste sul terminale), se dà il repository
+senza credenziali. Se lo dà, lo clona come sempre. Altrimenti il clone lo fa `devloop clone` con il
+token del dispatcher, che vuole l'overlay e la chiave, assenti alla prima esecuzione:
+
+1. la prima esecuzione di `setup-devloop.sh` (o di `setup-project.sh`) fa il resto, il clone della
+   sorgente compreso, e lascia il clone del repository fra i passi a mano;
+2. le app (passo 2), poi nell'overlay `repo` e `[apps.dispatcher]`, e la chiave del dispatcher
+   nella `key_dir` di `devloop` (passo 4), come per un repository pubblico;
+3. la seconda esecuzione di `setup-devloop.sh` (o di `setup-project.sh`, passo 5 della guida
+   rapida) clona il repository come `devloop`, con `devloop clone` del clone della sorgente, che
+   deve averlo (#716), e il solo overlay. Il clone ha `origin` all'URL HTTPS del repository e
+   nessun token nella sua configurazione;
+4. il primo pin, `check-host.sh` e l'avvio, come per un repository pubblico. `check-host.sh` dice
+   che il repository è privato e verifica, come `devloop`, il fetch del clone con il token del
+   dispatcher: `devloop fetch`, come il loop, o con `--read-only` `devloop fetch --check`, un
+   `git ls-remote` che non scrive nulla. Senza `[apps.dispatcher]`, senza clone o senza copia
+   fissata è un errore.
+
+Con `--dry-run` nessuno dei due script chiede nulla a GitHub: `setup-devloop.sh` stampa il clone
+di sempre e, sotto, come si clona un repository privato. Un repository pubblico che GitHub non
+raggiunge (la rete assente) sembra privato: i messaggi lo dicono.
+
+**I limiti.**
+
+- **I clone dei ruoli** (`SUPERVISOR_CLONE` e `COORDINATOR_CLONE`): `setup-supervisor.sh` e
+  `setup-coordinator.sh` clonano ancora il repository gestito senza credenziali, e con un
+  repository privato non riescono, quindi `setup-project.sh` si ferma a `setup-supervisor.sh`. È
+  #717: le app del supervisore e del coordinatore avranno bisogno di `contents: read`, che serve
+  solo per un repository privato; per uno pubblico, compreso quello di devloop, non è necessario.
+- **I registri privati delle dipendenze** di `[prepare]` restano fuori: la preparazione dei
+  worktree gira come l'utente degli agent, senza credenziali di rete.
+- **La sorgente di devloop** resta pubblica: i suoi clone (`SOURCE_CLONE` e quelli dei ruoli) non
+  cambiano.
 
 ## Migrazione su un'altra macchina
 

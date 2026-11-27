@@ -316,6 +316,30 @@ class RequestTests(Case):
         self.assertEqual(self.gh.labels[7], {READY})
         self.assertEqual(self.planned(d), [('implement', 7)])
 
+    def test_a_new_authorization_of_a_changed_text_keeps_the_block_and_checks_again(self):
+        # #722: the coordinator changes the text of an issue the check blocked and authorizes
+        # it again; the dispatcher's record of that authorization (or of a refusal) is no
+        # escalation, so the block stays the check's and the changed text is checked again.
+        for outcome in ('authorized', 'refused'):
+            with self.subTest(outcome):
+                d = self.make()
+                self.blocked(d, gap())
+                history = self.gh.issue_history
+                self.gh.issue_history = lambda n: dict(history(n), body='Testo nuovo.')
+                record = {'outcome': outcome, 'comment': 1, 'by': 'coordinator[bot]',
+                          'at': '2026-11-17T11:30:00Z', 'priority': ''}
+                record.update({'hash': 'a' * 64} if outcome == 'authorized'
+                              else {'reason': 'Motivo.'})
+                self.gh.say(7, 'brushtyler', markdown.render_authorize(record))
+                view = d._preflight_view(7, {READY, HUMAN})
+                self.assertTrue(view['owned'])
+                self.assertEqual(preflight_state(view),
+                                 ('run', 'the issue text changed since the readiness check'))
+                self.assertEqual(self.planned(d), [('preflight', 7)])
+                self.runner.outputs.append(checked(True))
+                self.assertEqual([a.kind for a in d.tick()], ['preflight'])
+                self.assertEqual(self.gh.labels[7], {READY})
+
     def test_a_note_with_an_escalation_marker_still_voids_the_attribution(self):
         d = self.make()
         self.blocked(d, gap())

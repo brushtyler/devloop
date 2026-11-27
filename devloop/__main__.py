@@ -1,6 +1,6 @@
 """devloop command line: python3 -m devloop
 {setup,status,apps,tick,run,cleanup,gc,follow,watch,pin,report,direction,fallback,token,clone,
-notify}."""
+fetch,notify}."""
 
 import argparse
 import fcntl
@@ -815,6 +815,47 @@ def run_clone(args, auth=AppAuth, clone=workspace_clone):
     return 0
 
 
+def run_fetch(args, auth=AppAuth, run=subprocess.run):
+    """``devloop fetch [--check]`` (#718): the fetch of the base branch of the managed
+    repository into the clone, as the loop makes it (``Workspace.fetch_base``), with a token of
+    the dispatcher's app limited to ``contents=read`` (``apps.FETCH``): what ``check-host.sh``
+    verifies for a private repository. ``--check`` writes nothing: ``git ls-remote`` of the base
+    branch, with the same token and defences. It runs from the checkout of the managed
+    repository, with the configuration of the project, and stops without the dispatcher's app
+    or its key. ``auth`` and ``run`` are there for the tests. Returns 0, or exits with a
+    message."""
+    try:
+        root = main_checkout()
+    except (OSError, subprocess.CalledProcessError):
+        sys.exit('devloop: fetch: run it from the checkout of the managed repository')
+    try:
+        cfg = load(args, root)
+        state_path(cfg, root)
+    except ConfigError as exc:
+        sys.exit(f'devloop: invalid config: {exc}')
+    configured = cfg.apps.get(DISPATCHER)
+    if configured is None:
+        sys.exit(f'devloop: fetch: no GitHub App of the dispatcher in [apps] of the overlay of '
+                 f'{cfg.repo}: set [apps.dispatcher] and its key first')
+    key_dir = os.environ.get('DEVLOOP_APP_KEY_DIR') or cfg.app_key_dir
+    try:
+        app = auth(configured.app_id, configured.slug, find_key(key_dir, configured.slug),
+                   cfg.repo)
+    except (OSError, ValueError, KeyError) as exc:
+        sys.exit(f'devloop: fetch: no token of the dispatcher app: {exc}')
+    url = repo_url(cfg.repo)
+    ws = Workspace(root, cfg.state_dir, cfg.base_branch, run=run,
+                   fetch_auth=lambda: {'url': url, 'token': app.token(FETCH)})
+    try:
+        ws.fetch_base(check=args.check)
+    except WorkspaceError as exc:
+        sys.exit(f'devloop: fetch: {exc}')
+    done = 'reached' if args.check else f'fetched into origin/{cfg.base_branch}'
+    log(f'fetch: {cfg.base_branch} of {cfg.repo} {done}, with the token of the dispatcher app '
+        '(contents=read)')
+    return 0
+
+
 def run_watch(parser, args):
     """``devloop watch`` (#173). It reads GitHub with the identity of the ticks' reads (#197):
     the dispatcher's app when ``[apps]`` has one, else the ambient ``gh`` login."""
@@ -1171,6 +1212,12 @@ def main(argv=None):
                                              'configuration) with a token of the dispatcher '
                                              'app limited to contents=read')
     clone_cmd.add_argument('dest', help='the directory of the clone: absent, or empty')
+    fetch_cmd = sub.add_parser('fetch', help='fetch the base branch of the managed repository '
+                                             'into its clone, as the loop does, with a token of '
+                                             'the dispatcher app limited to contents=read')
+    fetch_cmd.add_argument('--check', action='store_true',
+                           help='write nothing: only check that the base branch is reached '
+                                '(git ls-remote)')
     notify_cmd = sub.add_parser('notify', help='send a notice to the operator on the channel '
                                                'of [notify] of the overlay (Telegram, outbound '
                                                'only), once per key and interval')
@@ -1277,6 +1324,8 @@ def _command(parser, args, argv, command, timeout):
         return run_token(args, command)
     if args.command == 'clone':
         sys.exit(run_clone(args))
+    if args.command == 'fetch':
+        sys.exit(run_fetch(args))
     if args.command == 'fallback':
         return run_fallback(args)
     if args.command == 'report':

@@ -528,18 +528,44 @@ class Workspace:
         says so. Nothing in a read-only workspace: the remote branches are those last fetched."""
         if self._read_only is not None:
             return
-        try:
-            auth = self.fetch_auth() if self.fetch_auth is not None else None
-        except Exception as exc:  # whatever the mint raised: the fetch fails, as on git's errors
-            raise WorkspaceError(f'git fetch: no token of the dispatcher app to fetch '
-                                 f'{self.base_branch}: {exc}') from exc
+        auth = self._fetch_credentials('git fetch')
         if not auth:
             self._git('fetch', 'origin', self.base_branch, *refs)
             return
         url = auth['url']
-        self._refuse_rewrites(None, url, 'fetch')
         self._git('fetch', url,
                   f'+refs/heads/{self.base_branch}:refs/remotes/origin/{self.base_branch}', *refs,
+                  env=app_auth_env(url, auth['token']), unset=APP_AUTH_UNSET)
+
+    def _fetch_credentials(self, what):
+        """The credentials of :attr:`fetch_auth`, ``{url, token}``, after the refusal of the URL
+        rewrites that match ``url``; None without them, for ``origin`` and the ambient ones. A
+        token that cannot be had raises WorkspaceError, with ``what`` and a message that says
+        so."""
+        try:
+            auth = self.fetch_auth() if self.fetch_auth is not None else None
+        except Exception as exc:  # whatever the mint raised: the fetch fails, as on git's errors
+            raise WorkspaceError(f'{what}: no token of the dispatcher app to fetch '
+                                 f'{self.base_branch}: {exc}') from exc
+        if auth:
+            self._refuse_rewrites(None, auth['url'], 'fetch')
+        return auth or None
+
+    def fetch_base(self, check=False):
+        """``devloop fetch`` (#718): the fetch of the base branch as the loop makes it
+        (``_fetch``), with the same credentials and defences. With ``check`` nothing is written:
+        ``git ls-remote --exit-code`` of the base branch instead, which fails when the branch is
+        not there. Without :attr:`fetch_auth`, ``origin`` with the ambient credentials. Raises
+        WorkspaceError."""
+        if not check:
+            self._fetch()
+            return
+        auth = self._fetch_credentials('git ls-remote')
+        if not auth:
+            self._git('ls-remote', '--exit-code', 'origin', f'refs/heads/{self.base_branch}')
+            return
+        url = auth['url']
+        self._git('ls-remote', '--exit-code', url, f'refs/heads/{self.base_branch}',
                   env=app_auth_env(url, auth['token']), unset=APP_AUTH_UNSET)
 
     def path(self, name):

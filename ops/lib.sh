@@ -1641,6 +1641,34 @@ clone_origin() {
 }
 origin_slug() { printf '%s' "$1" | sed -E 's#^.*github\.com[:/]##; s#/+$##; s#\.git$##'; }
 
+# repo_public REPO: GitHub dà REPO senza credenziali (#718), a un git ls-remote anonimo: nessun
+# file di configurazione di git (né di sistema, né dell'utente, né di un repository: gira in /),
+# nessun helper delle credenziali, nessuna richiesta sul terminale, solo HTTPS, al più 60 secondi.
+# Falso per un repository privato, e anche quando GitHub non si raggiunge. Non scrive nulla.
+repo_public() {
+    (cd / && env -u GIT_CONFIG_PARAMETERS -u GIT_CONFIG_COUNT -u GIT_DIR HOME=/nonexistent \
+        XDG_CONFIG_HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+        GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=false SSH_ASKPASS=false GIT_ALLOW_PROTOCOL=https \
+        timeout 60 git ls-remote "https://github.com/$1.git" HEAD) </dev/null >/dev/null 2>&1
+}
+
+# token_clone OVERLAY: il clone del repository gestito privato in DEVLOOP_CLONE, come utente
+# devloop, con `devloop clone` (#716): un token dell'app del dispatcher limitato a contents=read,
+# con il codice del clone della sorgente (SOURCE_CLONE) e solo repo e [apps] di OVERLAY (#718).
+# Solo quando OVERLAY dichiara [apps.dispatcher] e la key_dir di devloop ha la sua chiave;
+# altrimenti è un passo a mano, che fa la prossima esecuzione dello script.
+token_clone() {
+    local overlay=$1 doc="ops/README.md, «Un repository privato»"
+    if ! overlay_declares_app "$overlay" dispatcher; then
+        todo "il clone di $REPO, privato: [apps.dispatcher] in $overlay e la chiave di ${APP_PREFIX}dispatcher in $DEVLOOP_KEY_DIR, poi rieseguire questo script ($doc)"
+    elif ! compgen -G "$DEVLOOP_KEY_DIR/${APP_PREFIX}dispatcher.*.private-key.pem" >/dev/null 2>&1; then
+        todo "il clone di $REPO, privato: la chiave di ${APP_PREFIX}dispatcher in $DEVLOOP_KEY_DIR, poi rieseguire questo script ($doc)"
+    else
+        as_user "$DEVLOOP_USER" /usr/bin/env -C "$SOURCE_CLONE" PYTHONPATH="$SOURCE_CLONE" \
+            /usr/bin/python3 -P -m devloop --local-config "$overlay" clone "$DEVLOOP_CLONE"
+    fi
+}
+
 # ensure_source_clone USER DIR: in DIR, di USER, un clone di SOURCE_REPO con il tag SOURCE_REF
 # di origin estratto (#571). Da lì il supervisore e il coordinatore di un progetto con la
 # sorgente a parte lanciano scripts/supervisor-token.py e scripts/coordinator-token.py, che il
@@ -1661,17 +1689,6 @@ ensure_source_clone() {
     as_user "$user" git -C "$dir" fetch --quiet --no-tags origin \
         "+refs/tags/$SOURCE_REF:refs/tags/$SOURCE_REF"
     as_user "$user" git -C "$dir" checkout --quiet --detach "refs/tags/$SOURCE_REF"
-}
-
-# repo_public: 0 se https://github.com/$REPO.git si legge senza credenziali (un repository
-# pubblico), 1 altrimenti: privato, o GitHub non raggiungibile (#717). Nessuna credenziale entra
-# nella prova: né helper né configurazione di sistema, globale o dell'ambiente, né richieste al
-# terminale. Va in rete: con --dry-run non si chiama.
-repo_public() {
-    env -u GIT_CONFIG_PARAMETERS -u GIT_CONFIG_COUNT -u GIT_DIR GIT_CONFIG_NOSYSTEM=1 \
-        GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=false SSH_ASKPASS=false \
-        timeout 60 git -C / ls-remote --quiet --exit-code "https://github.com/$REPO.git" HEAD \
-        >/dev/null 2>&1
 }
 
 # role_git_cmd RUOLO KEY_DIR TOKEN_CLONE AZIONE CLONE: in ROLE_GIT il comando che fa AZIONE
@@ -1714,7 +1731,7 @@ ensure_role_clone() {
         as_user "$user" "${ROLE_GIT[@]}"
         return 0
     fi
-    if repo_public; then
+    if repo_public "$REPO"; then
         [ "$action" = fetch ] || as_user "$user" git clone "https://github.com/$REPO.git" "$clone"
         return 0
     fi

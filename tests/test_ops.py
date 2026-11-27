@@ -148,6 +148,9 @@ class OpsTestCase(unittest.TestCase):
         self.calls = self.tmp / 'calls'
         for name in MUTATING:
             self.shim(name, 'echo "$(basename "$0") $*" >> "$OPS_TEST_CALLS"')
+        # The anonymous git ls-remote of repo_public (#718) only reads: a public repository.
+        self.shim('git', 'if [ "$1" = ls-remote ]; then exit 0; fi\n'
+                         'echo "$(basename "$0") $*" >> "$OPS_TEST_CALLS"')
         self.release = self.tmp / 'os-release'
         self.release.write_text('ID=ubuntu\nVERSION_ID="26.04"\n')
         self.home = self.tmp / 'home'
@@ -3834,6 +3837,88 @@ esac''')
         values.update(overrides)
         return self.params(**values)
 
+    def lib(self, params, code, env=None):
+        """``code`` of bash after ops/lib.sh and the parameters ``params``, with --dry-run."""
+        env = dict(os.environ, PATH=f'{self.bin}:{os.environ.get("PATH", "/usr/bin:/bin")}',
+                   OPS_TEST_CALLS=str(self.calls), LC_ALL='C.UTF-8', **(env or {}))
+        return subprocess.run(
+            [BASH, '-c', f'. {shlex.quote(str(OPS / "lib.sh"))}; '
+             f'PARAMS_FILE={shlex.quote(str(params))}; ops_load_params; DRY_RUN=1; {code}'],
+            capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL, timeout=60)
+
+    def test_a_public_repository_is_one_github_gives_without_credentials(self):
+        # #718: repo_public, an anonymous git ls-remote: no config file of git, no credential
+        # helper, no prompt, only HTTPS. Its exit status decides.
+        seen, status = self.tmp / 'git-env', self.tmp / 'git-status'
+        self.shim('git', f'{{ echo "PWD=$PWD ARGS=$*"; env; }} > {shlex.quote(str(seen))}\n'
+                         f'exit "$(cat {shlex.quote(str(status))})"')
+        params = self.source_params()
+        for code, expected in (('0', 'public'), ('128', 'private')):
+            with self.subTest(code=code):
+                status.write_text(code)
+                done = self.lib(params, 'if repo_public "$REPO"; then echo public; '
+                                        'else echo private; fi',
+                                env={'GIT_CONFIG_PARAMETERS': "'credential.helper'='store'",
+                                     'GIT_CONFIG_COUNT': '1'})
+                self.assertEqual(done.stdout, f'{expected}\n', done.stderr)
+                lines = seen.read_text().splitlines()
+                self.assertEqual(lines[0], 'PWD=/ ARGS=ls-remote '
+                                           'https://github.com/acme/widget.git HEAD')
+                for line in ('HOME=/nonexistent', 'GIT_CONFIG_NOSYSTEM=1',
+                             'GIT_CONFIG_GLOBAL=/dev/null', 'GIT_TERMINAL_PROMPT=0',
+                             'GIT_ASKPASS=false', 'GIT_ALLOW_PROTOCOL=https'):
+                    self.assertIn(line, lines)
+                self.assertFalse([line for line in lines
+                                  if line.startswith(('GIT_CONFIG_PARAMETERS=',
+                                                      'GIT_CONFIG_COUNT='))])
+        self.assertEqual(self.mutating_calls(), [])
+
+    def test_a_private_repository_is_cloned_with_the_dispatcher_token(self):
+        # #718: token_clone, after the overlay and the key of the dispatcher: devloop clone from
+        # the clone of the source, as devloop's user. Until then, a step by hand.
+        params = self.source_params()
+        overlay = self.tmp / 'state/widget/config.local.toml'
+        overlay.parent.mkdir(parents=True)
+        overlay.write_text('repo = "acme/widget"\n')
+        keys = self.home / 'devloop/.ghapps'
+        doc = 'ops/README.md, «Un repository privato»'
+        done = self.lib(params, f'token_clone {shlex.quote(str(overlay))}')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stdout, '  da fare a mano: il clone di acme/widget, privato: '
+                                      f'[apps.dispatcher] in {overlay} e la chiave di '
+                                      f'{PREFIX}dispatcher in {keys}, poi rieseguire questo '
+                                      f'script ({doc})\n')
+        with overlay.open('a') as fh:
+            fh.write('[apps.dispatcher]\napp_id = 1\nslug = "brushtyler-devloop-dispatcher"\n')
+        done = self.lib(params, f'token_clone {shlex.quote(str(overlay))}')
+        self.assertEqual(done.stdout, '  da fare a mano: il clone di acme/widget, privato: la '
+                                      f'chiave di {PREFIX}dispatcher in {keys}, poi rieseguire '
+                                      f'questo script ({doc})\n')
+        keys.mkdir(parents=True)
+        (keys / f'{PREFIX}dispatcher.2026-11-27.private-key.pem').write_text('not a key\n')
+        done = self.lib(params, f'token_clone {shlex.quote(str(overlay))}')
+        source = self.home / 'devloop/devloop-source'
+        self.assertEqual(done.stdout,
+                         f'  [dry-run] sudo -u opsdry-nouser -H -- /usr/bin/env -C {source} '
+                         f'PYTHONPATH={source} /usr/bin/python3 -P -m devloop --local-config '
+                         f'{overlay} clone {self.home}/devloop/widget\n')
+        self.assertEqual(self.mutating_calls(), [])
+
+    def test_setup_devloop_dry_run_names_the_clone_of_a_private_repository(self):
+        # #718: --dry-run does not ask GitHub: it prints the clone of today and how a private
+        # repository is cloned instead.
+        done = self.run_script('host/setup-devloop.sh', '--dry-run', '--params',
+                               str(self.source_params()))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn('[dry-run] sudo -u opsdry-nouser -H -- git clone '
+                      f'https://github.com/acme/widget.git {self.home}/devloop/widget\n',
+                      done.stdout)
+        self.assertIn('  se GitHub non dà acme/widget senza credenziali (un repository privato), '
+                      'il clone lo fa invece devloop clone, con il token del dispatcher, dopo '
+                      'overlay e chiavi (ops/README.md, «Un repository privato»)\n', done.stdout)
+        self.assertNotIn('Clone di acme/widget, privato', done.stdout)
+        self.assertEqual(self.mutating_calls(), [])
+
     def test_a_separate_source_installs_the_launcher_from_its_tag(self):
         # ADR 0006, R1 and section 3.5: the launcher on the host, from the source at the pinned
         # tag, outside the pinned copy and the managed repository.
@@ -5602,6 +5687,74 @@ class CheckHostTests(OpsTestCase):
         self.prune_units()
         self.acl(f'user:{ME}:--x')
         self.service('active')
+
+    def repository_section(self, *args):
+        """check-host.sh with ``args``: its exit code and its step on the managed repository
+        (#718)."""
+        params = self.params(DEVLOOP_USER=ME, AGENT_USER=FAKE_AGENT)
+        done = self.run_script('host/check-host.sh', '--no-apps', *args, '--params', str(params))
+        out = done.stdout
+        return out[out.index('==> Repository gestito'):out.index('==> GitHub App')]
+
+    def test_a_public_repository_asks_for_nothing_more(self):
+        # #718: GitHub gives it without credentials (the git ls-remote of the fakes succeeds).
+        section = self.repository_section()
+        self.assertEqual(section, '==> Repository gestito: pubblico o privato (#718)\n'
+                                  '  ok: GitHub dà brushtyler/devloop senza credenziali: è '
+                                  'pubblico\n\n')
+        section = self.repository_section('--dry-run')
+        self.assertIn('  [dry-run] git ls-remote anonimo di https://github.com/brushtyler/'
+                      'devloop.git; se non riesce, il repository è privato e si verifica come '
+                      f'{ME}, nel clone, devloop fetch\n', section)
+        self.assertFalse([call for call in self.mutating_calls() if call.startswith('git ')])
+
+    def test_a_private_repository_needs_the_fetch_with_the_dispatcher_token(self):
+        # #718: GitHub does not give it without credentials. The dispatcher's app, the clone and
+        # a pinned copy are needed, then the fetch of devloop as devloop's user: devloop fetch,
+        # or with --read-only devloop fetch --check, which writes nothing.
+        self.shim('git', 'if [ "$1" = ls-remote ]; then exit 128; fi\n'
+                         'echo "$(basename "$0") $*" >> "$OPS_TEST_CALLS"')
+        overlay = self.state / 'config.local.toml'
+        private = ('  GitHub non dà brushtyler/devloop senza credenziali: è privato (o GitHub non '
+                   'si raggiunge)\n')
+        section = self.repository_section()
+        self.assertIn(private, section)
+        self.assertIn("  ERRORE: un repository privato vuole l'app del dispatcher: "
+                      f'[apps.dispatcher] in {overlay} (ops/README.md, «Un repository privato»)\n',
+                      section)
+        with overlay.open('a') as fh:
+            fh.write('[apps.dispatcher]\napp_id = 1\nslug = "brushtyler-devloop-dispatcher"\n')
+        clone = self.devloop / 'devloop'
+        shutil.rmtree(clone / '.git', ignore_errors=True)
+        self.assertIn(f'  ERRORE: {clone} non è un clone: setup-devloop.sh lo fa con il token del '
+                      'dispatcher', self.repository_section())
+        (clone / '.git').mkdir()
+        (self.state / 'current').rmdir()
+        self.assertIn(f'  ERRORE: nessuna copia fissata in {self.state}/current: fare il primo '
+                      'pin', self.repository_section())
+        (self.state / 'current').mkdir()
+        # The launcher of the clone, which records its arguments and its directory.
+        seen = self.tmp / 'launcher-args'
+        launcher = clone / 'scripts/devloop-pinned'
+        launcher.parent.mkdir()
+        status = self.tmp / 'launcher-status'
+        launcher.write_text('import os, sys\n'
+                            f'open({str(seen)!r}, "a").write(os.getcwd() + " " '
+                            '+ " ".join(sys.argv[1:]) + "\\n")\n'
+                            f'sys.exit(int(open({str(status)!r}).read()))\n')
+        status.write_text('0')
+        for args, command in (((), 'fetch'), (('--read-only',), 'fetch --check')):
+            with self.subTest(args=args):
+                seen.unlink(missing_ok=True)
+                section = self.repository_section(*args)
+                self.assertIn(private, section)
+                self.assertIn('  ok: fetch autenticato di brushtyler/devloop con il token del '
+                              f'dispatcher (devloop {command})\n', section)
+                self.assertEqual(seen.read_text(), f'{clone} {command}\n')
+        status.write_text('1')
+        self.assertIn('  ERRORE: fetch autenticato di brushtyler/devloop con il token del '
+                      'dispatcher (devloop fetch): non riuscito\n', self.repository_section())
+        self.assertFalse([call for call in self.mutating_calls() if call.startswith('git ')])
 
     def prune_units(self, copy=None):
         """The cleanup of done/ of the mailboxes (#707) as setup-supervisor.sh installs it for a

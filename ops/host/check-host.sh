@@ -15,7 +15,8 @@
 # `devloop apps`, e il coordinatore, se l'overlay del progetto lo dichiara (#571; key_dir e chiave della sua app, ACL e lettura dell'overlay, #549;
 # sudoers e copia di root di questo script, #530; il suo clone, #643), e Claude Code dei ruoli
 # senza aggiornamenti automatici (#643), la sentinella dei ruoli a riposo (unità, utente, ACL) e la
-# directory rest/ della casella (3770, #684). Con più progetti sullo stesso host si esegue una volta
+# directory rest/ della casella (3770, #684), se il repository gestito è privato e, in quel caso,
+# il fetch autenticato del clone di devloop con il token del dispatcher (#718). Con più progetti sullo stesso host si esegue una volta
 # per progetto, con i suoi parametri (--params). Per un progetto con SOURCE_REPO, un avviso se il
 # checkout da cui gira non è al tag SOURCE_REF: le copie di root di ops/ si confrontano con
 # quelle del checkout (#687).
@@ -27,10 +28,12 @@
 #
 # --dry-run: fa le verifiche locali in sola lettura e stampa, senza eseguirle, quelle che passano
 # da sudo o dalla rete (--version e strumento di shell delle CLI, lettura del log come
-# supervisore, visudo, sudo -E verso l'utente degli agent, devloop apps).
+# supervisore, visudo, sudo -E verso l'utente degli agent, devloop apps, la lettura anonima del
+# repository gestito e il fetch autenticato).
 # --read-only: la verifica del coordinatore (#530): nessuna CLI avviata (né --version né lo
 # strumento di shell: nessun modello, nessuna quota, nessuna scrittura nelle sessioni o nelle
-# cache), niente `devloop apps`, nessuna scrittura; solo righe di stato.
+# cache), niente `devloop apps`, nessuna scrittura (di un repository privato, `devloop fetch
+# --check` al posto del fetch, #718); solo righe di stato.
 # --verbose: i percorsi reali dell'host, per la diagnosi locale. Senza, l'output (anche gli errori
 # dei comandi) nomina i parametri ($STATE_DIR, $DEVLOOP_KEY_DIR, $AGENT_HOME, ...), i ruoli delle
 # chiavi, il servizio ($SERVICE_NAME) e gli utenti non di default (<AGENT_USER>) al posto dei
@@ -1367,7 +1370,7 @@ check_role_clone() {
             /usr/bin/bash -c "$ORIGIN_PROBE" _ "$clone"
         say "  se $REPO non si legge senza credenziali (repository privato, #717):"
         check_as "$user" "$clone si aggiorna con l'app $role" "${ROLE_GIT[@]}"
-    elif repo_public; then
+    elif repo_public "$REPO"; then
         check_as "$user" "$REPO si legge senza credenziali: $clone si aggiorna con git fetch, senza l'app $role" \
             /usr/bin/bash -c "$ORIGIN_PROBE" _ "$clone"
     else
@@ -1390,6 +1393,30 @@ elif [ "$READ_ONLY" = 1 ]; then
     say '  saltato (--read-only)'
 else
     say '  saltato (--no-apps)'
+fi
+
+# Un repository gestito privato (#718): GitHub non lo dà senza credenziali, e il loop lo legge con
+# il token del dispatcher (#716). Allora il fetch autenticato del clone di devloop deve riuscire:
+# `devloop fetch` come il loop, o con --read-only `devloop fetch --check`, che non scrive nulla.
+step "Repository gestito: pubblico o privato (#718)"
+if [ "$READ_ONLY" = 1 ]; then fetch_args=(fetch --check); else fetch_args=(fetch); fi
+if [ "$DRY_RUN" = 1 ]; then
+    say "  [dry-run] git ls-remote anonimo di https://github.com/$REPO.git; se non riesce, il repository è privato e si verifica come $DEVLOOP_USER, nel clone, devloop ${fetch_args[*]}"
+elif repo_public "$REPO"; then
+    ok "GitHub dà $REPO senza credenziali: è pubblico"
+else
+    say "  GitHub non dà $REPO senza credenziali: è privato (o GitHub non si raggiunge)"
+    if ! overlay_declares_app "$STATE_PATH/config.local.toml" dispatcher; then
+        fail "un repository privato vuole l'app del dispatcher: [apps.dispatcher] in $STATE_PATH/config.local.toml (ops/README.md, «Un repository privato»)"
+    elif [ ! -d "$DEVLOOP_CLONE/.git" ]; then
+        fail "$DEVLOOP_CLONE non è un clone: setup-devloop.sh lo fa con il token del dispatcher (ops/README.md, «Un repository privato»)"
+    elif [ ! -e "$STATE_PATH/current" ]; then
+        fail "nessuna copia fissata in $STATE_PATH/current: fare il primo pin, poi verificare il fetch autenticato"
+    else
+        # shellcheck disable=SC2086  # LAUNCHER_ARGS: nessuna parola o "--state-dir <percorso>"
+        check_as "$DEVLOOP_USER" "fetch autenticato di $REPO con il token del dispatcher (devloop ${fetch_args[*]})" \
+            env -C "$DEVLOOP_CLONE" /usr/bin/python3 "$LAUNCHER" $LAUNCHER_ARGS "${fetch_args[@]}"
+    fi
 fi
 
 step 'GitHub App (devloop apps)'

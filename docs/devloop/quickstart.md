@@ -146,6 +146,11 @@ group of the repository locks; the others prepare the agent user (step 5) and th
 [Un altro progetto](../../ops/README.md#un-altro-progetto)). Every script stays, and the single one
 is run again in step 5, after the overlay: it is idempotent.
 
+A private `acme/widget` cannot be cloned without credentials: `setup-devloop.sh` finds it out and
+leaves the clone among the steps by hand, and the run of step 5, after the overlay and the
+dispatcher's key, clones it with the dispatcher's token
+([Un repository privato](../../ops/README.md#un-repository-privato), with its limits).
+
 In an existing set of apps, the users of the supervisor and of the coordinator already serve
 another project of the set, and the scripts share them only when the two overlays declare the
 same `app_id` for the role's app: until step 4 writes `[apps.supervisor]` in this overlay, the
