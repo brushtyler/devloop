@@ -63,6 +63,8 @@ _NOT_FOUND = re.compile(r'Could not resolve to an? (?:PullRequest|issue)\b|\(HTT
 # `error connecting to` for a name that does not resolve; a failed TLS handshake), are certain:
 # nothing was written.
 _HTTP_STATUS = re.compile(r'\bHTTP (\d{3})\b')
+# A write GitHub refused as invalid (#719): `gh api` reports 422 (Unprocessable Entity).
+_REFUSED = re.compile(r'\(HTTP 422\)')
 _NOT_SENT = re.compile(r'\bdial tcp\b|\berror connecting to\b|\bTLS handshake\b')
 # The exit codes of coreutils ``timeout`` once it stopped its command (#397): 124 after SIGTERM,
 # 137 (128 + 9) after SIGKILL.
@@ -78,6 +80,12 @@ class GitHubError(RuntimeError):
 class GitHubNotFound(GitHubError):
     """GitHub answered that the object asked for does not exist: an explicit result, unlike a
     failed call."""
+
+
+class GitHubRefused(GitHubError):
+    """GitHub answered a write with 422 (Unprocessable Entity): it refused it as invalid, and
+    nothing was written. ``add_blocked_by`` raises it for a block the issue already has (#719),
+    unlike any other failure (403, 5xx, a timeout), which does not prove a duplicate."""
 
 
 class GitHubUncertain(GitHubError):
@@ -468,10 +476,16 @@ class GitHub:
 
     def add_blocked_by(self, number, issue_id):
         """Add to issue ``number`` the native "blocked by" of the issue whose REST id is
-        ``issue_id`` (#672, ``issue_target``)."""
-        self._gh('api', '-X', 'POST',
-                 f'repos/{self.repo}/issues/{int(number)}/dependencies/blocked_by',
-                 '-F', f'issue_id={int(issue_id)}')
+        ``issue_id`` (#672, ``issue_target``). Raises ``GitHubRefused`` when GitHub refuses
+        it with 422, as for a block the issue already has (#719)."""
+        try:
+            self._gh('api', '-X', 'POST',
+                     f'repos/{self.repo}/issues/{int(number)}/dependencies/blocked_by',
+                     '-F', f'issue_id={int(issue_id)}')
+        except GitHubError as exc:
+            if type(exc) is GitHubError and _REFUSED.search(str(exc)):
+                raise GitHubRefused(str(exc)) from exc
+            raise
 
     def remove_blocked_by(self, number, issue_id):
         """Remove from issue ``number`` the native "blocked by" of the issue whose REST id is

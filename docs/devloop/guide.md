@@ -589,8 +589,10 @@ repository when the issue, its comments or the repository give it (`0` otherwise
 - **A block that does not count** (#719). A "blocked by" of the prerequisite already there but
   ignored ([only trusted blocks count](#dependencies-between-issues): for example one the
   coordinator's app added) does not stop the dispatcher's: its record names it in `replaced`
-  and, when GitHub refuses the duplicate, the dispatcher removes that block and adds it again,
-  so that the latest event that adds it is its own and the block counts. The issue does not go
+  and, when GitHub refuses the duplicate (an answer 422), the dispatcher removes that block and
+  adds it again, so that the latest event that adds it is its own and the block counts. Any
+  other failure of GitHub (403, 5xx, a timeout) is no refusal of a duplicate: the dispatcher
+  removes nothing, and the error stays. The issue does not go
   to the operator for a prerequisite that only lacked a block that counts.
 - **Without the number** (a reference in words): an escalation of class `prerequisite`,
   non-critical. In `"auto"` it goes to the supervisor (under the conditions of the

@@ -67,8 +67,9 @@ transferred elsewhere), the state and the kind (issue or PR) of an issue number,
 `add_blocked_by`, which adds a "blocked by" with the REST API of the issue dependencies: the
 dispatcher adds a missing prerequisite named by its number
 ([Missing prerequisites](devloop/guide.md#missing-prerequisites)). Since #719 it has
-`remove_blocked_by`, which removes one: when GitHub refuses to add a block the issue already
-has but that does not count, the dispatcher removes it and adds it again as its own.
+`remove_blocked_by`, which removes one: when GitHub refuses with 422 (`GitHubRefused`, raised by
+`add_blocked_by`) to add a block the issue already has but that does not count, the dispatcher
+removes it and adds it again as its own; any other failure removes nothing.
 
 `Tracker.open_issue_numbers` (#656) lists the numbers of every open issue, page by page with no
 limit on their count, and `Tracker.comments_since` reads the

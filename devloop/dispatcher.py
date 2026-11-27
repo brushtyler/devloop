@@ -240,7 +240,8 @@ from .dispatch_preflight import PreflightMixin
 from .dispatch_supervision import TEXTS as SUPERVISION_TEXTS
 from .dispatch_supervision import SupervisionMixin, UntrustedChange, budget_fields
 from .generated import changed_by_tests, generated_files
-from .github import GitHubError, GitHubNotFound, GitHubUncertain, author_login, dropped_block
+from .github import (GitHubError, GitHubNotFound, GitHubRefused, GitHubUncertain, author_login,
+                     dropped_block)
 from .i18n import ENGLISH, Catalog
 from .journal import TEXTS as JOURNAL_TEXTS
 from .journal import (CLOSED, MERGED, RECONCILE_COMMAND, JournalError, TurnBlocked, blocked_text,
@@ -2250,9 +2251,10 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         and ``MAX_ADDED_PREREQUISITES`` added in all, those added again included, as its
         ``prerequisite`` records count them. The record is written first, then the blocks: a
         block counts only with a record that names it (``_dependency_edges``), and a record whose
-        blocks were lost still counts against the caps. When GitHub refuses to add a block the
-        issue already has, one that does not count, the dispatcher removes it and adds it again,
-        so that the latest event that adds it is its own (#719)."""
+        blocks were lost still counts against the caps. When GitHub refuses with 422
+        (``GitHubRefused``) to add a block the issue already has, one that does not count, the
+        dispatcher removes it and adds it again, so that the latest event that adds it is its
+        own (#719); any other failure propagates, and nothing is removed."""
         t = self._texts()
         wanted = sorted({n for n in wanted if isinstance(n, int) and not isinstance(n, bool)})
         if not wanted or wanted[0] < 1:
@@ -2316,11 +2318,13 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         for n in wanted:
             try:
                 self.gh.add_blocked_by(number, ids[n])
-            except GitHubError:
+            except GitHubRefused:
                 if n not in replaced:
                     raise
-                # GitHub refuses a block the issue already has (#719): the one that does not
-                # count goes, then the dispatcher adds it again, as the latest to add it.
+                # GitHub refuses with 422 a block the issue already has (#719): the one that
+                # does not count goes, then the dispatcher adds it again, as the latest to add
+                # it. Any other failure (403, 5xx, a timeout) proves no duplicate: it propagates
+                # and nothing is removed.
                 self.gh.remove_blocked_by(number, ids[n])
                 self.gh.add_blocked_by(number, ids[n])
         self.log(f'  issue #{number}: blocked by ' + ', '.join(f'#{n}' for n in wanted)

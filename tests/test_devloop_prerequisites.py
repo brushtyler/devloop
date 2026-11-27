@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import test_devloop_supervision as sup
 from devloop import markdown, schema, supervision
-from devloop.github import GitHub, GitHubError
+from devloop.github import GitHub, GitHubError, GitHubRefused, GitHubUncertain
 from devloop.dispatcher import (MAX_ACTIVE_PREREQUISITES, MAX_ADDED_PREREQUISITES,
                                 MAX_DEPENDENCY_READS, Dispatcher)
 from devloop.markdown import read_marker, render_prerequisite
@@ -52,7 +52,7 @@ class PrerequisiteGH(DependencyGH):
     def add_blocked_by(self, number, issue_id):
         # As GitHub, a block the issue already has is refused (#719).
         if any(b['number'] == issue_id - 100000 for b, _ in self.blocks.get(number, [])):
-            raise GitHubError('gh: Validation Failed (HTTP 422)')
+            raise GitHubRefused('gh: Validation Failed (HTTP 422)')
         super().add_blocked_by(number, issue_id)
         self.blocks.setdefault(number, []).append(block(issue_id - 100000, by=self.writer))
 
@@ -145,6 +145,29 @@ class BlockTests(unittest.TestCase):
             d._add_prerequisites(2, [5], 'preflight')
         self.assertEqual(getattr(self.gh, 'removed_blocks', []), [])
 
+    def test_only_a_refusal_as_a_duplicate_replaces_a_block_that_does_not_count(self):
+        # A block of #5 that does not count is there: a failure other than GitHub's 422 (403,
+        # 5xx, a timeout) proves no duplicate. It propagates, and the block stays.
+        failures = {'403': GitHubError('gh: Forbidden (HTTP 403)'),
+                    '503': GitHubError('gh: Service Unavailable (HTTP 503)'),
+                    'uncertain': GitHubUncertain('gh api: timed out after 30s')}
+        for name, failure in failures.items():
+            with self.subTest(failure=name):
+                d = self.make({2: [block(5, by='stranger')]}, identities=True)
+                calls = []
+
+                def fail(number, issue_id, failure=failure):
+                    calls.append((number, issue_id))
+                    raise failure
+
+                self.gh.add_blocked_by = fail
+                with self.assertRaises(GitHubError) as raised:
+                    d._add_prerequisites(2, [5], 'preflight')
+                self.assertIs(raised.exception, failure)
+                self.assertEqual(getattr(self.gh, 'removed_blocks', []), [])
+                self.assertEqual(calls, [(2, 100005)])
+                self.assertEqual([b['number'] for b, _ in self.gh.blocks[2]], [5])
+
     def test_a_condition_that_fails_adds_nothing(self):
         closed = {'id': 9, 'state': 'CLOSED', 'pull_request': False}
         cases = {
@@ -231,6 +254,23 @@ class IssueTargetTests(unittest.TestCase):
         self.assertEqual((moved['repo'], moved['number']), ('example/other', 99))
         self.assertIsNone(self.target({'id': 7, 'number': 5, 'state': 'open'})['repo'])
 
+    def test_only_a_422_is_a_refused_block(self):
+        # #719: GitHub's 422 is the refusal of a block the issue already has; any other
+        # failure keeps its own error, which the dispatcher does not take for a duplicate.
+        def adding(stderr):
+            def run(argv, **kw):
+                return SimpleNamespace(returncode=1, stdout='', stderr=stderr)
+            return GitHub('brushtyler/ssdlc', run=run)
+
+        with self.assertRaises(GitHubRefused):
+            adding('gh: Validation Failed (HTTP 422)\n').add_blocked_by(2, 100005)
+        for stderr in ('gh: Forbidden (HTTP 403)\n', 'gh: Service Unavailable (HTTP 503)\n',
+                       'gh: Not Found (HTTP 404)\n', 'connection reset\n'):
+            with self.subTest(stderr=stderr):
+                with self.assertRaises(GitHubError) as raised:
+                    adding(stderr).add_blocked_by(2, 100005)
+                self.assertNotIsInstance(raised.exception, GitHubRefused)
+
 
 class PreflightGH(IssueGH):
     """Issue #7 of the readiness check tests, with its native dependencies: the "blocked by"
@@ -248,7 +288,7 @@ class PreflightGH(IssueGH):
     def add_blocked_by(self, number, issue_id):
         # As GitHub, a block the issue already has is refused (#719).
         if any(b['number'] == issue_id - 100000 for b, _ in self.blocks):
-            raise GitHubError('gh: Validation Failed (HTTP 422)')
+            raise GitHubRefused('gh: Validation Failed (HTTP 422)')
         super().add_blocked_by(number, issue_id)
         self.blocks.append(block(issue_id - 100000))
 

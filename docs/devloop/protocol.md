@@ -732,7 +732,8 @@ escalation. First it writes a dispatcher comment ("Prerequisite added as \"block
 one; then the blocks. A prerequisite already among the "blocked by" of the issue stops the
 dispatcher only when that block counts (#719): one that does not, of a login whose blocks are
 ignored, goes in `replaced`, present only when not empty, a subset of `added` (records written
-before #719 lack it), and when GitHub refuses to add it again the dispatcher removes it
+before #719 lack it), and when GitHub refuses with 422 to add it again (`GitHubRefused`; any
+other failure propagates, and nothing is removed) the dispatcher removes it
 (`Tracker.remove_blocked_by`) and adds it again, so that the latest addition is its own. A block whose latest addition is the dispatcher's counts as trusted only
 while a `prerequisite` record of the dispatcher on the blocked issue names it: without the
 record it is ignored like any untrusted block. The records count the blocks against the caps of
