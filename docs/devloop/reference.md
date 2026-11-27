@@ -1331,6 +1331,45 @@ denied_cooldown_hours = 6  # how long a model denied twice is skipped
 review_commands = ["python3 scripts/run-tests.py", "python3 -m unittest", "git diff", "git log"]
 ```
 
+### Test commands of the agents
+
+The commands an agent may run are the installation's and the overlay's (ADR 0006, D2), and their
+defaults are Python's: devloop derives none from the `test_cmd` of the
+[project file](#project-file). A project with other tests admits them in the overlay, agent by
+agent: the recipe, with an npm example, is in the quick start,
+[A project that is not Python](quickstart.md#a-project-that-is-not-python).
+
+`devloop status` checks them (#697). For each configured agent, in the turns of its roles
+(`write` for the keys that may implement: `roles.implementer`, `[roles.implementers]`, every
+`<kind>-implementer`; `review` for the reviewers of the pool, every `<kind>-reviewer`,
+`preflight`, `conclave`, the advisory and the findings-only reviewer), it checks `test_cmd` and
+`[prompts] module_test_cmd`, as the prompts give it, against what the agent admits, and prints
+one line for each agent that does not admit one of them:
+
+```text
+agent commands: claude-reviewer: test_cmd `npm test` and prompts.module_test_cmd `npx vitest run src/name.test.ts` not admitted in its review turns (agents.claude-reviewer.review_args (--allowedTools))
+```
+
+- **claude**: the rules of `--allowedTools` and `--disallowedTools` in `write_args` (write turns)
+  or `review_args` (review turns), each argument one rule. `Bash` and `Bash(*)` admit every
+  command; `Bash(<command> *)` and `Bash(<command>:*)` the command alone or followed by any
+  argument; any other `Bash(<pattern>)` the commands it matches whole, `*` standing for any
+  text. A rule of `--disallowedTools` that matches wins. Each command of a chain must be admitted
+  on its own: devloop splits at `&&`, `||`, `;`, `|`, `|&`, `&` and at newlines, outside quotes
+  and escapes, not at the `&` of a redirection such as `2>&1`. `--permission-mode bypassPermissions` and
+  `--dangerously-skip-permissions` admit everything.
+- **agy**: the prefixes of `write_commands` or `review_commands`, word by word
+  ([agy permissions](#agy-permissions)).
+- **codex**: no line. devloop gives it no list of commands: it runs any command in its sandbox,
+  without network in review turns.
+
+Only a warning: what the agents may run stays what their configuration says, the outcome of
+`status` does not change and the loop goes on. With this repository's configuration (ssdlc's
+project file and overlay) the claude agents get one: `claude-implementer` does not admit
+`python3 scripts/run-tests.py`, which its prompt tells it not to run, and `claude-reviewer`
+admits `python3 -m unittest tests.*`, not the `discover` form of `module_test_cmd`. Changing
+their permissions is the operator's choice.
+
 ### Fallback models
 
 An agent may list `fallback_models`, in order, for when its model is unavailable (#121). agy runs
