@@ -229,6 +229,16 @@ class RealGitTests(unittest.TestCase):
         git(dest, 'config', '--unset', f'http.{self.url}.extraHeader')
         self.assert_no_secret(dest)
 
+    def test_a_relative_destination_is_resolved_from_the_current_directory(self):
+        (self.tmp / 'parent').mkdir()
+        cwd = os.getcwd()
+        os.chdir(self.tmp)
+        self.addCleanup(os.chdir, cwd)
+        clone(self.url, SECRET, 'parent/clone', run=http_allowed)
+        self.assertEqual(git(self.tmp / 'parent' / 'clone', 'rev-parse', 'origin/main'),
+                         self.head)
+        self.assertFalse((self.tmp / 'parent' / 'parent').exists())
+
     def test_a_refused_token_fails_without_showing_it(self):
         self.server.seen.clear()
         with self.assertRaises(WorkspaceError) as caught:

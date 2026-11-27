@@ -262,7 +262,8 @@ def clone(url, token, dest, run=subprocess.run, timeout=1800):
     in the clone's config, which keeps ``url`` as ``origin``, nor on the command line. Raises
     WorkspaceError when a URL rewrite of the configuration of git matches ``url``, or the clone
     fails."""
-    dest = Path(dest)
+    # Absolute before the command runs in its parent: a relative DEST would be resolved twice.
+    dest = Path(dest).absolute()
     where = dest.parent if dest.parent.is_dir() else Path.cwd()
     env = {k: v for k, v in os.environ.items() if k not in APP_AUTH_UNSET}
     try:
