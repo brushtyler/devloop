@@ -2542,6 +2542,37 @@ model = "gpt-6.1-sol"
 - Without the table nothing changes: the app is only declared, and its comments and labels count
   for no role, as anyone else's.
 
+### The permissions of the role apps
+
+`python3 -m devloop apps` does not list the apps of the supervisor and of the coordinator,
+whose keys devloop never reads. Their scripts check them instead (#726), run as the role's user
+with its key:
+
+```
+DEVLOOP_APP_KEY_DIR=<SUPERVISOR_KEY_DIR> python3 scripts/supervisor-token.py --state-dir <STATE_DIR> --check
+DEVLOOP_APP_KEY_DIR=<COORDINATOR_KEY_DIR> python3 scripts/coordinator-token.py --state-dir <STATE_DIR> --check
+```
+
+- `--check` reads the permissions of the app's installation on the project's `repo`
+  (`GET /repos/{repo}/installation` with the app's JWT, `AppAuth.installation_permissions` of
+  `devloop/apps.py`) and compares them with `default_permissions` of the role's manifest,
+  `ops/github/apps/supervisor.json` or `coordinator.json` of the clone it runs from. It mints no
+  installation token, prints none and runs no command; it takes only `--state-dir` beside it
+  (no `--perm`, no command).
+- A permission of the manifest missing on the installation, or there at a lower level (not
+  granted, or not yet accepted by the owner of the installation), is an error; one the
+  installation has above the manifest, or that the manifest does not have, a warning.
+  `contents: read` (#717) is needed only for a private managed repository: when it is missing,
+  the script asks GitHub for the repository without credentials (`GET /repos/{repo}`), and its
+  absence is a warning for a public repository, an error for a private one (or when GitHub does
+  not answer). It exits with 1 on an error, with 0 otherwise.
+- `ops/host/check-host.sh` runs it for the supervisor and, when the project has it, for the
+  coordinator, when the overlay declares the role's app (`[apps.supervisor]`,
+  `[apps.coordinator]`): as the role's user, with its key_dir, from the clone the role takes its
+  tokens from (the source's clone, with `SOURCE_REPO`). `--no-apps` and `--read-only` skip it, as
+  `devloop apps`; a token script without `--check` is a warning
+  ([ops/README.md](../../ops/README.md#8-verifica)).
+
 ### The implementer app and the keys by role
 
 The implementer has a role app of its own too (ADR 0005, P5-3, #407):

@@ -25,6 +25,7 @@ import calendar
 import json
 import os
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -102,11 +103,15 @@ def http_json(method, path, auth, body=None, timeout=STEP_TIMEOUT, api=API):
     """``method`` on ``api + path``, its JSON answer. ``timeout`` bounds the whole request: name
     resolution, connection, the response's headers and body, of an error too. ``urlopen``'s own
     timeout applies to each socket operation only, so slow headers and a slow body could add up
-    beyond it (#197): the request runs in a worker thread, awaited at most ``timeout`` seconds."""
+    beyond it (#197): the request runs in a worker thread, awaited at most ``timeout`` seconds.
+    With ``auth`` None the request carries no credentials."""
+    headers = {'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28',
+               'User-Agent': 'devloop'}
+    if auth is not None:
+        headers['Authorization'] = auth
     req = urllib.request.Request(
         api + path, method=method, data=json.dumps(body).encode() if body is not None else None,
-        headers={'Authorization': auth, 'Accept': 'application/vnd.github+json',
-                 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'devloop'})
+        headers=headers)
     outcome = {}
 
     def fetch():
@@ -250,6 +255,97 @@ class AppAuth:
         return {'login': self.login, 'installation': inst['id'],
                 'repository_selection': inst['repository_selection'],
                 'permissions': inst['permissions']}
+
+    def installation_permissions(self):
+        """The id and the permissions of the app's installation on the repository, as GitHub
+        grants them (those the owner accepted), read with the app's JWT alone: no installation
+        token is minted (#726)."""
+        found = self._http('GET', f'/repos/{self.repo}/installation', f'Bearer {self.jwt()}')
+        if found['app_id'] != self.app_id:
+            raise GitHubError(f'installation {found["id"]} belongs to app {found["app_id"]}, '
+                              f'not {self.app_id}')
+        return found['id'], dict(found.get('permissions') or {})
+
+
+# The levels of a permission of a GitHub App, in order.
+LEVELS = ('read', 'write', 'admin')
+# The permission a role app needs only for a private managed repository (#717): its absence is
+# a warning for a public one.
+PRIVATE_ONLY = 'contents'
+
+
+def _rank(level):
+    return LEVELS.index(level) + 1 if level in LEVELS else 0
+
+
+def repo_public(repo, http=http_json):
+    """Whether GitHub gives ``repo`` without credentials: an anonymous ``GET /repos/{repo}``.
+    False for a private repository, and when GitHub does not answer (as ``repo_public`` of
+    ``ops/lib.sh``)."""
+    try:
+        found = http('GET', f'/repos/{repo}', None)
+    except GitHubError:
+        return False
+    return isinstance(found, dict) and found.get('private') is False
+
+
+def compare_permissions(manifest, installed, public):
+    """``(errors, warnings)`` of the permissions ``installed`` on an installation against those
+    of its ``manifest`` (#726): one the manifest asks for and the installation lacks, or has at
+    a lower level (not granted, or not accepted by the owner), is an error; one the installation
+    has above the manifest, or that the manifest does not ask for, a warning. ``contents``
+    (``PRIVATE_ONLY``) missing is only a warning for a ``public`` repository."""
+    errors, warnings = [], []
+    for name, level in sorted(manifest.items()):
+        has = installed.get(name)
+        if _rank(has) >= _rank(level):
+            continue
+        what = (f'{name}={level} of the manifest is {"missing" if has is None else has} on the '
+                'installation: not granted, or not accepted by the owner')
+        if name == PRIVATE_ONLY and public:
+            warnings.append(f'{what}; the repository is public, and the app needs it only for '
+                            'a private one (#717)')
+        else:
+            errors.append(what)
+    for name, has in sorted(installed.items()):
+        if _rank(has) > _rank(manifest.get(name)):
+            warnings.append(f'{name}={has} on the installation is more than the manifest '
+                            f'({name}={manifest[name]})' if name in manifest else
+                            f'{name}={has} on the installation is not in the manifest')
+    return errors, warnings
+
+
+def check_role_app(role, app, manifest_path, out=None, public=None):
+    """``--check`` of the scripts of the role apps' tokens (#726): the permissions of the
+    installation of ``app`` on its repository against those of ``manifest_path``
+    (``ops/github/apps/<role>.json``), written on ``out`` (standard output by default). The
+    installation is read with the app's JWT: no installation token is minted, none printed, no
+    command run. 0 without errors, 1 otherwise; warnings do not count."""
+    out = out if out is not None else sys.stdout
+    public = public or repo_public
+    manifest = json.loads(Path(manifest_path).read_text(encoding='utf-8'))['default_permissions']
+    try:
+        installation, installed = app.installation_permissions()
+    except GitHubError as exc:
+        out.write(f'{role}: error: the installation of {app.login} on {app.repo}: {exc}\n')
+        return 1
+
+    def show(perms):
+        return ', '.join(f'{k}={v}' for k, v in sorted(perms.items())) or 'none'
+    out.write(f'{role}: {app.login}, installation {installation} on {app.repo}: '
+              f'{show(installed)}\n')
+    out.write(f'{role}: manifest ops/github/apps/{Path(manifest_path).name}: '
+              f'{show(manifest)}\n')
+    lacking = _rank(installed.get(PRIVATE_ONLY)) < _rank(manifest.get(PRIVATE_ONLY))
+    errors, warnings = compare_permissions(
+        manifest, installed, lacking and public(app.repo, app._http))
+    for line in errors:
+        out.write(f'{role}: error: {line}\n')
+    for line in warnings:
+        out.write(f'{role}: warning: {line}\n')
+    if not errors:
+        out.write(f'{role}: the installation has the permissions the role needs\n')
+    return 1 if errors else 0
 
 
 class Identities:
