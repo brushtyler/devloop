@@ -1599,7 +1599,7 @@ class TagUpgradeGuideTests(unittest.TestCase):
         for phrase in ('The operator creates and pushes the tag', 'no `contents` permission',
                        'at least an hour', 'no `Traceback` and no `ALERT:` in `run.log`',
                        '`v0.MINOR.PATCH`', 'The tag is annotated',
-                       "git tag -a '<new tag>' <commit> -F <message file>",
+                       "git tag -a '<new tag>' <commit> --cleanup=verbatim -F <message file>",
                        "git push origin '<new tag>'", 'notes the new tag in the project\'s journal'):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, releases)
@@ -1645,6 +1645,44 @@ class TagUpgradeGuideTests(unittest.TestCase):
                     self.assertEqual(result.stderr, '')
                     self.assertEqual(result.stdout.splitlines(),
                                      ['## Nuovo passo (#5)', '## Altro passo (#7)'])
+
+    @unittest.skipIf(BASH is None or shutil.which('git') is None, 'bash or git is not installed')
+    def test_the_tag_keeps_the_titles_of_the_sections_in_its_message(self):
+        # #714: the command of the releases, on the example message of the guide, keeps the
+        # lines `## …` that the default cleanup of git tag would drop as comments.
+        releases = self.releases()
+        block = next(b for b in re.findall(r'```bash\n(.*?)```', releases, re.S)
+                     if 'git tag -a' in b)
+        line = next(line.strip() for line in block.splitlines()
+                    if line.strip().startswith('git tag -a'))
+        message = re.search(r'The message file, for example:\n\n```text\n(.*?)```',
+                            releases, re.S).group(1)
+        self.assertIn('\n## ', message)
+        env = {**os.environ, 'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@example.invalid',
+               'GIT_COMMITTER_NAME': 't', 'GIT_COMMITTER_EMAIL': 't@example.invalid',
+               'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_NOSYSTEM': '1'}
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / 'repo'
+            git = lambda *args: subprocess.run(['git', '-C', str(repo), *args], env=env,
+                                               check=True, capture_output=True, text=True)
+            repo.mkdir()
+            git('init', '-q')
+            git('commit', '-q', '--allow-empty', '-m', 'start')
+            path = Path(tmp) / 'message.txt'
+            path.write_text(message, encoding='utf-8')
+            for name, command in (('guide', line), ('default', line.replace(
+                    ' --cleanup=verbatim', ''))):
+                tag = f'v0.4.0-{name}'
+                command = command.replace("'<new tag>'", tag).replace('<commit>', 'HEAD').replace(
+                    '<message file>', shlex.quote(str(path)))
+                subprocess.run([BASH, '-c', command], cwd=repo, env=env, check=True,
+                               capture_output=True)
+                kept = git('tag', '-l', '--format=%(contents)', tag).stdout
+                with self.subTest(command=name):
+                    if name == 'guide':
+                        self.assertEqual(kept.rstrip('\n'), message.rstrip('\n'))
+                    else:
+                        self.assertNotIn('## ', kept)
 
 
 class CoordinatorGuideTests(unittest.TestCase):

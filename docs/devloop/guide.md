@@ -3901,9 +3901,14 @@ git log --oneline --first-parent '<earlier tag>'..<commit>      # the merges sin
 git show '<commit>:ops/host/migrate.md' | grep '^## ' \
     | grep -vxF -f <(git show '<earlier tag>:ops/host/migrate.md' | grep '^## ') \
     | grep -vxF '## Un progetto con la sorgente a un tag nuovo (#666)'   # the sections added
-git tag -a '<new tag>' <commit> -F <message file>
+git tag -a '<new tag>' <commit> --cleanup=verbatim -F <message file>
 git push origin '<new tag>'
 ```
+
+`--cleanup=verbatim` keeps the message file as written. Without it, `git tag` cleans the message
+in its default `strip` mode, also with `-F`, and drops every line that starts with `#` as a
+comment: the titles `## …` of the sections below would be lost, as in the messages of v0.4.0 and
+v0.5.0 (#714).
 
 The message file, for example:
 
