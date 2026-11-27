@@ -2621,6 +2621,7 @@ $devloop direction        # print the operator's direction in force, from [direc
 $devloop fallback reset agy-reviewer  # forget the models agy-reviewer remembers unavailable (see Memory of unavailable models)
 $devloop token claude -- gh pr comment 70 --body-file reply.md  # run a command as an agent's app of the project (see GitHub identities; scripts/agent-token.py calls it)
 $devloop clone /path/of/the/clone  # the first clone of the managed repository, private too, with a token of the dispatcher's app limited to contents=read; it reads only repo and [apps] of the overlay (reference, "Clone and fetch of the managed repository")
+$devloop fetch --check    # reach the base branch of the managed repository with the dispatcher's token, writing nothing; without --check, its fetch as the loop makes it (reference, "Clone and fetch of the managed repository")
 $devloop notify --key host:disk "disk almost full"  # a notice to the operator on [notify], once per key and interval (see Notices to the operator); --test to check the channel
 ```
 

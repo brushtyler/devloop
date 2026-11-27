@@ -3,7 +3,8 @@
 Every fetch of the workspace goes, when the dispatcher has an app, to the repository's HTTPS URL
 with a token of that app limited to ``contents=read``, with the defences of the push: the token
 only in the environment of the command, credential helpers, askpass and SSH off, only HTTPS, URL
-rewrites refused. ``devloop clone DEST`` makes the first clone the same way.
+rewrites refused. ``devloop clone DEST`` makes the first clone the same way, and ``devloop fetch
+[--check]`` makes the fetch of the base branch, or only reaches it, for check-host.sh (#718).
 """
 
 import base64
@@ -55,8 +56,8 @@ class FakeGit:
         self.calls.append((argv, kw.get('env')))
         return SimpleNamespace(returncode=0, stdout='', stderr='')
 
-    def fetches(self):
-        return [(argv, env) for argv, env in self.calls if argv[1] == 'fetch']
+    def fetches(self, command='fetch'):
+        return [(argv, env) for argv, env in self.calls if argv[1] == command]
 
 
 class FetchTests(unittest.TestCase):
@@ -138,6 +139,40 @@ class FetchTests(unittest.TestCase):
                                fetch_auth=lambda: {'url': URL, 'token': SECRET})
                 with self.assertRaisesRegex(WorkspaceError, 'rewrites .*refusing to fetch'):
                     ws.base_head()
+                with self.assertRaisesRegex(WorkspaceError, 'rewrites .*refusing to fetch'):
+                    ws.fetch_base(check=True)
+
+    def test_fetch_base_fetches_or_with_check_only_reaches_the_base_branch(self):
+        # #718: devloop fetch, for check-host.sh. --check writes nothing: ls-remote, no fetch,
+        # with the same token and environment.
+        run = FakeGit()
+        ws = self.workspace(run, lambda: {'url': URL, 'token': SECRET})
+        ws.fetch_base()
+        self.assertEqual([argv for argv, _ in run.fetches()], [['git', 'fetch', URL, BASE]])
+        self.assertEqual(run.fetches('ls-remote'), [])
+        run.calls.clear()
+        ws.fetch_base(check=True)
+        self.assertEqual(run.fetches(), [])
+        (argv, env), = run.fetches('ls-remote')
+        self.assertEqual(argv, ['git', 'ls-remote', '--exit-code', URL, 'refs/heads/main'])
+        self.assertNotIn(SECRET, ' '.join(argv))
+        self.assertEqual((env['GIT_ALLOW_PROTOCOL'], env['GIT_TERMINAL_PROMPT']), ('https', '0'))
+        self.assertEqual(config_pairs(env)[0], ('credential.helper', ''))
+        # Without the dispatcher's app, origin with the ambient credentials, as the fetches.
+        run = FakeGit()
+        self.workspace(run, None).fetch_base(check=True)
+        self.assertEqual(run.fetches('ls-remote'),
+                         [(['git', 'ls-remote', '--exit-code', 'origin', 'refs/heads/main'], None)])
+
+    def test_a_token_that_cannot_be_had_fails_the_check(self):
+        run = FakeGit()
+
+        def broken():
+            raise GitHubError('HTTP 401: Bad creds')
+        with self.assertRaisesRegex(WorkspaceError, 'git ls-remote: no token of the dispatcher '
+                                                    'app to fetch main: HTTP 401'):
+            self.workspace(run, broken).fetch_base(check=True)
+        self.assertEqual(run.fetches('ls-remote'), [])
 
 
 class Server:
@@ -172,7 +207,7 @@ class Server:
 
 def http_allowed(argv, **kw):
     """The test server has no TLS: its clone and fetches use plain HTTP, nothing else changes."""
-    if argv[1] in ('fetch', 'clone'):
+    if argv[1] in ('fetch', 'clone', 'ls-remote'):
         kw['env'] = dict(kw['env'], GIT_ALLOW_PROTOCOL='http')
     return subprocess.run(argv, **kw)
 
@@ -228,6 +263,28 @@ class RealGitTests(unittest.TestCase):
         self.assertEqual(set(self.server.seen), {self.app})
         git(dest, 'config', '--unset', f'http.{self.url}.extraHeader')
         self.assert_no_secret(dest)
+
+    def test_the_check_reaches_the_base_branch_with_the_app_token_only(self):
+        # #718: devloop fetch --check, what check-host.sh --read-only runs: nothing written.
+        dest = self.tmp / 'clone'
+        clone(self.url, SECRET, dest, run=http_allowed)
+        before = sorted(str(p) for p in (dest / '.git').rglob('*'))
+        self.server.seen.clear()
+        ws = Workspace(dest, '.state', 'main', run=http_allowed,
+                       fetch_auth=lambda: {'url': self.url, 'token': SECRET})
+        ws.fetch_base(check=True)
+        self.assertEqual(set(self.server.seen), {self.app})
+        self.assertEqual(sorted(str(p) for p in (dest / '.git').rglob('*')), before)
+        ws = Workspace(dest, '.state', 'main', run=http_allowed,
+                       fetch_auth=lambda: {'url': self.url, 'token': 'WRONG-TOKEN'})
+        with self.assertRaises(WorkspaceError) as caught:
+            ws.fetch_base(check=True)
+        self.assertNotIn('WRONG-TOKEN', str(caught.exception))
+        # A base branch that is not there fails the check.
+        ws = Workspace(dest, '.state', 'other', run=http_allowed,
+                       fetch_auth=lambda: {'url': self.url, 'token': SECRET})
+        with self.assertRaises(WorkspaceError):
+            ws.fetch_base(check=True)
 
     def test_a_relative_destination_is_resolved_from_the_current_directory(self):
         (self.tmp / 'parent').mkdir()
@@ -347,6 +404,85 @@ class CloneCommandTests(unittest.TestCase):
             cli.main(['--local-config', str(ssdlc_project.OVERLAY), 'clone', 'dest'])
         self.assertEqual(caught.exception.code, 0)
         self.assertEqual(run_clone.call_args[0][0].dest, 'dest')
+
+
+class FetchCommandTests(unittest.TestCase):
+    """``devloop fetch [--check]`` (#718), with the configuration of the project."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+        self.slug = 'o-devloop-dispatcher'
+        key = self.tmp / f'{self.slug}.2026-01-01.private-key.pem'
+        key.write_text('not a key')
+        key.chmod(0o600)
+        self.cfg = SimpleNamespace(
+            repo='o/r', base_branch='main', state_dir='.state', app_key_dir=str(self.tmp),
+            apps={'dispatcher': config.AppConfig(app_id=7, slug=self.slug)})
+        for name, value in (('main_checkout', lambda: self.tmp),
+                            ('load', lambda args, root: self.cfg),
+                            ('state_path', lambda cfg, root: self.tmp / '.state')):
+            patcher = mock.patch.object(cli, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher = mock.patch.dict(os.environ)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop('DEVLOOP_APP_KEY_DIR', None)
+
+    def fetch(self, check, auth=None):
+        minted, made, run = [], [], FakeGit()
+
+        def app(app_id, slug, key_path, repo):
+            made.append((app_id, slug, Path(key_path).parent, repo))
+            return FakeApp(minted)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = cli.run_fetch(SimpleNamespace(check=check), auth=auth or app, run=run)
+        return code, made, minted, run, out.getvalue()
+
+    def test_fetch_and_check_with_the_dispatcher_token(self):
+        code, made, minted, run, out = self.fetch(check=False)
+        self.assertEqual(code, 0)
+        self.assertEqual(made, [(7, self.slug, self.tmp, 'o/r')])
+        self.assertEqual(minted, [{'contents': 'read'}])
+        self.assertEqual([argv for argv, _ in run.fetches()], [['git', 'fetch', URL, BASE]])
+        self.assertIn('fetch: main of o/r fetched into origin/main', out)
+        self.assertNotIn(SECRET, out)
+        code, _, minted, run, out = self.fetch(check=True)
+        self.assertEqual(code, 0)
+        self.assertEqual(minted, [{'contents': 'read'}])
+        self.assertEqual(run.fetches(), [])
+        self.assertEqual([argv for argv, _ in run.fetches('ls-remote')],
+                         [['git', 'ls-remote', '--exit-code', URL, 'refs/heads/main']])
+        self.assertIn('fetch: main of o/r reached', out)
+
+    def test_without_the_dispatcher_app_or_its_token_it_stops(self):
+        class Refused:
+            def __init__(self, *args):
+                pass
+
+            def token(self, permissions=None):
+                raise GitHubError('HTTP 401')
+        with self.assertRaisesRegex(SystemExit, 'fetch: git ls-remote: no token of the '
+                                                'dispatcher app .*HTTP 401'):
+            self.fetch(check=True, auth=Refused)
+        (self.tmp / f'{self.slug}.2026-01-01.private-key.pem').unlink()
+        with self.assertRaisesRegex(SystemExit, 'fetch: no token of the dispatcher app'):
+            self.fetch(check=True)
+        self.cfg.apps = {}
+        with self.assertRaisesRegex(SystemExit, 'no GitHub App of the dispatcher'):
+            self.fetch(check=True)
+
+    def test_the_subcommand_is_wired(self):
+        for argv, check in ((['fetch'], False), (['fetch', '--check'], True)):
+            with self.subTest(argv=argv), \
+                    mock.patch.object(cli, 'run_fetch', return_value=0) as run_fetch, \
+                    self.assertRaises(SystemExit) as caught:
+                cli.main(argv)
+            self.assertEqual(caught.exception.code, 0)
+            self.assertEqual(run_fetch.call_args[0][0].check, check)
 
 
 if __name__ == '__main__':

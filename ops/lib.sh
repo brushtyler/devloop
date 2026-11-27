@@ -1641,6 +1641,34 @@ clone_origin() {
 }
 origin_slug() { printf '%s' "$1" | sed -E 's#^.*github\.com[:/]##; s#/+$##; s#\.git$##'; }
 
+# repo_public REPO: GitHub dà REPO senza credenziali (#718), a un git ls-remote anonimo: nessun
+# file di configurazione di git (né di sistema, né dell'utente, né di un repository: gira in /),
+# nessun helper delle credenziali, nessuna richiesta sul terminale, solo HTTPS, al più 60 secondi.
+# Falso per un repository privato, e anche quando GitHub non si raggiunge. Non scrive nulla.
+repo_public() {
+    (cd / && env -u GIT_CONFIG_PARAMETERS -u GIT_CONFIG_COUNT -u GIT_DIR HOME=/nonexistent \
+        XDG_CONFIG_HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+        GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=false SSH_ASKPASS=false GIT_ALLOW_PROTOCOL=https \
+        timeout 60 git ls-remote "https://github.com/$1.git" HEAD) </dev/null >/dev/null 2>&1
+}
+
+# token_clone OVERLAY: il clone del repository gestito privato in DEVLOOP_CLONE, come utente
+# devloop, con `devloop clone` (#716): un token dell'app del dispatcher limitato a contents=read,
+# con il codice del clone della sorgente (SOURCE_CLONE) e solo repo e [apps] di OVERLAY (#718).
+# Solo quando OVERLAY dichiara [apps.dispatcher] e la key_dir di devloop ha la sua chiave;
+# altrimenti è un passo a mano, che fa la prossima esecuzione dello script.
+token_clone() {
+    local overlay=$1 doc="ops/README.md, «Un repository privato»"
+    if ! overlay_declares_app "$overlay" dispatcher; then
+        todo "il clone di $REPO, privato: [apps.dispatcher] in $overlay e la chiave di ${APP_PREFIX}dispatcher in $DEVLOOP_KEY_DIR, poi rieseguire questo script ($doc)"
+    elif ! compgen -G "$DEVLOOP_KEY_DIR/${APP_PREFIX}dispatcher.*.private-key.pem" >/dev/null 2>&1; then
+        todo "il clone di $REPO, privato: la chiave di ${APP_PREFIX}dispatcher in $DEVLOOP_KEY_DIR, poi rieseguire questo script ($doc)"
+    else
+        as_user "$DEVLOOP_USER" /usr/bin/env -C "$SOURCE_CLONE" PYTHONPATH="$SOURCE_CLONE" \
+            /usr/bin/python3 -P -m devloop --local-config "$overlay" clone "$DEVLOOP_CLONE"
+    fi
+}
+
 # ensure_source_clone USER DIR: in DIR, di USER, un clone di SOURCE_REPO con il tag SOURCE_REF
 # di origin estratto (#571). Da lì il supervisore e il coordinatore di un progetto con la
 # sorgente a parte lanciano scripts/supervisor-token.py e scripts/coordinator-token.py, che il
