@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import tempfile
 import threading
@@ -14,7 +15,7 @@ from contextlib import nullcontext
 from pathlib import Path
 
 from .agentuser import SHARED_DIR, TMP, SharedDir, with_git_config
-from .localtests import failed_cases
+from .localtests import failed_cases, prepared_output
 
 # The opening and closing lines git writes around a conflict (`=======` alone also underlines
 # Markdown and reST headings, so it is not a reliable sign).
@@ -45,6 +46,16 @@ _PUSH_REFUSED = re.compile(
 class TransientPushError(WorkspaceError):
     """A push that failed for a transient error of the remote (#645, ``transient_push``): a 5xx
     answer or a connection lost. Any other failure of a push stays a ``WorkspaceError``."""
+
+
+class PrepareFailed(WorkspaceError):
+    """The step that prepares a worktree (``[prepare] cmd``, #696) failed or timed out: a
+    critical escalation to the operator (``prepare_failed``). ``tail``: the end of its output,
+    for the escalation, which cleans it as it cleans the output of the tests."""
+
+    def __init__(self, message, tail=''):
+        super().__init__(message)
+        self.tail = tail
 
 
 def transient_push(message):
@@ -214,6 +225,9 @@ WORKTREE_GIT_CONFIG = (('core.hooksPath', os.devnull), ('core.fsmonitor', 'false
 # project that is not Python ignores it.
 NO_BYTECODE = {'PYTHONDONTWRITEBYTECODE': '1'}
 
+# The variable that gives the step that prepares a worktree its cache (#696, ``run_prepare``).
+PREPARE_CACHE_ENV = 'DEVLOOP_PREPARE_CACHE'
+
 
 def _identity_env(author):
     """Variables that make ``author`` (``{name, email}``) both author and committer of one git
@@ -266,6 +280,9 @@ class Workspace:
         # The identities of the failed tests of the latest run in each worktree (#459,
         # ``failed_cases``), read from its whole output.
         self._failed = {}
+        # The fingerprint with which each worktree was last prepared (#696, ``prepare_stamp``),
+        # forgotten when the worktree is created again or removed.
+        self._prepared = {}
 
     @property
     def test_env(self):
@@ -443,6 +460,7 @@ class Workspace:
                 pass
 
     def _fresh(self, path):
+        self._prepared.pop(str(path), None)
         if path.exists():
             self._git('worktree', 'remove', '--force', str(path), check=False)
             if path.exists():
@@ -621,16 +639,21 @@ class Workspace:
         self._git('worktree', 'add', '--force', '--detach', str(copy), self.head(path))
         return name, copy
 
-    def pristine(self, path, head):
+    def pristine(self, path, head, outputs=()):
         """Whether ``path`` is still at commit ``head``, with no change and no new file, not
-        even an ignored one."""
+        even an ignored one. ``outputs``: what the step that prepares a worktree produces
+        (#696, ``[prepare] outputs``): a new file git ignores under one of them is admitted;
+        a tracked file changed, or a new file git does not ignore, under them too, is not."""
         if self.head(path) != head:
             return False
-        return not self._git('status', '--porcelain', '--ignored', '--untracked-files=all',
-                             cwd=path).strip()
+        out = self._git('status', '--porcelain', '-z', '--ignored', '--untracked-files=all',
+                        cwd=path)
+        return all(entry.startswith('!! ') and prepared_output(entry[3:], outputs)
+                   for entry in out.split('\0') if entry)
 
     def remove(self, name):
         path = self.path(name)
+        self._prepared.pop(str(path), None)
         if path.exists():
             self._git('worktree', 'remove', '--force', str(path), check=False)
         self._git('worktree', 'prune', check=False)
@@ -1030,7 +1053,77 @@ class Workspace:
         read from the whole output, are kept for ``failed_cases`` (#459). Python writes no
         bytecode (``NO_BYTECODE``, #660)."""
         self._failed[str(path)] = None
-        env = dict(os.environ if self._test_env is None else self._test_env, **NO_BYTECODE)
+        done = self._run_command(path, command, timeout)
+        if done is None:
+            return False, f'Test command timed out after {timeout}s'
+        output = (done.stdout + '\n' + done.stderr).strip()
+        tail = '\n'.join(output.splitlines()[-60:])
+        self._failed[str(path)] = [] if done.returncode == 0 else failed_cases(output)
+        return done.returncode == 0, tail
+
+    def prepare_stamp(self, path, command, inputs):
+        """The fingerprint of the step that prepares ``path`` (#696): the SHA-256 of
+        ``command`` and of the content of each of ``inputs``, relative paths in the worktree. A
+        file that is missing, a link or anything but a regular file counts as such, read
+        without following a link and without waiting on a pipe: what an agent left there is
+        only hashed, never opened beyond its own entry."""
+        digest = hashlib.sha256(command.encode('utf-8'))
+        for name in inputs:
+            digest.update(b'\0' + name.encode('utf-8') + b'\0')
+            try:
+                fd = os.open(Path(path) / name,
+                             os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+            except OSError as exc:
+                digest.update(f'missing:{exc.errno}'.encode())
+                continue
+            with os.fdopen(fd, 'rb') as fh:
+                if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                    digest.update(b'not a regular file')
+                    continue
+                digest.update(b'file:' + hashlib.sha256(fh.read()).hexdigest().encode())
+        return digest.hexdigest()
+
+    def prepared(self, path):
+        """The ``prepare_stamp`` with which ``path`` was last prepared (#696), or None: never
+        since the worktree was created."""
+        return self._prepared.get(str(path))
+
+    def mark_prepared(self, path, stamp):
+        """Record that the step prepared ``path`` with the fingerprint ``stamp`` (#696)."""
+        self._prepared[str(path)] = stamp
+
+    def run_prepare(self, path, command, timeout, cache):
+        """``(passed, output_tail)`` of the step that prepares ``path`` (#696), as the test
+        command runs (``run_tests``): the same user and environment, with ``timeout``. Its cache
+        is ``cache``, a directory of the user that runs it, outside the worktrees and the
+        ``state_dir``, which the command gets as ``DEVLOOP_PREPARE_CACHE`` and which is created,
+        as that user, before it runs."""
+        script = 'mkdir -p -- "$DEVLOOP_PREPARE_CACHE" && ' + command
+        done = self._run_command(path, script, timeout, {PREPARE_CACHE_ENV: str(cache)})
+        if done is None:
+            return False, f'Prepare command timed out after {timeout}s'
+        output = (done.stdout + '\n' + done.stderr).strip()
+        return done.returncode == 0, '\n'.join(output.splitlines()[-60:])
+
+    def prepare_cache(self, project):
+        """The cache of the step that prepares the worktrees of ``project`` (#696):
+        ``<HOME>/.cache/devloop-prepare/<project>`` of the user that runs it, the agent user's
+        HOME with one, outside the worktrees and the ``state_dir``. Emptying it costs only
+        time."""
+        if self.agent_user is not None:
+            home = Path(self.agent_user.home)
+        else:
+            env = os.environ if self._test_env is None else self._test_env
+            home = Path(env.get('HOME') or Path.home())
+        return home / '.cache' / 'devloop-prepare' / re.sub(r'[^\w.-]', '_', project)
+
+    def _run_command(self, path, command, timeout, extra=None):
+        """The completed ``bash -c command`` in ``path``, as the project's commands run (#415):
+        as the agent user with one, git trusting ``path``, Python writing no bytecode, a
+        private temporary directory with ``private_tmp``; ``extra`` variables over the
+        environment. None when it timed out: its whole process group is killed."""
+        env = dict(os.environ if self._test_env is None else self._test_env, **NO_BYTECODE,
+                   **(extra or {}))
         run = run_in_group if self._run is subprocess.run else self._run
         argv = ['bash', '-c', command]
         user = self.agent_user
@@ -1051,16 +1144,13 @@ class Workspace:
                 done = run(argv, cwd=path, capture_output=True, text=True, timeout=timeout,
                            **kwargs)
             except subprocess.TimeoutExpired:
-                return False, f'Test command timed out after {timeout}s'
+                return None
         finally:
             if tmp is not None and user is not None:
                 self._remove_agent_tmp(tmp)
             elif tmp is not None:
                 shutil.rmtree(tmp, ignore_errors=True)
-        output = (done.stdout + '\n' + done.stderr).strip()
-        tail = '\n'.join(output.splitlines()[-60:])
-        self._failed[str(path)] = [] if done.returncode == 0 else failed_cases(output)
-        return done.returncode == 0, tail
+        return done
 
     def failed_cases(self, path):
         """The identities of the tests that failed in the latest ``run_tests`` in ``path``

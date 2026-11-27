@@ -1351,7 +1351,9 @@ class ActionsMixin:
                     if exc is not None and not isinstance(exc, TurnCancelled)]
         for key, exc in failures:
             self.log(f'  review by {key} failed: {exc}')
-        if not self.ws.pristine(path, pr.head_sha):
+        # Only the ignored outputs of the step that prepares a worktree are admitted (#696): a
+        # tracked file changed, or any other new file, ignored or not, discards the verdict.
+        if not self.ws.pristine(path, pr.head_sha, cfg.prepare.outputs):
             raise WorkspaceError(f'the worktree of PR #{pr.number} changed during the review; '
                                  'verdict discarded')
         if level2 and self.gh.pr_head(pr.number) != pr.head_sha:

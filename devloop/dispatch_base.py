@@ -284,6 +284,9 @@ class BaseMixin:
             return None
         found = set()
         try:
+            # The base commit's own dependencies (#696), before its tests: without them every
+            # test would fail there, and the failure would look like the base's.
+            self._prepare(copy)
             for module in modules:
                 self.ws.run_tests(copy, module_command([module]), self.cfg.test_timeout_seconds)
                 failed = self.ws.failed_cases(copy)

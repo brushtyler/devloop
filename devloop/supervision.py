@@ -137,6 +137,7 @@ CRITICAL = {
     'budget': 'turno non coperto dall\'envelope di budget della storia',
     'host_tests': 'test rossi in locale anche sulla base, verdi nella sua CI',
     'prerequisite_dropped': 'prerequisito chiuso senza essere completato',
+    'prepare_failed': 'passo di preparazione del worktree (`[prepare] cmd`) non riuscito',
 }
 UNCERTAIN_TURN = 'uncertain_turn'  # a turn refused by the block on uncertain outcomes (#362)
 # An approval that leaves open findings no agent can close any more: the operator's, and the
@@ -147,6 +148,9 @@ HOST_TESTS = 'host_tests'
 # A trusted "blocked by" of a ready issue closed for a reason other than ``completed`` (#671):
 # the prerequisite was dropped, not done, and the issue does not start.
 PREREQUISITE_DROPPED = 'prerequisite_dropped'
+# The step that prepares a worktree (``[prepare] cmd``, #696) failed or timed out: it runs the
+# repository's code with the network, so its failure is the operator's.
+PREPARE_FAILED = 'prepare_failed'
 
 # The steps a ``retry`` can run again, and the PR label each one resumes from.
 RETRY_STEPS = ('preflight', 'implement', 'review', 'fix', 'sync')
@@ -394,6 +398,7 @@ _ENGLISH = {
     'budget': 'turn not covered by the budget envelope of the story',
     'host_tests': 'tests red locally on the base too, green in its CI',
     'prerequisite_dropped': 'prerequisite closed without being completed',
+    'prepare_failed': 'the step that prepares the worktree (`[prepare] cmd`) failed',
 }
 _ENGLISH_UNKNOWN = 'class not recognised, hence critical'
 

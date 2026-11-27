@@ -49,6 +49,13 @@ CI logs (`[tests] ci_log_format = "run-tests"`, ADR 0006, R5). The agents, witho
 measures instead of asking the supervisor for them; a job log that cannot be read only leaves
 its summary out (see [Summary of the CI in the prompts](reference.md#summary-of-the-ci-in-the-prompts)).
 
+A project with dependencies to install, such as the `node_modules/` of an npm project, names in
+its project file the command that installs them (`[prepare] cmd`, #696): the dispatcher runs it
+in each worktree before its first turn or test, a reviewer's copy included, and again when one
+of `[prepare] inputs` (its lock files) changes, as the tests run and with a cache of the
+project; a failure escalates `prepare_failed` to the operator (see
+[Preparing the worktree](reference.md#preparing-the-worktree)). Without `[prepare]` nothing runs.
+
 The review prompt does not say who wrote the change (#389): no implementer key or model, no
 attribution header or marker in the issue, the PR description and the comments it carries, and
 an explicit statement that the reviewer is not the author (see
@@ -1445,6 +1452,7 @@ next to the review; one for the trust policy gets none (#434, see
 | `sync_sensitive`, `protected_paths` | A sync conflict on a sensitive or operator-only path; a change to `protected_paths` | Yes |
 | `tests_failed`, `blocked`, `interrupted`, `unattributable`, `lost_meta`, `inconsistent`, `configuration`, `failure` | Tests still failing (or no change), an agent that declared itself blocked, an interrupted implementation, findings without an owner, a lost PR marker, an inconsistent PR state, a configuration to decide (a turn refused for an entry of the directories of the CLIs that is not in the [list](#agent-user), #517, also in a sync), a `gh`, git or dispatcher error (a push the remote refused, for its permissions, the rules of the branch or a conflict, included) | Yes |
 | `host_tests` | Local tests that fail on the base commit of the branch too, but pass in the CI of that commit: a [failure of the host](#tests-red-on-the-base-too), not of `main` | Yes |
+| `prepare_failed` | The step that [prepares a worktree](reference.md#preparing-the-worktree) (`[prepare] cmd`, #696) failed or reached its time limit, before a turn or a test | Yes |
 | `receipt_conflict` | The [receipt of the PR](protocol.md#pr-receipt) contradicts the markers at its promotion | Yes |
 | `prerequisite_dropped` | A ready issue, or one with a retry or an extension that would run its step, whose trusted "blocked by" was closed for a reason other than completed, such as not planned ([Dependencies between issues](#dependencies-between-issues)) | Yes |
 | `retry_limit`, `supervisor_escalated`, `supervisor_refused` | The supervisor's retries are spent, it handed the escalation over, or it gave a command the escalation does not admit | Yes |

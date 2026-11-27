@@ -244,9 +244,12 @@ it acts for.
 A reviewer does not run in the PR worktree but in a disposable copy of it: a detached worktree
 at the same commit, `pr-<n>-review`, which shares the repository's refs (so
 `git diff origin/main...HEAD` works) and is removed after the review. The tests the reviewer runs
-can therefore write files and temporary directories. After the review the dispatcher checks
-that the PR worktree is still at the reviewed commit with no change and no new file, not even
-an ignored one; otherwise the verdict is discarded and the PR goes to `agent:needs-operator`.
+can therefore write files and temporary directories. With [`[prepare] cmd`](#preparing-the-worktree)
+the copy gets the project's dependencies before the review turn, from the dispatcher, with the
+network of the local tests: codex reviews without network, and needs them there. After the
+review the dispatcher checks that the PR worktree is still at the reviewed commit with no change
+and no new file, not even an ignored one, except the ignored files under `[prepare] outputs`;
+otherwise the verdict is discarded and the PR goes to `agent:needs-operator`.
 
 | Reviewer | Sandbox |
 |---|---|
@@ -442,7 +445,7 @@ names it (a key of the overlay is told so: `set it in the local overlay`):
 
 | Kind | Keys | How it composes |
 |---|---|---|
-| Facts | `test_cmd`, `local_tests`, [`[tests]`](#local-tests), `language`, `priority_labels`, `[docs.map]`, `[prompts]` ([data in the prompts](#project-data-in-the-prompts)) | replace the installation's value (`[docs.map]`, `[tests]` and `[prompts]` merge key by key); the overlay replaces them in turn |
+| Facts | `test_cmd`, `local_tests`, [`[tests]`](#local-tests), [`[prepare]`](#preparing-the-worktree), `language`, `priority_labels`, `[docs.map]`, `[prompts]` ([data in the prompts](#project-data-in-the-prompts)) | replace the installation's value (`[docs.map]`, `[tests]`, `[prepare]` and `[prompts]` merge key by key); the overlay replaces them in turn |
 | Restrictions | `protected_paths`, `blocked_labels`, `[review_policy] sensitive_paths` and `sensitive_path_lists`, `[review_policy.zero] checks`, `[merge] operator_only_paths` | only add: the entries of the installation and of the overlay (or the code's default) stay, those of the project file that are not there follow. An empty list removes nothing. `[review_policy.zero] checks` only add to the checks of the installation and the overlay: the project file never turns level 0 on, and a check with none below stops devloop |
 
 Every other key, the trust keys (`repo`, `trusted_users`, `[apps]`, `[merge] mode`, roles, review
@@ -483,7 +486,7 @@ configuration, and the trust keys whose value changed since the previous one, wi
 before and after. The trust keys are `repo`, `base_branch`, `state_dir`, `source`, `test_cmd`,
 `trusted_users`, `preflight`, `conclave`, `[roles]`, `[agents]`, `[apps]`, `[merge]`,
 `[review_policy]`, `max_review_rounds`, `max_requested_fix_rounds`, `protected_paths`,
-`blocked_labels`, `[budget]`, `[delegations]`, `[agent_user]` and `[pin]`. The start records the files the dispatcher was
+`blocked_labels`, `[budget]`, `[delegations]`, `[agent_user]`, `[pin]` and `[prepare]`. The start records the files the dispatcher was
 built from, as they were read, never a second read of them. Its log says the same. A start whose
 record cannot be written stops devloop.
 
@@ -771,6 +774,60 @@ without promoting it. With `"full"` an absent CI is enough, as before; a pending
 The mode and the modules run (`local_tests`: `{mode, modules}`, only `{mode}` with `"full"`) go to the tick log and, as
 information only, to the markers of implement and fix: they are not part of the policy receipt
 and no approval depends on them.
+
+### Preparing the worktree
+
+A worktree is born clean: whatever git ignores, such as the `node_modules/` of an npm project,
+is not there, and the agents have no network in their turns to install it (#696). `[prepare]`
+names the step that prepares it. It is a fact of the project, like `[tests]`: it belongs in the
+[project file](#project-file), the overlay may replace its keys, and the installation sets none.
+Every key is optional:
+
+| Key | Value | Without it |
+|---|---|---|
+| `cmd` | The shell command that prepares a worktree, for example `npm ci --ignore-scripts --cache "$DEVLOOP_PREPARE_CACHE"` | Nothing runs, and nothing changes from before #696 |
+| `inputs` | Relative paths of files, such as the lock files (`package-lock.json`), whose content runs the step again | The step runs once per worktree |
+| `outputs` | Relative paths the step produces and git ignores: a directory ends in `/` and covers what is under it, a `*` matches within one segment (`packages/*/node_modules/`) | The check of the PR worktree after a review is the one of before #696 |
+
+`inputs` and `outputs` without `cmd`, an unknown key, a path that is absolute, holds `.` or `..`,
+or has characters other than letters, digits and `.@+=,-` (and the `*` of an output) stop devloop
+at startup. `[prepare]` is a trust key, recorded in the journal at every change, and never a
+permission of the agents: the commands they may run are the installation's and the overlay's.
+
+**When it runs.** The dispatcher runs `cmd` in a worktree before its first agent turn, whatever
+the step (implementation, fix, sync, review, readiness check, conclave, advisory review), and
+before the first test it runs there (the full suite before a review, the tests of the base
+commit of a branch). Before every later turn and test it runs again when one of `inputs`, or
+`cmd`, changed since: an attempt that changed `package-lock.json` has its dependencies repaired
+before its tests and before the next attempt. A worktree created again is prepared again. A
+reviewer's disposable copy is a worktree of its own, and is prepared before the review turn.
+
+**How it runs.** As `test_cmd` runs: the same user (the [agent user](#agent-user), when there is
+one) and the same environment, without keys nor GitHub token, with the same network as the
+local tests, and `test_timeout_seconds` as its time limit. Before the command the dispatcher
+creates, as that user, the project's cache, `$HOME/.cache/devloop-prepare/<owner>_<repo>` in the
+HOME of that user, outside the worktrees and the `state_dir`, and gives it to the command as
+`DEVLOOP_PREPARE_CACHE`: the command passes it to its package manager (`npm ci --cache
+"$DEVLOOP_PREPARE_CACHE"`). The cache can be emptied at any time: the next step downloads again.
+An installation may run the repository's scripts (the `postinstall` of a package, of the
+repository too, which an agent may have written): prefer the options that do not, such as
+`npm ci --ignore-scripts`, when the project allows it.
+
+**Its record.** Every run is a `verification` record of kind `prepare`
+([Evidence and telemetry](protocol.md#evidence-and-telemetry)), like a local test: command, outcome, duration and the
+tree before and after, in the register of a fix, a record of its own otherwise. A run that fails
+or reaches its time limit stops the step: it escalates `prepare_failed`, a critical class, to the
+operator ([Escalations to the supervisor](guide.md#escalations-to-the-supervisor)), with the end
+of its output, cleaned as the output of the tests is, and the operator resumes it as after any
+other escalation ([Commands on escalations to the operator](guide.md#commands-on-escalations-to-the-operator)).
+On the base commit of a branch (#459) a failed step only leaves the failure to the branch.
+
+**The check after a review.** The PR worktree must come out of a review still at the reviewed
+commit, with no change and no new file. With `outputs`, a new file that git ignores and
+that lies under one of them is admitted; anything else still discards the verdict: a tracked file
+changed, under `outputs` too, a new file git does not ignore, an ignored file elsewhere. The
+diff and the commit never hold what git ignores, so admitting it hides no change of the reviewed
+tree.
 
 ### Generated files in the commits
 

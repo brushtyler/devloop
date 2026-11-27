@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .agentuser import allowed_entries
-from .localtests import CI_LOG_FORMATS, SELECTIONS, Tests
+from .localtests import CI_LOG_FORMATS, SELECTIONS, Prepare, Tests
 from .localtests import MODES as LOCAL_TESTS_MODES
 from .policy import MAX_LEVEL, MIN_LEVEL, SECOND_REVIEWER_MODES, ZERO_LEVEL, ReviewPolicy
 from .supervision import (MAX_CAPACITY, MAX_CAPACITY_HOURS, MAX_COORDINATOR_MERGES,
@@ -677,6 +677,9 @@ class Config:
     # The selection of the test modules and the format of the CI logs (``[tests]``, ADR 0006,
     # R5), facts of the project: none by default.
     tests: Tests = Tests()
+    # The step that prepares a worktree (``[prepare]``, #696), a fact of the project: none by
+    # default, and then nothing runs before the turns.
+    prepare: Prepare = Prepare()
     # The block on uncertain turns (#362): a turn of the journal left without outcome refuses
     # every new turn of its work until a trusted user reconciles it. Off by default (ADR 0004,
     # D8): the journal records the turns all the same.
@@ -1311,6 +1314,48 @@ def parse_tests(table):
         raise ConfigError('tests: source_prefixes and dir_modules are parameters of a '
                           'selection: they need tests.selection')
     return Tests(source_prefixes=prefixes, dir_modules=tuple(pairs), **values)
+
+
+PREPARE_KEYS = ('cmd', 'inputs', 'outputs')
+# A segment of a relative path of ``[prepare]``: no "." nor "..", no shell or glob syntax but the
+# ``*`` of an output.
+_PREPARE_SEGMENT = re.compile(r'[\w.@+=,-]+', re.ASCII)
+_OUTPUT_SEGMENT = re.compile(r'[\w.@+=,*-]+', re.ASCII)
+
+
+def _prepare_paths(table, key, segment, directories):
+    """The relative paths of ``prepare.<key>``: each segment ``segment``, never ``.`` nor
+    ``..``; with ``directories`` a path may end in ``/``, a directory."""
+    paths = _str_list(table, key, 'prepare')
+    for path in paths:
+        body = path[:-1] if directories and path.endswith('/') else path
+        parts = body.split('/')
+        if (not body or path.startswith('/')
+                or any(p in ('.', '..') or not segment.fullmatch(p) for p in parts)):
+            kind = 'a relative path, a directory ending in "/"' if directories else \
+                'the relative path of a file'
+            raise ConfigError(f'prepare.{key}: {path!r} is not {kind}')
+    return paths
+
+
+def parse_prepare(table):
+    """``[prepare]`` (#696), facts of the project, each optional: ``cmd``, the command that
+    prepares a worktree (``localtests.Prepare``); ``inputs``, the files whose change runs it
+    again; ``outputs``, what it produces, ignored by git. Without ``cmd`` the other keys stop
+    devloop: they would prepare nothing. Anything else stops devloop."""
+    if not isinstance(table, dict):
+        raise ConfigError('prepare: expected a table')
+    unknown = set(table) - set(PREPARE_KEYS)
+    if unknown:
+        raise ConfigError(f'prepare: unknown keys {sorted(unknown)}')
+    command = table.get('cmd', '')
+    if not isinstance(command, str):
+        raise ConfigError('prepare.cmd: expected a string')
+    inputs = _prepare_paths(table, 'inputs', _PREPARE_SEGMENT, False)
+    outputs = _prepare_paths(table, 'outputs', _OUTPUT_SEGMENT, True)
+    if (inputs or outputs) and not command.strip():
+        raise ConfigError('prepare: inputs and outputs need prepare.cmd')
+    return Prepare(command=command.strip(), inputs=inputs, outputs=outputs)
 
 
 def parse_delegations(table):
@@ -2044,6 +2089,7 @@ def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
     if local_tests == 'changed' and not tests.selection:
         local_tests = 'full'
     ci_rerun = ci_rerun and bool(tests.ci_log_format) and bool(tests.selection)
+    prepare = parse_prepare(data.get('prepare', {}))
     block_uncertain = (_require(data, 'block_uncertain_turns', bool, 'config')
                        if 'block_uncertain_turns' in data else Config.block_uncertain_turns)
     story_identity = (_require(data, 'story_identity', bool, 'config')
@@ -2105,7 +2151,7 @@ def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
         priority_labels=_str_list(data, 'priority_labels', 'config', ('prerequisito',)),
         protected_paths=_str_list(data, 'protected_paths', 'config', DEFAULT_PROTECTED),
         apps=apps, app_key_dir=key_dir, agent_stall_action=stall_action,
-        local_tests=local_tests, ci_rerun_unrelated=ci_rerun, tests=tests,
+        local_tests=local_tests, ci_rerun_unrelated=ci_rerun, tests=tests, prepare=prepare,
         block_uncertain_turns=block_uncertain, story_identity=story_identity,
         publication_outbox=outbox, attempt_identity=attempt_identity, budget=budget,
         merge=merge, supervisor=supervisor,
@@ -2242,6 +2288,7 @@ OVERLAY_KEYS = {
     'docs': {'map': {'*': None}},
     'tests': {'selection': None, 'source_prefixes': None, 'dir_modules': {'*': None},
               'ci_log_format': None},
+    'prepare': dict.fromkeys(PREPARE_KEYS),
     'prompts': _PROMPTS_KEYS,
     'delegations': dict.fromkeys(('retry_own_prs', 'rounds', 'budget', 'max_rounds_per_pr',
                                   'max_grants_per_day', 'capacity', 'capacity_max_open_prs',
@@ -2322,6 +2369,9 @@ PROJECT_FACTS = {
     # permission of the agents: those are the installation's and the overlay's (D2).
     'tests': {'selection': None, 'source_prefixes': None, 'dir_modules': {'*': None},
               'ci_log_format': None},
+    # The step that prepares a worktree (#696): run by the dispatcher, as the tests, never a
+    # permission of the agents.
+    'prepare': dict.fromkeys(PREPARE_KEYS),
 }
 # Each restriction with its value when neither the installation nor the overlay sets it.
 PROJECT_RESTRICTIONS = {
@@ -2595,7 +2645,7 @@ def load_config(path=None, local=None, project=None, *, sources=None):
 TRUST_KEYS = ('repo', 'repo_aliases', 'base_branch', 'state_dir', 'source', 'test_cmd', 'trusted_users',
               'preflight', 'conclave', 'roles', 'agents', 'apps', 'merge', 'review_policy',
               'max_review_rounds', 'max_requested_fix_rounds', 'protected_paths',
-              'blocked_labels', 'budget', 'delegations', 'agent_user', 'pin')
+              'blocked_labels', 'budget', 'delegations', 'agent_user', 'pin', 'prepare')
 
 
 def _plain(value):

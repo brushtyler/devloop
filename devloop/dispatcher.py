@@ -268,10 +268,10 @@ from .ports import Backend, Tracker, summarize_checks
 from .review import (CI, OPERATOR, UNPROVEN, current_round, finding_commands, finding_key,
                      flow_verdict, open_findings, owner_of, round_verdict, trust_policy_parts)
 from .supervision import (ACCEPT_DEFAULTS, BUDGET_GRANTABLE, COORDINATOR_DELEGATED, DECIDE,
-                          PREREQUISITE_DROPPED, PUSH_FAILED, RETRY, ROUND_GRANTABLE,
-                          TOOL_FAILURE, UNCERTAIN_TURN,
+                          PREPARE_FAILED, PREREQUISITE_DROPPED, PUSH_FAILED, RETRY,
+                          ROUND_GRANTABLE, TOOL_FAILURE, UNCERTAIN_TURN,
                           operator_rounds_text, supervisor_command)
-from .workspace import TransientPushError, WorkspaceError
+from .workspace import PrepareFailed, TransientPushError, WorkspaceError
 
 # The colours of the labels of the review level, of level 0 and of the priorities; their
 # descriptions, in the project's ``language`` (#635), are ``label_*`` of ``TEXTS``.
@@ -2848,8 +2848,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         model produced no result (``AgentError``: a crash, a timeout, a stall, an unavailable
         model, a denied permission), ``untrusted`` for an issue text no longer trusted,
         ``push_failed`` for the push of a step's branch that failed twice for a transient error
-        of the remote (``TransientPushError``, #645), ``failure`` for anything else (``gh``, git,
-        the dispatcher itself).
+        of the remote (``TransientPushError``, #645), ``prepare_failed``, critical, for the step
+        that prepares a worktree (``PrepareFailed``, #696), ``failure`` for anything else
+        (``gh``, git, the dispatcher itself).
 
         A conclave (#141) is never escalated, whatever failed and however it ran
         (``_run_action``, or ``_run_lane`` for an unexpected error): it runs on an item already
@@ -2889,6 +2890,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         if getattr(exc, 'kept_push', None):  # the commits a retry pushes again (#645)
             reason += t('push_kept', commit=exc.kept_push[:12])
         cls = ('configuration' if _cli_state_refused(exc)  # the CLIs' entries (#517)
+               else PREPARE_FAILED if isinstance(exc, PrepareFailed)  # critical (#696)
                else PUSH_FAILED if isinstance(exc, TransientPushError)
                else TOOL_FAILURE if isinstance(exc, AgentError)
                else 'untrusted' if isinstance(exc, UntrustedChange)
@@ -3484,6 +3486,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         ledger records them joined by ``&&``. ``retried``: the failed tests that ``command`` runs
         again alone (#598), recorded."""
         commands = command if isinstance(command, list) else [command]
+        self._prepare(path, where, attempt)
         if self.ledger is None or where is None:
             return (*self._run_each(path, commands), None)
         before = self.ws.tree(path)
@@ -3503,6 +3506,49 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                                          tree_after=after, register=fix_register(where),
                                          retried=retried, changed_by_tests=changed)
         return passed, tail, entry
+
+    def _prepare(self, path, where=None, attempt=1):
+        """Run the step that prepares the worktree ``path`` (``[prepare] cmd``, #696) when it is
+        due: never run in it since the worktree was created, or one of ``[prepare] inputs`` (or
+        the command) changed since (``Workspace.prepare_stamp``). Nothing without a command.
+        It runs as the tests run, with ``test_timeout_seconds`` and the project's cache
+        (``Workspace.run_prepare``); with a ledger and ``where`` it is a ``verification`` of
+        kind ``prepare`` of ``attempt``, in the register of the fix ``where`` names, if any. A
+        failure or a timeout raises ``PrepareFailed``, with the end of its
+        output: a critical escalation to the operator (``prepare_failed``)."""
+        prepare = self.cfg.prepare
+        if not prepare.command:
+            return
+        stamp = self.ws.prepare_stamp(path, prepare.command, prepare.inputs)
+        last = self.ws.prepared(path)
+        if last == stamp:
+            return
+        name = Path(path).name
+        self.log(f'  prepare {name}: ' + ('[prepare] inputs changed, running [prepare] cmd again'
+                                          if last else 'running [prepare] cmd'))
+        record = self.ledger is not None and where is not None
+        before = self.ws.tree(path) if record else None
+        started = time.monotonic()
+        passed, tail = self.ws.run_prepare(path, prepare.command, self.cfg.test_timeout_seconds,
+                                           self.ws.prepare_cache(self.cfg.repo))
+        duration = int((time.monotonic() - started) * 1000)
+        if record:
+            after = self.ws.tree(path)
+            changed = self.ws.tree_changes(path, before, after) if before != after else []
+            if changed:
+                self.log('  the prepare step changed ' + ', '.join(changed[:10])
+                         + (f' and {len(changed) - 10} more' if len(changed) > 10 else ''))
+            # A section of the register of a fix; a record of its own otherwise, that of the
+            # copy of a reviewer too: the register of a round holds only turns and events.
+            self.ledger.verification(where[0], kind='prepare', attempt=attempt,
+                                     command=prepare.command, passed=passed,
+                                     duration_ms=duration, tree_before=before, tree_after=after,
+                                     register=fix_register(where), changed_by_tests=changed)
+        if not passed:
+            self.log(f'  prepare {name}: failed')
+            raise PrepareFailed(f'the step that prepares the worktree {name} ([prepare] cmd) '
+                                'failed', tail)
+        self.ws.mark_prepared(path, stamp)
 
     def _run_each(self, path, commands):
         """``(passed, tail)`` of ``commands`` run one after the other in ``path``, each with its
@@ -3844,7 +3890,12 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         it leaves ``models`` and is listed in ``models.skipped`` and on the configuration
         returned (``skipped``). When every model of the chain is remembered, no CLI runs and
         the turn fails listing each one with its reason and time (``ModelsUnavailable``). A
-        model that answers is forgotten."""
+        model that answers is forgotten.
+
+        Before the first model runs, the worktree ``path`` is prepared when it is due
+        (``_prepare``, #696): with ``[prepare] cmd``, a worktree gets its dependencies before
+        its first turn, whatever the step."""
+        self._prepare(path, where)
         failed = None
         retried = {}  # the models already denied a permission in this call: their denial
         emptied = set()  # the last models of the chain already rerun after no output (#222)
@@ -4015,6 +4066,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         resumed = self._resume_kept(path, label) if keep else ''
         for attempt in range(1 + self.cfg.implement_test_retries):
             text = (prompt(attempt) if callable(prompt) else prompt) + resumed + failures
+            # The worktree prepared before each attempt (#696): before the first, and again
+            # when the previous attempt changed one of ``[prepare] inputs``.
+            self._prepare(path, where, attempt + 1)
             try:
                 result, used = self._turn(models, 'write', text, schema, path,
                                           f'{label}-{attempt + 1}', where=where)

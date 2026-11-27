@@ -1392,6 +1392,31 @@ progetto (ADR 0006, R4, [docs/devloop/reference.md](../docs/devloop/reference.md
 senza, i prompt tolgono le frasi che li citano. I test locali e la lettura della CI seguono
 `[tests]` del file di progetto (R5): vale quanto sotto per `local_tests` e `ci_rerun_unrelated`.
 
+**Un progetto con dipendenze da installare** (#696), per esempio un progetto npm con
+`node_modules/` ignorato da git: ogni worktree nasce senza, e gli agent non hanno rete nei loro
+turni. La tabella `[prepare]` del file di progetto ne dà il comando, che il dispatcher esegue
+prima del primo turno di ogni worktree e di nuovo quando cambia un file di `inputs`
+([docs/devloop/reference.md](../docs/devloop/reference.md#preparing-the-worktree), esempio nella
+[guida rapida](../docs/devloop/quickstart.md#a-project-that-is-not-python)). Non serve alcun
+passo sull'host:
+
+- **utente e rete**: il comando gira come i test locali, cioè come l'utente degli agent
+  (`AGENT_USER`), senza chiavi né token nell'ambiente, e con la stessa rete della verifica
+  locale di oggi, che devloop non limita; una rete ristretta ai registri si configura sull'host,
+  fuori da devloop. Un'installazione può eseguire gli script dei pacchetti e del repository,
+  che un agent può aver scritto: dove il progetto lo permette, il comando usa le opzioni che non
+  li eseguono (per npm `npm ci --ignore-scripts`);
+- **cache**: una directory per progetto nella home dell'utente che esegue il comando,
+  `~/.cache/devloop-prepare/<owner>_<repo>` di `AGENT_USER` (dell'utente di devloop senza utente
+  degli agent), fuori dai worktree e dallo `state_dir`; il dispatcher la crea come quell'utente e
+  la passa al comando in `DEVLOOP_PREPARE_CACHE` (per npm `--cache "$DEVLOOP_PREPARE_CACHE"`).
+  È scrivibile anche nei turni degli agent, come la loro home: il gestore di pacchetti verifica
+  ciò che ne prende con gli hash del file di lock (`npm ci`). Si può svuotare senza effetti oltre
+  la lentezza, meglio a loop fermo: il passo successivo scarica di nuovo;
+- **fallimento**: un comando che fallisce o supera `test_timeout_seconds` è un'escalation
+  critica all'operatore, `prepare_failed`, con la fine del suo output, ripulita come quella dei
+  test.
+
 **Gli script di un progetto con `SOURCE_REF` dal checkout del suo tag** (#687). Per un progetto
 con la sorgente a parte, ogni script di `ops/host/` (`setup-*.sh`, `check-host.sh`,
 `start-role.sh`) e ogni sezione di [host/migrate.md](host/migrate.md) si eseguono da un checkout

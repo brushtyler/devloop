@@ -373,6 +373,13 @@ local_tests = "full"
 
 [prompts]
 module_test_cmd = "npx vitest run src/name.test.ts"
+
+# The dependencies of each worktree, installed by the dispatcher before the first turn and
+# again when the lock file changes (docs/devloop/reference.md, "Preparing the worktree").
+[prepare]
+cmd = 'npm ci --ignore-scripts --no-audit --no-fund --cache "$DEVLOOP_PREPARE_CACHE"'
+inputs = ["package-lock.json"]
+outputs = ["node_modules/"]
 ```
 
 and the overlay admits them, beside its other keys (`[agents.agy-reviewer]` replaces the table
@@ -399,6 +406,14 @@ write_commands = ["npm test", "npm run", "npx tsc", "npx jest", "npx vitest", "g
 review_commands = ["npm test", "npm run", "npx tsc", "npx jest", "npx vitest", "git status",
                    "git diff", "git log", "git show"]
 ```
+
+A worktree is born without `node_modules/`, and the agents have no network in their turns: the
+`[prepare]` table of the project file installs the dependencies, run by the dispatcher as the
+tests run, before the first turn of each worktree and again when `package-lock.json` changes,
+with a cache of the project in the HOME of the agent user
+([Preparing the worktree](reference.md#preparing-the-worktree)). `--ignore-scripts` keeps the
+installation from running the scripts of the packages and of the repository: leave it out only
+if the project needs them. A failure goes to the operator as `prepare_failed`.
 
 `Bash(npm run *)` admits every script of `package.json`; a narrower rule, such as
 `Bash(npm run test *)`, is the operator's choice. `devloop status` checks the result: for each

@@ -29,6 +29,7 @@ Without a selection ``changed`` is ``full``; without a format no CI log is read 
 and ``ci_rerun_unrelated`` is off (``config.parse_config``).
 """
 
+import fnmatch
 import re
 import shlex
 from dataclasses import dataclass
@@ -57,6 +58,40 @@ class Tests:
     source_prefixes: tuple = ()
     dir_modules: tuple = ()
     ci_log_format: str = ''
+
+
+@dataclass(frozen=True)
+class Prepare:
+    """``[prepare]`` of the configuration (#696), facts of the project: the step that prepares a
+    worktree before its first turn or test, such as the installation of its dependencies.
+    ``command``: the shell command, '' without one (nothing runs, as before #696). ``inputs``:
+    relative paths of files, such as the lock files, whose change runs it again before the next
+    turn or test. ``outputs``: the relative paths it produces, ignored by git, such as
+    ``node_modules/`` (``prepared_output``): the check of the PR worktree after a review admits
+    them, ignored, and nothing else."""
+    command: str = ''
+    inputs: tuple = ()
+    outputs: tuple = ()
+
+
+def prepared_output(name, outputs):
+    """Whether ``name``, a path relative to a worktree as ``git status`` gives it (a directory
+    ends in ``/``), is one of ``outputs`` or lies under one of them (#696). An output ending in
+    ``/`` is a directory and covers everything under it; any other is a file. A ``*`` matches
+    within one segment of the path, never a ``/``: ``packages/*/node_modules/``."""
+    parts = name.rstrip('/').split('/')
+    for output in outputs:
+        pattern = output.rstrip('/').split('/')
+        if output.endswith('/'):
+            if len(parts) < len(pattern):
+                continue
+        elif len(parts) != len(pattern) or name.endswith('/'):
+            continue
+        if all(fnmatch.fnmatchcase(part, want) for part, want in zip(parts, pattern)):
+            return True
+    return False
+
+
 # What scripts/run-tests.py prints for each failed module and at the end of a failed suite.
 # In a `gh run view --log-failed` log each line starts with the job, the step and a timestamp.
 _FAILED_MODULE = re.compile(r'(?:^|\s)FAILED MODULE (\S+)\s*$')
