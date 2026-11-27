@@ -8321,6 +8321,36 @@ class RoleWaitTests(WakeUpCase):
         return (self.lock_held(role) and state.exists()
                 and state.read_text().split()[1:] == ['manutenzione'])
 
+    def test_without_a_maintenance_ever_seen_the_wait_writes_nothing_on_stderr(self):
+        # #711: the state of the maintenance seen by the role is missing until its first
+        # maintenance; each round of the wait, with the mailbox empty, reads it without an error.
+        for role in ('supervisor', 'coordinator'):
+            with self.subTest(role=role):
+                self.as_role(role)
+                seen = (self.coordinator_home
+                        / f'.local/state/devloop-{role}-wait/_default/maintenance')
+                done = self.wait('--period', '3')
+                self.assertEqual(done.returncode, 0, done.stderr)
+                self.assertTrue(done.stdout.startswith('periodo: 3s'), done.stdout)
+                self.assertEqual(done.stderr, '')
+                self.assertFalse(seen.exists())
+
+    def test_the_migration_guide_has_the_step_on_the_host_of_711(self):
+        # #711: the section the host_step names: the root copies again, then the pin by hand.
+        step = RootStepsGuideTests().section('## Sveglia dei ruoli senza errori su stderr (#711)')
+        commands = RootStepsGuideTests.commands(step, inline=False)
+        for script in ('setup-supervisor.sh', 'setup-coordinator.sh'):
+            for dry in (' --dry-run', ''):
+                self.assertIn(f'sudo bash <checkout>/ops/host/{script} --params <parametri>{dry}',
+                              commands)
+        self.assertIn('sudo bash <checkout>/ops/host/check-host.sh --params <parametri> --no-apps',
+                      commands)
+        flat = ' '.join(step.split())
+        for phrase in ('host/role-wait.sh', 'il pin a mano', '**Rollback**',
+                       '**Un progetto con `SOURCE_REF`** (#687)'):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, flat)
+
     def test_each_wait_leaves_at_the_start_of_the_maintenance_then_waits_in_it(self):
         # The usual wait, the rest and the pause: each one leaves with the start, once.
         for name, args, pause in (('normal', (), False), ('rest', ('--rest',), False),
