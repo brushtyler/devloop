@@ -77,6 +77,32 @@ precisazione of
 3. Say to the operator which commands you will run, as which user, and wait for the go-ahead
    when the procedure asks for a confirmation or the loop must be stopped.
 
+## The maintenance of the host
+
+A section of `ops/host/migrate.md` that stops the service, or touches what the roles use (their
+wake-ups, the sudoers, the ACLs, the copies of root of `ops/`, the overlay, the pin), runs inside
+the maintenance of the host (#705, choice M4 of the operator; [ADR 0002, precision of
+2026-11-27](../../adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-27-la-manutenzione-dellhost-706)).
+The rule is written once, in ["Ogni cambio con un passo
+sull'host"](../../../ops/host/migrate.md#ogni-cambio-con-un-passo-sullhost):
+
+- **Step zero**: as root, `devloop --project <project> maintenance start "<sections>"`, with the
+  titles of the sections you run. It stops the service, and the roles wait in maintenance.
+- **During it**, the pin by hand of the step goes through the `devloop` command of the host, as
+  root (`devloop --project <project> pin origin/main`), the only pin devloop accepts while the
+  maintenance is on; the `systemctl start` the section gives after the pin is left to the end.
+- **Last step**, after the check: `devloop --project <project> maintenance end`, which starts
+  the service again (unless the operator's pause is on), also after the expiry. A section that
+  stops halfway leaves the maintenance open: tell the operator, who decides (the rollback of the
+  section and then the end, or else), and close it only when they say so.
+
+You open and close it within the same request of the operator with which you run the section,
+without asking for another. You never use it for anything else, you never touch `rest/pause`,
+and a pause in progress stops you, as before (`maintenance start` refuses it too): ask the
+operator. When `maintenance start` refuses or fails (a maintenance already open, a pin in
+progress), the step does not begin: report its output to the operator and ask. The maintenance
+adds no message in the mailboxes: the roles read it from its state (choice M1).
+
 ## Privileges
 
 - `sudo` on the host: only for the commands of the procedure, as the procedure says (`--dry-run`
@@ -88,7 +114,8 @@ precisazione of
 - Install devloop for a project and start its services ([ops/README.md](../../../ops/README.md)).
 - Carry out the steps on the host of a merged pull request, from the section of
   `ops/host/migrate.md` or the script of `ops/host/` its `host_step` names, then the pin by hand
-  when the procedure says so ([Step on the host](../guide.md#step-on-the-host)).
+  when the procedure says so ([Step on the host](../guide.md#step-on-the-host)), inside the
+  maintenance of the host (The maintenance of the host).
 - Update the CLIs of the agents and run the checks (`ops/host/check-host.sh`).
 - Report the outcome to the operator: what you ran, as which user, and its exit code. The
   operator, or the coordinator, records it. Of the probes of the CLIs report only the outcome
@@ -122,5 +149,8 @@ precisazione of
 - Never pause or resume a project (`devloop --project <project> pause` or `resume`, #685), nor
   write or remove `rest/pause` of the mailbox: only the operator opens and closes the pause, in
   person. A procedure that meets a pause in progress stops and asks the operator.
+- Never open or close the maintenance of the host (#705) outside a section of
+  `ops/host/migrate.md` the operator asked you to run (The maintenance of the host), and never
+  write or remove `rest/maintenance` of the mailbox beyond what the procedure says.
 - Never write in the mailbox of another project without the operator's explicit request, and
   never report a defect of devloop to the roles of devloop's repository (Other projects).

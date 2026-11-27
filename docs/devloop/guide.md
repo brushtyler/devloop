@@ -3093,6 +3093,17 @@ notify`, from a timer of root that `setup-devloop.sh` enables (`devloop-maintena
 every 5 minutes and also after a reboot, until the maintenance is ended. The procedure is in
 [ops/README.md](../../ops/README.md#10-coordinatore-facoltativo), "La manutenzione dell'host".
 
+Only the agent of the host, within a section of `ops/host/migrate.md` the operator asked for, and
+the operator open and close it (#706; [ADR 0002, precision of
+2026-11-27](../adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-27-la-manutenzione-dellhost-706)):
+step zero and last step of each section that stops the service or touches what the roles use
+([ops/host/migrate.md, "Ogni cambio con un passo
+sull'host"](../../ops/host/migrate.md#ogni-cambio-con-un-passo-sullhost)). While it is on, the
+supervisor neither starts, stops or restarts the service nor pins; the coordinator does not
+diagnose the stopped service, and at the end, or at the expiry, checks the outcome and tells
+the operator ([supervisor](roles/supervisor.md#maintenance-of-the-host),
+[coordinator](roles/coordinator.md#maintenance-of-the-host)).
+
 ### Continuous mode
 
 With `max_parallel_actions` above 1, actions run in one of two modes (#227):

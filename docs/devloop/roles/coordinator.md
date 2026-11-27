@@ -337,11 +337,50 @@ In pause you start nothing that the pause stopped: no authorization, no priority
 devloop that waits for the loop; what waits for the loop waits for the resume. The watchdog of
 the roles tells the operator, once per pause, the work that waits.
 
+## Maintenance of the host
+
+A step on the host (a section of `ops/host/migrate.md`) runs inside the maintenance of the host
+(#705, #706; [ADR 0002, precision of
+2026-11-27](../../adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-27-la-manutenzione-dellhost-706)):
+the agent of the host, within a section the operator asked for, or the operator, opens it as root
+with `devloop --project <project> maintenance start "<sections>"`, which writes
+`rest/maintenance` of the mailbox and stops the service, and closes it with `maintenance end`,
+which starts the service again. Only they open and close it; unlike the pause, it goes with a
+procedure, has an expiry (`MAINTENANCE_TIMEOUT`, two hours from the stop of the service) and ends
+with it.
+
+Your wake-up, usual, at rest or in pause, tells you each change once, with a `manutenzione:`
+line: `iniziata` or `in corso` (the start, the sections, the expiry), `scadenza fissata`,
+`scaduta`, `finita`. While it is on, start the wake-up again: it waits in maintenance, with the
+state `rest/coordinator` with the reason `manutenzione` and the lock, and the sentinel wakes you
+only for a message in `to-coordinator/`, neither for `run.log` nor for the stopped service:
+act on the message, then start the wake-up again.
+
+- **During the maintenance** the stopped service, the stopped stream and the errors of the
+  service are wanted: do not diagnose them and do not report them. As in the pause, you start
+  nothing that waits for the loop (no authorization, no priority, no command to devloop that
+  waits for the loop), and you never change the host (Prohibitions).
+- **At the end** (`finita`), or at the expiry (`scaduta`), check the outcome with your reads:
+  the automatic pin resumed (`devloop-pinned status` without an `auto-pin held:` line, and the
+  pinned copy of the step), the wake-ups active (the sentinel and the watchdog of the roles,
+  and the service active after `finita`, in `check-host.sh --read-only`; no message of the
+  watchdog in `to-coordinator/` on the supervisor), and `check-host.sh --read-only` without an
+  `ERRORE`. Write the outcome to the operator in `to-operator/` (`mailbox.sh send --to
+  operator`), with what you checked and what failed.
+- **At the expiry without an end** (`scaduta`), tell the operator also with `sudo -u <devloop
+  user> <launcher> notify --key coordinator:maintenance "<message>"` (Notices to the operator):
+  the maintenance is still open, `devloop run` and `devloop pin` stay stopped until someone ends
+  it. You never end it yourself. Then start the wake-up again, which waits in maintenance until
+  the end, and check again at `finita`.
+
+At `finita` start the usual wake-up, which gives you the events after your cursor, and do the
+periodic check (Tasks) before resting again.
+
 ## Stopped roles
 
 The watchdog of the roles (`devloop-role-watchdog@<project>`, ADR 0002, second precision of
 2026-11-23, point 6, and precisions of 2026-11-26 on the rest and the pause) sees each role in
-one of four states. It only detects: it has no GitHub key and changes nothing.
+one of five states (the fifth, in maintenance, from #705). It only detects: it has no GitHub key and changes nothing.
 
 - **Active**: regular heartbeats.
 - **At rest**: the rest declared, the sentinel active, the lock held: a line of information in
@@ -354,6 +393,11 @@ one of four states. It only detects: it has no GitHub key and changes nothing.
 - **In pause** (#685): during the pause of the operator, a role that waits with its state and its
   lock. The work waiting is no anomaly; the others of the rest stay. Once per pause, a line of
   information in its journal: «in pausa per ordine dell'operatore dal …», with the work waiting.
+- **In maintenance** (#705): during the maintenance of the host, a role that waits with its
+  state and its lock. The work waiting, the sentinel not active and its signals are no anomaly;
+  the lock not held and an old message in its mailbox are. Once per maintenance, a line of
+  information in its journal: «in manutenzione dal …, sezioni …, scadenza …», and at the expiry
+  without an end, once, the line `allarme all'operatore:`.
 - **Stopped**: no valid rest, and the heartbeat missing or older than two of its periods.
 
 - When the supervisor is stopped, or at rest with an anomaly, it leaves a message in
@@ -732,6 +776,8 @@ the mailbox.
 - Never run a step on the host: that is the agent of the host's, launched by the operator
   ([host runbook](host.md)).
 - Never open or close the pause of the operator (#685): never write or remove `rest/pause`.
+- Never open or close the maintenance of the host (#705): never write or remove
+  `rest/maintenance`.
 - Never write to the roles of another project, devloop's repository included, nor read or write
   its mailbox: a defect of devloop goes to the operator, in your summary in `to-operator/` (Other projects).
 - Never read or write GitHub with the operator's `gh` login, with a personal token or with the
