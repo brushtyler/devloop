@@ -283,6 +283,29 @@ class HostStepOrderTests(unittest.TestCase):
         rollback = section[section.index('**Rollback**'):]
         self.assertIn('si toglie **prima** del pin', rollback)
 
+    def test_through_the_procedure_between_tags_rest_dir_goes_after_the_pin(self):
+        # A project with SOURCE_REF runs #684 inside step 3 of #666, before the pin of step 5:
+        # the new key of the overlay waits for step 6, after the pin and before the start.
+        section = ' '.join(migrate_section(
+            '## Un progetto con la sorgente a un tag nuovo (#666)').split())
+        step3 = section[section.index('3. **Le sezioni introdotte'):section.index('4. **La verifica')]
+        self.assertIn('**Una chiave nuova dell\'overlay** che una sezione fa scrivere (come '
+                      '`rest_dir`', step3)
+        self.assertIn('non si scrive lì', step3)
+        self.assertIn('si scrive al passo 6, dopo il pin e prima dell\'avvio', step3)
+        pin = section.index('5. **Il pin del tag nuovo**')
+        step6 = section.index('6. **L\'avvio del servizio**')
+        key = section.index('le chiavi nuove dell\'overlay annotate al passo 3', step6)
+        start = section.index('`systemctl start <SERVICE_NAME>`', step6)
+        self.assertLess(pin, step6)
+        self.assertLess(key, start)
+        rollback = section[section.index('**Rollback.**'):]
+        self.assertIn('il passo 6, senza chiavi nuove', rollback)
+        # #684 itself points to that order for a project with SOURCE_REF.
+        rest = ' '.join(migrate_section('## Il riposo dei ruoli (#684)').split())
+        self.assertIn('il pin è il suo passo 5, `rest_dir` si scrive al suo passo 6, prima '
+                      'dell\'avvio, mai al suo passo 3', rest)
+
     def test_the_general_rule_on_a_new_key_of_the_overlay(self):
         rule = migrate_section('### Ogni cambio con un passo sull\'host')
         self.assertIn('Una chiave nuova dell\'overlay si scrive **dopo** il pin del codice che la '
