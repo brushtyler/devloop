@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Prepara l'host per devloop: pacchetti, utente dedicato, directory dei lock per repository,
-# clone, state_dir, overlay d'esempio, key_dir 700, impostazioni di Claude Code senza
+# clone (di un repository privato con il token del dispatcher, dopo overlay e chiavi: #718),
+# state_dir, overlay d'esempio, key_dir 700, impostazioni di Claude Code senza
 # aggiornamenti automatici, unità systemd, il comando devloop dell'host con il file del progetto
 # (#588). Con SOURCE_REPO anche il clone della sorgente
 # dell'installazione e l'avviatore dal suo tag. Con PROJECT (ADR 0006, R8) prepara uno dei
@@ -85,10 +86,25 @@ else
 fi
 
 step "Clone di $REPO"
+# Un repository privato (#718) non si clona senza credenziali: lo clona `devloop clone` con il
+# token del dispatcher, più avanti (token_clone), quando overlay e chiave ci sono. Vuole la
+# sorgente a parte, da cui viene devloop, e uno state_dir fuori dal clone, che non esiste ancora.
+PRIVATE_CLONE=0
+PRIVATE_DOC="ops/README.md, «Un repository privato»"
 if [ -d "$DEVLOOP_CLONE/.git" ]; then
     ok "$DEVLOOP_CLONE è già un clone (non lo aggiorna: devloop fissa le copie da origin)"
-else
+elif [ "$DRY_RUN" = 1 ]; then
     as_user "$DEVLOOP_USER" git clone "https://github.com/$REPO.git" "$DEVLOOP_CLONE"
+    say "  se GitHub non dà $REPO senza credenziali (un repository privato), il clone lo fa invece devloop clone, con il token del dispatcher, dopo overlay e chiavi ($PRIVATE_DOC)"
+elif repo_public "$REPO"; then
+    as_user "$DEVLOOP_USER" git clone "https://github.com/$REPO.git" "$DEVLOOP_CLONE"
+else
+    [ -n "$SOURCE_REPO" ] \
+        || die "GitHub non dà $REPO senza credenziali (privato, o GitHub non si raggiunge): un repository privato vuole la sorgente a parte, SOURCE_REPO ($PRIVATE_DOC)"
+    [[ $STATE_DIR == /* ]] \
+        || die "GitHub non dà $REPO senza credenziali (privato, o GitHub non si raggiunge): un repository privato vuole uno STATE_DIR assoluto, fuori dal clone ($PRIVATE_DOC)"
+    PRIVATE_CLONE=1
+    say "  GitHub non dà $REPO senza credenziali: è privato (o GitHub non si raggiunge). Il clone lo fa devloop clone con il token del dispatcher, dopo le chiavi (sotto)"
 fi
 
 if [ -n "$SOURCE_REPO" ]; then
@@ -261,6 +277,11 @@ for role in $DEVLOOP_KEYS_OPTIONAL; do
         say "  la chiave di $APP_PREFIX$role serve solo con [apps.$role] nell'overlay: per ora non manca"
     fi
 done
+
+if [ "$PRIVATE_CLONE" = 1 ]; then
+    step "Clone di $REPO, privato, con il token del dispatcher (#716, #718)"
+    token_clone "$STATE/config.local.toml"
+fi
 
 step 'Fatto'
 if [ -n "$SOURCE_REPO" ]; then

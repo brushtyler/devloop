@@ -1962,8 +1962,17 @@ same token and defences: `DEST` absent or empty, `origin` at `https://github.com
 no token in its config. Since the clone may come before the checkout and the project file, it
 reads only the overlay given with `--local-config` (`repo`, `[apps.dispatcher]` and `[apps]
 key_dir`; `$DEVLOOP_APP_KEY_DIR` prevails), and stops without the dispatcher's app or its
-key. The scripts of the host use it in a later change; the clones of the installation's source
-(`SOURCE_REPO`), which is public, are not concerned.
+key. `setup-devloop.sh` uses it for a repository that GitHub does not give without credentials
+(#718), once the overlay and the key are there; the clones of the installation's source
+(`SOURCE_REPO`), which is public, are not concerned
+([Un repository privato](../../ops/README.md#un-repository-privato)).
+
+`devloop fetch` makes, from the checkout of the managed repository and with the configuration of
+the project, the fetch of the base branch as the loop makes it, with the same token and
+defences; `devloop fetch --check` writes nothing: a `git ls-remote --exit-code` of the base
+branch, with the same token, which fails when the branch is not there. Both stop without the
+dispatcher's app or its key, and print no token. `check-host.sh` runs them, as devloop's user,
+for a private repository (#718): the first, or the second with `--read-only`.
 
 ### Host details in the published texts
 
