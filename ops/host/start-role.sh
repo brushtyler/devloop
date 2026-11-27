@@ -198,8 +198,8 @@ command -v tmux >/dev/null 2>&1 || die 'manca tmux: installarlo (apt-get install
 # sezione "At startup": una sessione nuova li segue senza istruzioni dell'operatore.
 CHANNEL=''
 case $ROLE in
-    supervisor) INBOX=to-supervisor OUTBOX=to-coordinator ;;
-    coordinator) INBOX=to-coordinator OUTBOX=to-supervisor ;;
+    supervisor) INBOX=to-supervisor OUTBOX=to-coordinator ROLE_OPS=$SUPERVISOR_OPS_DIR ;;
+    coordinator) INBOX=to-coordinator OUTBOX=to-supervisor ROLE_OPS=$COORDINATOR_OPS_DIR ;;
     host) INBOX='' ;;
 esac
 # Per supervisore e coordinatore anche i valori dei token della loro app (#565; il supervisore
@@ -209,7 +209,7 @@ TOKENS=''
 [ "$ROLE" = host ] \
     || TOKENS=" For the section \"GitHub\": the key_dir of your app (DEVLOOP_APP_KEY_DIR) is $ROLE_KEY_DIR; you work in your clone $ROLE_DIR, and you run scripts/$ROLE-token.py from the clone $TOKEN_CLONE (cd there for each command)."
 if [ -n "$INBOX" ]; then
-    CHANNEL="Values of this installation (ops/params.env), for the sections \"At startup\", \"Channel\" and \"Watching\" of the runbook: the state_dir of devloop is $STATE_PATH; the mailbox between supervisor and coordinator is $COORDINATION_DIR (group $COORDINATION_GROUP): your messages are in $COORDINATION_DIR/$INBOX/, yours to the other role go in $COORDINATION_DIR/$OUTBOX/; the wake-up of the supervisor is bash $SUPERVISOR_OPS_DIR/host/role-wait.sh --role supervisor, the wake-up of the coordinator is bash $COORDINATOR_OPS_DIR/host/role-wait.sh --role coordinator.$TOKENS Start now with the section \"At startup\".
+    CHANNEL="Values of this installation (ops/params.env), for the sections \"At startup\", \"Channel\" and \"Watching\" of the runbook: the state_dir of devloop is $STATE_PATH; the mailbox between supervisor and coordinator is $COORDINATION_DIR (group $COORDINATION_GROUP): your messages are in $COORDINATION_DIR/$INBOX/, yours to the other role go in $COORDINATION_DIR/$OUTBOX/; the script of the mailboxes (send, list, show, done) is bash $ROLE_OPS/host/mailbox.sh; the wake-up of the supervisor is bash $SUPERVISOR_OPS_DIR/host/role-wait.sh --role supervisor, the wake-up of the coordinator is bash $COORDINATOR_OPS_DIR/host/role-wait.sh --role coordinator.$TOKENS Start now with the section \"At startup\".
 
 "
 fi

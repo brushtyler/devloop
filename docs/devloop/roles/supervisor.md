@@ -31,8 +31,9 @@ repository (Other projects).
 
 A new session, of any CLI, starts here, without instructions from the operator:
 
-1. Read your mailbox, `to-supervisor/` of the mailbox (below): every message there is not read
-   yet. Act on each, then move it to `to-supervisor/done/` or remove it.
+1. Read your mailbox, `to-supervisor/` of the mailbox (below), with `mailbox.sh list` and
+   `show <id>`: every message there is not read yet. Act on each, then move it to
+   `to-supervisor/done/` with `mailbox.sh done <id>`.
 2. Read the state of the work on GitHub: the journal of the project (issue #76 for ssdlc), the
    daily summary (`[report] issue`, #316 for ssdlc) and the open issues and pull requests with
    `agent:needs-supervisor` or `agent:needs-operator`. There is no local handoff file: what is
@@ -56,16 +57,35 @@ Two ways, each for its use:
   (with `PROJECT`, `devloop-roles-<project>`). `to-coordinator/` holds
   your messages to the coordinator, `to-supervisor/` its messages to you. One file per message,
   plain text, with a unique name (UTC date and time and a random suffix), published with an
-  atomic rename from a temporary file whose name starts with `.`:
+  atomic rename from a temporary file whose name starts with `.`. The script of the mailboxes
+  does it (#707): `mailbox.sh` of your root copy (`SUPERVISOR_OPS_DIR`, default
+  `/usr/local/lib/devloop-supervisor`; with `PROJECT`, `/usr/local/lib/devloop-supervisor-<project>`),
+  run as yourself. `send` takes the text from stdin (or from `--file <file>`), adds a first line
+  with your role and the project, prints the id of the message (its file name) and refuses,
+  publishing nothing, a text that holds a private key, a token or the value of a secret-looking
+  name:
 
   ```bash
-  box=/var/lib/devloop-coordination/to-coordinator
-  tmp=$(mktemp "$box/.tmp-XXXXXX") && chmod 640 "$tmp" && printf '%s\n' "<message>" >"$tmp" \
-      && mv "$tmp" "$box/$(date -u +%Y%m%dT%H%M%SZ)-${tmp##*.tmp-}.txt"
+  bash /usr/local/lib/devloop-supervisor/host/mailbox.sh send --to coordinator <<'EOF'
+  <message>
+  EOF
   ```
 
   A message says what happened, where (issue, pull request, log) and what you expect; it holds
-  no token, key or secret. The recipient reads it, then moves it to `done/` or removes it.
+  no token, key or secret. The recipient reads it, then moves it to `done/` with `done <id>`:
+
+  ```bash
+  bash /usr/local/lib/devloop-supervisor/host/mailbox.sh list
+  bash /usr/local/lib/devloop-supervisor/host/mailbox.sh show <id>
+  bash /usr/local/lib/devloop-supervisor/host/mailbox.sh done <id>
+  ```
+
+  `list` gives the id, the owner of the file and the time of each message of `to-supervisor/`;
+  `show` prints one, with the owner of the file: who really wrote it, since the first line is
+  only text. `show` does not move the message: read it, act, then move it with `done`, so that a
+  session that stops halfway leaves it unread. `list --box coordinator` shows whether one of
+  your messages is still in `to-coordinator/`, without its text; the script refuses `show` and
+  `done` on a mailbox that is not yours.
 
 **The coordinator is the operator's interface** (the operator's directives of 2026-11-24,
 #603). Ask the operator for no decision and give them no command to run: write to the
@@ -78,15 +98,20 @@ escalations on GitHub stay as they are.
 
 **The operator's folder** (#663). `to-operator/` of the mailbox, next to `to-coordinator/` and
 `to-supervisor/`, holds the roles' messages for the operator, in the same format and with the
-same command (with `box=/var/lib/devloop-coordination/to-operator`). You write there only in the
+same command (`send --to operator`). You write there only in the
 two exceptions above, when you write to the operator directly; everything else still goes to the
 coordinator in `to-coordinator/`. A message names your role and the project and, for what must
 be tracked, the issue or the pull request it refers to: the decisions and the state of the work
 stay on GitHub. It holds no token, key or secret, nor the details of a vulnerability. Only the
-operator reads it, and moves the messages read to `to-operator/done/` or removes them: you never
-read it, and the wake-up does not watch it.
+operator reads it, as root with `mailbox.sh read`, which moves the messages read to
+`to-operator/done/`: you never read it, the script refuses `list`, `show` and `read` of
+`to-operator/` to anyone but root, and the wake-up does not watch it.
 
-Move each message of the coordinator to `done/` as soon as you read it: one left in
+The messages in `done/` of the three mailboxes are history: a daily timer of the host
+(`devloop-mailbox-prune@<project>`) removes those older than 30 days (`MAILBOX_DONE_DAYS`), never
+a message not moved yet.
+
+Move each message of the coordinator to `done/` as soon as you read it (`done <id>`): one left in
 `to-supervisor/` after 15 minutes tells the coordinator that you do not answer, and it puts the
 work in the queue itself.
 

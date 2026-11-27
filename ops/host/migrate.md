@@ -963,6 +963,99 @@ dell'host, `rm <SYSTEMD_DIR>/devloop-maintenance@.service <SYSTEMD_DIR>/devloop-
 e `systemctl daemon-reload`. Una manutenzione lasciata da togliere a mano si toglie come root con
 `rm <COORDINATION_DIR>/rest/maintenance`, poi `systemctl start <SERVICE_NAME>`.
 
+## Script delle caselle e pulizia di done/ (#707)
+
+Il passo sull'host di #707. Con #707 le caselle fra i ruoli (`$COORDINATION_DIR`: `to-supervisor/`,
+`to-coordinator/`, `to-operator/`) hanno uno script, `ops/host/mailbox.sh`, al posto del comando a
+mano dei runbook: i ruoli scrivono con `send` e leggono la propria casella con `list`, `show` e
+`done`, l'operatore legge `to-operator/` come root con `read`, e `prune` toglie dalle `done/` delle
+tre caselle i messaggi più vecchi di `MAILBOX_DONE_DAYS` giorni (30 per default, la scelta
+dell'operatore). Servono quindi:
+
+- lo script nelle copie di root dei ruoli: `mailbox.sh` in `SUPERVISOR_OPS_DIR` e in
+  `COORDINATOR_OPS_DIR`, accanto a `role-wait.sh`, e nella copia del coordinatore anche le unità
+  nuove che `check-host.sh --read-only` confronta;
+- le due unità nuove della pulizia, comuni ai progetti dell'host,
+  `$SYSTEMD_DIR/devloop-mailbox-prune@.service` e `$SYSTEMD_DIR/devloop-mailbox-prune@.timer`, la
+  drop-in del progetto `$SYSTEMD_DIR/devloop-mailbox-prune@<progetto>.service.d/project.conf`, con
+  la copia da cui gira lo script (quella del coordinatore, o del supervisore se il progetto non ha
+  il coordinatore), e il timer del progetto abilitato: una volta al giorno, come root,
+  `mailbox.sh prune`, che non tocca i messaggi non letti, fuori da `done/`.
+
+Il parametro nuovo `MAILBOX_DONE_DAYS` si scrive in `params.env` solo per un valore diverso da 30,
+prima del passo 2. Nessuna chiave nuova dell'overlay, nessun sudoers e nessuna ACL nuovi: i ruoli
+eseguono lo script come sé stessi, con il gruppo della casella che hanno già, e la pulizia è un
+timer di root. Il codice di devloop non cambia: devloop mergia la PR di #707 come le altre, ma non
+fa il pin automatico di quel commit né dei successivi finché l'operatore non fa il pin a mano
+([Ogni cambio con un passo sull'host](#ogni-cambio-con-un-passo-sullhost)): qui è il passo 3.
+
+### Comandi
+
+Come root, dal checkout dell'operatore aggiornato (`git -C <checkout> fetch origin` e
+`git -C <checkout> checkout --detach origin/main`, con il merge di #707), **per ogni progetto
+dell'host** con il supervisore, con il suo file di parametri `<parametri>` (uno con `SOURCE_REF`
+al tag successivo, con [la sua procedura](#un-progetto-con-la-sorgente-a-un-tag-nuovo-666)):
+
+1. **il loop fermo**: `systemctl stop <SERVICE_NAME>`. Le sessioni dei ruoli restano;
+
+2. **le copie di root di `ops/` e la pulizia**, prima con `--dry-run`: le azioni nuove sono le
+   copie (`SUPERVISOR_OPS_DIR`, `COORDINATOR_OPS_DIR`, `WATCHDOG_OPS_DIR`) con `host/mailbox.sh`,
+   la scrittura di `devloop-mailbox-prune@.service` e `devloop-mailbox-prune@.timer` in
+   `SYSTEMD_DIR` (al primo progetto dell'host) e della drop-in del progetto, con `systemctl
+   daemon-reload`, e `systemctl enable --now devloop-mailbox-prune@<progetto>.timer`. Con il
+   coordinatore la pulizia la installa `setup-coordinator.sh`, dalla sua copia, e
+   `setup-supervisor.sh` la lascia ("il progetto ha il coordinatore"); senza, la installa
+   `setup-supervisor.sh`, dalla copia del supervisore, e `setup-coordinator.sh` non si esegue.
+   Un'altra azione che il passo non spiega vuol dire che l'host non corrisponde ai parametri: ci
+   si ferma e si chiede all'operatore:
+
+   ```bash
+   sudo bash <checkout>/ops/host/setup-supervisor.sh --params <parametri> --dry-run
+   sudo bash <checkout>/ops/host/setup-supervisor.sh --params <parametri>
+   sudo bash <checkout>/ops/host/setup-coordinator.sh --params <parametri> --dry-run
+   sudo bash <checkout>/ops/host/setup-coordinator.sh --params <parametri>
+   ```
+
+   `<progetto>` è `PROJECT`, o `_default` senza `PROJECT`;
+
+3. **il pin a mano**: come utente `DEVLOOP_USER`, `devloop pin origin/main` (con più progetti
+   `devloop --project <progetto> pin origin/main`), poi `systemctl start <SERVICE_NAME>`. Il pin a
+   mano fa riprendere il pin automatico;
+
+4. **la verifica**: nessun `ERRORE`, nel passo *Pulizia di done/ delle caselle* le righe `ok: …
+   coincide con ops/host/devloop-mailbox-prune@.service`, `… devloop-mailbox-prune@.timer`,
+   `… coincide con ops/host/mailbox-prune-project.conf, dalla copia …`,
+   `devloop-mailbox-prune@<progetto>.timer è abilitato` e `… è attivo`, e nelle copie di root la
+   riga `ok: …/host/mailbox.sh coincide con …`:
+
+   ```bash
+   sudo bash <checkout>/ops/host/check-host.sh --params <parametri> --no-apps
+   ```
+
+5. **le sessioni dei ruoli**: leggono il runbook nuovo, con lo script, al prossimo avvio
+   (`start-role.sh`); fino ad allora usano il comando a mano, che resta valido: lo script pubblica
+   i messaggi nello stesso modo, con lo stesso nome.
+
+**Un progetto con `SOURCE_REF`** (#687) ha lo script con il suo tag: finché il tag non contiene
+#707, per quel progetto resta il comando a mano dei runbook del tag, e `done/` non si pulisce.
+Questa sezione la applica al tag che la contiene, con [la sua
+procedura](#un-progetto-con-la-sorgente-a-un-tag-nuovo-666).
+
+**La prova**, se l'operatore la vuole, a fine passo: `sudo systemctl start
+devloop-mailbox-prune@<progetto>.service`, poi nel journal (`journalctl -u
+devloop-mailbox-prune@<progetto>`) una riga `to-…/done/: tolti …` per ciascuna delle tre caselle;
+e `sudo bash <COORDINATOR_OPS_DIR>/host/mailbox.sh read` (o dalla copia del supervisore), che
+stampa i messaggi non letti di `to-operator/` e li sposta in `to-operator/done/`.
+
+**Rollback**: il passo 2 dal checkout della versione di prima rimette le copie di prima, senza lo
+script (che resta nelle copie: si toglie con `rm <SUPERVISOR_OPS_DIR>/host/mailbox.sh
+<COORDINATOR_OPS_DIR>/host/mailbox.sh`), e il pin della versione di prima il codice di prima; poi,
+come root, `systemctl disable --now devloop-mailbox-prune@<progetto>.timer`, `rm -r
+<SYSTEMD_DIR>/devloop-mailbox-prune@<progetto>.service.d` e, all'ultimo progetto dell'host, `rm
+<SYSTEMD_DIR>/devloop-mailbox-prune@.service <SYSTEMD_DIR>/devloop-mailbox-prune@.timer`, e
+`systemctl daemon-reload`. I messaggi che la pulizia ha già tolto da `done/` non tornano: erano
+solo storico.
+
 ## Configurazione di ssdlc nel suo file di progetto
 
 Con l'ADR 0006, R3, `devloop/config.toml` non contiene più i fatti di ssdlc né le restrizioni che

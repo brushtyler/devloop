@@ -39,7 +39,7 @@ SCRIPTS = ('host/setup-devloop.sh', 'host/setup-supervisor.sh', 'host/setup-agen
            'host/setup-coordinator.sh', 'host/setup-project.sh', 'host/check-host.sh',
            'host/start-role.sh',
            'host/coordinator-wait.sh', 'host/role-wait.sh', 'host/role-watchdog.sh',
-           'host/role-sentinel.sh', 'github/create-apps.sh')
+           'host/role-sentinel.sh', 'host/mailbox.sh', 'github/create-apps.sh')
 BASH = shutil.which('bash')
 ME = getpass.getuser()
 PREFIX = 'brushtyler-devloop-'
@@ -301,6 +301,8 @@ class LayoutTests(unittest.TestCase):
                      'host/devloop-role-sentinel@.service',
                      'host/devloop-role-sentinel-failed@.service',
                      'host/role-sentinel-project.conf',
+                     'host/mailbox.sh', 'host/devloop-mailbox-prune@.service',
+                     'host/devloop-mailbox-prune@.timer', 'host/mailbox-prune-project.conf',
                      'host/devloop-command', 'host/devloop-command-project',
                      'github/create-apps.sh', 'github/ruleset-main.json', 'github/tokens.md',
                      *(f'github/apps/{role}.json' for role in REQUIRED)):
@@ -2421,6 +2423,16 @@ class DryRunTests(OpsTestCase):
                               'poi rieseguire questo script\n', out)
                 self.assertIn('host/role-wait.sh', files)
                 self.assertIn(f'  bash {copy}/host/role-wait.sh --role coordinator\n', out)
+                # #707: the script of the mailboxes in the copy, and the cleanup of done/ of
+                # the mailboxes from it, daily, as root.
+                self.assertIn('host/mailbox.sh', files)
+                prune = self.tmp / 'systemd/devloop-mailbox-prune@_default.service.d/project.conf'
+                self.assertIn(f'scriverebbe {prune} (mode 644, proprietario root)', out)
+                self.assertIn(f'    | ExecStart=/usr/bin/bash {copy}/host/mailbox.sh --params '
+                              f'{copy}/params.env prune\n', out)
+                self.assertIn('  [dry-run] systemctl enable --now '
+                              'devloop-mailbox-prune@_default.timer\n', out)
+                self.assertIn(f'  bash {copy}/host/mailbox.sh send --to supervisor\n', out)
                 self.assertNotRegex(out, r'@[A-Z_]+@')
         self.assertEqual(self.mutating_calls(), [])
         self.assertEqual(self.tree(), before)
@@ -2569,10 +2581,26 @@ class DryRunTests(OpsTestCase):
                       "l'istanza devloop-role-watchdog@_default si prepara quando ci sono entrambi",
                       out)
         self.assertNotIn(FAKE_WATCHDOG, out)
-        self.assertNotIn('systemctl enable', out)
+        self.assertNotIn('systemctl enable --now devloop-role-watchdog', out)
+        # #707: the cleanup of done/ of the mailboxes runs from the supervisor's copy, the
+        # project having no coordinator; with the coordinator, from the coordinator's.
+        prune = systemd / 'devloop-mailbox-prune@_default.service.d/project.conf'
+        for unit in ('devloop-mailbox-prune@.service', 'devloop-mailbox-prune@.timer'):
+            self.assertIn(f'scriverebbe {systemd}/{unit} (mode 644, proprietario root)', out)
+        self.assertIn(f'scriverebbe {prune} (mode 644, proprietario root)', out)
+        self.assertIn(f'    | ExecStart=/usr/bin/bash {copy}/host/mailbox.sh --params '
+                      f'{copy}/params.env prune\n', out)
+        self.assertIn(f'    | ReadWritePaths={self.tmp}/coordination\n', out)
+        self.assertIn('  [dry-run] systemctl enable --now devloop-mailbox-prune@_default.timer\n',
+                      out)
+        self.assertIn(f'[dry-run] install -m 644 -o root -g root {OPS}/host/mailbox.sh '
+                      f'{copy}/host/mailbox.sh\n', out)
         overlay.write_text('[roles.coordinator]\nname = "codex-coordinator"\nkind = "codex"\n')
         done = self.run_script('host/setup-supervisor.sh', '--dry-run', '--params', str(params))
         out = done.stdout
+        self.assertIn('  ok: il progetto ha il coordinatore: devloop-mailbox-prune@_default gira '
+                      'dalla sua copia (setup-coordinator.sh)\n', out)
+        self.assertNotIn(f'scriverebbe {prune}', out)
         self.assertIn('[dry-run] useradd --system --user-group --no-create-home --home-dir / '
                       f'--shell /usr/sbin/nologin {FAKE_WATCHDOG}\n', out)
         box = self.tmp / 'coordination'
@@ -5389,8 +5417,24 @@ class CheckHostTests(OpsTestCase):
             'STATE_PATH': str(state), 'OPS_INSTANCE': '_default',
             'DEVLOOP_PATH': f'{self.devloop}/.local/bin:/usr/local/bin:/usr/bin:/bin'}))
         failed_unit(self.tmp)
+        self.prune_units()
         self.acl(f'user:{ME}:--x')
         self.service('active')
+
+    def prune_units(self, copy=None):
+        """The cleanup of done/ of the mailboxes (#707) as setup-supervisor.sh installs it for a
+        project without the coordinator: the template units and the drop-in of the instance, with
+        the root copy ``copy`` (the supervisor's by default)."""
+        copy = copy or str(self.tmp / 'lib/devloop-supervisor')
+        systemd = self.tmp / 'systemd'
+        for unit in ('devloop-mailbox-prune@.service', 'devloop-mailbox-prune@.timer'):
+            (systemd / unit).write_text(render(f'host/{unit}', {}))
+        dropin = systemd / 'devloop-mailbox-prune@_default.service.d/project.conf'
+        dropin.parent.mkdir(exist_ok=True)
+        dropin.write_text(render('host/mailbox-prune-project.conf', {
+            'REPO': 'brushtyler/devloop', 'COORDINATION_DIR': str(self.box),
+            'MAILBOX_OPS_DIR': copy}))
+        return dropin
 
     def key(self, home, role, mode=0o600):
         path = home / '.ghapps' / f'{PREFIX}{role}.2026-11-18.private-key.pem'
@@ -5432,8 +5476,10 @@ class CheckHostTests(OpsTestCase):
                 else 'name = "codex-coordinator"\nkind = "codex"\n')
         overlay.write_text(overlay.read_text() + f'\n[{table}.coordinator]\n{body}')
 
-    def service(self, state):
-        self.shim('systemctl', f'case "$1" in is-active) echo {state} ;; is-enabled) echo enabled ;;'
+    def service(self, state, timers='active'):
+        """systemctl: ``state`` for the services, ``timers`` for the timers (#707)."""
+        self.shim('systemctl', f'case "$1" in is-active) case "$2" in *.timer) echo {timers} ;;'
+                               f' *) echo {state} ;; esac ;; is-enabled) echo enabled ;;'
                                f' show) echo mixed ;; esac')
 
     def check(self, *args, **overrides):
@@ -6423,6 +6469,65 @@ exec "$@"''')
                       watchdog())
         self.assertEqual(self.mutating_calls(), [])
 
+    def test_the_cleanup_of_the_mailboxes_and_the_copies_of_mailbox_sh_are_checked(self):
+        # #707: the units of the cleanup of done/, the drop-in of the instance with the copy it
+        # runs from (the supervisor's without the coordinator, the coordinator's with it), its
+        # timer enabled and active; mailbox.sh in the root copies of the roles.
+        def prune(params=None):
+            params = params or self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=ME,
+                                           AGENT_USER='root')
+            done = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params))
+            out = done.stdout
+            return out[out.index('==> Pulizia di done/'):out.index('==> Flusso degli eventi')]
+        done, errors = self.check()
+        self.assertEqual(errors, [], done.stdout)
+        systemd = self.tmp / 'systemd'
+        dropin = systemd / 'devloop-mailbox-prune@_default.service.d/project.conf'
+        supervisor_copy = self.tmp / 'lib/devloop-supervisor'
+        coordinator_copy = self.tmp / 'lib/devloop-coordinator'
+        out = prune()
+        for unit in ('devloop-mailbox-prune@.service', 'devloop-mailbox-prune@.timer'):
+            self.assertIn(f'  ok: {systemd}/{unit} coincide con ops/host/{unit}\n', out)
+        self.assertIn(f'  ok: {dropin} coincide con ops/host/mailbox-prune-project.conf, dalla '
+                      f'copia {supervisor_copy}\n', out)
+        self.assertIn('  ok: devloop-mailbox-prune@_default.timer è abilitato\n', out)
+        self.assertIn('  ok: devloop-mailbox-prune@_default.timer è attivo\n', out)
+        # A copy of the supervisor without mailbox.sh: setup-supervisor.sh puts it there.
+        (supervisor_copy / 'host').mkdir(parents=True)
+        done, _ = self.check()
+        self.assertIn(f'  ATTENZIONE: {supervisor_copy}/host/mailbox.sh non esiste '
+                      '(setup-supervisor.sh)\n', done.stdout)
+        # Missing, the units and the drop-in are errors; a timer not enabled or not active too.
+        for path in (dropin, systemd / 'devloop-mailbox-prune@.timer'):
+            path.unlink()
+        self.shim('systemctl', 'case "$1" in is-active) echo inactive ;; is-enabled) echo '
+                               'disabled ;; show) echo mixed ;; esac')
+        out = prune()
+        self.assertIn(f'  ERRORE: {systemd}/devloop-mailbox-prune@.timer non esiste '
+                      '(setup-coordinator.sh, o setup-supervisor.sh senza coordinatore)\n', out)
+        self.assertIn(f'  ERRORE: {dropin} non esiste', out)
+        self.assertIn('  ERRORE: devloop-mailbox-prune@_default.timer non è abilitato (disabled)',
+                      out)
+        self.assertIn('  ERRORE: devloop-mailbox-prune@_default.timer non è attivo (inactive): '
+                      'done/ delle caselle non si pulisce', out)
+        # With the coordinator of the project, from its copy; the supervisor's is a warning.
+        self.service('active')
+        self.prune_units()
+        self.declare_coordinator()
+        self.fake_host('classic sudo', users=(FAKE_AGENT, FAKE_SUPERVISOR, FAKE_COORDINATOR))
+        params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=FAKE_SUPERVISOR,
+                             AGENT_USER=FAKE_AGENT)
+        self.assertIn(f'  ATTENZIONE: {dropin} usa la copia del supervisore, {supervisor_copy}: '
+                      'il progetto ha il coordinatore, rieseguire setup-coordinator.sh\n',
+                      prune(params))
+        self.prune_units(str(coordinator_copy))
+        self.assertIn(f'  ok: {dropin} coincide con ops/host/mailbox-prune-project.conf, dalla '
+                      f'copia {coordinator_copy}\n', prune(params))
+        done = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params))
+        self.assertIn(f'  ERRORE: {coordinator_copy}/host/mailbox.sh non esiste '
+                      '(setup-coordinator.sh)\n', done.stdout)
+        self.assertEqual(self.mutating_calls(), [])
+
     def test_the_sentinel_of_the_roles_at_rest_and_its_directory_are_checked(self):
         # #684: with the coordinator, the units of the sentinel, its drop-in, its service enabled
         # and active, its user and its ACLs on the mailbox, devloop's reading of the rest; and
@@ -6817,14 +6922,19 @@ esac''')
         # So are those of the sentinel of the roles at rest (#684), in OPS_SENTINEL_UNITS.
         named |= {f'host/{unit}' for unit in re.search(
             r"^OPS_SENTINEL_UNITS='(.*)'$", lib, re.M).group(1).split()}
+        # And those of the cleanup of done/ of the mailboxes (#707), in OPS_MAILBOX_UNITS.
+        named |= {f'host/{unit}' for unit in re.search(
+            r"^OPS_MAILBOX_UNITS='(.*)'$", lib, re.M).group(1).split()}
         # And the wake-up of the roles (#602; coordinator-wait.sh, #543), which the coordinator
-        # runs from the copy, with its parameters, the watchdog's script and the sentinel's.
+        # runs from the copy, with its parameters, the watchdog's script, the sentinel's and the
+        # script of the mailboxes (#707), which the timer of the cleanup runs from the copy.
         self.assertEqual(named | {'lib.sh', 'host/check-host.sh', 'host/coordinator-wait.sh',
                                   'host/role-wait.sh', 'host/role-watchdog.sh',
-                                  'host/role-sentinel.sh'}, files)
+                                  'host/role-sentinel.sh', 'host/mailbox.sh'}, files)
         self.assertIn('host/devloop@.service', named)
         self.assertIn('host/role-watchdog-project.conf', named)
         self.assertIn('host/role-sentinel-project.conf', named)
+        self.assertIn('host/mailbox-prune-project.conf', named)
 
     def real_sudo(self, sudo, env_stderr='', env_status=0):
         """A ``sudo`` whose ``--version`` is that of ``SUDO_FLAVORS``, and whose ``sudo -n -E``
@@ -8739,6 +8849,364 @@ class RoleSentinelTests(WakeUpCase):
 
 
 @unittest.skipIf(BASH is None, 'bash is not installed')
+class MailboxTests(OpsTestCase):
+    """ops/host/mailbox.sh (#707), the script of the mailboxes of the roles: run by the user of
+    the tests, which a fake ``id`` shows as the supervisor, the coordinator or root. The files are
+    the real ones of the temporary mailbox, so their owner is always the user of the tests."""
+
+    NAME = r'^\d{8}T\d{6}Z-[A-Za-z0-9]{6}\.txt$'
+    BOXES = ('to-supervisor', 'to-coordinator', 'to-operator')
+
+    def setUp(self):
+        super().setUp()
+        self.box = self.tmp / 'coordination'
+        for name in self.BOXES:
+            (self.box / name / 'done').mkdir(parents=True)
+        for path in [self.box, *self.box.rglob('*')]:
+            os.chown(path, -1, os.getgid())
+            path.chmod(0o3770 if path == self.box else 0o2770)
+        self.whoami = self.tmp / 'whoami'
+        # The fake id: the user of whoami for the script, any other user exists (1001).
+        self.shim('id', f'''if [ $# -ge 2 ]; then echo 1001; exit 0; fi
+read -r uid user < {shlex.quote(str(self.whoami))}
+case "$1" in -u) echo "$uid" ;; -un) echo "$user" ;; *) echo "$user" ;; esac''')
+        self.params_file = self.params(SUPERVISOR_USER=FAKE_SUPERVISOR,
+                                       COORDINATOR_USER=FAKE_COORDINATOR)
+
+    def mailbox(self, who, *args, text=None, params=None):
+        """mailbox.sh ARGS as WHO (supervisor, coordinator, root or another user)."""
+        users = {'supervisor': (1000, FAKE_SUPERVISOR), 'coordinator': (1000, FAKE_COORDINATOR),
+                 'root': (0, 'root')}
+        uid, user = users.get(who, (1000, who))
+        self.whoami.write_text(f'{uid} {user}\n')
+        return subprocess.run(
+            [BASH, str(OPS / 'host/mailbox.sh'), '--params', str(params or self.params_file),
+             *args], capture_output=True, text=True, env=self.env(), input=text or '',
+            timeout=120)
+
+    def messages(self, box):
+        return sorted(p for p in (self.box / box).iterdir() if p.is_file())
+
+    def write(self, box, name, text, age_days=0):
+        path = self.box / box / name
+        path.write_text(text)
+        path.chmod(0o640)
+        if age_days:
+            then = time.time() - age_days * 86400
+            os.utime(path, (then, then))
+        return path
+
+    def test_send_publishes_atomically_with_the_mode_the_group_and_the_name(self):
+        # The publication of the runbooks (#543), with the line of who writes and the project.
+        sent = []
+        for _ in range(2):
+            done = self.mailbox('supervisor', 'send', '--to', 'coordinator',
+                                text='la CI di #12 è rossa da un\'ora\n')
+            self.assertEqual(done.returncode, 0, done.stderr)
+            sent.append(done.stdout.strip())
+        messages = self.messages('to-coordinator')
+        self.assertEqual([m.name for m in messages], sorted(sent))
+        self.assertEqual(len(set(sent)), 2)
+        for message in messages:
+            self.assertRegex(message.name, self.NAME)
+            self.assertEqual(stat.S_IMODE(message.stat().st_mode), 0o640)
+            self.assertEqual(message.stat().st_gid, grp.getgrnam(GROUP).gr_gid)
+            self.assertEqual(message.read_text(),
+                             'Da: supervisore, progetto brushtyler/devloop\n\n'
+                             'la CI di #12 è rossa da un\'ora\n')
+        # No temporary file left, nothing in the other boxes.
+        self.assertEqual([p.name for p in (self.box / 'to-coordinator').iterdir()
+                          if p.name.startswith('.')], [])
+        self.assertEqual(self.messages('to-supervisor'), [])
+        # From --file, by the coordinator, with PROJECT; and by root, to any box.
+        body = self.tmp / 'message.txt'
+        body.write_text('#12 è autorizzata')
+        params = self.params(SUPERVISOR_USER=FAKE_SUPERVISOR, COORDINATOR_USER=FAKE_COORDINATOR,
+                             PROJECT='widget', SERVICE_NAME='devloop@widget')
+        done = self.mailbox('coordinator', 'send', '--to', 'supervisor', '--file', str(body),
+                            params=params)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual((self.box / 'to-supervisor' / done.stdout.strip()).read_text(),
+                         'Da: coordinatore, progetto widget (brushtyler/devloop)\n\n'
+                         '#12 è autorizzata\n')
+        self.params(SUPERVISOR_USER=FAKE_SUPERVISOR, COORDINATOR_USER=FAKE_COORDINATOR)
+        done = self.mailbox('root', 'send', '--to', 'supervisor', text='nota dell\'operatore\n')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual((self.box / 'to-supervisor' / done.stdout.strip()).read_text(),
+                         "Da: root (l'operatore o l'agent dell'host), progetto "
+                         "brushtyler/devloop\n\nnota dell'operatore\n")
+        # The roles write to the operator; never in their own box; an empty text is refused.
+        self.assertEqual(self.mailbox('coordinator', 'send', '--to', 'operator',
+                                      text='una scelta\n').returncode, 0)
+        done = self.mailbox('coordinator', 'send', '--to', 'coordinator', text='x\n')
+        self.assertEqual(done.returncode, 1)
+        self.assertIn('un ruolo non scrive nella propria casella', done.stderr)
+        done = self.mailbox('supervisor', 'send', '--to', 'coordinator', text='  \n')
+        self.assertEqual(done.returncode, 1)
+        self.assertIn('il testo è vuoto', done.stderr)
+        self.assertEqual(len(self.messages('to-coordinator')), 2)
+        # Another user is not a role.
+        done = self.mailbox('somebody', 'send', '--to', 'coordinator', text='x\n')
+        self.assertEqual(done.returncode, 1)
+        self.assertIn('va eseguito come', done.stderr)
+        for args in (('send',), ('send', '--to', 'nobody'), ('list', 'x'), ('frobnicate',), ()):
+            with self.subTest(args=args):
+                self.assertEqual(self.mailbox('supervisor', *args).returncode, 2)
+
+    def test_send_refuses_a_text_with_a_token_or_a_key(self):
+        # The detectors of devloop/agents.py (the default accepted on #707): the same patterns,
+        # and the secret never in the error.
+        from devloop import agents
+        script = (OPS / 'host/mailbox.sh').read_text()
+        start = script.index('_PEM = re.compile(')
+        code = script[start:script.index('# Fine dei rilevatori.', start)]
+        detectors = {}
+        exec('import re\n' + code, detectors)
+        for name in ('_PEM', '_CREDENTIAL', '_ASSIGNED'):
+            with self.subTest(detector=name):
+                self.assertEqual(detectors[name].pattern, getattr(agents, name).pattern)
+                self.assertEqual(detectors[name].flags, getattr(agents, name).flags)
+        secrets = {
+            'pem': '-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXk\n'
+                   '-----END OPENSSH PRIVATE KEY-----',
+            'github': 'gh' + 'p_' + 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8',
+            'bearer': 'Bearer ' + 'abcDEF0123456789abcDEF0123',
+            'assigned': 'DB_PASSWORD=hunter2-zz',
+        }
+        for kind, secret in secrets.items():
+            with self.subTest(kind=kind):
+                done = self.mailbox('supervisor', 'send', '--to', 'coordinator',
+                                    text=f'guarda qui:\n{secret}\n')
+                self.assertEqual(done.returncode, 1)
+                self.assertIn('niente pubblicato', done.stderr)
+                self.assertNotIn(secret.splitlines()[-1], done.stderr + done.stdout)
+                self.assertNotIn(secret.split('=')[-1], done.stderr + done.stdout)
+                self.assertEqual(list((self.box / 'to-coordinator').iterdir()),
+                                 [self.box / 'to-coordinator/done'])
+        # What the detectors leave passes.
+        done = self.mailbox('supervisor', 'send', '--to', 'coordinator',
+                            text='KeyError: 3 in #12, input_tokens: 4\n')
+        self.assertEqual(done.returncode, 0, done.stderr)
+
+    def test_to_operator_is_refused_to_a_user_that_is_not_root(self):
+        # #663: only the operator reads to-operator/, as root; read moves what it prints.
+        message = self.write('to-operator', '20261127T090000Z-a1b2c3.txt',
+                             'Da: coordinatore, progetto brushtyler/devloop\n\nuna scelta\n')
+        for role in ('supervisor', 'coordinator'):
+            for args in (('list', '--box', 'operator'),
+                         ('show', '--box', 'operator', message.name),
+                         ('done', '--box', 'operator', message.name), ('read',)):
+                with self.subTest(role=role, args=args):
+                    done = self.mailbox(role, *args)
+                    self.assertEqual(done.returncode, 1)
+                    self.assertIn('(#663)', done.stderr)
+                    self.assertNotIn('una scelta', done.stdout)
+                    self.assertTrue(message.exists())
+        # prune is root's too.
+        done = self.mailbox('coordinator', 'prune')
+        self.assertEqual(done.returncode, 1)
+        self.assertIn('prune va eseguito come root', done.stderr)
+        # root: list without --box is to-operator/, and read prints and moves at once.
+        done = self.mailbox('root', 'list')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn(f'{message.name}  proprietario {ME}  ', done.stdout)
+        done = self.mailbox('root', 'read')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn('una scelta\n', done.stdout)
+        self.assertFalse(message.exists())
+        self.assertTrue((self.box / 'to-operator/done' / message.name).exists())
+        done = self.mailbox('root', 'read')
+        self.assertEqual(done.stdout, 'nessun messaggio da leggere in to-operator/\n')
+
+    def test_show_leaves_the_message_and_done_moves_it(self):
+        # Read, act, then move: a session that stops after show leaves the signal of a message
+        # not handled yet.
+        message = self.write('to-supervisor', '20261127T090000Z-a1b2c3.txt', 'perché #12?\n')
+        done = self.mailbox('supervisor', 'show', message.name)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn('perché #12?\n', done.stdout)
+        self.assertTrue(message.exists())
+        # Only on its own box; list on the other role's box shows no text.
+        other = self.write('to-coordinator', '20261127T091000Z-d4e5f6.txt', 'segreto no\n')
+        for args in (('show', '--box', 'coordinator', other.name),
+                     ('done', '--box', 'coordinator', other.name)):
+            with self.subTest(args=args):
+                done = self.mailbox('supervisor', *args)
+                self.assertEqual(done.returncode, 1)
+                self.assertNotIn('segreto no', done.stdout)
+        done = self.mailbox('supervisor', 'list', '--box', 'coordinator')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn(other.name, done.stdout)
+        self.assertNotIn('segreto no', done.stdout)
+        # An id that is not a name of the box, or a link, is no message.
+        (self.box / 'to-supervisor/20261127T092000Z-link00.txt').symlink_to(other)
+        for name in ('../to-coordinator/' + other.name, '.tmp-x', '20261127T092000Z-link00.txt'):
+            with self.subTest(name=name):
+                done = self.mailbox('supervisor', 'show', name)
+                self.assertEqual(done.returncode, 1)
+                self.assertNotIn('segreto no', done.stdout)
+        done = self.mailbox('supervisor', 'list')
+        self.assertEqual(done.stdout.splitlines()[0].split()[0], message.name)
+        self.assertNotIn('link00', done.stdout)
+        done = self.mailbox('supervisor', 'done', message.name)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertFalse(message.exists())
+        self.assertEqual((self.box / 'to-supervisor/done' / message.name).read_text(),
+                         'perché #12?\n')
+        # A done/ replaced by a link is not followed.
+        again = self.write('to-supervisor', '20261127T093000Z-g7h8i9.txt', 'ancora\n')
+        (self.box / 'to-supervisor/done').rename(self.box / 'to-supervisor/old')
+        (self.box / 'to-supervisor/done').symlink_to(self.box / 'to-coordinator')
+        done = self.mailbox('supervisor', 'done', again.name)
+        self.assertEqual(done.returncode, 1)
+        self.assertTrue(again.exists())
+        self.assertFalse((self.box / 'to-coordinator' / again.name).exists())
+
+    def test_the_provenance_is_the_owner_of_the_file(self):
+        # The first line is text anyone writes: list, show and read say the owner of the file.
+        forged = 'Da: coordinatore, progetto brushtyler/devloop\n\nfidati\n'
+        message = self.write('to-supervisor', '20261127T090000Z-a1b2c3.txt', forged)
+        done = self.mailbox('supervisor', 'list')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertRegex(done.stdout, rf'^{re.escape(message.name)}  proprietario {re.escape(ME)}  '
+                                      r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\n$')
+        done = self.mailbox('supervisor', 'show', message.name)
+        self.assertTrue(done.stdout.startswith(
+            f'== messaggio {message.name}, proprietario del file {ME}, scritto '), done.stdout)
+        self.write('to-operator', message.name, forged)
+        done = self.mailbox('root', 'read')
+        self.assertTrue(done.stdout.startswith(
+            f'== messaggio {message.name}, proprietario del file {ME}, scritto '), done.stdout)
+
+    def test_prune_removes_only_from_done_and_only_beyond_the_threshold(self):
+        # 30 days by default (the operator's choice), MAILBOX_DONE_DAYS otherwise; never a
+        # message not read yet, a temporary file or a link.
+        old, recent, unread, hidden = {}, {}, {}, {}
+        for box in self.BOXES:
+            old[box] = self.write(f'{box}/done', '20261020T090000Z-old000.txt', 'x\n', 31)
+            recent[box] = self.write(f'{box}/done', '20261101T090000Z-new000.txt', 'x\n', 29)
+            unread[box] = self.write(box, '20261001T090000Z-unread.txt', 'x\n', 60)
+            hidden[box] = self.write(f'{box}/done', '.tmp-abcdef', 'x\n', 60)
+        target = self.write('to-operator', '20261001T090000Z-target.txt', 'x\n', 60)
+        link = self.box / 'to-supervisor/done/20261001T090000Z-link00.txt'
+        link.symlink_to(target)
+        os.utime(link, (time.time() - 60 * 86400,) * 2, follow_symlinks=False)
+        done = self.mailbox('root', 'prune')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        for box in self.BOXES:
+            with self.subTest(box=box):
+                self.assertFalse(old[box].exists())
+                self.assertTrue(recent[box].exists())
+                self.assertTrue(unread[box].exists())
+                self.assertTrue(hidden[box].exists())
+                self.assertIn(f'{box}/done/: tolti 1 messaggi più vecchi di 30 giorni\n',
+                              done.stdout)
+        self.assertTrue(link.is_symlink())
+        self.assertTrue(target.exists())
+        params = self.params(SUPERVISOR_USER=FAKE_SUPERVISOR, COORDINATOR_USER=FAKE_COORDINATOR,
+                             MAILBOX_DONE_DAYS='7')
+        done = self.mailbox('root', 'prune', params=params)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        for box in self.BOXES:
+            self.assertFalse(recent[box].exists())
+            self.assertTrue(unread[box].exists())
+        params = self.params(SUPERVISOR_USER=FAKE_SUPERVISOR, COORDINATOR_USER=FAKE_COORDINATOR,
+                             MAILBOX_DONE_DAYS='0')
+        done = self.mailbox('root', 'prune', params=params)
+        self.assertEqual(done.returncode, 1)
+        self.assertIn('MAILBOX_DONE_DAYS è un numero di giorni', done.stderr)
+        self.params(SUPERVISOR_USER=FAKE_SUPERVISOR, COORDINATOR_USER=FAKE_COORDINATOR)
+        # A done/ that is a link is not followed: the other boxes are cleaned all the same.
+        kept = self.write('to-coordinator', '20261001T090000Z-kept00.txt', 'x\n', 60)
+        (self.box / 'to-operator/done').rename(self.box / 'to-operator/old')
+        (self.box / 'to-operator/done').symlink_to(self.box / 'to-coordinator')
+        gone = self.write('to-supervisor/done', '20261001T090000Z-gone00.txt', 'x\n', 60)
+        done = self.mailbox('root', 'prune')
+        self.assertEqual(done.returncode, 1)
+        self.assertIn('to-operator/done non si apre come directory', done.stderr)
+        self.assertTrue(kept.exists())
+        self.assertFalse(gone.exists())
+
+    def test_the_commands_of_the_runbooks_publish_and_handle_a_message(self):
+        # The blocks of the runbooks of the roles, run as written, with the script of this
+        # checkout in place of the root copy (#707; the publication of #543).
+        copy = re.compile(r'/usr/local/lib/devloop-(?:supervisor|coordinator)/host/mailbox\.sh')
+        script = f'{OPS}/host/mailbox.sh --params {self.params_file}'
+        users = {'supervisor': FAKE_SUPERVISOR, 'coordinator': FAKE_COORDINATOR}
+        for role, other in (('supervisor', 'coordinator'), ('coordinator', 'supervisor')):
+            text = ROLE_RUNBOOKS[role].read_text()
+            blocks = [textwrap.dedent(b) for b in re.findall(r'```bash\n(.*?)\n *```', text, re.S)
+                      if 'mailbox.sh' in b]
+            send = next(b for b in blocks if f'send --to {other} <<' in b)
+            handle = next(b for b in blocks if 'mailbox.sh list' in b)
+            with self.subTest(role=role):
+                for target in (other, 'operator'):
+                    block = send if target == other else next(
+                        (b for b in blocks if 'send --to operator' in b),
+                        send.replace(f'--to {other}', '--to operator'))
+                    self.whoami.write_text(f'1000 {users[role]}\n')
+                    line = copy.sub(script, block).replace('<message>', 'CI rossa su #12')
+                    done = subprocess.run([BASH, '-c', line], capture_output=True, text=True,
+                                          env=self.env(), timeout=60)
+                    self.assertEqual(done.returncode, 0, done.stderr)
+                    message = self.box / f'to-{target}' / done.stdout.strip()
+                    self.assertRegex(message.name, self.NAME)
+                    self.assertTrue(message.read_text().endswith('\n\nCI rossa su #12\n'))
+                mine = self.write(f'to-{role}', '20261127T090000Z-a1b2c3.txt', 'per te\n')
+                outputs = []
+                for line in handle.splitlines():
+                    line = copy.sub(script, line).replace('<id>', mine.name)
+                    done = subprocess.run([BASH, '-c', line], capture_output=True, text=True,
+                                          env=self.env(), timeout=60)
+                    self.assertEqual(done.returncode, 0, done.stderr)
+                    outputs.append(done.stdout)
+                self.assertIn(mine.name, outputs[0])
+                self.assertIn('per te\n', outputs[1])
+                self.assertTrue((self.box / f'to-{role}/done' / mine.name).exists())
+
+    def env(self):
+        return dict(os.environ, PATH=f'{self.bin}:{os.environ.get("PATH", "/usr/bin:/bin")}',
+                    OPS_TEST_CALLS=str(self.calls), LC_ALL='C.UTF-8')
+
+    def test_the_migration_guide_has_the_step_on_the_host(self):
+        # #707: the section the host_step names, from the operator's checkout, for every project.
+        step = RootStepsGuideTests().section('## Script delle caselle e pulizia di done/ (#707)')
+        commands = RootStepsGuideTests.commands(step, inline=False)
+        for script in ('setup-supervisor.sh', 'setup-coordinator.sh'):
+            for dry in (' --dry-run', ''):
+                self.assertIn(f'sudo bash <checkout>/ops/host/{script} --params <parametri>{dry}',
+                              commands)
+        self.assertIn('sudo bash <checkout>/ops/host/check-host.sh --params <parametri> --no-apps',
+                      commands)
+        flat = ' '.join(step.split())
+        for phrase in ('`MAILBOX_DONE_DAYS`', 'devloop-mailbox-prune@<progetto>.timer',
+                       'il pin a mano', '**Un progetto con `SOURCE_REF`** (#687)',
+                       'resta il comando a mano', '**Rollback**',
+                       "**per ogni progetto dell'host** con il supervisore, con il suo file di "
+                       'parametri `<parametri>` (uno con `SOURCE_REF` al tag successivo'):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, flat)
+        self.assertIn('(host/migrate.md#script-delle-caselle-e-pulizia-di-done-707)',
+                      (OPS / 'README.md').read_text())
+
+    def test_the_unit_runs_prune_as_root_daily_from_the_copy_of_the_drop_in(self):
+        service = configparser.ConfigParser(interpolation=None, strict=False)
+        service.read_string((OPS / 'host/devloop-mailbox-prune@.service').read_text())
+        self.assertNotIn('User', service['Service'])
+        self.assertEqual(service['Service']['ProtectSystem'], 'strict')
+        timer = configparser.ConfigParser(interpolation=None)
+        timer.read_string((OPS / 'host/devloop-mailbox-prune@.timer').read_text())
+        self.assertEqual(timer['Timer']['OnCalendar'], 'daily')
+        self.assertEqual(timer['Timer']['Persistent'], 'true')
+        dropin = render('host/mailbox-prune-project.conf', {
+            'REPO': 'brushtyler/devloop', 'COORDINATION_DIR': '/x/box',
+            'MAILBOX_OPS_DIR': '/x/copy'})
+        self.assertIn('ReadWritePaths=/x/box\n', dropin)
+        self.assertIn('ExecStart=/usr/bin/bash /x/copy/host/mailbox.sh --params '
+                      '/x/copy/params.env prune\n', dropin)
+
+
+@unittest.skipIf(BASH is None, 'bash is not installed')
 class RoleWatchdogTests(OpsTestCase):
     """ops/host/role-watchdog.sh (#602), run as the watchdog of the project (the user of the
     tests) on a mailbox under the temporary directory, with STATE_DIRECTORY as systemd sets it."""
@@ -9454,6 +9922,10 @@ echo "$2:x:1000:"''')
                               f'the mailbox between supervisor and coordinator is {box} '
                               f'(group {GROUP})', f'your messages are in {box}/{inbox}/',
                               f'yours to the other role go in {box}/{outbox}/',
+                              # #707: the script of the mailboxes of its root copy.
+                              'the script of the mailboxes (send, list, show, done) is bash '
+                              f'{copy if role == "coordinator" else supervisor_copy}/host/'
+                              'mailbox.sh;',
                               # #602: the wake-up of each role.
                               f'the wake-up of the supervisor is bash {supervisor_copy}/host/'
                               'role-wait.sh --role supervisor',
@@ -9894,8 +10366,10 @@ class RoleRunbookTests(unittest.TestCase):
                 for phrase in ('**On GitHub**, for what must be tracked', '`agent:needs-operator`',
                                '**The mailbox**, for quick alerts, always available, also when '
                                'GitHub', '`/var/lib/devloop-coordination`', 'group `devloop-roles`',
-                               'atomic rename', 'moves it to `done/` or removes it',
-                               'never in the mailbox', f'box=/var/lib/devloop-coordination/to-{other}'):
+                               'atomic rename', 'moves it to `done/` with `done <id>`',
+                               'never in the mailbox',
+                               f'/usr/local/lib/devloop-{role}/host/mailbox.sh send --to {other}',
+                               'the owner of the file', '`show` does not move the message'):
                     self.assertIn(phrase, channel)
         supervisor = ' '.join(ROLE_RUNBOOKS['supervisor'].read_text().split())
         self.assertIn('You follow the continuous stream', supervisor)
@@ -9964,26 +10438,24 @@ class RoleRunbookTests(unittest.TestCase):
                 self.assertIn(phrase, github)
         self.assertNotRegex(github, r'/home/|/var/lib/|\.ghapps')
 
-    def test_the_mailbox_command_of_the_runbooks_publishes_a_readable_message_atomically(self):
-        # #543: the command of the runbooks, run as written (with the box of the tests): one
-        # file per message, readable by the group, with a unique name, no temporary file left.
-        if BASH is None:
-            self.skipTest('bash is not installed')
-        text = ROLE_RUNBOOKS['coordinator'].read_text()
-        block = text.split('box=/var/lib/devloop-coordination/to-supervisor', 1)[1]
-        block = block.split('```', 1)[0]
-        with tempfile.TemporaryDirectory() as tmp:
-            box = Path(tmp) / 'to-supervisor'
-            box.mkdir()
-            script = f'box={shlex.quote(str(box))}{block}'.replace('<message>', 'CI rossa')
-            for _ in range(2):
-                subprocess.run([BASH, '-c', script], check=True, timeout=60)
-            messages = sorted(box.iterdir())
-            self.assertEqual(len(messages), 2)
-            for message in messages:
-                self.assertRegex(message.name, r'^\d{8}T\d{6}Z-[A-Za-z0-9]{6}\.txt$')
-                self.assertEqual(message.read_text(), 'CI rossa\n')
-                self.assertEqual(stat.S_IMODE(message.stat().st_mode), 0o640)
+    def test_the_runbooks_write_and_read_the_mailbox_with_its_script(self):
+        # #707: no command by hand any more; the script of the root copy of each role, and the
+        # operator's folder through the same send. MailboxTests runs the commands.
+        for role in ('supervisor', 'coordinator'):
+            text = ROLE_RUNBOOKS[role].read_text()
+            with self.subTest(role=role):
+                self.assertNotIn('mktemp', text)
+                self.assertNotIn('box=/var/lib/', text)
+                for command in ('list', 'show <id>', 'done <id>'):
+                    self.assertIn(f'bash /usr/local/lib/devloop-{role}/host/mailbox.sh '
+                                  f'{command}\n', text)
+        host = ' '.join(ROLE_RUNBOOKS['host'].read_text().split())
+        channel = host.split('## Channel, watching and startup')[1].split(' ## ')[0]
+        for phrase in ('When the operator explicitly asks you, in this session',
+                       'sudo bash <checkout>/ops/host/mailbox.sh --params <parametri> send --to',
+                       'You never use `list`, `show`, `done` or `read`', 'never read its messages'):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, channel)
 
     def test_the_anchors_between_the_ops_guide_and_the_migration_guide_resolve(self):
         # ops/ is not among the pages of test_doc_links: its anchors are checked here (#543).
@@ -10268,7 +10740,8 @@ class RoleRunbookTests(unittest.TestCase):
         channel = self.part(coordinator, 'Channel with the operator')
         folder = channel.split(" ### The operator's folder (#663) ")[1].split(' ### ')[0]
         for phrase in ('next to `to-supervisor/` and `to-coordinator/`',
-                       'box=/var/lib/devloop-coordination/to-operator',
+                       'host/mailbox.sh send --to operator',
+                       'the script refuses `list`, `show` and `read` of `to-operator/`',
                        'used to leave in the summary of your session',
                        'a question, a choice with its options, a report',
                        'your role and the project', 'the issue or the pull request',
@@ -10282,7 +10755,8 @@ class RoleRunbookTests(unittest.TestCase):
         supervisor = ' '.join(ROLE_RUNBOOKS['supervisor'].read_text().split())
         channel = self.part(supervisor, 'Channel with the coordinator')
         folder = channel.split("**The operator's folder** (#663)")[1]
-        for phrase in ('box=/var/lib/devloop-coordination/to-operator',
+        for phrase in ('the same command (`send --to operator`)',
+                       'the script refuses `list`, `show` and `read` of `to-operator/`',
                        'You write there only in the two exceptions above',
                        'everything else still goes to the coordinator in `to-coordinator/`',
                        'your role and the project', 'stay on GitHub',

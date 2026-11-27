@@ -1,0 +1,15 @@
+# Il timer della pulizia di done/ delle caselle fra i ruoli (ops/host/devloop-mailbox-prune@.timer,
+# #707): avvia devloop-mailbox-prune@<progetto>.service una volta al giorno; Persistent= recupera
+# il giorno perso con l'host spento. setup-coordinator.sh (o setup-supervisor.sh, se il progetto
+# non ha il coordinatore) lo installa in SYSTEMD_DIR, una volta per host, e abilita e avvia
+# l'istanza del progetto.
+[Unit]
+Description=devloop mailbox of the roles, daily cleanup of done/ (%i)
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

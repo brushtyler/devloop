@@ -112,14 +112,26 @@ sorveglia ciascuno e cosa fa all'avvio:
   progetto, non `devloop` né `devloop-agent` né i ruoli di altri progetti. Un file per messaggio, con un
   nome univoco (data e ora UTC più un suffisso casuale), pubblicato con una rinomina atomica da
   un file temporaneo che comincia con `.`; il destinatario lo legge, poi lo sposta in `done/` o
-  lo rimuove. La casella serve solo per gli avvisi, non per lo stato;
+  lo rimuove. La casella serve solo per gli avvisi, non per lo stato. Lo script delle caselle
+  `ops/host/mailbox.sh` (#707), nelle copie di root dei ruoli accanto a `role-wait.sh`, fa tutto
+  questo: `send --to supervisor|coordinator|operator` pubblica, con una riga di testa con chi
+  scrive e il progetto, e rifiuta un testo con un token o una chiave; `list`, `show <id>` e
+  `done <id>` sono dei ruoli, sulla propria casella (`show` non sposta: «leggi, agisci, poi
+  sposta»), e dicono il proprietario del file, cioè chi l'ha scritto davvero; `prune`, come root,
+  toglie dalle `done/` delle tre caselle i messaggi più vecchi di `MAILBOX_DONE_DAYS` giorni (30),
+  con il timer `devloop-mailbox-prune@<progetto>`, una volta al giorno, che installa
+  `setup-coordinator.sh` (o `setup-supervisor.sh` se il progetto non ha il coordinatore) e
+  `check-host.sh` verifica. Su un host con i ruoli già installati lo si aggiunge come in
+  [host/migrate.md](host/migrate.md#script-delle-caselle-e-pulizia-di-done-707);
 - **la cartella dell'operatore** (#663), `to-operator/` della casella: i ruoli ci lasciano le
   comunicazioni per l'operatore che non vanno su GitHub (domande, scelte con le opzioni,
   segnalazioni), ciascuna con il ruolo, il progetto e l'issue o la PR a cui si riferisce. Ci
   scrive il coordinatore; il supervisore solo quando scrive all'operatore direttamente (il
   coordinatore non ha letto un suo messaggio da 15 minuti, o un'emergenza di sicurezza). La legge
   solo l'operatore, dalla sua shell come root, che sposta i messaggi letti in `to-operator/done/`
-  o li rimuove; nessun ruolo la legge, e il risveglio dei ruoli non la guarda. Su un host con i
+  o li rimuove: `sudo bash <copia di root>/host/mailbox.sh read` li stampa e li sposta subito;
+  nessun ruolo la legge (lo script rifiuta `list`, `show` e `read` di `to-operator/` a chi non è
+  root), e il risveglio dei ruoli non la guarda. Su un host con i
   ruoli già installati la si aggiunge come in
   [host/migrate.md](host/migrate.md#cartella-to-operator-della-casella-663);
 - **la sorveglianza**: il supervisore segue il flusso continuo, il coordinatore solo i suoi
@@ -167,11 +179,14 @@ ops/
                              degli agent; --unseal per installare e aggiornare le CLI
     setup-supervisor.sh      utente supervisor, ACL di attraversamento su /home/<devloop> e di
                              lettura su overlay, file di progetto e flusso degli eventi, casella
-                             fra i ruoli, sudoers, clone, key_dir 700, impostazioni di Claude Code
+                             fra i ruoli, sudoers, clone, key_dir 700, impostazioni di Claude Code,
+                             copia di root della sveglia e di mailbox.sh, la pulizia di done/
+                             delle caselle se il progetto non ha il coordinatore (#707)
     setup-coordinator.sh     utente coordinator (facoltativo), ACL di attraversamento su
                              /home/<devloop> e di lettura su overlay e flusso degli eventi,
                              casella fra i ruoli,
-                             clone, key_dir 700, copia di root di check-host.sh e della sveglia,
+                             clone, key_dir 700, copia di root di check-host.sh, della sveglia e
+                             di mailbox.sh, la pulizia di done/ delle caselle (#707),
                              sudoers in sola lettura, impostazioni di Claude Code
     setup-project.sh         un progetto con un solo comando: i quattro setup-*.sh nell'ordine,
                              prima tutti con --dry-run, poi con una sola conferma, e i passi a
@@ -181,6 +196,11 @@ ops/
                              alla fine del periodo, e a ogni avvio scrive il battito del ruolo;
                              con --rest il riposo del ruolo, fino al segnale della sentinella
     coordinator-wait.sh      involucro compatibile: role-wait.sh --role coordinator
+    mailbox.sh               le caselle fra i ruoli (#707): send, list, show, done per i ruoli,
+                             read di to-operator/ e prune delle done/ per root
+    devloop-mailbox-prune@.service, devloop-mailbox-prune@.timer  unità template della pulizia
+                             di done/ delle caselle, una istanza per progetto, ogni giorno
+    mailbox-prune-project.conf  drop-in di un progetto per l'istanza della pulizia (segnaposto)
     role-watchdog.sh         il watchdog dei ruoli: dai battiti e dal riposo, i ruoli fermi o
                              in anomalia nella casella e all'operatore
     devloop-role-watchdog@.service, devloop-role-watchdog@.timer,
