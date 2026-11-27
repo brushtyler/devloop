@@ -8953,6 +8953,147 @@ case "$1" in -u) echo "$uid" ;; -un) echo "$user" ;; *) echo "$user" ;; esac''')
             with self.subTest(args=args):
                 self.assertEqual(self.mailbox('supervisor', *args).returncode, 2)
 
+    def test_send_shows_the_public_name_only_with_the_whole_message(self):
+        # The atomic publication, watched while it writes: the code of the script runs here with
+        # every write split in two, and between the halves (and after) no file of the box with
+        # the name of a message has less than the whole message.
+        import builtins
+        import contextlib
+        import io
+        from unittest import mock
+        script = (OPS / 'host/mailbox.sh').read_text()
+        start = script.index('\n', script.index("MAILBOX_PY=$(cat <<'EOF'")) + 1
+        code = compile(script[start:script.index('\nEOF\n', start)], 'mailbox.py', 'exec')
+        box = self.box / 'to-coordinator'
+        first = 'Da: supervisore, progetto brushtyler/devloop'
+        text = 'la CI di #12 è rossa da un\'ora\n' * 500
+        body = f'{first}\n\n{text}'.encode()
+        checks = []
+
+        def check():
+            for path in box.iterdir():
+                if re.match(self.NAME, path.name):
+                    checks.append((path.name, path.read_bytes() == body))
+                else:
+                    checks.append((None, True))
+
+        class Halves:
+            def __init__(self, fh):
+                self.fh = fh
+
+            def write(self, data):
+                half = len(data) // 2
+                self.fh.write(data[:half])
+                self.fh.flush()
+                check()
+                self.fh.write(data[half:])
+                self.fh.flush()
+                check()
+                return len(data)
+
+            def __getattr__(self, name):
+                return getattr(self.fh, name)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return self.fh.__exit__(*exc)
+
+        real_fdopen, real_open, real_write = os.fdopen, builtins.open, os.write
+
+        def wrap(opener):
+            def opened(*args, **kwargs):
+                fh = opener(*args, **kwargs)
+                return Halves(fh) if fh.writable() else fh
+            return opened
+
+        def write(fd, data):
+            if fd in (0, 1, 2):
+                return real_write(fd, data)
+            half = len(data) // 2
+            real_write(fd, data[:half])
+            check()
+            return half + real_write(fd, data[half:])
+
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, MAILBOX_DIR=str(self.box),
+                             MAILBOX_BOXES=' '.join(self.BOXES)), \
+                mock.patch.object(sys, 'argv', ['mailbox', 'send', 'to-coordinator', '', first,
+                                                GROUP]), \
+                mock.patch.object(sys, 'stdin', io.TextIOWrapper(io.BytesIO(text.encode()))), \
+                mock.patch.object(os, 'fdopen', wrap(real_fdopen)), \
+                mock.patch.object(builtins, 'open', wrap(real_open)), \
+                mock.patch.object(os, 'write', write), contextlib.redirect_stdout(out), \
+                self.assertRaises(SystemExit) as exit_:
+            exec(code, {'__name__': '__main__'})
+        self.assertEqual(exit_.exception.code, 0)
+        self.assertGreaterEqual(len(checks), 2)
+        self.assertEqual([c for c in checks if not c[1]], [])
+        self.assertEqual([p.name for p in self.messages('to-coordinator')], [out.getvalue().strip()])
+        self.assertEqual((box / out.getvalue().strip()).read_bytes(), body)
+
+    def test_send_and_read_keep_the_whole_message(self):
+        # The limit is the file's, with the first line: what send accepts, read shows whole.
+        first = 'Da: coordinatore, progetto brushtyler/devloop\n\n'
+        limit = 256 * 1024
+        text = 'x' * (limit - len(first) - len('THE_END\n')) + 'THE_END\n'
+        done = self.mailbox('coordinator', 'send', '--to', 'operator', text=text)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        sent = self.box / 'to-operator' / done.stdout.strip()
+        self.assertEqual(sent.stat().st_size, limit)
+        done = self.mailbox('coordinator', 'send', '--to', 'operator', text='y' + text)
+        self.assertEqual(done.returncode, 1)
+        self.assertIn('con la riga di testa, supera 262144 byte: niente pubblicato', done.stderr)
+        self.assertEqual(self.messages('to-operator'), [sent])
+        done = self.mailbox('root', 'read')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertTrue(done.stdout.endswith('THE_END\n'))
+        self.assertNotIn('troncato', done.stdout)
+        self.assertTrue((self.box / 'to-operator/done' / sent.name).exists())
+        # A larger file, not written by send, is shown in part and stays to be read.
+        big = self.write('to-operator', '20261127T090000Z-big000.txt', 'z' * limit + 'THE_END\n')
+        done = self.mailbox('root', 'read')
+        self.assertEqual(done.returncode, 1)
+        self.assertIn('troncato', done.stdout)
+        self.assertNotIn('THE_END', done.stdout)
+        self.assertIn('non si mostra per intero: resta da leggere', done.stderr)
+        self.assertTrue(big.exists())
+
+    def test_read_moves_a_message_only_after_writing_it(self):
+        # An output that fails leaves the message to be read.
+        message = self.write('to-operator', '20261127T090000Z-a1b2c3.txt', 'una scelta\n')
+        self.whoami.write_text('0 root\n')
+        with open('/dev/full', 'w') as full:
+            done = subprocess.run(
+                [BASH, str(OPS / 'host/mailbox.sh'), '--params', str(self.params_file), 'read'],
+                stdout=full, stderr=subprocess.PIPE, text=True, env=self.env(), timeout=120)
+        self.assertEqual(done.returncode, 1)
+        self.assertIn('lo stdout non si scrive', done.stderr)
+        self.assertIn('resta da leggere', done.stderr)
+        self.assertTrue(message.exists())
+        self.assertEqual(list((self.box / 'to-operator/done').iterdir()), [])
+
+    def test_read_of_many_messages_holds_one_directory_open(self):
+        # 80 messages with 64 descriptors: read closes what it opens.
+        import resource
+        names = [f'20261127T09{i // 60:02d}{i % 60:02d}Z-m{i:05d}.txt' for i in range(80)]
+        for name in names:
+            self.write('to-operator', name, f'messaggio {name}\n')
+        self.whoami.write_text('0 root\n')
+
+        def limit():
+            resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
+
+        done = subprocess.run(
+            [BASH, str(OPS / 'host/mailbox.sh'), '--params', str(self.params_file), 'read'],
+            capture_output=True, text=True, env=self.env(), timeout=120, preexec_fn=limit)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.messages('to-operator'), [])
+        self.assertEqual(sorted(p.name for p in (self.box / 'to-operator/done').iterdir()), names)
+        for name in names:
+            self.assertIn(f'messaggio {name}\n', done.stdout)
+
     def test_send_refuses_a_text_with_a_token_or_a_key(self):
         # The detectors of devloop/agents.py (the default accepted on #707): the same patterns,
         # and the secret never in the error.

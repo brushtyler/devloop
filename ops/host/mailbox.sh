@@ -25,9 +25,11 @@
 #   «leggi, agisci, poi sposta»: show non sposta, così una sessione caduta a metà lascia il
 #   messaggio dov'era, e il segnale «non ancora gestito» per l'altro ruolo e per il watchdog; done
 #   lo sposta in done/. root su qualunque casella.
-# - read: solo root, su to-operator/: stampa i messaggi non letti e li sposta subito in done/. Un
-#   ruolo non legge to-operator/ (#663): list, show e read di quella casella sono rifiutati a chi
-#   non è root.
+# - read: solo root, su to-operator/: stampa i messaggi non letti e li sposta subito in done/,
+#   ciascuno solo dopo averlo scritto per intero sullo stdout: se lo stdout non si scrive, o il
+#   file supera il limite di un messaggio (256 KiB, riga di testa compresa: send non ne pubblica
+#   di più grandi), il messaggio resta da leggere e read esce con 1. Un ruolo non legge
+#   to-operator/ (#663): list, show e read di quella casella sono rifiutati a chi non è root.
 # - La provenienza: list, show e read dicono il proprietario del file (stat), cioè chi l'ha
 #   scritto davvero; la riga di testa è solo testo, e non se ne fidano.
 # - prune: solo root, toglie dalle done/ delle tre caselle i messaggi più vecchi di
@@ -282,10 +284,11 @@ def read_message(fd, name, box):
         if not stat.S_ISREG(st.st_mode):
             fail(f'{box}/{name} non è un file')
         data = fh.read(LIMIT + 1)
+    whole = len(data) <= LIMIT
     text = data[:LIMIT].decode('utf-8', errors='replace')
-    if len(data) > LIMIT:
+    if not whole:
         text += f'\n[… troncato a {LIMIT} byte]\n'
-    return st, text
+    return st, text, whole
 
 
 def move_done(fd, name, box):
@@ -308,14 +311,33 @@ def header(name, st):
     return f'messaggio {name}, proprietario del file {user(st.st_uid)}, scritto {when(st)}'
 
 
-def show(box, name, move):
+def emit(text):
+    """Scrive TEXT sullo stdout senza buffer: un errore si vede qui, prima di spostare."""
+    data = text.encode('utf-8', errors='replace')
+    try:
+        while data:
+            data = data[os.write(sys.stdout.fileno(), data):]
+    except OSError as exc:
+        fail(f'lo stdout non si scrive ({exc.strerror})')
+
+
+def show(fd, box, name, move):
+    """Mostra il messaggio NAME della casella FD; con MOVE lo sposta in done/, ma solo dopo
+    averlo scritto per intero sullo stdout. Dice se l'ha spostato."""
     check_id(name)
-    fd = box_fd(box)
-    st, text = read_message(fd, name, box)
-    print(f'== {header(name, st)}')
-    print(text, end='' if text.endswith('\n') else '\n')
+    st, text, whole = read_message(fd, name, box)
+    sys.stdout.flush()
+    try:
+        emit(f'== {header(name, st)}\n' + text + ('' if text.endswith('\n') else '\n'))
+    except Refused as exc:
+        fail(f'{exc}: {box}/{name} resta da leggere' if move else str(exc))
+    if move and not whole:
+        print(f'mailbox.sh: {box}/{name} supera {LIMIT} byte e non si mostra per intero: resta '
+              f'da leggere, leggerlo dal file e spostarlo con done', file=sys.stderr)
+        return False
     if move:
         move_done(fd, name, box)
+    return move
 
 
 def send(box, path, first_line, group):
@@ -340,6 +362,10 @@ def send(box, path, first_line, group):
             fail(f'il testo contiene {what}: niente pubblicato. Un messaggio non porta token, '
                  'chiavi né segreti; toglierlo e riscrivere')
     body = f'{first_line}\n\n{text}' + ('' if text.endswith('\n') else '\n')
+    # Il limite vale per il file intero, con la riga di testa: show e read lo leggono così, e un
+    # messaggio pubblicato da send si mostra sempre per intero.
+    if len(body.encode('utf-8')) > LIMIT:
+        fail(f'il messaggio, con la riga di testa, supera {LIMIT} byte: niente pubblicato')
     try:
         gid = grp.getgrnam(group).gr_gid
     except KeyError:
@@ -417,21 +443,35 @@ def main(command, args):
         for name, st in found:
             print(f'{name}  proprietario {user(st.st_uid)}  {when(st)}')
     elif command == 'show':
-        show(*args, move=False)
+        box, name = args
+        fd = box_fd(box)
+        try:
+            show(fd, box, name, move=False)
+        finally:
+            os.close(fd)
     elif command == 'done':
         box, name = args
         check_id(name)
         fd = box_fd(box)
-        read_message(fd, name, box)
-        move_done(fd, name, box)
+        try:
+            read_message(fd, name, box)
+            move_done(fd, name, box)
+        finally:
+            os.close(fd)
         print(f'{box}/{name} spostato in {box}/done/')
     elif command == 'read':
+        # Una sola directory aperta per tutta la lettura; un messaggio che non si mostra per
+        # intero resta da leggere, e read esce con 1.
         box, = args
-        found = messages(box_fd(box))
-        if not found:
-            print(f'nessun messaggio da leggere in {box}/')
-        for name, _ in found:
-            show(box, name, move=True)
+        fd = box_fd(box)
+        try:
+            found = messages(fd)
+            if not found:
+                print(f'nessun messaggio da leggere in {box}/')
+            moved = [show(fd, box, name, move=True) for name, _ in found]
+        finally:
+            os.close(fd)
+        return 0 if all(moved) else 1
     elif command == 'send':
         send(*args)
     elif command == 'prune':
