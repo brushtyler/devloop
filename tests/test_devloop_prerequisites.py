@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import test_devloop_supervision as sup
 from devloop import markdown, schema, supervision
-from devloop.github import GitHub, GitHubError, GitHubRefused, GitHubUncertain
+from devloop.github import GitHub, GitHubError, GitHubDuplicate, GitHubUncertain
 from devloop.dispatcher import (MAX_ACTIVE_PREREQUISITES, MAX_ADDED_PREREQUISITES,
                                 MAX_DEPENDENCY_READS, Dispatcher)
 from devloop.markdown import read_marker, render_prerequisite
@@ -52,7 +52,7 @@ class PrerequisiteGH(DependencyGH):
     def add_blocked_by(self, number, issue_id):
         # As GitHub, a block the issue already has is refused (#719).
         if any(b['number'] == issue_id - 100000 for b, _ in self.blocks.get(number, [])):
-            raise GitHubRefused('gh: Validation Failed (HTTP 422)')
+            raise GitHubDuplicate('gh: Issue is already blocked by this issue (HTTP 422)')
         super().add_blocked_by(number, issue_id)
         self.blocks.setdefault(number, []).append(block(issue_id - 100000, by=self.writer))
 
@@ -254,22 +254,60 @@ class IssueTargetTests(unittest.TestCase):
         self.assertEqual((moved['repo'], moved['number']), ('example/other', 99))
         self.assertIsNone(self.target({'id': 7, 'number': 5, 'state': 'open'})['repo'])
 
-    def test_only_a_422_is_a_refused_block(self):
-        # #719: GitHub's 422 is the refusal of a block the issue already has; any other
-        # failure keeps its own error, which the dispatcher does not take for a duplicate.
-        def adding(stderr):
+    def test_only_a_422_that_says_already_is_a_duplicate(self):
+        # #719: a 422 whose message, in the stderr or in the body `gh` prints, says the block is
+        # already there is the refusal of a duplicate; any other failure, a 422 for another
+        # cause included, keeps its own error, which the dispatcher does not take for one.
+        def adding(stderr, stdout=''):
             def run(argv, **kw):
-                return SimpleNamespace(returncode=1, stdout='', stderr=stderr)
+                return SimpleNamespace(returncode=1, stdout=stdout, stderr=stderr)
             return GitHub('brushtyler/ssdlc', run=run)
 
-        with self.assertRaises(GitHubRefused):
-            adding('gh: Validation Failed (HTTP 422)\n').add_blocked_by(2, 100005)
-        for stderr in ('gh: Forbidden (HTTP 403)\n', 'gh: Service Unavailable (HTTP 503)\n',
-                       'gh: Not Found (HTTP 404)\n', 'connection reset\n'):
+        duplicates = {
+            'message': ('gh: Issue is already blocked by this issue (HTTP 422)\n', ''),
+            'code': ('gh: Validation Failed (HTTP 422)\n',
+                     '{"message":"Validation Failed","errors":[{"resource":"IssueDependency",'
+                     '"field":"issue_id","code":"already_exists"}]}'),
+        }
+        for name, (stderr, stdout) in duplicates.items():
+            with self.subTest(duplicate=name), self.assertRaises(GitHubDuplicate):
+                adding(stderr, stdout).add_blocked_by(2, 100005)
+        for stderr in ('gh: Validation Failed (HTTP 422)\n',
+                       'gh: endpoint has been spammed (HTTP 422)\n',
+                       'gh: Forbidden (HTTP 403)\n', 'gh: Service Unavailable (HTTP 503)\n',
+                       'gh: Not Found (HTTP 404)\n', 'connection reset\n',
+                       # "already" outside a 422 is no refusal of a duplicate.
+                       'gh: already rate limited (HTTP 403)\n'):
             with self.subTest(stderr=stderr):
                 with self.assertRaises(GitHubError) as raised:
                     adding(stderr).add_blocked_by(2, 100005)
-                self.assertNotIsInstance(raised.exception, GitHubRefused)
+                self.assertNotIsInstance(raised.exception, GitHubDuplicate)
+        with self.assertRaises(GitHubError) as raised:
+            adding('gh: Not Found (HTTP 404)\n').add_blocked_by(2, 100005)
+        self.assertEqual(type(raised.exception).__name__, 'GitHubNotFound')
+
+    def test_a_422_for_another_cause_removes_no_block_that_does_not_count(self):
+        # #719: a block of #5 that does not count is there, and GitHub answers the dispatcher's
+        # with a 422 that is no duplicate: the real adapter raises its error, the dispatcher
+        # removes nothing and adds nothing again.
+        for stderr in ('gh: endpoint has been spammed (HTTP 422)\n',
+                       'gh: Validation Failed (HTTP 422)\n'):
+            with self.subTest(stderr=stderr):
+                d = BlockTests.make(self, {2: [block(5, by='stranger')]}, identities=True)
+                calls = []
+
+                def run(argv, stderr=stderr, **kw):
+                    calls.append(argv[argv.index('-X') + 1])
+                    return SimpleNamespace(returncode=1, stdout='', stderr=stderr)
+
+                adapter = GitHub('brushtyler/ssdlc', run=run)
+                self.gh.add_blocked_by = adapter.add_blocked_by
+                self.gh.remove_blocked_by = adapter.remove_blocked_by
+                with self.assertRaises(GitHubError) as raised:
+                    d._add_prerequisites(2, [5], 'preflight')
+                self.assertNotIsInstance(raised.exception, GitHubDuplicate)
+                self.assertEqual(calls, ['POST'])
+                self.assertEqual([b['number'] for b, _ in self.gh.blocks[2]], [5])
 
 
 class PreflightGH(IssueGH):
@@ -288,7 +326,7 @@ class PreflightGH(IssueGH):
     def add_blocked_by(self, number, issue_id):
         # As GitHub, a block the issue already has is refused (#719).
         if any(b['number'] == issue_id - 100000 for b, _ in self.blocks):
-            raise GitHubRefused('gh: Validation Failed (HTTP 422)')
+            raise GitHubDuplicate('gh: Issue is already blocked by this issue (HTTP 422)')
         super().add_blocked_by(number, issue_id)
         self.blocks.append(block(issue_id - 100000))
 
