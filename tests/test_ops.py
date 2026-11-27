@@ -5048,6 +5048,45 @@ exec {shlex.quote(STAT)} "$@"''')
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertNotIn('un pin è in corso', done.stdout)
 
+    def test_maintenance_start_fails_when_the_pin_in_progress_does_not_end(self):
+        # A pin still holding the lock of the pins after PIN_WAIT may have passed its last check
+        # of the maintenance and move current later: start fails, the maintenance stays and the
+        # service stays stopped, and the step on the host does not begin. PIN_WAIT shortened to
+        # one second in the rendered command.
+        text = self.command.read_text()
+        self.assertIn('\nPIN_WAIT=600\n', text)
+        self.command.write_text(text.replace('\nPIN_WAIT=600\n', '\nPIN_WAIT=1\n'))
+        maintenance = self.maintained_project(ack='30')
+        state = self.tmp / 'clones/widget/.devloop'
+        state.mkdir()
+        lock = state / 'pin.lock'
+        lock.touch()
+        pin = subprocess.Popen(['flock', '-x', str(lock), 'sleep', '30'])
+        self.addCleanup(pin.wait)
+        self.addCleanup(pin.kill)
+        deadline = time.time() + 10
+        while subprocess.run(['flock', '-n', '-s', str(lock), 'true']).returncode == 0:
+            self.assertLess(time.time(), deadline, 'the lock of the pins is not held')
+            time.sleep(0.05)
+        started = time.time()
+        done = self.devloop('maintenance', 'start', self.SECTIONS)
+        self.assertEqual(done.returncode, 2, done.stdout)
+        # It does not wait for the ok of the roles: it stops at the pin.
+        self.assertLess(time.time() - started, 20)
+        self.assertIsNone(pin.poll(), 'the pin ended before the timeout')
+        self.assertIn('devloop: un pin è in corso: aspetto al più 1s che finisca', done.stdout)
+        self.assertIn("il pin in corso non è finito entro 1s: può ancora spostare la copia "
+                      "fissata, il passo sull'host non comincia", done.stdout)
+        self.assertIn(f'maintenance start non riuscito: un pin tiene ancora {lock}', done.stderr)
+        self.assertIn('devloop --project widget maintenance end', done.stderr)
+        self.assertNotIn('aspetta già in manutenzione', done.stdout)
+        self.assertNotIn('è in manutenzione; alla fine del passo', done.stdout)
+        # The maintenance stays, with its expiry, and the service stays stopped.
+        self.assertTrue(maintenance.exists())
+        self.assertNotEqual(maintenance.read_text().split(' ')[2], '-')
+        self.assertEqual(self.mutating_calls(), ['systemctl stop devloop@widget (manutenzione -)'])
+        self.assertIn('il pin in corso non è finito entro 1s', (self.tmp / 'logger').read_text())
+
     def test_maintenance_start_needs_the_state_dir_of_the_project(self):
         maintenance = self.maintained_project()
         path = self.projects / 'params-widget.env'

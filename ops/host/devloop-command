@@ -323,7 +323,9 @@ if [ "$1" = maintenance ]; then
             # Un pin che tiene il lock adesso ha passato il controllo prima della manutenzione:
             # start aspetta che finisca, così dopo start nessun pin sposta current. Senza il file
             # del lock nessun pin lo tiene, e quello che lo crea vede la manutenzione. Il lock si
-            # apre solo se è un file regolare, come quelli dei ruoli.
+            # apre solo se è un file regolare, come quelli dei ruoli. Un pin che non finisce
+            # entro PIN_WAIT può aver passato anche l'ultimo controllo e spostare current più
+            # tardi: start non riesce, e il passo non comincia.
             pin_lock=$STATE_PATH/pin.lock
             if [ -f "$pin_lock" ] && ! [ -L "$pin_lock" ] \
                 && ! flock -n -s "$pin_lock" true 2>/dev/null; then
@@ -332,7 +334,8 @@ if [ "$1" = maintenance ]; then
                 if flock -w "$PIN_WAIT" -s "$pin_lock" true 2>/dev/null; then
                     note "il pin in corso è finito: da qui nessun pin sposta la copia fissata durante la manutenzione"
                 else
-                    note "avviso: il pin in corso non è finito entro ${PIN_WAIT}s: si rifiuta prima di spostare la copia fissata, ma controllare devloop status prima del passo"
+                    note "il pin in corso non è finito entro ${PIN_WAIT}s: può ancora spostare la copia fissata, il passo sull'host non comincia; la manutenzione resta e $SERVICE_NAME resta fermo"
+                    die "maintenance start non riuscito: un pin tiene ancora $pin_lock; non iniziare il passo finché non è finito (il lock libero, devloop status), poi chiudere la manutenzione con devloop --project $project maintenance end e ripetere devloop --project $project maintenance start"
                 fi
             fi
             # Le conferme dei ruoli: un'informazione, non una condizione (l'ok non è una difesa).

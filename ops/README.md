@@ -1280,7 +1280,10 @@ chi la usa e come cambiano i runbook dei ruoli lo dice #706.
   il lock dei pin, `pin.lock` dello state_dir) ha passato il controllo prima della manutenzione:
   `start` aspetta che finisca, al più 600 secondi, e `devloop pin` ricontrolla la manutenzione
   sotto quel lock, dopo il fetch e dopo lo smoke test, e si rifiuta prima di spostare la copia
-  fissata; per questo il file del progetto ha anche lo state_dir (`STATE_PATH`). Poi dice quali
+  fissata; per questo il file del progetto ha anche lo state_dir (`STATE_PATH`). Se il pin non
+  finisce entro quel tempo, `start` non riesce (codice 2): la manutenzione resta e il servizio
+  resta fermo, ma il passo non comincia, perché quel pin può aver passato anche l'ultimo controllo;
+  finito il pin, si chiude la manutenzione con `maintenance end` e si ripete `start`. Altrimenti dice quali
   ruoli aspettano già in manutenzione (lo stato e il lock tenuti dalla loro sveglia) e quali no,
   aspetta le loro conferme per al più `MAINTENANCE_ACK_TIMEOUT` secondi (default **300**), poi
   prosegue comunque e scrive nell'output e nel log di sistema (`logger -t devloop-maintenance`) chi
