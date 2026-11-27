@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import test_devloop_supervision as sup
 from devloop import markdown, schema, supervision
-from devloop.github import GitHub
+from devloop.github import GitHub, GitHubError
 from devloop.dispatcher import (MAX_ACTIVE_PREREQUISITES, MAX_ADDED_PREREQUISITES,
                                 MAX_DEPENDENCY_READS, Dispatcher)
 from devloop.markdown import read_marker, render_prerequisite
@@ -50,8 +50,16 @@ class PrerequisiteGH(DependencyGH):
                 for i, (n, body) in enumerate(self.comments) if n == number]
 
     def add_blocked_by(self, number, issue_id):
+        # As GitHub, a block the issue already has is refused (#719).
+        if any(b['number'] == issue_id - 100000 for b, _ in self.blocks.get(number, [])):
+            raise GitHubError('gh: Validation Failed (HTTP 422)')
         super().add_blocked_by(number, issue_id)
         self.blocks.setdefault(number, []).append(block(issue_id - 100000, by=self.writer))
+
+    def remove_blocked_by(self, number, issue_id):
+        super().remove_blocked_by(number, issue_id)
+        self.blocks[number] = [pair for pair in self.blocks.get(number, [])
+                               if pair[0]['number'] != issue_id - 100000]
 
     def prerequisites(self, number):
         return [r for n, body in self.comments
@@ -95,6 +103,48 @@ class BlockTests(unittest.TestCase):
         # The blocks the dispatcher added count: the issue waits for them.
         self.assertEqual(self.blocked_by(d), ['#4', '#5'])
 
+    def test_a_block_that_does_not_count_is_replaced_by_the_dispatchers(self):
+        # #719: a block of #5 added by a login whose blocks are ignored (the coordinator's app,
+        # or anyone else's) does not stop the dispatcher's.
+        d = self.make({2: [block(5, by='stranger')]}, identities=True)
+        self.assertEqual(self.blocked_by(d), [])
+        self.assertEqual(d._add_prerequisites(2, [5, 6], 'preflight'), ([5, 6], ''))
+        self.assertEqual(self.gh.prerequisites(2),
+                         [{'step': 'preflight', 'added': [5, 6], 'replaced': [5]}])
+        self.assertIn('non contano: #5.', ' '.join(self.gh.comments[-1][1].split()))
+        # GitHub refused the block it already had: the dispatcher removed it and added it again.
+        self.assertEqual(self.gh.removed_blocks, [(2, 100005)])
+        self.assertEqual(self.gh.added_blocks, [(2, 100005), (2, 100006)])
+        self.assertTrue(any('in place of the blocks that do not count of #5' in line
+                            for line in self.logs))
+        # Now it is the dispatcher's, with its record: it counts, and the issue waits for it.
+        self.assertEqual(self.blocked_by(d), ['#5', '#6'])
+        added, why = d._add_prerequisites(2, [5], 'implement')
+        self.assertEqual(added, [])
+        self.assertIn('#5', why)
+
+    def test_a_block_that_does_not_count_and_is_not_refused_is_not_removed(self):
+        d = self.make({2: [block(5, by='stranger')]}, identities=True)
+        accepted = []
+        self.gh.add_blocked_by = lambda number, issue_id: accepted.append((number, issue_id))
+        self.assertEqual(d._add_prerequisites(2, [5], 'preflight'), ([5], ''))
+        self.assertEqual(getattr(self.gh, 'removed_blocks', []), [])
+        self.assertEqual(accepted, [(2, 100005)])
+        self.assertEqual(self.gh.prerequisites(2),
+                         [{'step': 'preflight', 'added': [5], 'replaced': [5]}])
+
+    def test_another_refusal_is_no_replacement(self):
+        # A block that is not there: a refusal of GitHub is an error, as before #719.
+        d = self.make(identities=True)
+
+        def refuse(number, issue_id):
+            raise GitHubError('gh: (HTTP 403)')
+
+        self.gh.add_blocked_by = refuse
+        with self.assertRaises(GitHubError):
+            d._add_prerequisites(2, [5], 'preflight')
+        self.assertEqual(getattr(self.gh, 'removed_blocks', []), [])
+
     def test_a_condition_that_fails_adds_nothing(self):
         closed = {'id': 9, 'state': 'CLOSED', 'pull_request': False}
         cases = {
@@ -104,7 +154,8 @@ class BlockTests(unittest.TestCase):
             'a pull request': ([5], {5: {'id': 9, 'state': 'OPEN', 'pull_request': True}}, {},
                                'pull request'),
             'closed': ([5], {5: closed}, {}, '#5'),
-            'already a block': ([5], {}, {2: [block(5, by='stranger')]}, '#5'),
+            # A block that counts, of a trusted user (#719: one of any other login does not).
+            'already a block': ([5], {}, {2: [block(5)]}, '#5'),
             # #5 is blocked by #2 already: #2 blocked by #5 would close a cycle.
             'a cycle': ([5], {}, {5: [block(2)]}, '#2, #5'),
             # GitHub follows the transfer of #5: the issue it answers with is elsewhere.
@@ -195,8 +246,15 @@ class PreflightGH(IssueGH):
                 'added': [dict(e) for _, e in pairs]}
 
     def add_blocked_by(self, number, issue_id):
+        # As GitHub, a block the issue already has is refused (#719).
+        if any(b['number'] == issue_id - 100000 for b, _ in self.blocks):
+            raise GitHubError('gh: Validation Failed (HTTP 422)')
         super().add_blocked_by(number, issue_id)
         self.blocks.append(block(issue_id - 100000))
+
+    def remove_blocked_by(self, number, issue_id):
+        super().remove_blocked_by(number, issue_id)
+        self.blocks = [pair for pair in self.blocks if pair[0]['number'] != issue_id - 100000]
 
     def records(self, kind):
         return [r for c in self.thread if (r := read_marker(c['body'], kind))]
@@ -238,6 +296,26 @@ class PreflightPrerequisiteTests(unittest.TestCase):
         self.assertEqual(self.kinds(d), [('preflight', 7)])
         self.assertTrue(self.gh.records('preflight')[-1]['ready'])
         self.assertEqual([a.kind for a in plan(d.snapshot(), PCFG)], ['implement'])
+
+    def test_a_block_that_does_not_count_does_not_send_the_issue_to_the_operator(self):
+        # #719: the block of #5 was added by a login whose blocks do not count (the coordinator's
+        # app, as on #718): the plan ignores it and the check runs; with that prerequisite as
+        # its only gap, the dispatcher adds its own block in place of agent:needs-operator.
+        d = self.make(checked(False, [gap(repository=True, prerequisite='il parser',
+                                          blocked_by=5)]))
+        self.gh.blocks = [block(5, by='stranger')]
+        self.assertEqual(self.kinds(d), [('preflight', 7)])
+        self.assertEqual(self.gh.labels[7], {READY})
+        self.assertEqual(self.gh.removed_blocks, [(7, 100005)])
+        self.assertEqual(self.gh.added_blocks, [(7, 100005)])
+        self.assertEqual(self.gh.records('prerequisite'),
+                         [{'step': 'preflight', 'added': [5], 'replaced': [5]}])
+        outcome = self.gh.records('preflight')[-1]
+        self.assertEqual((outcome['blocked'], outcome['class'], outcome['prerequisites']),
+                         (False, 'prerequisite', [5]))
+        # The block is now one that counts: the issue waits for it.
+        self.assertEqual(self.kinds(d), [])
+        self.assertEqual(len(self.runner.calls), 1)
 
     def test_a_failed_check_with_prerequisites_runs_again_once_unblocked(self):
         view = {'record': {'ready': False, 'hash': 'h', 'gaps': [], 'prerequisites': [5]},
@@ -497,7 +575,12 @@ class RecordTests(unittest.TestCase):
     def test_the_record_of_the_blocks(self):
         good = {'step': 'implement', 'added': [5, 6]}
         self.assertEqual(read_marker(render_prerequisite(good), 'prerequisite'), good)
+        replaced = dict(good, replaced=[6])  # #719
+        self.assertEqual(read_marker(render_prerequisite(replaced), 'prerequisite'), replaced)
+        self.assertIn('#6', render_prerequisite(replaced, 'it').split('contano: ')[1])
         for bad in ({'step': 'review', 'added': [5]}, {'step': 'preflight', 'added': []},
+                    dict(good, replaced=[7]), dict(good, replaced=['5']),
+                    dict(good, replaced=5),
                     {'step': 'preflight', 'added': [0]}, {'step': 'preflight', 'added': ['5']},
                     {'step': 'preflight', 'added': [True]}, {'step': 'preflight'}):
             with self.subTest(record=bad):

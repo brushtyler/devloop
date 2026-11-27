@@ -473,6 +473,13 @@ class GitHub:
                  f'repos/{self.repo}/issues/{int(number)}/dependencies/blocked_by',
                  '-F', f'issue_id={int(issue_id)}')
 
+    def remove_blocked_by(self, number, issue_id):
+        """Remove from issue ``number`` the native "blocked by" of the issue whose REST id is
+        ``issue_id`` (#719)."""
+        self._gh('api', '-X', 'DELETE',
+                 f'repos/{self.repo}/issues/{int(number)}/dependencies/blocked_by/'
+                 f'{int(issue_id)}')
+
     def labelers(self, number, label):
         """Logins of every ``labeled`` event of ``label`` on issue or PR ``number``, oldest
         first, including events of a label removed since."""

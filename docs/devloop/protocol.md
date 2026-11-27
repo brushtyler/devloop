@@ -729,7 +729,11 @@ of the issue (`Tracker.add_blocked_by`), in place of `agent:needs-operator` or o
 escalation. First it writes a dispatcher comment ("Prerequisite added as \"blocked by\"",
 "Prerequisito aggiunto come \"blocked by\"" in Italian) ending with a `prerequisite` marker:
 `step` (`preflight` or `implement`) and `added`, the numbers of the issues it adds, at least
-one; then the blocks. A block whose latest addition is the dispatcher's counts as trusted only
+one; then the blocks. A prerequisite already among the "blocked by" of the issue stops the
+dispatcher only when that block counts (#719): one that does not, of a login whose blocks are
+ignored, goes in `replaced`, present only when not empty, a subset of `added` (records written
+before #719 lack it), and when GitHub refuses to add it again the dispatcher removes it
+(`Tracker.remove_blocked_by`) and adds it again, so that the latest addition is its own. A block whose latest addition is the dispatcher's counts as trusted only
 while a `prerequisite` record of the dispatcher on the blocked issue names it: without the
 record it is ignored like any untrusted block. The records count the blocks against the caps of
 the code: at most 3 of the dispatcher's blocks open together on one issue, at most 5 added in

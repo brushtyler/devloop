@@ -58,7 +58,8 @@ Where a method went, when it was not obvious:
   issues, which the planner reads to hold back an issue while a trusted block is open.
   ``issue_target`` and ``add_blocked_by`` (#672) are there too: the dispatcher adds a missing
   prerequisite named by its number as a "blocked by" of the issue, once it is an open issue of
-  the repository.
+  the repository. ``remove_blocked_by`` (#719) too: when GitHub refuses to add a block that the
+  issue already has but that does not count, the dispatcher removes it and adds it again.
 - ``repo_labels`` and ``rename_label`` (#248) are in ``Tracker`` next to ``ensure_label``:
   ``ensure_labels`` renames ``agent:needs-operator`` from its old name, and ``devloop status``
   reports when both names exist.
@@ -150,6 +151,10 @@ class Tracker(Protocol):
     def add_blocked_by(self, number, issue_id):
         """Add to issue ``number`` the native "blocked by" of the issue with id ``issue_id``
         (``issue_target``, #672)."""
+
+    def remove_blocked_by(self, number, issue_id):
+        """Remove from issue ``number`` the native "blocked by" of the issue with id
+        ``issue_id`` (#719): the dispatcher replaces a block that does not count with its own."""
 
     def edit_comment(self, comment_id, body):
         """Replace the body of comment ``comment_id``. Raises ``GitHubUncertain`` when the

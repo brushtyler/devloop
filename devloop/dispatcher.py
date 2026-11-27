@@ -2158,7 +2158,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             read = self.gh.issue_dependencies(node[1])
             admitters = self._admitters(read.get('author'))
             added_by = {key(event): event.get('by') for event in read.get('added') or []}
-            blockers, gone, recorded = set(), {}, None
+            blockers, gone = set(), {}
+            # The dispatcher's records of the issue (#672): read once per issue, and only for a
+            # block of the dispatcher.
+            records = functools.cache(
+                lambda number=node[1]: self._recorded_prerequisites(number))
             for item in read.get('blocked_by') or []:
                 reason = item.get('state_reason')
                 open_ = item.get('state') == 'OPEN'
@@ -2166,14 +2170,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                     continue  # a block closed as completed blocks nothing
                 blocker = key(item)
                 by = added_by.get(blocker)
-                trusted = by in admitters
-                if not trusted and not blocker[0] and self._signed(by):
-                    # The dispatcher's own block of a prerequisite, with its record (#672): the
-                    # records are read once per issue, and only for such a block.
-                    if recorded is None:
-                        recorded = self._recorded_prerequisites(node[1])
-                    trusted = blocker[1] in recorded
-                if not trusted:
+                if not self._block_counts(by, admitters, blocker, records):
                     self.log(f'  issue {issue_ref(node)}: ignored the block by '
                              f'{issue_ref(blocker)}, added by {by or "an unknown author"}: '
                              'neither a trusted user nor the supervisor')
@@ -2215,6 +2212,18 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                 'cycle': [issue_ref(m) for m in cycles.get(('', number), ())]}
         return views
 
+    def _block_counts(self, by, admitters, blocker, recorded):
+        """Whether a "blocked by" of ``blocker`` (``(repo, number)``, ``repo`` empty for the
+        repository's own issues) whose latest addition is by ``by`` counts (#277, #672): ``by``
+        is among ``admitters`` (``_admitters`` of the blocked issue), or it is the dispatcher
+        and ``blocker`` is an issue of the repository that a ``prerequisite`` record it signed on
+        the blocked issue names. ``recorded``: a callable that returns the numbers those records
+        name, called only for a block of the dispatcher. The one rule of ``_dependency_edges``
+        and of ``_add_prerequisites`` (#719)."""
+        if by in admitters:
+            return True
+        return not blocker[0] and self._signed(by) and blocker[1] in recorded()
+
     # Prerequisites as native blocks (#672) ------------------------------------
     def _recorded_prerequisites(self, number, comments=None):
         """The numbers of the issues that the ``prerequisite`` records the dispatcher signed on
@@ -2232,14 +2241,18 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
 
         Each must be an open issue of the repository, still there under its number (not one
         transferred elsewhere, which GitHub still answers for), not a PR nor the issue itself,
-        not already among its "blocked by"; the blocks must close no dependency cycle
+        not already among its "blocked by" that count (``_block_counts``, #719): one there that
+        does not count is replaced by the dispatcher's, and the record names it in ``replaced``;
+        the blocks must close no dependency cycle
         (``dependency_cycles`` on the trusted blocks read now, with the new ones), read in
         full: beyond ``MAX_DEPENDENCY_READS`` a cycle cannot be ruled out; and the
         dispatcher's blocks of the issue stay within ``MAX_ACTIVE_PREREQUISITES`` open together
         and ``MAX_ADDED_PREREQUISITES`` added in all, those added again included, as its
         ``prerequisite`` records count them. The record is written first, then the blocks: a
         block counts only with a record that names it (``_dependency_edges``), and a record whose
-        blocks were lost still counts against the caps."""
+        blocks were lost still counts against the caps. When GitHub refuses to add a block the
+        issue already has, one that does not count, the dispatcher removes it and adds it again,
+        so that the latest event that adds it is its own (#719)."""
         t = self._texts()
         wanted = sorted({n for n in wanted if isinstance(n, int) and not isinstance(n, bool)})
         if not wanted or wanted[0] < 1:
@@ -2252,10 +2265,20 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             return not item.get('repo') or item['repo'].lower() in home
 
         read = self.gh.issue_dependencies(number)
+        comments = self.gh.issue_comments(number)
+        records = [record for _, record in self._dispatcher_records(comments, 'prerequisite')]
+        recorded = {n for record in records for n in record['added']}
+        latest = {event.get('number'): event.get('by')
+                  for event in read.get('added') or [] if own(event)}
+        admitters = self._admitters(read.get('author'))
+        # Only a block that counts stops the dispatcher's (#719): one of a login whose blocks
+        # are ignored is replaced by the dispatcher's.
         present = {item.get('number') for item in read.get('blocked_by') or [] if own(item)}
         for n in wanted:
-            if n in present:
+            if n in present and self._block_counts(latest.get(n), admitters, ('', n),
+                                                   lambda: recorded):
                 return [], t('prereq_present', n=n)
+        replaced = [n for n in wanted if n in present]
         ids = {}
         for n in wanted:
             try:
@@ -2270,12 +2293,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             if target.get('state') != 'OPEN' or not isinstance(target.get('id'), int):
                 return [], t('prereq_closed', n=n)
             ids[n] = target['id']
-        comments = self.gh.issue_comments(number)
-        records = [record for _, record in self._dispatcher_records(comments, 'prerequisite')]
-        recorded = {n for record in records for n in record['added']}
         total = sum(len(record['added']) for record in records)
-        latest = {event.get('number'): event.get('by')
-                  for event in read.get('added') or [] if own(event)}
         active = sum(1 for item in read.get('blocked_by') or []
                      if own(item) and item.get('state') == 'OPEN'
                      and item.get('number') in recorded
@@ -2291,12 +2309,24 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         cycle = dependency_cycles(edges).get(('', number))
         if cycle:
             return [], t('prereq_cycle', cycle=', '.join(issue_ref(m) for m in cycle))
-        self.gh.comment(number, render_prerequisite({'step': step, 'added': wanted},
-                                                    self.cfg.language))
+        record = {'step': step, 'added': wanted}
+        if replaced:
+            record['replaced'] = replaced
+        self.gh.comment(number, render_prerequisite(record, self.cfg.language))
         for n in wanted:
-            self.gh.add_blocked_by(number, ids[n])
+            try:
+                self.gh.add_blocked_by(number, ids[n])
+            except GitHubError:
+                if n not in replaced:
+                    raise
+                # GitHub refuses a block the issue already has (#719): the one that does not
+                # count goes, then the dispatcher adds it again, as the latest to add it.
+                self.gh.remove_blocked_by(number, ids[n])
+                self.gh.add_blocked_by(number, ids[n])
         self.log(f'  issue #{number}: blocked by ' + ', '.join(f'#{n}' for n in wanted)
-                 + f', the prerequisites the {step} named')
+                 + f', the prerequisites the {step} named'
+                 + (', in place of the blocks that do not count of '
+                    + ', '.join(f'#{n}' for n in replaced) if replaced else ''))
         return wanted, ''
 
     def _prerequisite_wait(self, comments):
