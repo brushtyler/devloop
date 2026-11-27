@@ -941,7 +941,8 @@ procedura](#un-progetto-con-la-sorgente-a-un-tag-nuovo-666)):
 
 6. **le sessioni dei ruoli**: le loro sveglie già in attesa girano la copia di prima finché il
    ruolo non le rilancia: fino ad allora una manutenzione ferma il servizio, ma non arriva ai
-   ruoli. Chi la usa e come cambiano i runbook dei ruoli è #706.
+   ruoli. Chi la usa e quando è in [Ogni cambio con un passo
+   sull'host](#ogni-cambio-con-un-passo-sullhost) (#706), e i compiti dei ruoli nei loro runbook.
 
 **Un progetto con `SOURCE_REF`** (#687) ha il comando e le sveglie del suo tag: finché il tag non
 contiene #705, per quel progetto la manutenzione non c'è, e i passi sull'host si fanno come oggi
@@ -1252,6 +1253,38 @@ ruolo su un host attivo](#chiavi-per-ruolo-su-un-host-attivo): lì è il codice 
 l'overlay. Nel rollback vale il contrario: la chiave si toglie **prima** del pin della copia di
 prima. Per un progetto con `SOURCE_REF` la chiave si scrive al passo 6 della [sua
 procedura](#un-progetto-con-la-sorgente-a-un-tag-nuovo-666), dopo il pin del tag nuovo.
+
+**La manutenzione dell'host** (#705, #706; scelta M4 dell'operatore, [ADR 0002, precisazione del
+2026-11-27](../../docs/adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-27-la-manutenzione-dellhost-706)).
+Ogni sezione di questa guida che ferma il servizio o tocca ciò che usano i ruoli (le sveglie, i
+sudoers, le ACL, le copie di root di `ops/`, l'overlay, il pin) si esegue dentro la manutenzione
+dell'host ([ops/README.md](../README.md#10-coordinatore-facoltativo), "La manutenzione
+dell'host"), per ogni progetto che tocca. La regola vale per ogni sezione, anche per quelle che
+non la ripetono:
+
+- **passo zero**, come root, prima del primo comando della sezione: `devloop --project <progetto>
+  maintenance start "<sezioni>"`, con i titoli delle sezioni che si eseguono. Ferma il servizio
+  (il `systemctl stop <SERVICE_NAME>` della sezione trova il servizio già fermo) e i ruoli
+  aspettano in manutenzione. Se `start` si rifiuta (una manutenzione o una pausa già aperte) o non
+  riesce (un pin in corso), il passo non comincia: ci si ferma e si chiede all'operatore;
+- **durante la manutenzione** il pin a mano del passo si fa con il comando `devloop` dell'host,
+  come root (`devloop --project <progetto> pin origin/main`), l'unico che devloop accetta finché
+  la manutenzione c'è; un pin fatto in un altro modo si rifiuta. Il `systemctl start
+  <SERVICE_NAME>` che la sezione dà dopo il pin non si esegue: lo fa la fine della manutenzione;
+- **ultimo passo**, come root, dopo la verifica: `devloop --project <progetto> maintenance end`,
+  che toglie la manutenzione e riavvia il servizio (salvo una pausa dell'operatore). Si chiude
+  anche dopo la scadenza. Una sezione che si ferma a metà lascia la manutenzione aperta: lo si
+  dice all'operatore, che decide (il rollback della sezione, poi la fine, o altro); un servizio
+  riavviato su un passo a metà farebbe più danni di un progetto fermo.
+
+La aprono e la chiudono l'agent dell'host, nella stessa richiesta dell'operatore con cui esegue
+la sezione e senza un'altra richiesta ([runbook](../../docs/devloop/roles/host.md#the-maintenance-of-the-host)),
+e l'operatore, quando esegue un passo lui stesso; nessun altro ruolo. Non si usa per altro, e
+non tocca la pausa dell'operatore: una pausa in corso ferma la sezione, come prima. La
+manutenzione non aggiunge messaggi nelle caselle: i ruoli la leggono dal suo stato (scelta M1).
+Fanno eccezione la sezione [La manutenzione dell'host (#705)](#la-manutenzione-dellhost-705),
+che installa il comando e si esegue senza, e un progetto con `SOURCE_REF` il cui tag non contiene
+ancora #705, per cui i passi si fanno come prima.
 
 Dal #462 il passo è anche dichiarato nell'output strutturato dell'implementer (`host_step`: un
 testo breve con il rimando a questa guida), e il reviewer controlla che ci sia. Dal #531 il

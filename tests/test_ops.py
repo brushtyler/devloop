@@ -11032,6 +11032,79 @@ class RoleRunbookTests(unittest.TestCase):
         self.assertIn('per **tutti i progetti dell\'host** passati da questa sezione, compreso '
                       'quello che resta', ' '.join(migrate[rollback:].split()))
 
+    def test_the_roles_keep_to_the_maintenance_of_the_host(self):
+        # #706, choice M4: the agent of the host and the operator open and close the maintenance
+        # of #705, as step zero and last step of the sections of migrate.md; the supervisor
+        # neither touches the service nor pins during it; the coordinator checks the outcome.
+        anchor = 'precisazione-del-2026-11-27-la-manutenzione-dellhost-706'
+        adr = ' '.join((ROOT / 'docs/adr/0002-ruoli-e-responsabilita.md').read_text().split())
+        self.assertIn(f'(#{anchor})', adr.split(' ## Contesto ')[0])
+        section = adr.split(" ### Precisazione del 2026-11-27: la manutenzione dell'host (#706) ")[1]
+        section = section.split(' ## ')[0]
+        for phrase in ('https://github.com/brushtyler/devloop/issues/706#issuecomment-7215503809',
+                       '**La manutenzione è il terzo motivo dello stesso meccanismo**',
+                       "**La aprono e la chiudono l'agent dell'host e l'operatore** (M4)",
+                       '**I ruoli la leggono dallo stato** (M1 di #705)', '**Il supervisore**',
+                       '**Il coordinatore**', 'la pausa vince', 'Non la chiude mai',
+                       '(../../ops/host/migrate.md#ogni-cambio-con-un-passo-sullhost)'):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, section)
+        link = f'(../../adr/0002-ruoli-e-responsabilita.md#{anchor})'
+        host = ' '.join(ROLE_RUNBOOKS['host'].read_text().split())
+        part = self.part(host, 'The maintenance of the host')
+        for phrase in (link, '**Step zero**', '**Last step**',
+                       '`devloop --project <project> maintenance start "<sections>"`',
+                       '`devloop --project <project> maintenance end`',
+                       'within the same request of the operator', 'without asking for another',
+                       'You never use it for anything else', 'you never touch `rest/pause`',
+                       'a pause in progress stops you', 'adds no message in the mailboxes',
+                       'leaves the maintenance open',
+                       '(../../../ops/host/migrate.md#ogni-cambio-con-un-passo-sullhost)'):
+            with self.subTest(host=phrase):
+                self.assertIn(phrase, part)
+        self.assertIn('Never open or close the maintenance of the host (#705) outside a section',
+                      self.part(host, 'Prohibitions'))
+        self.assertIn('**No** writing on GitHub', self.part(host, 'Privileges'))
+        supervisor = ' '.join(ROLE_RUNBOOKS['supervisor'].read_text().split())
+        part = self.part(supervisor, 'Maintenance of the host')
+        for phrase in (link, '`manutenzione:`', '`finita`', 'as in the pause',
+                       'no `systemctl start`, `stop` or `restart` of the service, and no pin',
+                       'This is the second defence', 'the first is in the code (#705)'):
+            with self.subTest(supervisor=phrase):
+                self.assertIn(phrase, part)
+        self.assertIn('never start, stop or restart the service, nor pin',
+                      self.part(supervisor, 'Prohibitions'))
+        coordinator = ' '.join(ROLE_RUNBOOKS['coordinator'].read_text().split())
+        part = self.part(coordinator, 'Maintenance of the host')
+        for phrase in (link, '`manutenzione:`', 'do not diagnose them',
+                       '**At the end** (`finita`), or at the expiry (`scaduta`)',
+                       'the automatic pin resumed', 'the wake-ups active',
+                       '`check-host.sh --read-only`', '`to-operator/`',
+                       '**At the expiry without an end** (`scaduta`)', 'notify --key coordinator:',
+                       'You never end it yourself'):
+            with self.subTest(coordinator=phrase):
+                self.assertIn(phrase, part)
+        self.assertIn('Never open or close the maintenance of the host (#705)',
+                      self.part(coordinator, 'Prohibitions'))
+        for role in ('supervisor', 'coordinator'):
+            text = ' '.join(ROLE_RUNBOOKS[role].read_text().split())
+            with self.subTest(role=role):
+                self.assertIn('- **In maintenance** (#705)', self.part(text, 'Stopped roles'))
+        # The rule written once in migrate.md, with the operator who may use it too.
+        rule = ' '.join(RootStepsGuideTests().section("### Ogni cambio con un passo sull'host")
+                        .split())
+        for phrase in (f'(../../docs/adr/0002-ruoli-e-responsabilita.md#{anchor})',
+                       '**passo zero**', '**ultimo passo**', '**durante la manutenzione**',
+                       '`devloop --project <progetto> maintenance start "<sezioni>"`',
+                       '`devloop --project <progetto> maintenance end`',
+                       '`devloop --project <progetto> pin origin/main`',
+                       "l'agent dell'host, nella stessa richiesta dell'operatore",
+                       "e l'operatore, quando esegue un passo lui stesso",
+                       'anche per quelle che non la ripetono', 'lascia la manutenzione aperta',
+                       '(../../docs/devloop/roles/host.md#the-maintenance-of-the-host)'):
+            with self.subTest(rule=phrase):
+                self.assertIn(phrase, rule)
+
     def test_the_documents_cite_the_runbooks(self):
         readme = (OPS / 'README.md').read_text()
         guide = (ROOT / 'docs' / 'devloop' / 'guide.md').read_text()

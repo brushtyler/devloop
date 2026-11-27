@@ -1289,8 +1289,12 @@ Su un host già attivo: [host/migrate.md](host/migrate.md#la-pausa-delloperatore
 [host/migrate.md](host/migrate.md)) i ruoli vedrebbero il servizio fermo o fallito senza sapere che
 è voluto, e un avvio o un pin a metà dei passi romperebbe la procedura. La manutenzione è uno
 stato, come la pausa, che accompagna una procedura dell'host: ha una scadenza e si chiude alla
-fine. La apre e la chiude chi fa il passo, come root, con il comando `devloop` dell'host (passo 4);
-chi la usa e come cambiano i runbook dei ruoli lo dice #706.
+fine. La apre e la chiude chi fa il passo, come root, con il comando `devloop` dell'host (passo 4):
+l'agent dell'host, dentro una sezione di [host/migrate.md](host/migrate.md) che l'operatore gli
+chiede, e l'operatore (#706, scelta M4; la regola in [host/migrate.md, "Ogni cambio con un passo
+sull'host"](host/migrate.md#ogni-cambio-con-un-passo-sullhost); i compiti dei ruoli nei loro
+runbook e nell'[ADR 0002, precisazione del
+2026-11-27](../docs/adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-27-la-manutenzione-dellhost-706)).
 
 - **`devloop --project <progetto> maintenance start "<sezioni>"`** si rifiuta se c'è già una
   manutenzione o una pausa; crea in modo esclusivo `COORDINATION_DIR/rest/maintenance` ("<inizio>

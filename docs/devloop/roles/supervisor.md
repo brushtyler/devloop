@@ -269,11 +269,36 @@ would exit at once all the same, without a tick), no pin, no escalation to decid
 what the message or the alarm asks; what waits for the loop waits for the resume. An alarm of the
 service active during the pause goes to the operator (Notices to the operator).
 
+## Maintenance of the host
+
+A step on the host (a section of `ops/host/migrate.md`) runs inside the maintenance of the host
+(#705, #706; [ADR 0002, precision of
+2026-11-27](../../adr/0002-ruoli-e-responsabilita.md#precisazione-del-2026-11-27-la-manutenzione-dellhost-706)):
+the agent of the host, within a section the operator asked for, or the operator, opens it as root
+with `devloop --project <project> maintenance start "<sections>"`, which writes
+`rest/maintenance` of the mailbox and stops the service, and closes it with `maintenance end`,
+which starts the service again. Only they open and close it; it has an expiry, and the stopped
+service is wanted.
+
+Your wake-up, usual, at rest or in pause, tells you each change once, with a `manutenzione:`
+line: `iniziata` or `in corso` (the start, the sections, the expiry), `scadenza fissata`,
+`scaduta`, `finita`. While it is on, start the wake-up again: it waits in maintenance, with the
+state `rest/supervisor` with the reason `manutenzione` and the lock, and the sentinel wakes you
+only for a message in `to-supervisor/`: act on it, then start the wake-up again. At `finita`,
+start the usual wake-up, which gives you the events after your cursor, and resume watching.
+
+While the maintenance is on, also after its expiry, as in the pause: no `systemctl start`,
+`stop` or `restart` of the service, and no pin. This is the second defence: the first is in the
+code (#705), where `devloop run` starts no tick and `devloop pin` refuses, but a service you
+started or a pin you tried halfway through a step would still break the procedure. The stopped
+service is not a problem to diagnose or to report; what waits for the loop waits for the end.
+The coordinator checks the outcome at the end and tells the operator.
+
 ## Stopped roles
 
 The watchdog of the roles (`devloop-role-watchdog@<project>`, ADR 0002, second precision of
 2026-11-23, point 6, and precisions of 2026-11-26 on the rest and the pause) sees each role in
-one of four states. It only detects: it has no GitHub key and changes nothing.
+one of five states (the fifth, in maintenance, from #705). It only detects: it has no GitHub key and changes nothing.
 
 - **Active**: regular heartbeats.
 - **At rest**: the rest declared, the sentinel active, the lock held: a line of information in
@@ -286,6 +311,11 @@ one of four states. It only detects: it has no GitHub key and changes nothing.
 - **In pause** (#685): during the pause of the operator, a role that waits with its state and its
   lock. The work waiting is no anomaly; the others of the rest stay. Once per pause, a line of
   information in its journal: «in pausa per ordine dell'operatore dal …», with the work waiting.
+- **In maintenance** (#705): during the maintenance of the host, a role that waits with its
+  state and its lock. The work waiting, the sentinel not active and its signals are no anomaly;
+  the lock not held and an old message in its mailbox are. Once per maintenance, a line of
+  information in its journal: «in manutenzione dal …, sezioni …, scadenza …», and at the expiry
+  without an end, once, the line `allarme all'operatore:`.
 - **Stopped**: no valid rest, and the heartbeat missing or older than two of its periods.
 
 - When the coordinator is stopped, or at rest with an anomaly, it leaves a message in
@@ -454,7 +484,8 @@ coordinator in the mailbox.
   without the command, or by anyone else, for one.
 - Pin and restart devloop when the procedures say so: never pin a merge that declares a step on
   the host before the operator says the step is done
-  ([Step on the host](../guide.md#step-on-the-host)).
+  ([Step on the host](../guide.md#step-on-the-host)), and never pin or restart during the
+  maintenance of the host (Maintenance of the host).
 - **Detect the details of the host** in the new texts on GitHub (AGENTS.md, ["Dettagli
   dell'host nei testi pubblici"](../../../AGENTS.md#dettagli-dellhost-nei-testi-pubblici)).
   Following the stream of the events, check the new texts of the agents, of the dispatcher, of
@@ -496,5 +527,7 @@ coordinator in the mailbox.
   are the agent of the host's, launched by the operator ([host runbook](host.md)).
 - Never open or close the pause of the operator (#685): never write or remove `rest/pause`, and
   never start the service while the pause is on.
+- Never open or close the maintenance of the host (#705): never write or remove
+  `rest/maintenance`, and while it is on never start, stop or restart the service, nor pin.
 - Never write to the roles of another project, devloop's repository included, nor read or write
   its mailbox: a defect of devloop goes to the operator (Other projects).
