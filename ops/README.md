@@ -1467,7 +1467,10 @@ non cambiano: i loro worktree vengono dal clone del dispatcher, e restano senza 
 rete.
 
 **I permessi.** Nessuno nuovo per devloop: il manifest del dispatcher ha già `contents: read`
-(passo 2). Le app si creano e si installano sul repository privato come su uno pubblico.
+(passo 2). Le app si creano e si installano sul repository privato come su uno pubblico. Le app
+`supervisor` e `coordinator` devono avere `contents: read` per i clone dei ruoli (sotto, e [Quando
+serve `contents: read` alle app di ruolo](#2-github-app), #717): il manifest lo dichiara, e sulle
+app già create si aggiunge dalle loro impostazioni.
 
 **I parametri.** Un repository privato vuole la sorgente a parte (`SOURCE_REPO` e `SOURCE_REF`:
 devloop viene dal clone della sorgente, pubblica) e uno `STATE_DIR` assoluto, fuori dal clone, che
@@ -1497,13 +1500,26 @@ Con `--dry-run` nessuno dei due script chiede nulla a GitHub: `setup-devloop.sh`
 di sempre e, sotto, come si clona un repository privato. Un repository pubblico che GitHub non
 raggiunge (la rete assente) sembra privato: i messaggi lo dicono.
 
+**I clone dei ruoli** (`SUPERVISOR_CLONE` e `COORDINATOR_CLONE`, #717). `setup-supervisor.sh` e
+`setup-coordinator.sh` fanno la stessa domanda anonima: un repository che si legge senza
+credenziali si clona come sempre; uno privato si clona, e se il clone c'è già si aggiorna, come
+l'utente del ruolo con un token della sua app limitato a `contents=read`
+(`scripts/supervisor-token.py` o `scripts/coordinator-token.py --perm contents=read`, che esegue
+`scripts/role-git.py`): il token passa solo nell'ambiente di `git`, mai nella configurazione del
+clone. Servono:
+
+- l'app del ruolo con `contents: read`, installata sul repository, e la sua tabella nell'overlay
+  (`[apps.supervisor]`, `[apps.coordinator]`);
+- la chiave dell'app nella `key_dir` del ruolo;
+- `scripts/role-git.py` nel clone della sorgente del ruolo, quindi un `SOURCE_REF` che contiene
+  #717 (lo script dei token viene da lì: un repository privato vuole già la sorgente a parte).
+
+Finché ne manca uno, lo script lo dice fra le cose da fare (`setup-project.sh` le raccoglie e non
+si ferma), e si riesegue quando è pronto; un clone o un aggiornamento con l'app che non riesce è un
+avviso. `check-host.sh` verifica, come l'utente di ogni ruolo, che il suo clone si aggiorni.
+
 **I limiti.**
 
-- **I clone dei ruoli** (`SUPERVISOR_CLONE` e `COORDINATOR_CLONE`): `setup-supervisor.sh` e
-  `setup-coordinator.sh` clonano ancora il repository gestito senza credenziali, e con un
-  repository privato non riescono, quindi `setup-project.sh` si ferma a `setup-supervisor.sh`. È
-  #717: le app del supervisore e del coordinatore avranno bisogno di `contents: read`, che serve
-  solo per un repository privato; per uno pubblico, compreso quello di devloop, non è necessario.
 - **I registri privati delle dipendenze** di `[prepare]` restano fuori: la preparazione dei
   worktree gira come l'utente degli agent, senza credenziali di rete.
 - **La sorgente di devloop** resta pubblica: i suoi clone (`SOURCE_CLONE` e quelli dei ruoli) non
