@@ -747,6 +747,10 @@ the mailbox.
   `agent:needs-operator`: only the operator admits it, with `agent:ready` in person or, when
   the check declares `trust_policy: covered`, with a `/devloop approve` on the issue that
   counts, after which your `agent:ready` starts it (#644).
+- **Native blocks** (#719; [Dependencies between issues](../guide.md#dependencies-between-issues)):
+  the "blocked by" that count are the supervisor's (#670) or a trusted user's, not yours. When
+  an issue needs a prerequisite, name it in the text, with the number of its issue, and leave
+  the block to the supervisor.
 - The other delegated commands of the table of [The coordinator](../guide.md#the-coordinator)
   (`retry`, `accept-defaults`, `decide`, `rereview`, `recheck`, `fix`, `hold`, `release`,
   `finding`; and `authorize`, above), under

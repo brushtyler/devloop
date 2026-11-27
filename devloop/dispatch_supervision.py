@@ -151,7 +151,7 @@ TEXTS = Catalog(
         # ``Dispatcher._add_prerequisites``): the escalation of before stays.
         'prereq_none': 'no issue number is given',
         'prereq_self': '#{n} is this issue itself',
-        'prereq_present': '#{n} is already among the "blocked by" of the issue',
+        'prereq_present': '#{n} is already among the "blocked by" of the issue that count',
         'prereq_missing': '#{n} does not exist in this repository',
         'prereq_moved': '#{n} was transferred to another repository',
         'prereq_pr': '#{n} is a pull request, not an issue',
@@ -525,7 +525,7 @@ TEXTS = Catalog(
                                     '<motivo>`.'),
         'prereq_none': 'non è indicato il numero di nessuna issue',
         'prereq_self': '#{n} è questa stessa issue',
-        'prereq_present': '#{n} è già fra i "blocked by" dell\'issue',
+        'prereq_present': '#{n} è già fra i "blocked by" dell\'issue che contano',
         'prereq_missing': '#{n} non esiste in questo repository',
         'prereq_moved': '#{n} è stata trasferita in un altro repository',
         'prereq_pr': '#{n} è una pull request, non un\'issue',

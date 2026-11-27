@@ -63,6 +63,12 @@ _NOT_FOUND = re.compile(r'Could not resolve to an? (?:PullRequest|issue)\b|\(HTT
 # `error connecting to` for a name that does not resolve; a failed TLS handshake), are certain:
 # nothing was written.
 _HTTP_STATUS = re.compile(r'\bHTTP (\d{3})\b')
+# GitHub's refusal of a block the issue already has (#719): a 422 (Unprocessable Entity) whose
+# message, in `gh`'s stderr or in the body it prints, says the dependency is already there
+# ("already ...", the validation code `already_exists`). GitHub answers 422 for other causes
+# too (another failed validation, an endpoint spammed): none of them is a duplicate.
+_UNPROCESSABLE = re.compile(r'\(HTTP 422\)')
+_ALREADY = re.compile(r'\balready(?:\b|_exists\b)', re.IGNORECASE)
 _NOT_SENT = re.compile(r'\bdial tcp\b|\berror connecting to\b|\bTLS handshake\b')
 # The exit codes of coreutils ``timeout`` once it stopped its command (#397): 124 after SIGTERM,
 # 137 (128 + 9) after SIGKILL.
@@ -78,6 +84,13 @@ class GitHubError(RuntimeError):
 class GitHubNotFound(GitHubError):
     """GitHub answered that the object asked for does not exist: an explicit result, unlike a
     failed call."""
+
+
+class GitHubDuplicate(GitHubError):
+    """GitHub refused to add a native "blocked by" the issue already has (#719): an answer 422
+    (Unprocessable Entity) that says so, and nothing was written. ``add_blocked_by`` raises it
+    only then: any other failure (a 422 for another cause, 403, 5xx, a timeout) proves no
+    duplicate."""
 
 
 class GitHubUncertain(GitHubError):
@@ -230,15 +243,20 @@ class GitHub:
             raise GitHubUncertain(f'gh {" ".join(args[:3])}: timed out after '
                                   f'{max(1, math.ceil(timeout))}s (exit {done.returncode})')
         if check and done.returncode != 0:
-            stderr = done.stderr or ''
-            if _NOT_FOUND.search(stderr):
-                error = GitHubNotFound
-            elif write and _uncertain(stderr):
-                error = GitHubUncertain
-            else:
-                error = GitHubError
-            raise error(f'gh {" ".join(args[:3])}: {stderr.strip()[:500]}')
+            self._failed(args, done, write)
         return done
+
+    @staticmethod
+    def _failed(args, done, write=False):
+        """Raise the error of the `gh` with ``args`` that failed with ``done``."""
+        stderr = done.stderr or ''
+        if _NOT_FOUND.search(stderr):
+            error = GitHubNotFound
+        elif write and _uncertain(stderr):
+            error = GitHubUncertain
+        else:
+            error = GitHubError
+        raise error(f'gh {" ".join(args[:3])}: {stderr.strip()[:500]}')
 
     def _tmp(self, args):
         """``tmp_dir``, created if missing, with mode 700 (#545)."""
@@ -468,10 +486,28 @@ class GitHub:
 
     def add_blocked_by(self, number, issue_id):
         """Add to issue ``number`` the native "blocked by" of the issue whose REST id is
-        ``issue_id`` (#672, ``issue_target``)."""
-        self._gh('api', '-X', 'POST',
-                 f'repos/{self.repo}/issues/{int(number)}/dependencies/blocked_by',
-                 '-F', f'issue_id={int(issue_id)}')
+        ``issue_id`` (#672, ``issue_target``). Raises ``GitHubDuplicate`` only when GitHub
+        refuses it as a block the issue already has: a 422 whose message, in the stderr or in
+        the body, says so (#719); any other failure, a 422 for another cause included, raises
+        its own error."""
+        args = ('api', '-X', 'POST',
+                f'repos/{self.repo}/issues/{int(number)}/dependencies/blocked_by',
+                '-F', f'issue_id={int(issue_id)}')
+        done = self._gh(*args, check=False)
+        if done.returncode == 0:
+            return
+        stderr = done.stderr or ''
+        if (_UNPROCESSABLE.search(stderr)
+                and _ALREADY.search(stderr + '\n' + (done.stdout or ''))):
+            raise GitHubDuplicate(f'gh {" ".join(args[:3])}: {stderr.strip()[:500]}')
+        self._failed(args, done)
+
+    def remove_blocked_by(self, number, issue_id):
+        """Remove from issue ``number`` the native "blocked by" of the issue whose REST id is
+        ``issue_id`` (#719)."""
+        self._gh('api', '-X', 'DELETE',
+                 f'repos/{self.repo}/issues/{int(number)}/dependencies/blocked_by/'
+                 f'{int(issue_id)}')
 
     def labelers(self, number, label):
         """Logins of every ``labeled`` event of ``label`` on issue or PR ``number``, oldest

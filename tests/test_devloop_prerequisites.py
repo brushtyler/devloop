@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import test_devloop_supervision as sup
 from devloop import markdown, schema, supervision
-from devloop.github import GitHub
+from devloop.github import GitHub, GitHubError, GitHubDuplicate, GitHubUncertain
 from devloop.dispatcher import (MAX_ACTIVE_PREREQUISITES, MAX_ADDED_PREREQUISITES,
                                 MAX_DEPENDENCY_READS, Dispatcher)
 from devloop.markdown import read_marker, render_prerequisite
@@ -50,8 +50,16 @@ class PrerequisiteGH(DependencyGH):
                 for i, (n, body) in enumerate(self.comments) if n == number]
 
     def add_blocked_by(self, number, issue_id):
+        # As GitHub, a block the issue already has is refused (#719).
+        if any(b['number'] == issue_id - 100000 for b, _ in self.blocks.get(number, [])):
+            raise GitHubDuplicate('gh: Issue is already blocked by this issue (HTTP 422)')
         super().add_blocked_by(number, issue_id)
         self.blocks.setdefault(number, []).append(block(issue_id - 100000, by=self.writer))
+
+    def remove_blocked_by(self, number, issue_id):
+        super().remove_blocked_by(number, issue_id)
+        self.blocks[number] = [pair for pair in self.blocks.get(number, [])
+                               if pair[0]['number'] != issue_id - 100000]
 
     def prerequisites(self, number):
         return [r for n, body in self.comments
@@ -95,6 +103,71 @@ class BlockTests(unittest.TestCase):
         # The blocks the dispatcher added count: the issue waits for them.
         self.assertEqual(self.blocked_by(d), ['#4', '#5'])
 
+    def test_a_block_that_does_not_count_is_replaced_by_the_dispatchers(self):
+        # #719: a block of #5 added by a login whose blocks are ignored (the coordinator's app,
+        # or anyone else's) does not stop the dispatcher's.
+        d = self.make({2: [block(5, by='stranger')]}, identities=True)
+        self.assertEqual(self.blocked_by(d), [])
+        self.assertEqual(d._add_prerequisites(2, [5, 6], 'preflight'), ([5, 6], ''))
+        self.assertEqual(self.gh.prerequisites(2),
+                         [{'step': 'preflight', 'added': [5, 6], 'replaced': [5]}])
+        self.assertIn('non contano: #5.', ' '.join(self.gh.comments[-1][1].split()))
+        # GitHub refused the block it already had: the dispatcher removed it and added it again.
+        self.assertEqual(self.gh.removed_blocks, [(2, 100005)])
+        self.assertEqual(self.gh.added_blocks, [(2, 100005), (2, 100006)])
+        self.assertTrue(any('in place of the blocks that do not count of #5' in line
+                            for line in self.logs))
+        # Now it is the dispatcher's, with its record: it counts, and the issue waits for it.
+        self.assertEqual(self.blocked_by(d), ['#5', '#6'])
+        added, why = d._add_prerequisites(2, [5], 'implement')
+        self.assertEqual(added, [])
+        self.assertIn('#5', why)
+
+    def test_a_block_that_does_not_count_and_is_not_refused_is_not_removed(self):
+        d = self.make({2: [block(5, by='stranger')]}, identities=True)
+        accepted = []
+        self.gh.add_blocked_by = lambda number, issue_id: accepted.append((number, issue_id))
+        self.assertEqual(d._add_prerequisites(2, [5], 'preflight'), ([5], ''))
+        self.assertEqual(getattr(self.gh, 'removed_blocks', []), [])
+        self.assertEqual(accepted, [(2, 100005)])
+        self.assertEqual(self.gh.prerequisites(2),
+                         [{'step': 'preflight', 'added': [5], 'replaced': [5]}])
+
+    def test_another_refusal_is_no_replacement(self):
+        # A block that is not there: a refusal of GitHub is an error, as before #719.
+        d = self.make(identities=True)
+
+        def refuse(number, issue_id):
+            raise GitHubError('gh: (HTTP 403)')
+
+        self.gh.add_blocked_by = refuse
+        with self.assertRaises(GitHubError):
+            d._add_prerequisites(2, [5], 'preflight')
+        self.assertEqual(getattr(self.gh, 'removed_blocks', []), [])
+
+    def test_only_a_refusal_as_a_duplicate_replaces_a_block_that_does_not_count(self):
+        # A block of #5 that does not count is there: a failure other than GitHub's 422 (403,
+        # 5xx, a timeout) proves no duplicate. It propagates, and the block stays.
+        failures = {'403': GitHubError('gh: Forbidden (HTTP 403)'),
+                    '503': GitHubError('gh: Service Unavailable (HTTP 503)'),
+                    'uncertain': GitHubUncertain('gh api: timed out after 30s')}
+        for name, failure in failures.items():
+            with self.subTest(failure=name):
+                d = self.make({2: [block(5, by='stranger')]}, identities=True)
+                calls = []
+
+                def fail(number, issue_id, failure=failure):
+                    calls.append((number, issue_id))
+                    raise failure
+
+                self.gh.add_blocked_by = fail
+                with self.assertRaises(GitHubError) as raised:
+                    d._add_prerequisites(2, [5], 'preflight')
+                self.assertIs(raised.exception, failure)
+                self.assertEqual(getattr(self.gh, 'removed_blocks', []), [])
+                self.assertEqual(calls, [(2, 100005)])
+                self.assertEqual([b['number'] for b, _ in self.gh.blocks[2]], [5])
+
     def test_a_condition_that_fails_adds_nothing(self):
         closed = {'id': 9, 'state': 'CLOSED', 'pull_request': False}
         cases = {
@@ -104,7 +177,8 @@ class BlockTests(unittest.TestCase):
             'a pull request': ([5], {5: {'id': 9, 'state': 'OPEN', 'pull_request': True}}, {},
                                'pull request'),
             'closed': ([5], {5: closed}, {}, '#5'),
-            'already a block': ([5], {}, {2: [block(5, by='stranger')]}, '#5'),
+            # A block that counts, of a trusted user (#719: one of any other login does not).
+            'already a block': ([5], {}, {2: [block(5)]}, '#5'),
             # #5 is blocked by #2 already: #2 blocked by #5 would close a cycle.
             'a cycle': ([5], {}, {5: [block(2)]}, '#2, #5'),
             # GitHub follows the transfer of #5: the issue it answers with is elsewhere.
@@ -180,6 +254,61 @@ class IssueTargetTests(unittest.TestCase):
         self.assertEqual((moved['repo'], moved['number']), ('example/other', 99))
         self.assertIsNone(self.target({'id': 7, 'number': 5, 'state': 'open'})['repo'])
 
+    def test_only_a_422_that_says_already_is_a_duplicate(self):
+        # #719: a 422 whose message, in the stderr or in the body `gh` prints, says the block is
+        # already there is the refusal of a duplicate; any other failure, a 422 for another
+        # cause included, keeps its own error, which the dispatcher does not take for one.
+        def adding(stderr, stdout=''):
+            def run(argv, **kw):
+                return SimpleNamespace(returncode=1, stdout=stdout, stderr=stderr)
+            return GitHub('brushtyler/ssdlc', run=run)
+
+        duplicates = {
+            'message': ('gh: Issue is already blocked by this issue (HTTP 422)\n', ''),
+            'code': ('gh: Validation Failed (HTTP 422)\n',
+                     '{"message":"Validation Failed","errors":[{"resource":"IssueDependency",'
+                     '"field":"issue_id","code":"already_exists"}]}'),
+        }
+        for name, (stderr, stdout) in duplicates.items():
+            with self.subTest(duplicate=name), self.assertRaises(GitHubDuplicate):
+                adding(stderr, stdout).add_blocked_by(2, 100005)
+        for stderr in ('gh: Validation Failed (HTTP 422)\n',
+                       'gh: endpoint has been spammed (HTTP 422)\n',
+                       'gh: Forbidden (HTTP 403)\n', 'gh: Service Unavailable (HTTP 503)\n',
+                       'gh: Not Found (HTTP 404)\n', 'connection reset\n',
+                       # "already" outside a 422 is no refusal of a duplicate.
+                       'gh: already rate limited (HTTP 403)\n'):
+            with self.subTest(stderr=stderr):
+                with self.assertRaises(GitHubError) as raised:
+                    adding(stderr).add_blocked_by(2, 100005)
+                self.assertNotIsInstance(raised.exception, GitHubDuplicate)
+        with self.assertRaises(GitHubError) as raised:
+            adding('gh: Not Found (HTTP 404)\n').add_blocked_by(2, 100005)
+        self.assertEqual(type(raised.exception).__name__, 'GitHubNotFound')
+
+    def test_a_422_for_another_cause_removes_no_block_that_does_not_count(self):
+        # #719: a block of #5 that does not count is there, and GitHub answers the dispatcher's
+        # with a 422 that is no duplicate: the real adapter raises its error, the dispatcher
+        # removes nothing and adds nothing again.
+        for stderr in ('gh: endpoint has been spammed (HTTP 422)\n',
+                       'gh: Validation Failed (HTTP 422)\n'):
+            with self.subTest(stderr=stderr):
+                d = BlockTests.make(self, {2: [block(5, by='stranger')]}, identities=True)
+                calls = []
+
+                def run(argv, stderr=stderr, **kw):
+                    calls.append(argv[argv.index('-X') + 1])
+                    return SimpleNamespace(returncode=1, stdout='', stderr=stderr)
+
+                adapter = GitHub('brushtyler/ssdlc', run=run)
+                self.gh.add_blocked_by = adapter.add_blocked_by
+                self.gh.remove_blocked_by = adapter.remove_blocked_by
+                with self.assertRaises(GitHubError) as raised:
+                    d._add_prerequisites(2, [5], 'preflight')
+                self.assertNotIsInstance(raised.exception, GitHubDuplicate)
+                self.assertEqual(calls, ['POST'])
+                self.assertEqual([b['number'] for b, _ in self.gh.blocks[2]], [5])
+
 
 class PreflightGH(IssueGH):
     """Issue #7 of the readiness check tests, with its native dependencies: the "blocked by"
@@ -195,8 +324,15 @@ class PreflightGH(IssueGH):
                 'added': [dict(e) for _, e in pairs]}
 
     def add_blocked_by(self, number, issue_id):
+        # As GitHub, a block the issue already has is refused (#719).
+        if any(b['number'] == issue_id - 100000 for b, _ in self.blocks):
+            raise GitHubDuplicate('gh: Issue is already blocked by this issue (HTTP 422)')
         super().add_blocked_by(number, issue_id)
         self.blocks.append(block(issue_id - 100000))
+
+    def remove_blocked_by(self, number, issue_id):
+        super().remove_blocked_by(number, issue_id)
+        self.blocks = [pair for pair in self.blocks if pair[0]['number'] != issue_id - 100000]
 
     def records(self, kind):
         return [r for c in self.thread if (r := read_marker(c['body'], kind))]
@@ -238,6 +374,26 @@ class PreflightPrerequisiteTests(unittest.TestCase):
         self.assertEqual(self.kinds(d), [('preflight', 7)])
         self.assertTrue(self.gh.records('preflight')[-1]['ready'])
         self.assertEqual([a.kind for a in plan(d.snapshot(), PCFG)], ['implement'])
+
+    def test_a_block_that_does_not_count_does_not_send_the_issue_to_the_operator(self):
+        # #719: the block of #5 was added by a login whose blocks do not count (the coordinator's
+        # app, as on #718): the plan ignores it and the check runs; with that prerequisite as
+        # its only gap, the dispatcher adds its own block in place of agent:needs-operator.
+        d = self.make(checked(False, [gap(repository=True, prerequisite='il parser',
+                                          blocked_by=5)]))
+        self.gh.blocks = [block(5, by='stranger')]
+        self.assertEqual(self.kinds(d), [('preflight', 7)])
+        self.assertEqual(self.gh.labels[7], {READY})
+        self.assertEqual(self.gh.removed_blocks, [(7, 100005)])
+        self.assertEqual(self.gh.added_blocks, [(7, 100005)])
+        self.assertEqual(self.gh.records('prerequisite'),
+                         [{'step': 'preflight', 'added': [5], 'replaced': [5]}])
+        outcome = self.gh.records('preflight')[-1]
+        self.assertEqual((outcome['blocked'], outcome['class'], outcome['prerequisites']),
+                         (False, 'prerequisite', [5]))
+        # The block is now one that counts: the issue waits for it.
+        self.assertEqual(self.kinds(d), [])
+        self.assertEqual(len(self.runner.calls), 1)
 
     def test_a_failed_check_with_prerequisites_runs_again_once_unblocked(self):
         view = {'record': {'ready': False, 'hash': 'h', 'gaps': [], 'prerequisites': [5]},
@@ -497,7 +653,12 @@ class RecordTests(unittest.TestCase):
     def test_the_record_of_the_blocks(self):
         good = {'step': 'implement', 'added': [5, 6]}
         self.assertEqual(read_marker(render_prerequisite(good), 'prerequisite'), good)
+        replaced = dict(good, replaced=[6])  # #719
+        self.assertEqual(read_marker(render_prerequisite(replaced), 'prerequisite'), replaced)
+        self.assertIn('#6', render_prerequisite(replaced, 'it').split('contano: ')[1])
         for bad in ({'step': 'review', 'added': [5]}, {'step': 'preflight', 'added': []},
+                    dict(good, replaced=[7]), dict(good, replaced=['5']),
+                    dict(good, replaced=5),
                     {'step': 'preflight', 'added': [0]}, {'step': 'preflight', 'added': ['5']},
                     {'step': 'preflight', 'added': [True]}, {'step': 'preflight'}):
             with self.subTest(record=bad):

@@ -39,7 +39,7 @@ CLIENTS = ('dispatcher.py', 'ledger.py', 'context.py', 'dispatch_supervision.py'
 EXPECTED = {
     ports.Tracker: ['issues_with_label', 'open_issue_numbers', 'issue', 'issue_history', 'issue_comments',
                     'pr_comments', 'comments_since', 'issue_dependencies', 'issue_target', 'labelers', 'label_events', 'labeled_events', 'edit_labels',
-                    'comment', 'close_issue', 'add_blocked_by', 'edit_comment', 'ensure_label', 'repo_labels',
+                    'comment', 'close_issue', 'add_blocked_by', 'remove_blocked_by', 'edit_comment', 'ensure_label', 'repo_labels',
                     'rename_label'],
     ports.CodeReview: ['open_prs', 'merged_prs', 'find_pr', 'commit_prs', 'branch_prs', 'merge_state', 'pr_head', 'pr_state', 'merge_pr',
                        'pr_reviews', 'create_pr', 'submit_review'],

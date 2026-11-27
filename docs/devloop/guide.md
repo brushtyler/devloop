@@ -577,8 +577,8 @@ repository when the issue, its comments or the repository give it (`0` otherwise
   escalates `prerequisite_dropped`, as above.
 - **Conditions.** The dispatcher adds the blocks only when each prerequisite is an open issue
   of the same repository, not a PR nor the issue itself, nor already among its "blocked by"
-  (an issue transferred to another repository is not, even though GitHub still answers for
-  its old number); when the blocks close no dependency cycle, read in full (beyond the 50
+  that count (an issue transferred to another repository is not, even though GitHub still
+  answers for its old number); when the blocks close no dependency cycle, read in full (beyond the 50
   issues the reading of the dependencies explores, `MAX_DEPENDENCY_READS`, a cycle cannot be
   ruled out and the blocks are not added); and within its caps for the issue, constants of
   the code: at most **3** of its blocks open together (`MAX_ACTIVE_PREREQUISITES`) and at most
@@ -586,6 +586,16 @@ repository when the issue, its comments or the repository give it (`0` otherwise
   count them. When a condition fails, the escalation of before stays: the check's
   `agent:needs-operator`, with a note that says why, or the implementer's `blocked`, with the
   reason appended.
+- **A block that does not count** (#719). A "blocked by" of the prerequisite already there but
+  ignored ([only trusted blocks count](#dependencies-between-issues): for example one the
+  coordinator's app added) does not stop the dispatcher's: its record names it in `replaced`
+  and, when GitHub refuses the duplicate (an answer 422 that says the block is already there), the
+  dispatcher removes that block and adds it again, so that the latest event that adds it is its
+  own and the block counts. Any other failure of GitHub (a 422 for another cause, such as
+  another failed validation or a spammed endpoint, 403, 5xx, a timeout) is no refusal of a
+  duplicate: the dispatcher
+  removes nothing, and the error stays. The issue does not go
+  to the operator for a prerequisite that only lacked a block that counts.
 - **Without the number** (a reference in words): an escalation of class `prerequisite`,
   non-critical. In `"auto"` it goes to the supervisor (under the conditions of the
   [routing](#escalations-to-the-supervisor)), which finds the issue, adds the "blocked by" with

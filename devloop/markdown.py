@@ -784,10 +784,15 @@ def _valid_prerequisite(p):
     """The "blocked by" the dispatcher added to an issue for a missing prerequisite (#672): the
     step that named it (``preflight`` or ``implement``) and the numbers of the issues of the
     same repository it added as blocks, at least one. Only a block this record names counts as
-    trusted when the dispatcher added it (``Dispatcher._dependency_edges``)."""
+    trusted when the dispatcher added it (``Dispatcher._dependency_edges``). ``replaced``
+    (#719), when present: those of ``added`` that already were "blocked by" of the issue, added
+    by a login whose blocks do not count, and that the dispatcher adds again as its own."""
     added = p.get('added')
+    replaced = p.get('replaced', [])
     return (p.get('step') in PREREQUISITE_STEPS and isinstance(added, list) and bool(added)
-            and all(_is_int(n, 1) for n in added))
+            and all(_is_int(n, 1) for n in added)
+            and isinstance(replaced, list) and all(n in added for n in replaced)
+            and all(_is_int(n, 1) for n in replaced))
 
 
 RECHECK_REQUESTS = ('recheck', 'relabeled')
@@ -1391,6 +1396,9 @@ NOTICE_TEXTS = Catalog(
                               'they are all closed, without other checks. This record is what '
                               'makes these blocks of the dispatcher count; whoever finds one '
                               'wrong removes it.'),
+        'prerequisite_replaced': ('Already among the "blocked by" of this issue, but added by '
+                                  'a login whose blocks do not count: {issues}. devloop adds '
+                                  'them again as its own, so that they count.'),
         'step_preflight': 'readiness check',
         'step_implement': 'implementer',
         'priority': 'priority `{priority}`',
@@ -1430,6 +1438,9 @@ NOTICE_TEXTS = Catalog(
                               'riprende quando sono tutte chiuse, senza altri controlli. Questo '
                               'record fa contare questi blocchi del dispatcher; chi ne trova uno '
                               'sbagliato lo rimuove.'),
+        'prerequisite_replaced': ('Già fra i "blocked by" di questa issue, ma aggiunti da un '
+                                  'login i cui blocchi non contano: {issues}. devloop li '
+                                  'aggiunge di nuovo come propri, così contano.'),
         'step_preflight': 'controllo di prontezza',
         'step_implement': 'implementer',
         'priority': 'priorità `{priority}`',
@@ -1472,10 +1483,13 @@ def render_prerequisite(record, language=ENGLISH):
     (#672), with a ``prerequisite`` marker: the step that named it and the issues added. Only a
     block of the dispatcher that such a record names counts. In ``language``."""
     t = NOTICE_TEXTS.texts(language)
+    replaced = record.get('replaced') or []
     return publishable(
         dispatcher_header() + f'\n## {t("prerequisite_title")}\n\n'
         + t('prerequisite_text', step=t('step_' + record['step']),
-            issues=', '.join(f'#{n}' for n in record['added'])) + '\n',
+            issues=', '.join(f'#{n}' for n in record['added'])) + '\n'
+        + (f'\n{t("prerequisite_replaced", issues=", ".join(f"#{n}" for n in replaced))}\n'
+           if replaced else ''),
         'prerequisite', record)
 
 
