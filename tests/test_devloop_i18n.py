@@ -6,6 +6,7 @@ the merges and the receipts, with the same markers, and the records already publ
 recognised after a change of ``language``."""
 
 import dataclasses
+import time
 import unittest
 
 from devloop import (acceptance, conclave, dispatch_advisory, i18n, ledger, markdown, review,
@@ -1070,6 +1071,10 @@ class MergeLanguageTests(unittest.TestCase):
             def close_issue(self, number):
                 pass
 
+        # One fixed clock for the three languages (#699): the receipt carries the times of its
+        # records and a hash that covers them, so a second passing between two languages would
+        # make the records differ with the same content.
+        now = time.time()
         records = {}
         for language in ('Italian', 'English', 'French'):
             with self.subTest(language=language):
@@ -1077,7 +1082,7 @@ class MergeLanguageTests(unittest.TestCase):
                 gh.labels[100] = {'agent:review'}
                 d = Dispatcher(dataclasses.replace(STRICT, language=language), gh, FakeWS(),
                                FakeRunner(*[raw_review()] * 3), log=lambda m: None,
-                               ledger=Ledger(gh))
+                               ledger=Ledger(gh, clock=lambda: now), clock=lambda: now)
                 d.tick()
                 self.assertEqual([a.kind for a in d.tick()], ['merge'])
                 expected = titles.get(language, titles['English'])
