@@ -3850,7 +3850,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             self.log(f'  {candidate.key}: model {candidate.model} not forgotten: {error}')
 
     def _turn(self, models, mode, prompt, schema, path, label, allowed=None, where=None,
-              note=None, role=None):
+              note=None, role=None, attempt=1):
         """Run one agent turn on the first of ``models`` (``Models``) that is available, and
         return its output and the agent configuration it ran with.
 
@@ -3892,10 +3892,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         the turn fails listing each one with its reason and time (``ModelsUnavailable``). A
         model that answers is forgotten.
 
-        Before the first model runs, the worktree ``path`` is prepared when it is due
-        (``_prepare``, #696): with ``[prepare] cmd``, a worktree gets its dependencies before
-        its first turn, whatever the step."""
-        self._prepare(path, where)
+        Before each invocation of a CLI, the first and every retry or fallback model after an
+        invocation without a result, the worktree ``path`` is prepared when it is due
+        (``_prepare``, #696, recorded as of ``attempt``): with ``[prepare] cmd``, a worktree
+        gets its dependencies before its first turn, whatever the step, and an invocation that
+        changed one of ``[prepare] inputs`` has them repaired before the next one."""
         failed = None
         retried = {}  # the models already denied a permission in this call: their denial
         emptied = set()  # the last models of the chain already rerun after no output (#222)
@@ -3922,6 +3923,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             suffix = f'-{candidate.model}' if candidate.fallback_for else ''
             # Its own log: the first attempt's stays as it was.
             suffix += '-retry' * ((candidate.model in retried) + (candidate.model in emptied))
+            # Before every invocation (#696): a previous one, without a result, may have
+            # changed one of ``[prepare] inputs``.
+            self._prepare(path, where, attempt)
             entry = self._open_turn(where, candidate, mode, label + suffix, role)
             try:
                 output = self.runner.run(candidate, mode, text, schema, path, label + suffix)
@@ -4066,12 +4070,12 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         resumed = self._resume_kept(path, label) if keep else ''
         for attempt in range(1 + self.cfg.implement_test_retries):
             text = (prompt(attempt) if callable(prompt) else prompt) + resumed + failures
-            # The worktree prepared before each attempt (#696): before the first, and again
-            # when the previous attempt changed one of ``[prepare] inputs``.
-            self._prepare(path, where, attempt + 1)
+            # The worktree is prepared before each invocation of the attempt (#696, ``_turn``):
+            # before the first, and again when an earlier one changed ``[prepare] inputs``.
             try:
                 result, used = self._turn(models, 'write', text, schema, path,
-                                          f'{label}-{attempt + 1}', where=where)
+                                          f'{label}-{attempt + 1}', where=where,
+                                          attempt=attempt + 1)
             except AgentError as exc:
                 if keep and exc.timed_out:
                     self._keep_timed_out(exc, path, start, label)
@@ -4096,7 +4100,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             passed, tail, tested, local = self._verify(where, path, attempt + 1)
             if passed:
                 return result, None, used, tested, local
-            broken = self._base_broken(path, tail) if base_check else None
+            broken = (self._base_broken(path, tail, where, attempt + 1) if base_check
+                      else None)
             if broken is not None:
                 # Before the failure of the host or of the base, its tests once again alone
                 # (#598): when they pass they are unstable under load, and the step goes on as

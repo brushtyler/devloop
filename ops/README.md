@@ -1407,7 +1407,8 @@ passo sull'host:
   che un agent può aver scritto: dove il progetto lo permette, il comando usa le opzioni che non
   li eseguono (per npm `npm ci --ignore-scripts`);
 - **cache**: una directory per progetto nella home dell'utente che esegue il comando,
-  `~/.cache/devloop-prepare/<owner>_<repo>` di `AGENT_USER` (dell'utente di devloop senza utente
+  `~/.cache/devloop-prepare/<owner>_<repo>-<digest>` (il digest di `repo`, che distingue i
+  progetti) di `AGENT_USER` (dell'utente di devloop senza utente
   degli agent), fuori dai worktree e dallo `state_dir`; il dispatcher la crea come quell'utente e
   la passa al comando in `DEVLOOP_PREPARE_CACHE` (per npm `--cache "$DEVLOOP_PREPARE_CACHE"`).
   È scrivibile anche nei turni degli agent, come la loro home: il gestore di pacchetti verifica

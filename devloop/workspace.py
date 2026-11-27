@@ -1107,15 +1107,19 @@ class Workspace:
 
     def prepare_cache(self, project):
         """The cache of the step that prepares the worktrees of ``project`` (#696):
-        ``<HOME>/.cache/devloop-prepare/<project>`` of the user that runs it, the agent user's
-        HOME with one, outside the worktrees and the ``state_dir``. Emptying it costs only
-        time."""
+        ``<HOME>/.cache/devloop-prepare/<owner>_<repo>-<digest>`` of the user that runs it,
+        the agent user's HOME with one, outside the worktrees and the ``state_dir``. The
+        digest, of ``project`` as it is, keeps apart two projects whose names differ only in
+        what the readable part replaces with ``_`` (``a_b/c`` and ``a/b_c``). Emptying it costs
+        only time."""
         if self.agent_user is not None:
             home = Path(self.agent_user.home)
         else:
             env = os.environ if self._test_env is None else self._test_env
             home = Path(env.get('HOME') or Path.home())
-        return home / '.cache' / 'devloop-prepare' / re.sub(r'[^\w.-]', '_', project)
+        readable = re.sub(r'[^\w.-]', '_', project)
+        digest = hashlib.sha256(project.encode()).hexdigest()[:12]
+        return home / '.cache' / 'devloop-prepare' / f'{readable}-{digest}'
 
     def _run_command(self, path, command, timeout, extra=None):
         """The completed ``bash -c command`` in ``path``, as the project's commands run (#415):

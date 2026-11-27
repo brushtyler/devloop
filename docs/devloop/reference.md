@@ -805,8 +805,8 @@ reviewer's disposable copy is a worktree of its own, and is prepared before the 
 **How it runs.** As `test_cmd` runs: the same user (the [agent user](#agent-user), when there is
 one) and the same environment, without keys nor GitHub token, with the same network as the
 local tests, and `test_timeout_seconds` as its time limit. Before the command the dispatcher
-creates, as that user, the project's cache, `$HOME/.cache/devloop-prepare/<owner>_<repo>` in the
-HOME of that user, outside the worktrees and the `state_dir`, and gives it to the command as
+creates, as that user, the project's cache, `$HOME/.cache/devloop-prepare/<owner>_<repo>-<digest>`
+(`<digest>`: of `repo`, so that no two projects share it) in the HOME of that user, outside the worktrees and the `state_dir`, and gives it to the command as
 `DEVLOOP_PREPARE_CACHE`: the command passes it to its package manager (`npm ci --cache
 "$DEVLOOP_PREPARE_CACHE"`). The cache can be emptied at any time: the next step downloads again.
 An installation may run the repository's scripts (the `postinstall` of a package, of the
@@ -820,7 +820,10 @@ or reaches its time limit stops the step: it escalates `prepare_failed`, a criti
 operator ([Escalations to the supervisor](guide.md#escalations-to-the-supervisor)), with the end
 of its output, cleaned as the output of the tests is, and the operator resumes it as after any
 other escalation ([Commands on escalations to the operator](guide.md#commands-on-escalations-to-the-operator)).
-On the base commit of a branch (#459) a failed step only leaves the failure to the branch.
+The copy of the base commit of a branch (#459) is no exception: its step is recorded with the
+step whose tests it compares, and a failure there escalates `prepare_failed` as well. When
+several reviewers of a round fail, a failed step of any of them is the escalation, with its
+output, whatever failed for the others.
 
 **The check after a review.** The PR worktree must come out of a review still at the reviewed
 commit, with no change and no new file. With `outputs`, a new file that git ignores and

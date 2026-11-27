@@ -70,7 +70,7 @@ from .notify import TEXTS as NOTIFY_TEXTS
 from .outbox import SENT as PUBLISHED
 from .ports import summarize_checks
 from .supervision import HOST_TESTS, PREFLIGHT_DEFAULT
-from .workspace import WorkspaceError
+from .workspace import PrepareFailed, WorkspaceError
 
 # The failed tests a record and its comment list at most; the count is always the whole.
 MAX_CASES_LISTED = 30
@@ -260,9 +260,12 @@ class BaseMixin:
         return with_mentions(body, logins, self.cfg.language)
 
     # Tests red on the base too ------------------------------------------------
-    def _base_broken(self, path, tail=''):
+    def _base_broken(self, path, tail='', where=None, attempt=1):
         """``BaseBroken`` when every test that failed in the latest local run in ``path`` fails
-        on the base commit of its branch too, else None (logged): the failure is the branch's."""
+        on the base commit of its branch too, else None (logged): the failure is the branch's.
+        The copy of the base commit is prepared before its tests (``_prepare``, #696), recorded
+        as a verification of ``attempt`` of ``where``; a failed step raises ``PrepareFailed``,
+        the critical escalation of any other failed step."""
         if self.cfg.tests.selection != UNITTEST_MODULES:
             self.log('  the failed tests are not compared with the base: the project declares '
                      f'no {UNITTEST_MODULES} selection')
@@ -286,7 +289,7 @@ class BaseMixin:
         try:
             # The base commit's own dependencies (#696), before its tests: without them every
             # test would fail there, and the failure would look like the base's.
-            self._prepare(copy)
+            self._prepare(copy, where, attempt)
             for module in modules:
                 self.ws.run_tests(copy, module_command([module]), self.cfg.test_timeout_seconds)
                 failed = self.ws.failed_cases(copy)
@@ -295,6 +298,8 @@ class BaseMixin:
                              'cannot be identified, the failure counts against the branch')
                     return None
                 found.update(failed)
+        except PrepareFailed:
+            raise  # a critical escalation (#696), not a failure of the branch
         except WorkspaceError as exc:
             self.log(f'  the failed tests not run on the base commit {base[:12]}: {exc}')
             return None

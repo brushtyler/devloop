@@ -17,12 +17,14 @@ import unittest
 from pathlib import Path
 
 from devloop import config, markdown
+from devloop.agents import AgentError, NoOutput
+from devloop.context import _review_failure
 from devloop.dispatcher import Dispatcher
 from devloop.ledger import Ledger
 from devloop.localtests import Prepare, prepared_output
 from devloop.planning import Action
 from devloop.supervision import PREPARE_FAILED, critical
-from devloop.workspace import PREPARE_CACHE_ENV, Workspace
+from devloop.workspace import PREPARE_CACHE_ENV, PrepareFailed, Workspace
 
 from helpers import ssdlc_project
 from test_devloop import CFG, FakeRunner, finding, fixed, implemented, norm, pr, raw_review
@@ -255,8 +257,12 @@ class WorkspaceTests(unittest.TestCase):
     def test_the_step_runs_with_its_cache_and_a_time_limit(self):
         ws, root = self.ws, self.root
         cache = ws.prepare_cache('acme/widget')
-        self.assertEqual(cache, self.home / '.cache' / 'devloop-prepare' / 'acme_widget')
+        self.assertEqual(cache.parent, self.home / '.cache' / 'devloop-prepare')
+        self.assertRegex(cache.name, r'^acme_widget-[0-9a-f]{12}$')
+        self.assertEqual(ws.prepare_cache('acme/widget'), cache)
         self.assertFalse(str(cache).startswith(str(root)))
+        # Two projects whose readable names are the same keep their own caches.
+        self.assertNotEqual(ws.prepare_cache('a_b/c'), ws.prepare_cache('a/b_c'))
         passed, tail = ws.run_prepare(
             root, f'echo "cache=${PREPARE_CACHE_ENV}"; mkdir -p node_modules/dep; echo done',
             60, cache)
@@ -367,14 +373,57 @@ class DispatcherTests(unittest.TestCase):
     def test_the_base_commit_is_prepared_before_its_tests(self):
         ws = PrepareWS()
         ws.cases = {'issue-7': ['test_x.T.test_a'], 'issue-7-base': ['test_x.T.test_a']}
-        d = self.make(ws)
-        d._base_broken(Path('/wt/issue-7'))
+        d = self.make(ws, ledger=True)
+        d._base_broken(Path('/wt/issue-7'), '', (7, 'implement'), 2)
         self.assertEqual(ws.events[:2], [('prepare', 'issue-7-base'), ('test', 'issue-7-base')])
-        # A failed step there leaves the failure to the branch: nothing tells it is the base's.
+        (prepared,) = self.gh.records(7, 'verification')
+        self.assertEqual((prepared['kind'], prepared['outcome'], prepared['attempt']),
+                         ('prepare', 'pass', 2))
+        # A failed step there is recorded, and is the critical escalation of any failed step:
+        # not a failure of the branch.
         ws = PrepareWS(results=(False,))
         ws.cases = {'issue-7': ['test_x.T.test_a'], 'issue-7-base': ['test_x.T.test_a']}
-        self.assertIsNone(self.make(ws)._base_broken(Path('/wt/issue-7')))
+        d = self.make(ws, ledger=True)
+        with self.assertRaises(PrepareFailed) as raised:
+            d._base_broken(Path('/wt/issue-7'), '', (7, 'implement'), 1)
+        self.assertEqual(raised.exception.tail, 'npm ERR! code E404')
         self.assertEqual(ws.events, [('prepare', 'issue-7-base')])
+        (failed,) = self.gh.records(7, 'verification')
+        self.assertEqual((failed['kind'], failed['outcome']), ('prepare', 'fail'))
+        self.assertIn('issue-7-base', ws.removed)
+
+    def test_a_failure_of_the_step_on_the_base_escalates_to_the_operator(self):
+        ws = PrepareWS(results=(True, False), tests=(False,))
+        ws.cases = {'issue-7': ['test_x.T.test_a'], 'issue-7-base': ['test_x.T.test_a']}
+        d = self.make(ws, implemented())
+        self.assertIsNotNone(d._run_action(Action('implement', 7), {}))
+        self.assertEqual(ws.events, [('prepare', 'issue-7'), ('turn', 'issue-7'),
+                                     ('test', 'issue-7'), ('prepare', 'issue-7-base')])
+        notice = markdown.read_marker(self.gh.comments[-1][1], 'notice')
+        self.assertEqual((notice['class'], notice['critical'], notice['to']),
+                         (PREPARE_FAILED, True, 'operator'))
+        self.assertIn('npm ERR! code E404', self.gh.comments[-1][1])
+
+    def test_a_change_during_a_turn_without_result_prepares_again_before_the_retry(self):
+        ws = PrepareWS()
+
+        def agent(turn):
+            if turn == 1:
+                ws.inputs = 'lock v2'  # the invocation changed the lock file, then gave nothing
+        self.make(ws, NoOutput('run ended with no output'), implemented(),
+                  during=agent)._do_implement(7)
+        self.assertEqual(ws.events, [('prepare', 'issue-7'), ('turn', 'issue-7'),
+                                     ('prepare', 'issue-7'), ('turn', 'issue-7'),
+                                     ('test', 'issue-7')])
+
+    def test_a_failed_step_of_one_reviewer_is_the_escalation_of_the_round(self):
+        prepare = PrepareFailed('the step that prepares the worktree failed', 'npm ERR! E404')
+        for failures in ([('reviewer-1', AgentError('CLI failed')), ('reviewer-2', prepare)],
+                         [('reviewer-1', prepare), ('reviewer-2', AgentError('CLI failed'))],
+                         [('reviewer-1', prepare)]):
+            with self.subTest(failures=failures):
+                self.assertIs(_review_failure(failures), prepare)
+        self.assertEqual(_review_failure([('reviewer-1', prepare)]).tail, 'npm ERR! E404')
 
     def test_without_the_command_nothing_runs_and_the_check_is_as_before(self):
         ws = PrepareWS()
