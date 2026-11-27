@@ -495,5 +495,85 @@ class LoopPauseTests(PauseCase):
         self.assertIn('stop requested (SIGTERM): no further tick', lines)
 
 
+class MaintenanceTests(PauseCase):
+    """The maintenance of the host (#705): ``<rest_dir>/maintenance``, root's."""
+
+    def maintenance(self, text='1764115200 manutenzione 1764122400 Il riposo dei ruoli (#684)\n'):
+        (self.rest_dir / rest.MAINTENANCE_FILE).write_text(text)
+
+    def loop(self, tick, lines):
+        def watch(timeout, sleep, check):
+            for _ in range(3):
+                check()
+            return NOTHING_NEW
+        return runloop.Loop(tick, watch, self.tmp / 'STOP', log=lines.append, idle_timeout=900,
+                            sleep=lambda s: None, rest=self.hold())
+
+    def test_the_maintenance_is_a_file_of_root_with_start_expiry_and_sections(self):
+        self.assertIsNone(rest.host_maintenance(self.rest_dir))
+        self.maintenance()
+        self.assertEqual(rest.host_maintenance(self.rest_dir),
+                         (1764115200, 1764122400, 'Il riposo dei ruoli (#684)'))
+        self.assertEqual(self.hold().maintenance()[0], 1764115200)
+        # Until the service is stopped the expiry is not known yet.
+        self.maintenance('1764115200 manutenzione - Il riposo dei ruoli (#684)\n')
+        self.assertEqual(rest.host_maintenance(self.rest_dir),
+                         (1764115200, None, 'Il riposo dei ruoli (#684)'))
+        self.assertIn('the service is being stopped',
+                      rest.describe_maintenance(rest.host_maintenance(self.rest_dir)))
+        self.assertIn('expired at 2025-11-26T02:00:00Z',
+                      rest.describe_maintenance((1764115200, 1764122400, 's'), now=1764122400))
+        self.assertIn('until 2025-11-26T02:00:00Z',
+                      rest.describe_maintenance((1764115200, 1764122400, 's'), now=1764122399))
+        # A file of a role, another text, a link: no maintenance.
+        with mock.patch.object(rest, 'OPERATOR_UID', os.getuid() + 1):
+            self.assertIsNone(rest.host_maintenance(self.rest_dir))
+        for text in ('1764115200 manutenzione 1764122400\n', '1764115200 pausa\n',
+                     'manutenzione - x\n', '1764115200 manutenzione x y\n'):
+            with self.subTest(text=text):
+                self.maintenance(text)
+                self.assertIsNone(rest.host_maintenance(self.rest_dir))
+        (self.rest_dir / rest.MAINTENANCE_FILE).unlink()
+        target = self.tmp / 'root-file'
+        target.write_text('1764115200 manutenzione - x\n')
+        (self.rest_dir / rest.MAINTENANCE_FILE).symlink_to(target)
+        self.assertIsNone(rest.host_maintenance(self.rest_dir))
+
+    def test_in_maintenance_the_loop_does_not_start_also_after_the_expiry(self):
+        # A service started by anyone (the supervisor may start it) runs no tick (M5 (a)).
+        for text in ('1764115200 manutenzione - x\n', '1764115200 manutenzione 1764122400 x\n'):
+            with self.subTest(text=text):
+                self.maintenance(text)
+                ticks, lines = [], []
+                self.assertEqual(self.loop(lambda: ticks.append(1) or [], lines).run(), 0)
+                self.assertEqual(ticks, [])
+                self.assertIn('the host is in maintenance (#705) since 2025-11-26T00:00:00Z',
+                              lines[0])
+                self.assertIn('no tick runs until it ends, with the devloop command of the host, '
+                              'maintenance end', lines[0])
+
+    def test_a_maintenance_that_begins_stops_the_loop_after_the_tick_in_progress(self):
+        ticks, lines = [], []
+
+        def tick():
+            ticks.append(1)
+            self.maintenance()
+            return [Action('review', 4)]
+        self.assertEqual(self.loop(tick, lines).run(), 0)
+        self.assertEqual(ticks, [1])
+        self.assertIn('stop requested (the maintenance of the host): no further tick', lines)
+
+    def test_the_refusal_of_the_pin(self):
+        self.assertIsNone(rest.maintenance_refusal(self.rest_dir, {}))
+        self.assertIsNone(rest.maintenance_refusal('', {}))
+        self.maintenance()
+        self.assertIn('the host is in maintenance (#705)',
+                      rest.maintenance_refusal(self.rest_dir, {}))
+        self.assertIsNone(rest.maintenance_refusal(
+            self.rest_dir, {rest.MAINTENANCE_PIN: '1764115200'}))
+        self.assertIsNotNone(rest.maintenance_refusal(
+            self.rest_dir, {rest.MAINTENANCE_PIN: '1'}))
+
+
 if __name__ == '__main__':
     unittest.main()

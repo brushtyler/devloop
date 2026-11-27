@@ -3065,6 +3065,34 @@ operator since when, with the work waiting: the queue of the latest tick, which 
 to `events/queue` ([reference](reference.md#the-roles-at-rest)). The procedure is in
 [ops/README.md](../../ops/README.md#10-coordinatore-facoltativo), "La pausa dell'operatore".
 
+### The maintenance of the host
+
+A step on the host (the sections of `ops/host/migrate.md`) opens the maintenance of the host
+(#705) with the devloop command of the host, as root, and closes it at its end:
+
+```bash
+devloop --project <project> maintenance start "<sections>"   # the service stopped
+devloop --project <project> maintenance end                  # the service started again
+```
+
+`start` refuses with a maintenance or a pause already open; it creates
+`$COORDINATION_DIR/rest/maintenance`, root's, then stops the service and writes the expiry,
+`MAINTENANCE_TIMEOUT` seconds (two hours) after the stop. `end` removes it and starts the service,
+unless a pause of the operator began in the meantime: the pause wins. While the maintenance is
+on, also after its expiry, `devloop run` (with `[run] rest_dir`) starts no tick (`the host is in
+maintenance (#705) since …: no tick runs until it ends` in the log; a loop that sees it begin
+stops after the tick in progress, `stop requested (the maintenance of the host)`), and `devloop
+pin` refuses (`pin refused, the pinned copy is unchanged: the host is in maintenance (#705) …`),
+whoever runs them. A pin already running when the maintenance begins checks it again under the
+lock of the pins, after its fetch and its smoke test, and refuses before the pinned copy moves;
+`start` waits for it to end. Only the pin of the step itself passes: `devloop pin` from the
+devloop command of the host, as root, which gives it the start of the maintenance. The roles are
+told of each change (the start, the expiry once the service is stopped, the expiry, the end) by
+their wake-up, and wait in maintenance; at the expiry the operator gets a notice with `devloop
+notify`, from a timer of root that `setup-devloop.sh` enables (`devloop-maintenance@<project>`),
+every 5 minutes and also after a reboot, until the maintenance is ended. The procedure is in
+[ops/README.md](../../ops/README.md#10-coordinatore-facoltativo), "La manutenzione dell'host".
+
 ### Continuous mode
 
 With `max_parallel_actions` above 1, actions run in one of two modes (#227):

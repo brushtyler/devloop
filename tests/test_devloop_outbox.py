@@ -1293,12 +1293,28 @@ class LockAndTimeoutTests(unittest.TestCase):
         gh_path.write_text(FAKE_GH.format(python=sys.executable))
         gh_path.chmod(0o755)
         (self.fake / 'hold').touch()
-        # Never leave a `gh` waiting.
-        self.addCleanup(lambda: (self.fake / 'go').touch())
+        # Never leave a `gh` waiting, and let the one that goes on finish its files before the
+        # directory is removed: an orphan `gh` that publishes while the cleanup runs leaves
+        # ``github/`` not empty.
+        self.addCleanup(self.release_gh)
         self.env = dict(os.environ, PATH=f'{bindir}{os.pathsep}{os.environ.get("PATH", "")}',
                         GH_FAKE_DIR=str(self.fake))
         self.env.pop(devloop_main.LOCK_FD, None)
         self.lock = self.state / 'dispatcher.lock'
+
+    def release_gh(self):
+        """Let the `gh` of the test go on, and wait until it has written its files or ended."""
+        (self.fake / 'go').touch()
+        try:
+            pid = int((self.fake / 'started').read_text())
+        except (OSError, ValueError):
+            return
+        deadline = time.monotonic() + 10
+        while alive(pid) and not (self.fake / 'posts').exists() \
+                and time.monotonic() < deadline:
+            time.sleep(0.02)
+        # The `posts` line is the last file it writes; a moment more for its write to end.
+        time.sleep(0.05)
 
     def start(self, outbox, timeout):
         dispatcher = subprocess.Popen(

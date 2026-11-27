@@ -207,10 +207,11 @@ default_key_dirs() {
         return
     fi
     for other in "$SYSTEMD_DIR"/devloop*.service; do
-        # Le unità del watchdog dei ruoli (#602) e dell'avviso di un servizio caduto (#593) non
-        # sono un'installazione.
+        # Le unità del watchdog dei ruoli (#602), dell'avviso di un servizio caduto (#593) e della
+        # scadenza della manutenzione (#705) non sono un'installazione.
         case $(basename "$other") in
-            devloop-role-watchdog* | devloop-role-sentinel* | devloop-failed@*) continue ;;
+            devloop-role-watchdog* | devloop-role-sentinel* | devloop-failed@* \
+                | devloop-maintenance@*) continue ;;
         esac
         if [ -f "$other" ] && [ "$other" != "$UNIT_FILE" ]; then
             printf '%s\n' "$home/.ghapps-$PROJECT"
@@ -1124,6 +1125,15 @@ check_unit "$UNIT_FILE" "$UNIT_TEMPLATE"
 [ -z "$DROPIN_FILE" ] || check_unit "$DROPIN_FILE" devloop-project.conf
 # L'OnFailure= del servizio (#593): l'avviso all'operatore di un servizio caduto.
 check_unit "$FAILED_UNIT_FILE" devloop-failed@.service
+# L'avviso della scadenza della manutenzione dell'host (#705): il timer, abilitato, e la sua unità.
+check_unit "$MAINTENANCE_UNIT_FILE" devloop-maintenance@.service
+check_unit "$MAINTENANCE_TIMER_FILE" devloop-maintenance@.timer
+enabled=$(systemctl is-enabled "$MAINTENANCE_UNIT.timer" 2>/dev/null)
+if [ "$enabled" = enabled ]; then
+    ok "$MAINTENANCE_UNIT.timer è abilitato"
+else
+    warn "$MAINTENANCE_UNIT.timer non è abilitato (${enabled:-sconosciuto}): la scadenza di una manutenzione dell'host non avvisa l'operatore (setup-devloop.sh)"
+fi
 # Un repository, un host (ADR 0006, R8): nessun'altra unità di devloop di questo host lo gestisce.
 for other in "$SYSTEMD_DIR"/devloop*.service "$SYSTEMD_DIR"/devloop@*.service.d/project.conf; do
     [ -f "$other" ] || continue
@@ -1138,11 +1148,18 @@ pause=$(ops_pause_start) || pause=''
 if [ -n "$pause" ]; then
     say "  in pausa per ordine dell'operatore dal $(date -u -d "@$pause" +%Y-%m-%dT%H:%M:%SZ): devloop run non parte finché l'operatore non la toglie (devloop resume)"
 fi
+# La manutenzione dell'host (#705): il servizio fermo è la manutenzione, finché non la si chiude.
+maintenance=$(ops_maintenance) || maintenance=''
+if [ -n "$maintenance" ]; then
+    say "  in manutenzione $(ops_maintenance_text "$maintenance"): devloop run non fa tick e devloop pin si rifiuta finché non la si chiude (devloop maintenance end)"
+fi
 case $state in
     active) ok "$SERVICE_NAME è attivo" ;;
     failed) fail "$SERVICE_NAME è fallito: journalctl -u $SERVICE_NAME e $LOG" ;;
     *)
-        if [ -n "$pause" ]; then
+        if [ -n "$maintenance" ]; then
+            ok "$SERVICE_NAME non è attivo (${state:-sconosciuto}): la manutenzione dell'host"
+        elif [ -n "$pause" ]; then
             ok "$SERVICE_NAME non è attivo (${state:-sconosciuto}): la pausa dell'operatore"
         else
             warn "$SERVICE_NAME non è attivo (${state:-sconosciuto}): l'avvio è dell'operatore"

@@ -33,6 +33,12 @@
 # dell'operatore). Non per gli eventi del flusso, il servizio fermo (lo ha fermato l'operatore), il
 # lavoro trattenuto né il controllo giornaliero. La fine della pausa la vede role-wait.sh da sé.
 #
+# Durante la manutenzione dell'host (#705: COORDINATION_DIR/rest/maintenance, di root,
+# ops_maintenance) la sentinella sveglia un ruolo in attesa solo per un messaggio nella sua
+# casella: non per il servizio fermo, il flusso, gli errori di run.log, il lavoro trattenuto né il
+# controllo giornaliero. L'inizio, la scadenza e la fine della manutenzione li vede role-wait.sh
+# da sé, e li dice al ruolo.
+#
 # Toglie il proprio segnale quando il ruolo non è più a riposo. A ogni giro, ogni POLL secondi, dà
 # a systemd il segno di vita (systemd-notify WATCHDOG=1, WatchdogSec= dell'unità): una sentinella
 # bloccata la riavvia systemd (Restart=on-failure), e il suo fallimento avvisa l'operatore con
@@ -314,9 +320,10 @@ LOG_FAILED=0
 # Un giro: legge ciò che è nuovo, e sveglia i ruoli a riposo che lo riguarda.
 round() {
     local role start resting='' events='' log='' service last why wake_at at hhmm text line
-    local box count daily pause
+    local box count daily pause maintenance
     NOW=$(date +%s)
     pause=$(ops_pause_start) || pause=''
+    maintenance=$(ops_maintenance) || maintenance=''
     ALERT_ISSUE=$(ops_alert_issue)
     # I cursori del flusso e di run.log avanzano a ogni giro: nuovo è ciò che è arrivato dal giro
     # prima.
@@ -356,6 +363,12 @@ round() {
         box=$COORDINATION_DIR/to-$role
         count=$(find "$box" -mindepth 1 -maxdepth 1 -type f ! -name '.*' 2>/dev/null | wc -l)
         [ "$count" -gt 0 ] && why="casella: $count messaggi in $box"
+        if [ -n "$maintenance" ]; then
+            # La manutenzione dell'host (#705): solo la casella; i cambi della manutenzione li
+            # vede role-wait.sh da sé.
+            [ -n "$why" ] && wake "$role" "$why"
+            continue
+        fi
         if [ -n "$pause" ]; then
             # La pausa dell'operatore (#685): solo la casella e gli allarmi.
             if [ -z "$why" ] && [ "$role" = coordinator ] && [ -n "$log" ]; then

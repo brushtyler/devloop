@@ -1,0 +1,16 @@
+# Timer template dell'avviso della scadenza della manutenzione dell'host (#705,
+# ops/host/devloop-maintenance@.timer): ogni 5 minuti, e due minuti dopo l'avvio dell'host, avvia
+# devloop-maintenance@<progetto>.service, che manda l'avviso all'operatore se la manutenzione del
+# progetto è scaduta senza essere chiusa. Abilitato, sopravvive a un riavvio: l'avviso non dipende
+# da `maintenance start`. Comune ai progetti dell'host: setup-devloop.sh lo installa in
+# SYSTEMD_DIR/devloop-maintenance@.timer e abilita l'istanza del progetto.
+[Unit]
+Description=devloop maintenance of the host, check of its expiry (%i)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

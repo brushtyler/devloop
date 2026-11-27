@@ -47,6 +47,22 @@
 # chiude la pausa: non scrive rest/pause, e il file di root non lo può togliere né rinominare, e
 # così rest/ (lo sticky bit di rest/ e di COORDINATION_DIR).
 #
+# La manutenzione dell'host (#705) è lo stesso stato con il motivo "manutenzione": la apre e la
+# chiude chi fa un passo sull'host, con `devloop --project <progetto> maintenance start
+# "<sezioni>"` e `maintenance end` (ops/host/devloop-command), che crea e toglie, come root,
+# COORDINATION_DIR/rest/maintenance (ops_maintenance di lib.sh: conta solo il file di root) e
+# ferma e riavvia il servizio. Ogni cambio arriva al ruolo una volta (scelta M1), con o senza
+# --rest e da qualunque attesa (normale, a riposo, in pausa): l'inizio, con "manutenzione:
+# iniziata" (cominciata durante questa sveglia) o "manutenzione: in corso" (c'era già al suo
+# avvio: anche un ruolo appena ripartito la sa prima di qualunque azione); la scadenza fissata
+# dopo lo stop del servizio, con "manutenzione: scadenza fissata" (per il ruolo che ha avuto
+# l'inizio mentre il servizio si fermava, "scadenza non ancora fissata"); la scadenza, con
+# "manutenzione: scaduta"; la fine, con "manutenzione: finita". L'ultimo cambio avuto è nel suo
+# stato (maintenance). Rilanciata durante la manutenzione, la sveglia aspetta in manutenzione: lo
+# stato "<inizio> manutenzione" e il lock, che `maintenance start` e il watchdog leggono come la
+# conferma del ruolo, senza battiti; sveglia solo per un messaggio nella casella, letta ogni
+# secondo, o per un cambio: non per il servizio fermo, il flusso fermo o gli errori del log.
+#
 # Si sveglia, ed esce con 0, su:
 # - un messaggio nella casella del ruolo (to-supervisor/ o to-coordinator/ di COORDINATION_DIR),
 #   letta ogni secondo: lo segnala senza consumarlo; il ruolo lo legge, poi lo sposta in done/ o
@@ -94,12 +110,12 @@
 #
 # Ogni riga dice perché si è svegliata: "casella:", "evento:", "flusso:", "log:", "eventi
 # fermi:", "servizio:", "periodo:"; con --rest "sentinella:" o "riposo:"; in pausa "sentinella:"
-# o "ripresa:". Esce con 2 su
+# o "ripresa:"; con la manutenzione dell'host "manutenzione:". Esce con 2 su
 # un'opzione sbagliata. Non esegue nulla come utente devloop, fuori dal tail di run.log del
 # coordinatore, e non scrive nulla fuori dal battito, dal riposo del ruolo (lo stato e il lock) e
 # dal suo stato, in ~/.local/state/devloop-<ruolo>-wait/<progetto>/ dell'utente del ruolo
 # (_default senza PROJECT): il cursore del flusso, le righe di run.log già viste, l'ultimo stato
-# del servizio e l'episodio del flusso fermo. Va eseguito come l'utente del ruolo, dalla copia di
+# del servizio, l'episodio del flusso fermo e l'ultimo cambio della manutenzione. Va eseguito come l'utente del ruolo, dalla copia di
 # root che setup-supervisor.sh (SUPERVISOR_OPS_DIR) o setup-coordinator.sh (COORDINATOR_OPS_DIR)
 # installa, con i suoi parametri.
 
@@ -582,6 +598,10 @@ rest_wait() {
     fi
     SECONDS=0
     while :; do
+        # La manutenzione dell'host (#705) che comincia durante il riposo o la pausa.
+        if maintenance_check; then
+            maintenance_wait
+        fi
         if ops_pause_start >/dev/null; then
             paused=1
             if [ "$pause_seen" = 0 ]; then
@@ -631,6 +651,87 @@ rest_wait() {
     done
 }
 
+# La manutenzione dell'host (#705), prima della pausa e del riposo: ogni cambio una volta,
+# MAINT_SEEN ("<inizio> <fase> <scadenza>", con la fase corso, scaduta o finita, e la scadenza
+# che il ruolo ha avuto, "-" se non ancora fissata) dice qual è l'ultimo che il ruolo ha avuto.
+MAINT_SEEN=$MINE/maintenance
+LAUNCH=$(date +%s)
+
+# maintenance_exit FASE INIZIO RIGA [SCADENZA]: l'uscita su un cambio della manutenzione,
+# salvato in MAINT_SEEN, con lo stato del ruolo tolto e il battito: il ruolo legge la riga, poi
+# rilancia la sveglia.
+maintenance_exit() {
+    save "$MAINT_SEEN" "$2 $1 ${4:--}"$'\n'
+    end_rest
+    beat_or_warn
+    say "manutenzione: $3"
+    exit 0
+}
+
+# maintenance_check: esce, con maintenance_exit, su un cambio della manutenzione che il ruolo non
+# ha ancora avuto: l'inizio ("iniziata" se dopo l'avvio di questa sveglia, "in corso" se c'era
+# già), la scadenza fissata dopo lo stop del servizio (l'inizio avuto con "scadenza non ancora
+# fissata"), la scadenza, la fine. Vero (0) se la manutenzione c'è e il ruolo l'ha già avuta.
+maintenance_check() {
+    local m seen_start='' seen_phase='' seen_expiry='' start expiry rest
+    read -r seen_start seen_phase seen_expiry <"$MAINT_SEEN" 2>/dev/null
+    if m=$(ops_maintenance); then
+        read -r start expiry rest <<<"$m"
+        if [ "$seen_start" != "$start" ]; then
+            if [ "$start" -ge "$LAUNCH" ]; then
+                maintenance_exit corso "$start" "iniziata: l'host è in manutenzione $(ops_maintenance_text "$m"); devloop run non fa tick e devloop pin si rifiuta finché non finisce: rilanciare la sveglia, che aspetta in manutenzione" "$expiry"
+            fi
+            maintenance_exit corso "$start" "in corso: l'host è in manutenzione $(ops_maintenance_text "$m"); devloop run non fa tick e devloop pin si rifiuta finché non finisce: rilanciare la sveglia, che aspetta in manutenzione" "$expiry"
+        fi
+        if [ "$expiry" != - ] && [ "$(date +%s)" -ge "$expiry" ] && [ "$seen_phase" != scaduta ]; then
+            maintenance_exit scaduta "$start" "scaduta: la manutenzione dell'host $(ops_maintenance_text "$m") non è stata chiusa; devloop run e devloop pin restano fermi finché non la si chiude (maintenance end), e il timer devloop-maintenance avvisa l'operatore: rilanciare la sveglia, che aspetta in manutenzione" "$expiry"
+        fi
+        if [ "$seen_phase" = corso ] && [ "$seen_expiry" = - ] && [ "$expiry" != - ]; then
+            maintenance_exit corso "$start" "scadenza fissata: il servizio è fermo, l'host è in manutenzione $(ops_maintenance_text "$m"): rilanciare la sveglia, che aspetta in manutenzione" "$expiry"
+        fi
+        return 0
+    fi
+    if [ -n "$seen_start" ] && [ "$seen_phase" != finita ]; then
+        maintenance_exit finita "$seen_start" "finita: la manutenzione dell'host cominciata alle $(utc "$seen_start") è chiusa: il $ROLE_NAME riprende, con la sveglia normale"
+    fi
+    return 1
+}
+
+# maintenance_wait: l'attesa in manutenzione (#705); non torna. Lo stato "<inizio>
+# manutenzione" e il lock del riposo, che `maintenance start` e il watchdog leggono come la
+# conferma del ruolo; sveglia solo un messaggio nella casella, letta ogni secondo, o un cambio
+# della manutenzione (la fine, la scadenza): non il servizio fermo, il flusso fermo, gli errori
+# del log, né i segnali della sentinella.
+maintenance_wait() {
+    [ -d "$REST_DIR" ] && [ -w "$REST_DIR" ] \
+        || die "non scrivo in $REST_DIR: setup-$ROLE.sh (ops/host/migrate.md, \"Il riposo dei ruoli (#684)\")"
+    if [ -z "${LOCK_FD:-}" ]; then
+        LOCK=$REST_STATE.lock
+        exec {LOCK_FD}>>"$LOCK" || die "non apro il lock $LOCK"
+        chmod 664 "$LOCK" 2>/dev/null
+        flock -n "$LOCK_FD" \
+            || die "il lock $LOCK è già tenuto: un'altra attesa del $ROLE_NAME è in corso"
+    fi
+    START=$(date +%s)
+    rest_state manutenzione
+    while :; do
+        EVENTS=''
+        inbox_events
+        if [ -n "$EVENTS" ]; then
+            end_rest
+            beat_or_warn
+            printf '%s' "$EVENTS"
+            exit 0
+        fi
+        maintenance_check || maintenance_exit finita "$START" "finita: il $ROLE_NAME riprende, con la sveglia normale"
+        sleep "$POLL"
+    done
+}
+
+if maintenance_check; then
+    maintenance_wait
+fi
+
 # Con --rest, o durante la pausa dell'operatore (#685), l'attesa a riposo o in pausa.
 if [ "$REST" = 1 ] || ops_pause_start >/dev/null; then
     rest_wait
@@ -640,6 +741,10 @@ SECONDS=0
 next_local=0
 next_stream=0
 while :; do
+    # La manutenzione dell'host che comincia durante l'attesa (#705).
+    if maintenance_check; then
+        maintenance_wait
+    fi
     EVENTS=''
     inbox_events
     # La pausa che comincia durante l'attesa (#685): con la casella vuota, l'attesa in pausa.

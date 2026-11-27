@@ -934,6 +934,50 @@ class PinSmokeTests(GitCase):
         self.assertEqual(self.logs[-1], f'pinned main at {self.first[:12]}: {copy}')
 
 
+class MaintenanceDuringThePinTests(GitCase):
+    """#705: a maintenance of the host begun while a pin by hand runs (its fetch, its smoke
+    test) stops that pin before ``current`` moves."""
+
+    def run_pin(self, during_smoke):
+        rest_dir = self.tmp / 'rest'
+        rest_dir.mkdir()
+        cfg = SimpleNamespace(state_dir='.devloop', source='', gc=config.GCPolicy(),
+                              run=config.RunPolicy(rest_dir=str(rest_dir)))
+        maintenance = rest_dir / 'maintenance'
+
+        class Smoke:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def __call__(self, *args):
+                during_smoke(maintenance)
+        patcher = mock.patch.dict(os.environ)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop('DEVLOOP_MAINTENANCE_PIN', None)
+        with mock.patch.object(cli, 'load_config', return_value=cfg), \
+                mock.patch.object(cli, 'main_checkout', return_value=self.root), \
+                mock.patch.object(cli.rest, 'OPERATOR_UID', os.getuid()), \
+                mock.patch.object(cli.pin, 'Smoke', Smoke), \
+                mock.patch.object(cli, 'log', self.logs.append):
+            cli.main(['pin', 'main'])
+
+    def test_a_maintenance_begun_during_the_smoke_test_stops_the_pin(self):
+        def begin(maintenance):
+            maintenance.write_text('1764115200 manutenzione - Il riposo (#684)\n')
+        with self.assertRaises(SystemExit) as raised:
+            self.run_pin(begin)
+        message = str(raised.exception.code)
+        self.assertIn('devloop: pin failed, the pinned copy is unchanged: pin refused: the host '
+                      'is in maintenance (#705) since 2025-11-26T00:00:00Z', message)
+        self.assertIsNone(self.pointed())
+        self.assertFalse((self.state / 'current').is_symlink())
+
+    def test_without_a_maintenance_the_pin_by_hand_moves_current(self):
+        self.run_pin(lambda maintenance: None)
+        self.assertEqual(self.pointed(), (self.state / f'pinned-{self.first[:12]}').resolve())
+
+
 class AlertGH:
     def __init__(self, fail=False):
         self.comments, self.fail = [], fail
@@ -1575,7 +1619,8 @@ class RestartTests(unittest.TestCase):
                     cli.main(['tick'])
 
     def test_no_smoke_reaches_the_pin(self):
-        cfg = SimpleNamespace(state_dir='.devloop', source='', gc=config.GCPolicy())
+        cfg = SimpleNamespace(state_dir='.devloop', source='', gc=config.GCPolicy(),
+                              run=config.RunPolicy())
         with mock.patch.object(cli, 'load_config', return_value=cfg), \
                 mock.patch.object(cli, 'main_checkout', return_value=self.tmp), \
                 mock.patch.object(cli.pin, 'pin') as pinned:
@@ -1591,6 +1636,49 @@ class RestartTests(unittest.TestCase):
             cfg.gc = config.GCPolicy(pins=False)
             cli.main(['pin', 'main'])
             self.assertIsNone(pinned.call_args.kwargs['keep'])
+
+    def test_the_maintenance_of_the_host_refuses_the_pin(self):
+        # #705: while <rest_dir>/maintenance of root exists, no pin, also after its expiry; only
+        # the host command, as root, passes its own pin with the start of that maintenance.
+        rest_dir = self.tmp / 'rest'
+        rest_dir.mkdir()
+        cfg = SimpleNamespace(state_dir='.devloop', source='', gc=config.GCPolicy(),
+                              run=config.RunPolicy(rest_dir=str(rest_dir)))
+        maintenance = rest_dir / 'maintenance'
+        patcher = mock.patch.dict(os.environ)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop('DEVLOOP_MAINTENANCE_PIN', None)
+        with mock.patch.object(cli, 'load_config', return_value=cfg), \
+                mock.patch.object(cli, 'main_checkout', return_value=self.tmp), \
+                mock.patch.object(cli.rest, 'OPERATOR_UID', os.getuid()), \
+                mock.patch.object(cli.pin, 'pin') as pinned:
+            for expiry in ('-', '1764122400', str(2 ** 33)):
+                with self.subTest(expiry=expiry):
+                    maintenance.write_text(f'1764115200 manutenzione {expiry} Il riposo (#684)\n')
+                    with self.assertRaises(SystemExit) as raised:
+                        cli.main(['pin', 'main'])
+                    message = str(raised.exception.code)
+                    self.assertIn('devloop: pin refused, the pinned copy is unchanged: the host '
+                                  'is in maintenance (#705) since 2025-11-26T00:00:00Z', message)
+                    self.assertIn('sections: Il riposo (#684)', message)
+                    pinned.assert_not_called()
+            # The pin of the host command during this maintenance passes; of another, it does not.
+            os.environ['DEVLOOP_MAINTENANCE_PIN'] = '1764115199'
+            with self.assertRaises(SystemExit):
+                cli.main(['pin', 'main'])
+            os.environ['DEVLOOP_MAINTENANCE_PIN'] = '1764115200'
+            cli.main(['pin', 'main'])
+            self.assertEqual(pinned.call_count, 1)
+            # A file not of root is no maintenance.
+            os.environ.pop('DEVLOOP_MAINTENANCE_PIN')
+            with mock.patch.object(cli.rest, 'OPERATOR_UID', os.getuid() + 1):
+                cli.main(['pin', 'main'])
+            self.assertEqual(pinned.call_count, 2)
+            # Without it, the pin as before.
+            maintenance.unlink()
+            cli.main(['pin', 'main'])
+            self.assertEqual(pinned.call_count, 3)
 
     def test_reexec_passes_the_lock_open(self):
         calls = []

@@ -1,0 +1,16 @@
+# Unità template dell'avviso della scadenza della manutenzione dell'host (#705,
+# ops/host/devloop-maintenance@.service): la avvia il timer devloop-maintenance@<progetto>.timer.
+# L'istanza è il progetto (_default senza PROJECT), come il file del progetto del comando devloop
+# dell'host. Esegue, come root, il comando devloop dell'host (ops/host/devloop-command) con
+# `maintenance expired`: senza una manutenzione scaduta non fa nulla; con una manutenzione scaduta
+# e non chiusa passa all'utente devloop del progetto `devloop notify`, con il canale di [notify]
+# dell'overlay, al più una volta per intervallo. Senza [notify] resta solo una riga nel journal di
+# questa unità. Comune ai progetti dell'host: setup-devloop.sh la installa in
+# SYSTEMD_DIR/devloop-maintenance@.service. Non si abilita: la avvia il timer.
+[Unit]
+Description=devloop maintenance of the host, notice of its expiry (%i)
+
+[Service]
+Type=oneshot
+ExecStart=@DEVLOOP_COMMAND@ --project %i maintenance expired
+TimeoutStartSec=120

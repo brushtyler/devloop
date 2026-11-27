@@ -210,6 +210,12 @@ fi
 # devloop dell'host e [notify] dell'overlay. Template comune ai progetti dell'host.
 put_file "$FAILED_UNIT_FILE" 644 root "$(render "$OPS_DIR/host/devloop-failed@.service")" \
     && unit_changed=1
+# L'avviso della scadenza della manutenzione dell'host (#705): il timer e la sua unità, template
+# comuni ai progetti dell'host; l'istanza del progetto si abilita con il comando devloop, sotto.
+put_file "$MAINTENANCE_UNIT_FILE" 644 root "$(render "$OPS_DIR/host/devloop-maintenance@.service")" \
+    && unit_changed=1
+put_file "$MAINTENANCE_TIMER_FILE" 644 root "$(render "$OPS_DIR/host/devloop-maintenance@.timer")" \
+    && unit_changed=1
 if [ "$unit_changed" = 1 ]; then
     run systemctl daemon-reload
 fi
@@ -227,7 +233,15 @@ else
 fi
 put_file "$DEVLOOP_PROJECT_FILE" 644 root "$(render "$OPS_DIR/host/devloop-command-project")" || true
 put_file "$DEVLOOP_COMMAND" 755 root "$(render "$OPS_DIR/host/devloop-command")" || true
-say "  per togliere il progetto dal comando devloop: rimuovere $DEVLOOP_PROJECT_FILE"
+# Il timer dell'avviso della scadenza della manutenzione (#705), che esegue il comando devloop:
+# abilitato, sopravvive a un riavvio; senza una manutenzione scaduta non fa nulla. Già abilitato
+# (il link di systemctl enable in timers.target.wants/), non si tocca.
+if [ -L "$SYSTEMD_DIR/timers.target.wants/$MAINTENANCE_UNIT.timer" ]; then
+    ok "$MAINTENANCE_UNIT.timer è abilitato"
+else
+    run systemctl enable --now "$MAINTENANCE_UNIT.timer"
+fi
+say "  per togliere il progetto dal comando devloop: rimuovere $DEVLOOP_PROJECT_FILE e disabilitare $MAINTENANCE_UNIT.timer"
 
 step 'Chiavi delle GitHub App'
 # La chiave dell'implementer, con il default di DEVLOOP_KEYS, solo se l'overlay dichiara

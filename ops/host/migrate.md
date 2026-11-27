@@ -846,6 +846,123 @@ copie di prima, e il pin della versione di prima il codice di prima. Una pausa l
 a mano si toglie come root con `rm <COORDINATION_DIR>/rest/pause`, poi `systemctl start
 <SERVICE_NAME>`.
 
+## La manutenzione dell'host (#705)
+
+Il passo sull'host di #705, su un host con la pausa dell'operatore di
+[#685](#la-pausa-delloperatore-685) già fatta. Con #705 chi fa un passo sull'host lo apre con
+`devloop --project <progetto> maintenance start "<sezioni>"` e lo chiude con `devloop --project
+<progetto> maintenance end`, sottocomandi del comando `devloop` dell'host
+([#588](#comando-devloop-dellhost-588)): `start` crea come root
+`$COORDINATION_DIR/rest/maintenance` e ferma il servizio, `end` la toglie e riavvia il servizio
+(salvo una pausa dell'operatore). Mentre la manutenzione c'è, `devloop run` non fa tick e
+`devloop pin` si rifiuta, salvo il pin dello stesso comando `devloop` dell'host; i ruoli ricevono
+ogni cambio dalla loro sveglia e aspettano in manutenzione, la sentinella li sveglia solo per un
+messaggio, il watchdog dei ruoli li vede in manutenzione e alla scadenza lo dice all'operatore
+([ops/README.md](../README.md#10-coordinatore-facoltativo), "La manutenzione dell'host"). Servono
+quindi:
+
+- il file del progetto del comando `devloop` (`$DEVLOOP_PROJECTS_DIR/params-<progetto>.env`) con le
+  tre righe nuove `STATE_PATH` (lo state_dir, con il lock dei pin che `maintenance start` aspetta),
+  `MAINTENANCE_TIMEOUT` e `MAINTENANCE_ACK_TIMEOUT`, e il comando nuovo con `maintenance`: senza
+  `STATE_PATH` il comando rifiuta `maintenance start`, senza le altre due usa i default (7200 e 300
+  secondi), e `check-host.sh` vede il file diverso da quello che `setup-devloop.sh` scrive;
+- le due unità nuove dell'avviso della scadenza, comuni ai progetti dell'host,
+  `$SYSTEMD_DIR/devloop-maintenance@.service` e `$SYSTEMD_DIR/devloop-maintenance@.timer`, e il
+  timer del progetto abilitato, `devloop-maintenance@<progetto>.timer`: ogni 5 minuti, come root,
+  `devloop --project <progetto> maintenance expired`, che senza una manutenzione scaduta non fa
+  nulla;
+- le copie di root nuove di `ops/` (con `lib.sh`, `host/role-wait.sh`, `host/role-sentinel.sh`,
+  `host/role-watchdog.sh` e `host/check-host.sh`), e la sentinella riavviata, che altrimenti gira
+  ancora la copia di prima;
+- il pin del codice nuovo di devloop, che non fa tick e rifiuta il pin durante la manutenzione.
+
+Nessuna chiave nuova dell'overlay: l'ordine pin poi overlay di
+[#702](#il-riposo-dei-ruoli-684) vale qui senza il secondo passo. Nessun sudoers e nessuna ACL
+nuovi: la manutenzione vive in `rest/`, che il riposo ha già dato a tutti quelli che la leggono, e
+l'avviso della scadenza è il timer di root che `setup-devloop.sh` installa e abilita, con il
+comando `devloop` dell'host. `MAINTENANCE_TIMEOUT` (la durata, contata dallo stop
+del servizio, 7200 secondi) e `MAINTENANCE_ACK_TIMEOUT` (l'attesa delle conferme dei ruoli, 300
+secondi) si scrivono in `params.env` solo per altri valori, prima del passo 2. devloop mergia la
+PR di #705 come le altre, ma non fa il pin automatico di quel commit né dei successivi finché
+l'operatore non fa il pin a mano ([Ogni cambio con un passo
+sull'host](#ogni-cambio-con-un-passo-sullhost)): qui è il passo 4. Questo passo non usa ancora la
+manutenzione: il codice che la rispetta arriva con il suo pin.
+
+### Comandi
+
+Come root, dal checkout dell'operatore aggiornato (`git -C <checkout> fetch origin` e
+`git -C <checkout> checkout --detach origin/main`, con il merge di #705), **per ogni progetto
+dell'host** con supervisore e coordinatore, con il suo file di parametri `<parametri>` (uno con
+`SOURCE_REF` al tag successivo, con [la sua
+procedura](#un-progetto-con-la-sorgente-a-un-tag-nuovo-666)):
+
+1. **il loop fermo**: `systemctl stop <SERVICE_NAME>`. Le sessioni dei ruoli restano;
+
+2. **il comando `devloop`, il file del progetto e il timer della scadenza**, prima con
+   `--dry-run`: le azioni nuove sono la riscrittura del file del progetto e del comando, la
+   scrittura di `devloop-maintenance@.service` e `devloop-maintenance@.timer` in `SYSTEMD_DIR`
+   (al primo progetto dell'host), con `systemctl daemon-reload`, e `systemctl enable --now
+   devloop-maintenance@<progetto>.timer`. Un'altra azione che il passo non spiega vuol dire che
+   l'host non corrisponde ai parametri: ci si ferma e si chiede all'operatore:
+
+   ```bash
+   sudo bash <checkout>/ops/host/setup-devloop.sh --params <parametri> --dry-run
+   sudo bash <checkout>/ops/host/setup-devloop.sh --params <parametri>
+   ```
+
+3. **le copie di root di `ops/`**, prima con `--dry-run`: le azioni nuove sono solo le copie
+   (`SUPERVISOR_OPS_DIR`, `COORDINATOR_OPS_DIR`, `WATCHDOG_OPS_DIR`); poi la sentinella riavviata
+   sulla copia nuova:
+
+   ```bash
+   sudo bash <checkout>/ops/host/setup-supervisor.sh --params <parametri> --dry-run
+   sudo bash <checkout>/ops/host/setup-supervisor.sh --params <parametri>
+   sudo bash <checkout>/ops/host/setup-coordinator.sh --params <parametri> --dry-run
+   sudo bash <checkout>/ops/host/setup-coordinator.sh --params <parametri>
+   sudo systemctl restart devloop-role-sentinel@<progetto>.service
+   ```
+
+   Il secondo script trova già fatto ciò che il primo ha fatto. `<progetto>` è `PROJECT`, o
+   `_default` senza `PROJECT`;
+
+4. **il pin a mano**: come utente `DEVLOOP_USER`, `devloop pin origin/main` (con più progetti
+   `devloop --project <progetto> pin origin/main`), poi `systemctl start <SERVICE_NAME>`. Il pin a
+   mano fa riprendere il pin automatico;
+
+5. **la verifica**: nessun `ERRORE`, nel passo *Comando devloop* le righe `ok: … coincide con
+   ops/host/devloop-command` e `… devloop-command-project`, nel passo *Servizio* le righe `ok: …
+   coincide con ops/host/devloop-maintenance@.service`, `… devloop-maintenance@.timer` e
+   `devloop-maintenance@<progetto>.timer è abilitato`, e la riga
+   `devloop-role-sentinel@<progetto>.service è attivo`:
+
+   ```bash
+   sudo bash <checkout>/ops/host/check-host.sh --params <parametri> --no-apps
+   ```
+
+6. **le sessioni dei ruoli**: le loro sveglie già in attesa girano la copia di prima finché il
+   ruolo non le rilancia: fino ad allora una manutenzione ferma il servizio, ma non arriva ai
+   ruoli. Chi la usa e come cambiano i runbook dei ruoli è #706.
+
+**Un progetto con `SOURCE_REF`** (#687) ha il comando e le sveglie del suo tag: finché il tag non
+contiene #705, per quel progetto la manutenzione non c'è, e i passi sull'host si fanno come oggi
+(`systemctl stop`, i passi, `systemctl start`), senza `maintenance`. Questa sezione la applica al
+tag che la contiene, con [la sua procedura](#un-progetto-con-la-sorgente-a-un-tag-nuovo-666).
+
+**La prova**, se l'operatore la vuole, a fine passo: `devloop --project <progetto> maintenance
+start "prova"`, che ferma il servizio e dice quali ruoli confermano; dopo qualche minuto, nel
+journal del watchdog (`journalctl -u devloop-role-watchdog@<progetto>`) la riga
+`informazione: … in manutenzione dal …`, e `check-host.sh` che dice la manutenzione; poi
+`devloop --project <progetto> maintenance end`, con il servizio di nuovo attivo e i ruoli che si
+svegliano con una riga `manutenzione: finita`.
+
+**Rollback**: senza manutenzione in corso (`devloop --project <progetto> maintenance end`, se
+serve), il passo 2 e il passo 3 dal checkout della versione di prima rimettono il comando, il file
+del progetto e le copie di prima, e il pin della versione di prima il codice di prima; poi, come
+root, `systemctl disable --now devloop-maintenance@<progetto>.timer` e, all'ultimo progetto
+dell'host, `rm <SYSTEMD_DIR>/devloop-maintenance@.service <SYSTEMD_DIR>/devloop-maintenance@.timer`
+e `systemctl daemon-reload`. Una manutenzione lasciata da togliere a mano si toglie come root con
+`rm <COORDINATION_DIR>/rest/maintenance`, poi `systemctl start <SERVICE_NAME>`.
+
 ## Configurazione di ssdlc nel suo file di progetto
 
 Con l'ADR 0006, R3, `devloop/config.toml` non contiene più i fatti di ssdlc né le restrizioni che

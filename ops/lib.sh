@@ -28,13 +28,13 @@ VERIFIED_ARCH=aarch64
 OPS_STATE_DIR=.devloop
 
 # I segnaposto @NOME@ che `render` sostituisce nei file dichiarativi (unità, sudoers).
-OPS_TEMPLATE_VARS='REPO DEVLOOP_USER SUPERVISOR_USER AGENT_USER COORDINATOR_USER DEVLOOP_HOME AGENT_HOME DEVLOOP_CLONE STATE_DIR STATE_PATH LAUNCHER_CMD DEVLOOP_PATH AGENT_PATH SERVICE_NAME REPO_LOCK_DIR REPO_LOCK_GROUP COORDINATOR_OPS_DIR COORDINATION_DIR WATCHDOG_USER WATCHDOG_OPS_DIR SENTINEL_USER DEVLOOP_PROJECTS_DIR DEVLOOP_COMMAND OPS_INSTANCE'
+OPS_TEMPLATE_VARS='REPO DEVLOOP_USER SUPERVISOR_USER AGENT_USER COORDINATOR_USER DEVLOOP_HOME AGENT_HOME DEVLOOP_CLONE STATE_DIR STATE_PATH LAUNCHER_CMD DEVLOOP_PATH AGENT_PATH SERVICE_NAME REPO_LOCK_DIR REPO_LOCK_GROUP COORDINATOR_OPS_DIR COORDINATION_DIR WATCHDOG_USER WATCHDOG_OPS_DIR SENTINEL_USER DEVLOOP_PROJECTS_DIR DEVLOOP_COMMAND OPS_INSTANCE MAINTENANCE_TIMEOUT MAINTENANCE_ACK_TIMEOUT'
 
 # I file di ops/ che check-host.sh legge (#530): setup-coordinator.sh li copia, con i parametri
 # (params.env), nella directory di root COORDINATOR_OPS_DIR, da cui il coordinatore esegue come
 # root `check-host.sh --read-only`, mai dal clone di devloop né da un checkout scrivibile. Con
 # loro il risveglio dei ruoli (role-wait.sh, #602) e il suo involucro coordinator-wait.sh (#543).
-OPS_COORDINATOR_FILES='lib.sh host/check-host.sh host/role-wait.sh host/coordinator-wait.sh host/role-watchdog.sh host/role-sentinel.sh host/sudoers-supervisor host/sudoers-agent host/sudoers-coordinator host/tmpfiles-devloop-repos.conf host/devloop.service host/devloop@.service host/devloop-project.conf host/devloop-role-watchdog@.service host/devloop-role-watchdog@.timer host/devloop-role-watchdog-failed@.service host/role-watchdog-project.conf host/devloop-role-sentinel@.service host/devloop-role-sentinel-failed@.service host/role-sentinel-project.conf host/devloop-command host/devloop-command-project host/devloop-failed@.service'
+OPS_COORDINATOR_FILES='lib.sh host/check-host.sh host/role-wait.sh host/coordinator-wait.sh host/role-watchdog.sh host/role-sentinel.sh host/sudoers-supervisor host/sudoers-agent host/sudoers-coordinator host/tmpfiles-devloop-repos.conf host/devloop.service host/devloop@.service host/devloop-project.conf host/devloop-role-watchdog@.service host/devloop-role-watchdog@.timer host/devloop-role-watchdog-failed@.service host/role-watchdog-project.conf host/devloop-role-sentinel@.service host/devloop-role-sentinel-failed@.service host/role-sentinel-project.conf host/devloop-command host/devloop-command-project host/devloop-failed@.service host/devloop-maintenance@.service host/devloop-maintenance@.timer'
 # Il risveglio del supervisore (#602): setup-supervisor.sh copia questi file, con i parametri,
 # nella directory di root SUPERVISOR_OPS_DIR, da cui il supervisore lo esegue.
 OPS_SUPERVISOR_FILES='lib.sh host/role-wait.sh'
@@ -71,6 +71,11 @@ COORDINATION_REST=rest
 # solo il comando devloop dell'host scrive, come root (pause), e toglie (resume). Conta solo il
 # file di root (ops_pause_start): i ruoli scrivono in rest/, ma non aprono né chiudono la pausa.
 REST_PAUSE=pause
+# La manutenzione dell'host (#705), MAINTENANCE_FILE di devloop/rest.py: rest/maintenance,
+# "<inizio> manutenzione <scadenza> <sezioni>" ("-" al posto della scadenza finché il servizio non
+# è fermo), che solo il comando devloop dell'host crea, come root (maintenance start), e toglie
+# (maintenance end). Conta solo il file di root (ops_maintenance), come per la pausa.
+REST_MAINTENANCE=maintenance
 
 # Il flusso degli eventi (#683), come devloop/events.py: la directory dello state_dir che devloop
 # run scrive (DIRECTORY), con i segmenti, il segno di vita (ALIVE) e l'identità del flusso. I
@@ -710,6 +715,12 @@ ops_load_params() {
     : "${REST_DAILY_CHECK:=00:30}"
     : "${REST_WAKE_TIMEOUT:=300}"
     : "${REST_MAILBOX_AGE:=300}"
+    # La manutenzione dell'host (#705): la sua durata, contata dallo stop del servizio (scelta
+    # M2, due ore), e quanto `maintenance start` aspetta che i ruoli confermino di aspettare in
+    # manutenzione prima di proseguire comunque. Il comando devloop li legge dal file del
+    # progetto (devloop-command-project).
+    : "${MAINTENANCE_TIMEOUT:=7200}"
+    : "${MAINTENANCE_ACK_TIMEOUT:=300}"
     # Il nome del progetto nei nomi per progetto dei ruoli (#602): PROJECT, o _default senza
     # PROJECT. '_' non è ammesso in PROJECT, così l'installazione senza PROJECT non coincide mai
     # con un progetto (PROJECT=default compreso): unità, drop-in e stato restano distinti.
@@ -779,6 +790,11 @@ ops_load_params() {
     # L'unità dell'avviso di un servizio caduto (#593), l'OnFailure= del servizio: template,
     # comune ai progetti dell'host, con il progetto come istanza.
     FAILED_UNIT_FILE=$SYSTEMD_DIR/devloop-failed@.service
+    # L'avviso della scadenza della manutenzione dell'host (#705): un timer e la sua unità,
+    # template comuni ai progetti dell'host, con il progetto come istanza.
+    MAINTENANCE_UNIT_FILE=$SYSTEMD_DIR/devloop-maintenance@.service
+    MAINTENANCE_TIMER_FILE=$SYSTEMD_DIR/devloop-maintenance@.timer
+    MAINTENANCE_UNIT=devloop-maintenance@$OPS_INSTANCE
     # La directory dei lock per repository (ADR 0006, R8): comune agli utenti devloop dell'host,
     # fuori dalle loro home e dagli state_dir, almeno due livelli sotto la radice.
     [[ $REPO_LOCK_DIR =~ ^/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+$ ]] && ! [[ $REPO_LOCK_DIR/ =~ /\.\.?/ ]] \
@@ -860,7 +876,7 @@ ops_load_params() {
         done
     done
     for copy in ROLE_WAIT_PERIOD COORDINATOR_WAIT_PERIOD EVENTS_STALE_AFTER REST_WAKE_TIMEOUT \
-        REST_MAILBOX_AGE; do
+        REST_MAILBOX_AGE MAINTENANCE_TIMEOUT MAINTENANCE_ACK_TIMEOUT; do
         [[ ${!copy} =~ ^[1-9][0-9]{0,6}$ ]] \
             || die "$copy è un numero di secondi, da 1 a 9999999: '${!copy}'"
     done
@@ -882,10 +898,11 @@ _ops_host_users() {
     for file in "$SYSTEMD_DIR"/devloop*.service "$SYSTEMD_DIR"/devloop@*.service.d/project.conf; do
         [ -f "$file" ] && [ -r "$file" ] || continue
         [ "$file" = "$UNIT_FILE" ] || [ "$file" = "$DROPIN_FILE" ] && continue
-        # Le unità del watchdog dei ruoli (#602) e dell'avviso di un servizio caduto (#593) non
-        # sono il servizio di un progetto.
+        # Le unità del watchdog dei ruoli (#602), dell'avviso di un servizio caduto (#593) e della
+        # scadenza della manutenzione (#705) non sono il servizio di un progetto.
         case $(basename "$file") in
-            devloop-role-watchdog* | devloop-role-sentinel* | devloop-failed@*) continue ;;
+            devloop-role-watchdog* | devloop-role-sentinel* | devloop-failed@* \
+                | devloop-maintenance@*) continue ;;
         esac
         sed -n "s|^User=\([a-z_][a-z0-9_-]*\)\$|\1 devloop $file|p" "$file"
     done
@@ -993,7 +1010,8 @@ _ops_unit_overlay() {
     for file in "$SYSTEMD_DIR"/devloop*.service "$SYSTEMD_DIR"/devloop@*.service.d/project.conf; do
         [ -f "$file" ] && [ -r "$file" ] || continue
         case $(basename "$file") in
-            devloop-role-watchdog* | devloop-role-sentinel* | devloop-failed@*) continue ;;
+            devloop-role-watchdog* | devloop-role-sentinel* | devloop-failed@* \
+                | devloop-maintenance@*) continue ;;
         esac
         grep -qxF "User=$1" "$file" || continue
         sed -n 's|^StandardOutput=append:\(/.*\)/run\.log$|\1/config.local.toml|p' "$file" | head -n 1
@@ -1294,6 +1312,36 @@ ops_pause_start() {
     read -r at why <"$file" 2>/dev/null || return 1
     [[ $at =~ ^[0-9]{1,12}$ ]] && [[ $why == pausa || $why == 'pausa '* ]] || return 1
     printf '%s\n' "$at"
+}
+
+# ops_maintenance: la manutenzione dell'host (#705), da COORDINATION_DIR/rest/maintenance, un file
+# regolare di root, non un link, "<inizio> manutenzione <scadenza> <sezioni>": stampa "<inizio>
+# <scadenza> <sezioni>", con "-" come scadenza finché il servizio non è fermo; nulla, e 1, senza
+# manutenzione. Il file di un altro utente non è una manutenzione, come per devloop
+# (host_maintenance di devloop/rest.py).
+ops_maintenance() {
+    local file=$COORDINATION_DIR/$COORDINATION_REST/$REST_MAINTENANCE owner='' kind=''
+    local at='' word='' expiry='' sections=''
+    [ -f "$file" ] && ! [ -L "$file" ] || return 1
+    read -r owner kind < <(stat -c '%u %F' -- "$file" 2>/dev/null) || return 1
+    [ "$owner" = 0 ] && [ "$kind" = 'regular file' ] || return 1
+    read -r at word expiry sections <"$file" 2>/dev/null || return 1
+    [[ $at =~ ^[0-9]{1,12}$ ]] && [ "$word" = manutenzione ] && [[ $expiry =~ ^([0-9]{1,12}|-)$ ]] \
+        && [ -n "$sections" ] || return 1
+    printf '%s %s %s\n' "$at" "$expiry" "$sections"
+}
+
+# ops_maintenance_text "<inizio> <scadenza> <sezioni>": la manutenzione a parole, per le righe
+# dei ruoli e del watchdog.
+ops_maintenance_text() {
+    local at expiry sections until
+    read -r at expiry sections <<<"$1"
+    if [ "$expiry" = - ]; then
+        until='scadenza non ancora fissata: parte dallo stop del servizio'
+    else
+        until="scadenza $(date -u -d "@$expiry" +%Y-%m-%dT%H:%M:%SZ)"
+    fi
+    printf 'dal %s, sezioni: %s, %s' "$(date -u -d "@$at" +%Y-%m-%dT%H:%M:%SZ)" "$sections" "$until"
 }
 
 # coordination_dirs: le directory della casella, una per riga: COORDINATION_DIR, una directory di
