@@ -2,6 +2,7 @@
 
 import dataclasses
 import os
+import re
 import shutil
 import signal
 import tempfile
@@ -243,6 +244,72 @@ class RunConfigTests(unittest.TestCase):
     def test_they_are_keys_of_the_overlay(self):
         self.assertIn('rest_dir', config.OVERLAY_KEYS['run'])
         self.assertIn('rest_wake_timeout', config.OVERLAY_KEYS['run'])
+
+
+MIGRATE = Path(__file__).resolve().parents[1] / 'ops' / 'host' / 'migrate.md'
+
+
+def migrate_section(title):
+    """The section of ``ops/host/migrate.md`` with heading ``title``, up to the next heading of
+    the same level or above."""
+    text = MIGRATE.read_text(encoding='utf-8')
+    start = text.index(f'\n{title}\n')
+    level = title.index(' ')
+    following = re.compile(rf'^#{{1,{level}}} ', re.M).search(text, start + len(title) + 2)
+    return text[start:following.start()] if following else text[start:]
+
+
+class HostStepOrderTests(unittest.TestCase):
+    """#702: the step on the host of #684 pins by hand before ``rest_dir`` is in the overlay,
+    since the pinned copy refuses a key of ``[run]`` it does not know, and starts the service
+    after."""
+
+    def test_a_copy_that_does_not_know_a_key_of_run_refuses_it(self):
+        # What the pinned copy of before does with a key it does not know, here a new one.
+        with self.assertRaisesRegex(ConfigError, r"unknown key 'run\.rest_later'"):
+            config.apply_overlay({}, {'run': {'rest_later': 1}})
+
+    def test_step_3_of_684_pins_then_writes_rest_dir_then_starts(self):
+        section = migrate_section('## Il riposo dei ruoli (#684)')
+        commands = section[section.index('\n### Comandi\n'):]
+        step = commands[commands.index('\n3. '):commands.index('\n4. ')]
+        pin = step.index('`devloop pin origin/main`')
+        key = step.index('`rest_dir = "<COORDINATION_DIR>/rest"`')
+        start = step.index('`systemctl start <SERVICE_NAME>`')
+        self.assertLess(pin, key)
+        self.assertLess(key, start)
+        self.assertIn('qui è il passo 3,\nche fa il pin prima di scrivere `rest_dir`', section)
+        # The rollback: the key goes before the pin of the copy of before, which refuses it.
+        rollback = section[section.index('**Rollback**'):]
+        self.assertIn('si toglie **prima** del pin', rollback)
+
+    def test_through_the_procedure_between_tags_rest_dir_goes_after_the_pin(self):
+        # A project with SOURCE_REF runs #684 inside step 3 of #666, before the pin of step 5:
+        # the new key of the overlay waits for step 6, after the pin and before the start.
+        section = ' '.join(migrate_section(
+            '## Un progetto con la sorgente a un tag nuovo (#666)').split())
+        step3 = section[section.index('3. **Le sezioni introdotte'):section.index('4. **La verifica')]
+        self.assertIn('**Una chiave nuova dell\'overlay** che una sezione fa scrivere (come '
+                      '`rest_dir`', step3)
+        self.assertIn('non si scrive lì', step3)
+        self.assertIn('si scrive al passo 6, dopo il pin e prima dell\'avvio', step3)
+        pin = section.index('5. **Il pin del tag nuovo**')
+        step6 = section.index('6. **L\'avvio del servizio**')
+        key = section.index('le chiavi nuove dell\'overlay annotate al passo 3', step6)
+        start = section.index('`systemctl start <SERVICE_NAME>`', step6)
+        self.assertLess(pin, step6)
+        self.assertLess(key, start)
+        rollback = section[section.index('**Rollback.**'):]
+        self.assertIn('il passo 6, senza chiavi nuove', rollback)
+        # #684 itself points to that order for a project with SOURCE_REF.
+        rest = ' '.join(migrate_section('## Il riposo dei ruoli (#684)').split())
+        self.assertIn('il pin è il suo passo 5, `rest_dir` si scrive al suo passo 6, prima '
+                      'dell\'avvio, mai al suo passo 3', rest)
+
+    def test_the_general_rule_on_a_new_key_of_the_overlay(self):
+        rule = migrate_section('### Ogni cambio con un passo sull\'host')
+        self.assertIn('Una chiave nuova dell\'overlay si scrive **dopo** il pin del codice che la '
+                      'conosce', ' '.join(rule.split()))
 
 
 class DispatcherRestTests(RestCase):
