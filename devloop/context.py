@@ -20,6 +20,7 @@ from .planning import FIX_COMMAND
 from .ports import Tracker
 from .review import CI, FINDING_COMMAND, finding_key, findings_only, owner_of
 from .supervision import DECIDE
+from .workspace import PrepareFailed
 
 PROMPT_DIR = Path(__file__).resolve().parent / 'prompts'
 REREVIEW_COMMAND = '/devloop rereview'
@@ -556,7 +557,12 @@ def _open_findings_reason(findings, language=ENGLISH):
 
 def _review_failure(failures):
     """The exception that ends a review action whose reviewers ``failures`` (``(key, exc)``)
-    failed: the only one, or one that lists them all when every one is an agent failure."""
+    failed: the only one, or one that lists them all when every one is an agent failure. A
+    failed step that prepares a reviewer's copy (``PrepareFailed``, #696) comes first, whatever
+    failed for the others: it is a critical escalation to the operator, with its output."""
+    prepare = [exc for _, exc in failures if isinstance(exc, PrepareFailed)]
+    if prepare:
+        return prepare[0]
     if len(failures) == 1 or not all(isinstance(exc, AgentError) for _, exc in failures):
         return failures[0][1]
     error = AgentError('; '.join(f'`{key}`: {str(exc).strip()}' for key, exc in failures),

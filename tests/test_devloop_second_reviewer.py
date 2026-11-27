@@ -21,6 +21,8 @@ from unittest import mock
 from devloop import agents, config, markdown, policy
 from devloop.config import ConfigError, MergePolicy
 from devloop.ledger import Ledger
+from devloop.localtests import Prepare
+from devloop.supervision import PREPARE_FAILED
 from devloop.planning import Action, closed_by_first, missing_verdicts, pending_reviewers
 from devloop.workspace import Cancelled, run_in_group
 from helpers import ssdlc_project
@@ -252,6 +254,60 @@ class ParallelCancelTests(Quorum):
         self.d.tick()
         self.assertEqual(self.gh.labels[100], {'agent:changes'})
         self.assertFalse([r for r in self.records('notice') if r.get('event') == 'escalation'])
+
+    def test_a_failed_step_that_prepares_the_second_in_a_closed_round_escalates(self):
+        # #696: the round is closed by the first, but the failed [prepare] cmd of the second's
+        # copy is still the critical escalation to the operator, with its output.
+        self.make_cancel({FIRST: [changes()]})
+        self.d.cfg = dataclasses.replace(self.d.cfg, prepare=Prepare(
+            command='npm ci --ignore-scripts', inputs=('package-lock.json',),
+            outputs=('node_modules/',)))
+        self.ws = self.d.ws = PrepareCopyWS(fail=SECOND)
+        self.ws.diff = list(CORE)
+        self.d.tick()
+        self.assertEqual(sorted(self.ws.prepared_copies),
+                         sorted([(f'pr-100-review-{FIRST}', True),
+                                 (f'pr-100-review-{SECOND}', False)]))
+        escalations = [r for r in self.records('notice') if r.get('event') == 'escalation']
+        self.assertEqual([(r['class'], r['critical'], r['to']) for r in escalations],
+                         [(PREPARE_FAILED, True, 'operator')])
+        self.assertTrue(any('npm ERR! code E404' in c['body'] for c in self.d._pr_thread(100)))
+        self.assertFalse(any('the failures above do not escalate' in line for line in self.logs))
+
+
+class PrepareCopyWS(CopyWS):
+    """A CopyWS with the step that prepares a worktree (#696): it fails in the copy of the
+    reviewer ``fail``; ``prepared_copies`` holds each run with its outcome."""
+
+    def __init__(self, fail, **kw):
+        super().__init__(**kw)
+        self.fail = fail
+        self.prepared_copies = []
+        self._prepare_lock = threading.Lock()
+
+    def prepare_stamp(self, path, command, inputs):
+        return f'{command}|{inputs}'
+
+    def prepared(self, path):
+        return None
+
+    def mark_prepared(self, path, stamp):
+        pass
+
+    def prepare_cache(self, project):
+        return Path('/agent-home/.cache/devloop-prepare') / project.replace('/', '_')
+
+    def run_prepare(self, path, command, timeout, cache):
+        passed = not Path(path).name.endswith(f'-{self.fail}')
+        with self._prepare_lock:
+            self.prepared_copies.append((Path(path).name, passed))
+        return passed, 'npm ERR! code E404'
+
+    def tree(self, path):
+        return 't1'
+
+    def tree_changes(self, path, old, new):
+        return []
 
 
 class RunnerCancelTests(unittest.TestCase):
