@@ -1,6 +1,6 @@
 {
   "name": "coordinator",
-  "description": "devloop: il coordinatore. Comandi, commenti e label; diagnosi della CI in sola lettura; nessun accesso ai contenuti.",
+  "description": "devloop: il coordinatore. Comandi, commenti e label; diagnosi della CI in sola lettura; contenuti in sola lettura, per il clone di un repository privato (#717).",
   "url": "https://github.com/@REPO@",
   "hook_attributes": {
     "url": "https://github.com/@REPO@",
@@ -12,6 +12,7 @@
   "default_permissions": {
     "actions": "read",
     "checks": "read",
+    "contents": "read",
     "issues": "write",
     "metadata": "read",
     "pull_requests": "write",

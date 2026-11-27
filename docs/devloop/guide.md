@@ -3887,7 +3887,7 @@ with the [pin after a merge](#pin-after-a-merge) and needs no tag. This is the p
 for v0.3.0 (#666); it gives no role new powers.
 
 - **Who.** The operator creates and pushes the tag, with their own account: the apps of the roles
-  have no `contents` permission, and the agent of the host does not write on GitHub
+  have no `contents: write` permission, and the agent of the host does not write on GitHub
   ([ADR 0002](../adr/0002-ruoli-e-responsabilita.md), [Privileges](roles/host.md#privileges)).
 - **When.** On the commit that devloop's own installation has pinned, after its pin (the copy
   `current` of its `state_dir` points at, `pinned-<sha12>`, [Pin](#pin)), once the loop has run

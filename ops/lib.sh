@@ -1691,6 +1691,63 @@ ensure_source_clone() {
     as_user "$user" git -C "$dir" checkout --quiet --detach "refs/tags/$SOURCE_REF"
 }
 
+# role_git_cmd RUOLO KEY_DIR TOKEN_CLONE AZIONE CLONE: in ROLE_GIT il comando che fa AZIONE
+# (clone, fetch o check di scripts/role-git.py) sul clone CLONE del ruolo con un token della sua
+# app limitato a contents=read (#717): scripts/RUOLO-token.py di TOKEN_CLONE, con la key_dir del
+# ruolo e lo state_dir del progetto, e un --perm contents=read esplicito, esegue role-git.py
+# dello stesso clone, che passa il token solo nell'ambiente di git, come i fetch di devloop
+# (#716). Si esegue come l'utente del ruolo.
+role_git_cmd() {
+    local role=$1 key_dir=$2 token_clone=$3 action=$4 clone=$5
+    ROLE_GIT=(env -C "$token_clone" "DEVLOOP_APP_KEY_DIR=$key_dir" /usr/bin/python3
+              "scripts/$role-token.py" --state-dir "$STATE_PATH" --perm contents=read --
+              /usr/bin/python3 scripts/role-git.py "$action" "$clone")
+}
+
+# ensure_role_clone RUOLO UTENTE CLONE KEY_DIR TOKEN_CLONE PARAMETRO: in CLONE (il parametro
+# PARAMETRO), di UTENTE, il clone di REPO da cui parte la sessione del ruolo (#643). Un clone già
+# lì di un altro repository è di un altro progetto: si ferma. Un repository che si legge senza
+# credenziali si clona come prima, senza token. Uno privato (#717) si clona, o con il clone già lì
+# si aggiorna, con l'app del ruolo (role_git_cmd); finché mancano la chiave del ruolo o
+# scripts/role-git.py in TOKEN_CLONE (senza SOURCE_REPO è il clone stesso), lo dice fra le cose da
+# fare e si riesegue dopo. Con --dry-run non va in rete: stampa il clone senza credenziali e il
+# comando con l'app, per un repository privato.
+ensure_role_clone() {
+    local role=$1 user=$2 clone=$3 key_dir=$4 token_clone=$5 param=$6 action=clone origin slug
+    if [ -d "$clone/.git" ]; then
+        # Un clone per progetto (ADR 0006, R8): uno di un altro repository è di un altro
+        # progetto, e non si condivide. L'origin si legge dal file, senza eseguire git nel clone.
+        origin=$(clone_origin "$clone")
+        slug=$(origin_slug "$origin")
+        [ "${slug,,}" = "${REPO,,}" ] \
+            || die "$clone è un clone di '${origin:-origine sconosciuta}', non di $REPO: è di un altro progetto, scegliere un altro $param"
+        ok "$clone è già un clone di $REPO"
+        action=fetch
+    fi
+    role_git_cmd "$role" "$key_dir" "$token_clone" "$action" "$clone"
+    if [ "$DRY_RUN" = 1 ]; then
+        [ "$action" = fetch ] || as_user "$user" git clone "https://github.com/$REPO.git" "$clone"
+        say "  se $REPO non si legge senza credenziali (repository privato, #717), il $action con l'app $role (contents: read):"
+        as_user "$user" "${ROLE_GIT[@]}"
+        return 0
+    fi
+    if repo_public "$REPO"; then
+        [ "$action" = fetch ] || as_user "$user" git clone "https://github.com/$REPO.git" "$clone"
+        return 0
+    fi
+    say "  $REPO non si legge senza credenziali: repository privato, il $action con l'app $role (contents: read, #717)"
+    if [ ! -f "$token_clone/scripts/role-git.py" ]; then
+        todo "$token_clone non ha scripts/role-git.py: senza SOURCE_REPO lo script dei token è nel clone del ruolo stesso, che per un repository privato non si fa senza; con SOURCE_REPO il tag SOURCE_REF è precedente a #717. Indicare in SOURCE_REPO e SOURCE_REF una sorgente di devloop che lo contiene (ops/README.md, \"Un altro progetto\"), poi rieseguire questo script"
+        return 0
+    fi
+    if ! compgen -G "$key_dir/$APP_PREFIX$role.*.private-key.pem" >/dev/null 2>&1; then
+        todo "copiare la chiave di $APP_PREFIX$role in $key_dir, poi rieseguire questo script: il $action di un repository privato si fa con la sua app (#717)"
+        return 0
+    fi
+    as_user "$user" "${ROLE_GIT[@]}" \
+        || warn "il $action di $REPO con l'app $APP_PREFIX$role non è riuscito: l'app ha contents: read ed è installata sul repository, e [apps.$role] è nell'overlay? Poi rieseguire questo script (#717)"
+}
+
 # Sostituisce i segnaposto @NOME@ di un file dichiarativo con i valori dei parametri.
 render() {
     local text var

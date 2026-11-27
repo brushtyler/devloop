@@ -10,7 +10,8 @@
 # template, e l'istanza del progetto, con il suo utente e le sue ACL, quando c'è il supervisore;
 # nella copia anche lo script delle caselle mailbox.sh, e il timer della pulizia di done/ delle
 # caselle, che gira da lì (#707);
-# il clone del repository gestito, da cui parte la sessione (#643), e con SOURCE_REPO anche un
+# il clone del repository gestito, da cui parte la sessione (#643; per un repository privato, con
+# un token della sua app limitato a contents=read, e aggiornato se c'è già, #717), e con SOURCE_REPO anche un
 # clone della sorgente al tag SOURCE_REF, da cui lanciare scripts/coordinator-token.py (#571);
 # le impostazioni di Claude Code senza aggiornamenti automatici, come per il supervisore (#643).
 # Idempotente: si può rieseguire, fa solo ciò che manca; va rieseguito dopo ogni aggiornamento di
@@ -140,30 +141,25 @@ ensure_coordination "$COORDINATOR_USER"
 step "key_dir del coordinatore (700)"
 ensure_dir "$COORDINATOR_KEY_DIR" 700 "$COORDINATOR_USER"
 
-# Il clone del repository gestito, la directory di lavoro della sessione del coordinatore (#621),
-# come quella del supervisore (#643): anche con la sorgente a parte il coordinatore lavora nel
-# clone del suo progetto. Un clone di un altro repository è di un altro progetto: non si usa.
-step "Clone di $REPO per $COORDINATOR_USER"
-if [ -d "$COORDINATOR_CLONE/.git" ]; then
-    origin=$(clone_origin "$COORDINATOR_CLONE")
-    slug=$(origin_slug "$origin")
-    [ "${slug,,}" = "${REPO,,}" ] \
-        || die "$COORDINATOR_CLONE è un clone di '${origin:-origine sconosciuta}', non di $REPO: è di un altro progetto, scegliere un altro COORDINATOR_CLONE"
-    ok "$COORDINATOR_CLONE è già un clone di $REPO"
-else
-    as_user "$COORDINATOR_USER" git clone "https://github.com/$REPO.git" "$COORDINATOR_CLONE"
-fi
-
 # Il clone da cui il coordinatore lancia scripts/coordinator-token.py (#565): il suo clone del
 # repository gestito; con la sorgente a parte il repository gestito non contiene devloop, quindi
 # un clone della sorgente, al tag SOURCE_REF del progetto, che questo script prepara (#571), e da
-# cui il coordinatore conia i token con un cd, come il supervisore (#643).
+# cui il coordinatore conia i token con un cd, come il supervisore (#643). Prima del clone del
+# repository gestito, che per un repository privato si fa con quello script (#717).
 TOKEN_CLONE=$COORDINATOR_CLONE
 if [ -n "$SOURCE_REPO" ]; then
     step "Clone di $SOURCE_REPO al tag $SOURCE_REF per $COORDINATOR_USER (i token della sua app)"
     ensure_source_clone "$COORDINATOR_USER" "$COORDINATOR_SOURCE_CLONE"
     TOKEN_CLONE=$COORDINATOR_SOURCE_CLONE
 fi
+
+# Il clone del repository gestito, la directory di lavoro della sessione del coordinatore (#621),
+# come quella del supervisore (#643): anche con la sorgente a parte il coordinatore lavora nel
+# clone del suo progetto. Un clone di un altro repository è di un altro progetto: non si usa. Per
+# un repository privato, con l'app del coordinatore limitata a contents=read (#717).
+step "Clone di $REPO per $COORDINATOR_USER"
+ensure_role_clone coordinator "$COORDINATOR_USER" "$COORDINATOR_CLONE" "$COORDINATOR_KEY_DIR" \
+    "$TOKEN_CLONE" COORDINATOR_CLONE
 
 # Il coordinatore esegue come root solo questa copia, di root, mai il clone di devloop (che
 # devloop scrive) né il checkout dell'operatore.

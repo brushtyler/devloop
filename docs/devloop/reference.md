@@ -1974,6 +1974,47 @@ branch, with the same token, which fails when the branch is not there. Both stop
 dispatcher's app or its key, and print no token. `check-host.sh` runs them, as devloop's user,
 for a private repository (#718): the first, or the second with `--read-only`.
 
+#### The clone of a role
+
+The supervisor and the coordinator work in a clone of the managed repository
+(`SUPERVISOR_CLONE`, `COORDINATOR_CLONE` of `ops/params.env`), where `ops/host/start-role.sh`
+starts their session. A public repository is cloned without credentials, as before. A private one
+(#717) is read with the role's own app, limited to `contents: read`: `ops/host/setup-supervisor.sh`
+and `ops/host/setup-coordinator.sh`, when `https://github.com/<repo>.git` does not read without
+credentials, clone it, or fetch it when the clone is already there, as the role's system user,
+with
+
+```bash
+DEVLOOP_APP_KEY_DIR=<role key_dir> python3 scripts/supervisor-token.py --state-dir <STATE_DIR> \
+    --perm contents=read -- python3 scripts/role-git.py fetch <clone>
+```
+
+(`scripts/coordinator-token.py` for the coordinator; `clone <clone>` for the first clone), from the clone
+of the token script (the clone of the source with `SOURCE_REPO`, else the role's clone itself).
+`scripts/role-git.py` takes the repository from `GH_REPO` and the token from `GH_TOKEN`, as the
+token script sets them, and passes it to `git` with the defences of the fetches of devloop
+(`workspace.app_auth_env`, above): only in the environment of that one command, never in the
+clone's config; `fetch` updates the remote branches of `origin`. `ops/host/check-host.sh`
+verifies that each role's clone updates, as the role's user and without writing in the clone:
+for a public repository, `git ls-remote origin` from the clone, with its own config (its origin,
+its URL rewrites), the path of a plain `git fetch`; for a private repository, `role-git.py
+check`, which reads the repository with the token (`git ls-remote`); not with
+`--no-apps` nor `--read-only`. A role session can update its clone the same way.
+
+**When the permission is needed.** `contents: read` to the role apps is needed only for a private
+managed repository. For a public one, devloop's included, it is not: the clones read without
+credentials. A set of apps used only for public repositories may lack it; a set that serves a
+private repository must have it. The manifest is one, the same for every set, and declares it
+(`ops/github/apps/supervisor.json`, `coordinator.json`). The token scripts grant it only with an
+explicit `--perm contents=read`, never by default and never to write. With a shared set it holds
+on every repository of the set, read only; on a public repository the roles already read the
+code.
+
+Without the role's key, or without `scripts/role-git.py` in the clone of the token script (with no
+`SOURCE_REPO` the script is in the role's clone itself, which a private repository cannot give
+before it exists; with `SOURCE_REPO`, a tag `SOURCE_REF` older than #717), the setup says so among
+the steps to do and is run again afterwards.
+
 ### Host details in the published texts
 
 The repository is public (#583): what devloop publishes names the parameters of
@@ -2322,8 +2363,10 @@ the app, the local `gh` login.
 The supervisor has a role app of its own (ADR 0005, P5-4, #408): `brushtyler-devloop-supervisor`,
 created by the operator from the manifest `ops/github/apps/supervisor.json` with `Issues: Read and
 write`, `Pull requests: Read and write`, `Metadata: Read-only` and, read-only since #643, when the
-supervisor reads GitHub with this app, `Actions`, `Checks` and `Commit statuses`, and **no**
-`Contents`, because the supervisor neither implements nor merges. The manifest is the reference:
+supervisor reads GitHub with this app, `Actions`, `Checks` and `Commit statuses`, and
+`Contents` **read-only** since #717, for the clone of a private managed repository ([The clone
+of a role](#the-clone-of-a-role)), never read and write, because the supervisor neither
+implements nor merges. The manifest is the reference:
 an app created by hand before the manifests may hold permissions it does not list, which anyone
 with the key could ask for by minting a token without `scripts/supervisor-token.py`, so the
 operator removes them ([ops/README.md](../../ops/README.md#2-github-app), #655). It signs the supervisor's commands on escalations, its labels (`agent:ready`, priorities,
@@ -2386,7 +2429,8 @@ model = "claude-opus-5-5"
   `$DEVLOOP_APP_KEY_DIR` or `key_dir`: with a `key_dir` of devloop's user in the overlay, the
   supervisor sets `$DEVLOOP_APP_KEY_DIR` to its own. Without `--perm` the token gets `issues=write` and
   `pull_requests=write`; only `issues` and `pull_requests` (read or write), and `actions`,
-  `checks`, `statuses` and `metadata` read, may be asked for. The supervisor reads GitHub with
+  `checks`, `statuses`, `metadata` and `contents` read, may be asked for; `contents=read` (#717)
+  only for [the clone of a role](#the-clone-of-a-role). The supervisor reads GitHub with
   this script too, asking only the read permissions it needs (`--perm issues=read`, `--perm
   actions=read`, …): since #643 it has no personal token of `gh`. The token reaches the command
   through `GH_TOKEN` only, and is never printed.
@@ -2414,7 +2458,9 @@ in the [precision of ADR 0002 of 2026-11-22](../adr/0002-ruoli-e-responsabilita.
 `[apps.coordinator]`, created by the operator from the manifest
 `ops/github/apps/coordinator.json` (#549) with `Issues: Read and write`, `Pull requests: Read
 and write`, `Metadata: Read-only` and, read-only for the diagnosis of the CI, `Actions`,
-`Checks` and `Commit statuses`, and **no** `Contents`. It is distinct from the
+`Checks` and `Commit statuses`, and `Contents` **read-only** since #717, for the clone of a
+private managed repository ([The clone of a role](#the-clone-of-a-role)), never read and write.
+It is distinct from the
 supervisor's app, whose work the coordinator verifies: two actors never share an app. The local
 overlay of the project declares it, and turns it on with `[roles.coordinator]`, off by default
 (D10):
@@ -2482,8 +2528,9 @@ model = "gpt-6.1-sol"
   key_dir`, the token only in `GH_TOKEN`, never printed. `[apps] key_dir` of the overlay is
   devloop's, so the coordinator always sets `DEVLOOP_APP_KEY_DIR` to its own key_dir. Without
   `--perm` the token gets `issues=write` and `pull_requests=write`; only `issues` and
-  `pull_requests` (read or write) and `actions`, `checks`, `statuses` and `metadata` read may be
-  asked for, any other permission is refused
+  `pull_requests` (read or write) and `actions`, `checks`, `statuses`, `metadata` and `contents`
+  read may be asked for (`contents=read`, #717, only for [the clone of a
+  role](#the-clone-of-a-role)), any other permission is refused
   ([ops/README.md](../../ops/README.md#10-coordinatore-facoltativo)). A text with a path of the
   host or a key file is refused as the supervisor's script refuses it, and
   `--allow-host-details` publishes it anyway, logged (#583):

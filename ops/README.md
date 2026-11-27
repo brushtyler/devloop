@@ -363,8 +363,19 @@ possiede).
 | `merger` | contents: write, pull_requests: write | solo i merge (#201) |
 | `claude-agent`, `codex-agent`, `agy-agent` | contents: write, issues: write, pull_requests: write, actions/checks/statuses: read | con l'ADR 0005, quando l'implementer è un'app a sé, i reviewer scendono a contents: read |
 | `implementer` | contents: write, issues: write, pull_requests: write | **mai `workflows`**: senza quel permesso GitHub rifiuta i push che cambiano `.github/workflows/` |
-| `supervisor` | issues: write, pull_requests: write, actions/checks/statuses: read | **nessun contents**; anche le letture passano dall'app, senza token personale (#643) |
-| `coordinator` | issues: write, pull_requests: write, actions/checks/statuses: read | **nessun contents**; le letture per la diagnosi della CI; solo se c'è il coordinatore (passo 10) |
+| `supervisor` | issues: write, pull_requests: write, actions/checks/statuses/contents: read | **mai contents in scrittura**; `contents: read` solo per il clone di un repository gestito privato (#717); anche le letture passano dall'app, senza token personale (#643) |
+| `coordinator` | issues: write, pull_requests: write, actions/checks/statuses/contents: read | **mai contents in scrittura**; `contents: read` solo per il clone di un repository gestito privato (#717); le letture per la diagnosi della CI; solo se c'è il coordinatore (passo 10) |
+
+**Quando serve `contents: read` alle app di ruolo** (#717). Supervisore e coordinatore lavorano in
+un clone del repository gestito (`SUPERVISOR_CLONE`, `COORDINATOR_CLONE`). Per un repository
+pubblico, compreso quello di devloop, il clone si legge senza credenziali e il permesso non serve:
+un insieme di app usato solo per repository pubblici può non averlo. Un insieme che serve un
+repository **privato** deve averlo: `setup-supervisor.sh` e `setup-coordinator.sh` clonano e
+aggiornano il clone del ruolo con un token della sua app limitato a `contents=read`, che
+`scripts/supervisor-token.py` e `scripts/coordinator-token.py` concedono solo con un `--perm
+contents=read` esplicito, mai per default e mai in scrittura. Il manifest è uno solo per tutti gli
+insiemi, e lo dichiara. Con un insieme condiviso il permesso vale su tutti i repository
+dell'insieme, ma è sola lettura.
 
 Nessuna app ha `workflows` o permessi di amministrazione. I permessi che devloop chiede per ogni
 azione sono in `devloop/apps.py` (`IMPLEMENT`, `REVIEW`, `PR_COMMENT`, `ISSUE_COMMENT`, `MERGE`,
@@ -813,7 +824,13 @@ installa la **copia di root del risveglio** `role-wait.sh` con `lib.sh` e i para
 `SUPERVISOR_OPS_DIR` (`/usr/local/lib/devloop-supervisor`, 755 e 644, di root; con `PROJECT`,
 `-<progetto>`) e il **watchdog dei ruoli** (le unità template e, se il progetto ha anche il
 coordinatore, la sua istanza: passo 10, "Watchdog dei ruoli", #602), clona il repository e
-prepara `key_dir` e `~/.claude` (700).
+prepara `key_dir` e `~/.claude` (700). Un repository gestito che non si legge senza credenziali
+(privato, #717) lo clona, e se il clone c'è già lo aggiorna, con un token dell'app `supervisor`
+limitato a `contents=read` (`scripts/supervisor-token.py --perm contents=read`, che esegue
+`scripts/role-git.py`): il token passa solo nell'ambiente di `git`, come nei fetch di devloop
+(#716), e mai nella configurazione del clone. Serve la chiave dell'app nella `key_dir` del
+supervisore e, senza `SOURCE_REPO`, un clone che c'è già (lo script dei token è nel clone stesso):
+finché mancano, lo script lo dice fra le cose da fare e si riesegue dopo.
 Con la sorgente a parte (`SOURCE_REPO`, [Un altro progetto](#un-altro-progetto)) il repository
 gestito non contiene `scripts/supervisor-token.py`: lo script clona anche la sorgente, come
 `supervisor`, in `SUPERVISOR_SOURCE_CLONE` (`/home/supervisor/devloop-source`; con `PROJECT`,
@@ -857,7 +874,9 @@ Poi, a mano:
   finché P5-4 non è attivo, `claude-agent`. Con P5-4 attivo (`[roles.supervisor]` come tabella
   nell'overlay di devloop), le scritture del supervisore passano da
   `scripts/supervisor-token.py`, che conia un token dell'app `supervisor` con i soli permessi
-  dell'azione (`issues` e `pull_requests`, e in sola lettura `actions`, `checks` e `statuses`),
+  dell'azione (`issues` e `pull_requests`, e in sola lettura `actions`, `checks` e `statuses`;
+  `contents` in sola lettura, solo con `--perm contents=read` e per il clone di un repository
+  privato, #717),
   con `--state-dir` sullo `state_dir` di devloop
   (`/home/devloop/devloop/.devloop`), dal cui overlay legge `repo` e `[apps.supervisor]`
   (ADR 0006, R6); prima passano da `scripts/agent-token.py`, con
@@ -921,7 +940,10 @@ servizio; il comando `devloop` e il file del progetto (#588: uguali a quelli gen
 root, in una directory di root non scrivibile da altri; un avviso se mancano); che `devloop-agent` scriva le voci di `AGENT_CLI_WRITABLE`; `--version` di ogni CLI
 come `devloop-agent` e, sempre come `devloop-agent`, un prompt che le fa eseguire `git --version`
 con il loro strumento di shell (#494: passa dal modello, con la rete e il login della CLI; un
-errore se non risponde con `git version` o se nell'output c'è un `permission denied`); se il
+errore se non risponde con `git version` o se nell'output c'è un `permission denied`); che i
+clone dei ruoli si aggiornino (#717: come l'utente del ruolo e senza scrivere nel clone; per un
+repository pubblico, `git ls-remote origin` dal clone, con la sua configurazione; per uno privato,
+che la sua app con `contents=read` legga il repository; non con `--no-apps`); se il
 repository gestito è pubblico o privato (#718: un `git ls-remote` anonimo) e, se è privato, che
 l'overlay abbia `[apps.dispatcher]`, che il clone e la copia fissata ci siano e che il fetch del
 clone con il token del dispatcher riesca, come `devloop` (`devloop fetch`; con `--read-only`
@@ -1365,7 +1387,9 @@ Su un host già attivo: [host/migrate.md](host/migrate.md#la-manutenzione-dellho
 `<APP_PREFIX>coordinator`, che l'operatore crea come le altre (passo 2), dal manifest
 `ops/github/apps/coordinator.json`: `issues: write`, `pull_requests: write`, `metadata: read` e,
 in sola lettura per la diagnosi della CI, `actions`, `checks` e `statuses`; **nessun accesso ai
-contenuti**.
+contenuti** in scrittura, e in lettura (`contents: read`) solo per il clone di un repository
+gestito privato (#717, [Quando serve `contents: read` alle app di
+ruolo](#2-github-app)).
 
 1. `bash ops/github/create-apps.sh --dry-run` la elenca (`coordinator` è in `APPS`) con i suoi
    permessi; la pagina generata ha il suo pulsante. Creata l'app, si completa lo scambio del
@@ -1443,7 +1467,10 @@ non cambiano: i loro worktree vengono dal clone del dispatcher, e restano senza 
 rete.
 
 **I permessi.** Nessuno nuovo per devloop: il manifest del dispatcher ha già `contents: read`
-(passo 2). Le app si creano e si installano sul repository privato come su uno pubblico.
+(passo 2). Le app si creano e si installano sul repository privato come su uno pubblico. Le app
+`supervisor` e `coordinator` devono avere `contents: read` per i clone dei ruoli (sotto, e [Quando
+serve `contents: read` alle app di ruolo](#2-github-app), #717): il manifest lo dichiara, e sulle
+app già create si aggiunge dalle loro impostazioni.
 
 **I parametri.** Un repository privato vuole la sorgente a parte (`SOURCE_REPO` e `SOURCE_REF`:
 devloop viene dal clone della sorgente, pubblica) e uno `STATE_DIR` assoluto, fuori dal clone, che
@@ -1473,13 +1500,26 @@ Con `--dry-run` nessuno dei due script chiede nulla a GitHub: `setup-devloop.sh`
 di sempre e, sotto, come si clona un repository privato. Un repository pubblico che GitHub non
 raggiunge (la rete assente) sembra privato: i messaggi lo dicono.
 
+**I clone dei ruoli** (`SUPERVISOR_CLONE` e `COORDINATOR_CLONE`, #717). `setup-supervisor.sh` e
+`setup-coordinator.sh` fanno la stessa domanda anonima: un repository che si legge senza
+credenziali si clona come sempre; uno privato si clona, e se il clone c'è già si aggiorna, come
+l'utente del ruolo con un token della sua app limitato a `contents=read`
+(`scripts/supervisor-token.py` o `scripts/coordinator-token.py --perm contents=read`, che esegue
+`scripts/role-git.py`): il token passa solo nell'ambiente di `git`, mai nella configurazione del
+clone. Servono:
+
+- l'app del ruolo con `contents: read`, installata sul repository, e la sua tabella nell'overlay
+  (`[apps.supervisor]`, `[apps.coordinator]`);
+- la chiave dell'app nella `key_dir` del ruolo;
+- `scripts/role-git.py` nel clone della sorgente del ruolo, quindi un `SOURCE_REF` che contiene
+  #717 (lo script dei token viene da lì: un repository privato vuole già la sorgente a parte).
+
+Finché ne manca uno, lo script lo dice fra le cose da fare (`setup-project.sh` le raccoglie e non
+si ferma), e si riesegue quando è pronto; un clone o un aggiornamento con l'app che non riesce è un
+avviso. `check-host.sh` verifica, come l'utente di ogni ruolo, che il suo clone si aggiorni.
+
 **I limiti.**
 
-- **I clone dei ruoli** (`SUPERVISOR_CLONE` e `COORDINATOR_CLONE`): `setup-supervisor.sh` e
-  `setup-coordinator.sh` clonano ancora il repository gestito senza credenziali, e con un
-  repository privato non riescono, quindi `setup-project.sh` si ferma a `setup-supervisor.sh`. È
-  #717: le app del supervisore e del coordinatore avranno bisogno di `contents: read`, che serve
-  solo per un repository privato; per uno pubblico, compreso quello di devloop, non è necessario.
 - **I registri privati delle dipendenze** di `[prepare]` restano fuori: la preparazione dei
   worktree gira come l'utente degli agent, senza credenziali di rete.
 - **La sorgente di devloop** resta pubblica: i suoi clone (`SOURCE_CLONE` e quelli dei ruoli) non

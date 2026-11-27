@@ -11,7 +11,8 @@
 # worktree, #572; l'ambiente dei turni gli arriva con sudo -E,
 # che sudo-rs ignora), il lock per repository (directory comune, gruppo, overlay; ADR 0006, R8),
 # servizio, comando devloop dell'host e file del progetto (#588), CLI degli agent (--version, e un `git --version` con il loro strumento di shell,
-# #494) e `devloop apps`, e il coordinatore, se l'overlay del progetto lo dichiara (#571; key_dir e chiave della sua app, ACL e lettura dell'overlay, #549;
+# #494), che i clone dei ruoli si aggiornino (per un repository privato con la loro app, #717) e
+# `devloop apps`, e il coordinatore, se l'overlay del progetto lo dichiara (#571; key_dir e chiave della sua app, ACL e lettura dell'overlay, #549;
 # sudoers e copia di root di questo script, #530; il suo clone, #643), e Claude Code dei ruoli
 # senza aggiornamenti automatici (#643), la sentinella dei ruoli a riposo (unità, utente, ACL) e la
 # directory rest/ della casella (3770, #684), se il repository gestito è privato e, in quel caso,
@@ -51,7 +52,8 @@ VERBOSE=0
 usage() {
     say "Uso: sudo bash $0 [--params FILE] [--dry-run] [--no-apps] [--read-only] [--verbose]"
     say
-    say '  --no-apps       non esegue `devloop apps` (che interroga GitHub)'
+    say '  --no-apps       non esegue `devloop apps` né la verifica dei clone dei ruoli (che'
+    say '                  interrogano GitHub)'
     say '  --read-only     nessuna CLI avviata, niente `devloop apps`, nessuna scrittura (il'
     say '                  coordinatore, #530)'
     say '  --verbose       i percorsi reali dell'"'"'host, per la diagnosi locale: senza, l'"'"'output'
@@ -1345,6 +1347,52 @@ if [ -n "$SOURCE_REPO" ]; then
     fi
     [ -d "$SOURCE_CLONE/.git" ] && ok "$SOURCE_CLONE è un clone della sorgente" \
         || fail "$SOURCE_CLONE non è un clone (setup-devloop.sh)"
+fi
+
+# check_role_clone RUOLO UTENTE CLONE KEY_DIR TOKEN_CLONE: che il clone del ruolo si aggiorni
+# (#717). Un repository che si legge senza credenziali si aggiorna con git fetch dal clone: come
+# l'utente del ruolo, `git ls-remote origin` nel clone (ORIGIN_PROBE), con la sua configurazione
+# (l'origin, le riscritture dell'URL) e senza scrivervi nulla. Uno privato con l'app del ruolo,
+# limitata a contents=read: come l'utente del ruolo, `role-git.py check`, che legge il repository
+# con quel token senza scrivere nulla nel clone. Interroga GitHub: non con --no-apps né con
+# --read-only; con --dry-run stampa soltanto.
+ORIGIN_PROBE='export GIT_TERMINAL_PROMPT=0 GIT_OPTIONAL_LOCKS=0; timeout 60 git -C "$1" ls-remote --quiet origin HEAD >/dev/null'
+check_role_clone() {
+    local role=$1 user=$2 clone=$3 key_dir=$4 token_clone=$5
+    if [ ! -d "$clone/.git" ]; then
+        say "  $clone non è un clone: nessun aggiornamento da verificare (setup-$role.sh)"
+        return 0
+    fi
+    role_git_cmd "$role" "$key_dir" "$token_clone" check "$clone"
+    if [ "$DRY_RUN" = 1 ]; then
+        say "  se $REPO si legge senza credenziali (repository pubblico):"
+        check_as "$user" "$clone si aggiorna con git fetch" \
+            /usr/bin/bash -c "$ORIGIN_PROBE" _ "$clone"
+        say "  se $REPO non si legge senza credenziali (repository privato, #717):"
+        check_as "$user" "$clone si aggiorna con l'app $role" "${ROLE_GIT[@]}"
+    elif repo_public "$REPO"; then
+        check_as "$user" "$REPO si legge senza credenziali: $clone si aggiorna con git fetch, senza l'app $role" \
+            /usr/bin/bash -c "$ORIGIN_PROBE" _ "$clone"
+    else
+        check_as "$user" "$clone si aggiorna con l'app $role (contents: read, #717)" "${ROLE_GIT[@]}"
+    fi
+}
+step "Aggiornamento dei clone dei ruoli (#717)"
+if [ "$CHECK_APPS" = 1 ]; then
+    token_clone=$SUPERVISOR_CLONE
+    [ -z "$SOURCE_REPO" ] || token_clone=$SUPERVISOR_SOURCE_CLONE
+    check_role_clone supervisor "$SUPERVISOR_USER" "$SUPERVISOR_CLONE" "$SUPERVISOR_KEY_DIR" \
+        "$token_clone"
+    if [ "$PROJECT_COORDINATOR" = 1 ] && user_exists "$COORDINATOR_USER"; then
+        token_clone=$COORDINATOR_CLONE
+        [ -z "$SOURCE_REPO" ] || token_clone=$COORDINATOR_SOURCE_CLONE
+        check_role_clone coordinator "$COORDINATOR_USER" "$COORDINATOR_CLONE" \
+            "$COORDINATOR_KEY_DIR" "$token_clone"
+    fi
+elif [ "$READ_ONLY" = 1 ]; then
+    say '  saltato (--read-only)'
+else
+    say '  saltato (--no-apps)'
 fi
 
 # Un repository gestito privato (#718): GitHub non lo dà senza credenziali, e il loop lo legge con
