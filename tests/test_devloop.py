@@ -1057,7 +1057,7 @@ class FakeWS:
         name = f'{Path(path).name}-review'
         return name, Path('/wt') / name
 
-    def pristine(self, path, head):
+    def pristine(self, path, head, outputs=()):
         return not self.touched and self._head == head
 
     def head(self, path):
