@@ -940,8 +940,9 @@ root, in una directory di root non scrivibile da altri; un avviso se mancano); c
 come `devloop-agent` e, sempre come `devloop-agent`, un prompt che le fa eseguire `git --version`
 con il loro strumento di shell (#494: passa dal modello, con la rete e il login della CLI; un
 errore se non risponde con `git version` o se nell'output c'è un `permission denied`); che i
-clone dei ruoli si aggiornino (#717: per un repository privato, come l'utente del ruolo, che la
-sua app con `contents=read` legga il repository, senza scrivere nel clone; non con `--no-apps`); e
+clone dei ruoli si aggiornino (#717: come l'utente del ruolo e senza scrivere nel clone; per un
+repository pubblico, `git ls-remote origin` dal clone, con la sua configurazione; per uno privato,
+che la sua app con `contents=read` legga il repository; non con `--no-apps`); e
 `devloop apps`
 (ogni app, la sua installazione e i suoi permessi). Con `--dry-run` stampa, senza eseguirle, le
 verifiche che passano da `sudo` o dalla rete.

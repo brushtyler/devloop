@@ -1986,8 +1986,10 @@ of the token script (the clone of the source with `SOURCE_REPO`, else the role's
 token script sets them, and passes it to `git` with the defences of the fetches of devloop
 (`workspace.app_auth_env`, above): only in the environment of that one command, never in the
 clone's config; `fetch` updates the remote branches of `origin`. `ops/host/check-host.sh`
-verifies that each role's clone updates: for a private repository, `role-git.py check`, which
-reads the repository with the token (`git ls-remote`) without writing in the clone; not with
+verifies that each role's clone updates, as the role's user and without writing in the clone:
+for a public repository, `git ls-remote origin` from the clone, with its own config (its origin,
+its URL rewrites), the path of a plain `git fetch`; for a private repository, `role-git.py
+check`, which reads the repository with the token (`git ls-remote`); not with
 `--no-apps` nor `--read-only`. A role session can update its clone the same way.
 
 **When the permission is needed.** `contents: read` to the role apps is needed only for a private

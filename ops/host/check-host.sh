@@ -1347,10 +1347,13 @@ if [ -n "$SOURCE_REPO" ]; then
 fi
 
 # check_role_clone RUOLO UTENTE CLONE KEY_DIR TOKEN_CLONE: che il clone del ruolo si aggiorni
-# (#717). Un repository che si legge senza credenziali si aggiorna con git fetch; uno privato con
-# l'app del ruolo, limitata a contents=read: come l'utente del ruolo, `role-git.py check`, che
-# legge il repository con quel token senza scrivere nulla nel clone. Interroga GitHub: non con
-# --no-apps né con --read-only; con --dry-run stampa soltanto.
+# (#717). Un repository che si legge senza credenziali si aggiorna con git fetch dal clone: come
+# l'utente del ruolo, `git ls-remote origin` nel clone (ORIGIN_PROBE), con la sua configurazione
+# (l'origin, le riscritture dell'URL) e senza scrivervi nulla. Uno privato con l'app del ruolo,
+# limitata a contents=read: come l'utente del ruolo, `role-git.py check`, che legge il repository
+# con quel token senza scrivere nulla nel clone. Interroga GitHub: non con --no-apps né con
+# --read-only; con --dry-run stampa soltanto.
+ORIGIN_PROBE='export GIT_TERMINAL_PROMPT=0 GIT_OPTIONAL_LOCKS=0; timeout 60 git -C "$1" ls-remote --quiet origin HEAD >/dev/null'
 check_role_clone() {
     local role=$1 user=$2 clone=$3 key_dir=$4 token_clone=$5
     if [ ! -d "$clone/.git" ]; then
@@ -1359,10 +1362,14 @@ check_role_clone() {
     fi
     role_git_cmd "$role" "$key_dir" "$token_clone" check "$clone"
     if [ "$DRY_RUN" = 1 ]; then
+        say "  se $REPO si legge senza credenziali (repository pubblico):"
+        check_as "$user" "$clone si aggiorna con git fetch" \
+            /usr/bin/bash -c "$ORIGIN_PROBE" _ "$clone"
         say "  se $REPO non si legge senza credenziali (repository privato, #717):"
         check_as "$user" "$clone si aggiorna con l'app $role" "${ROLE_GIT[@]}"
     elif repo_public; then
-        ok "$REPO si legge senza credenziali: $clone si aggiorna senza l'app $role"
+        check_as "$user" "$REPO si legge senza credenziali: $clone si aggiorna con git fetch, senza l'app $role" \
+            /usr/bin/bash -c "$ORIGIN_PROBE" _ "$clone"
     else
         check_as "$user" "$clone si aggiorna con l'app $role (contents: read, #717)" "${ROLE_GIT[@]}"
     fi

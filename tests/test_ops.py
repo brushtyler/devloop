@@ -5692,7 +5692,14 @@ class CheckHostTests(OpsTestCase):
         (clone / '.git').mkdir(parents=True)
         done, errors = self.check()
         self.assertEqual(errors, [])
-        self.assertIn(f'{step}  se brushtyler/devloop non si legge senza credenziali (repository '
+        self.assertIn(f'{step}  se brushtyler/devloop si legge senza credenziali (repository '
+                      f'pubblico):\n  [dry-run] sudo -u {ME} -H -- /usr/bin/bash -c ', done.stdout)
+        probe = next(line for line in done.stdout.splitlines()
+                     if line.startswith(f'  [dry-run] sudo -u {ME} -H -- /usr/bin/bash -c ')
+                     and 'ls-remote' in line)
+        self.assertIn(r'git\ -C\ \"\$1\"\ ls-remote\ --quiet\ origin\ HEAD', probe)
+        self.assertTrue(probe.endswith(f' _ {clone}'), probe)
+        self.assertIn(f'  se brushtyler/devloop non si legge senza credenziali (repository '
                       f'privato, #717):\n  [dry-run] sudo -u {ME} -H -- env -C {clone} '
                       f'DEVLOOP_APP_KEY_DIR={self.supervisor}/.ghapps /usr/bin/python3 '
                       f'scripts/supervisor-token.py --state-dir {self.state} --perm contents=read '
@@ -5703,6 +5710,63 @@ class CheckHostTests(OpsTestCase):
                 self.assertIn(f'{step}  saltato ({why})\n', done.stdout)
                 self.assertNotIn('role-git.py', done.stdout)
         self.assertEqual(self.mutating_calls(), [])
+
+    def test_the_clone_of_a_public_repository_updates_from_its_own_config(self):
+        # #717, check_role_clone outside a dry run, for a repository that reads without
+        # credentials: the probe runs as the role's user from the clone itself, with its own
+        # config, so an origin that does not answer (here a URL rewrite of the clone to nowhere)
+        # is an error, not an "ok"; it writes nothing in the clone. No network: the rewrite
+        # sends the GitHub URL to a local repository, and repo_public answers yes.
+        real_git = shutil.which('git')
+        git_env = dict(os.environ, GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null',
+                       GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@example.invalid',
+                       GIT_COMMITTER_NAME='t', GIT_COMMITTER_EMAIL='t@example.invalid')
+
+        def git(*args):
+            subprocess.run([real_git, *args], check=True, capture_output=True, env=git_env)
+
+        upstream, clone = self.tmp / 'upstream', self.tmp / 'clone'
+        git('init', '-q', str(upstream))
+        git('-C', str(upstream), 'commit', '-q', '--allow-empty', '-m', 'first')
+        git('init', '-q', str(clone))
+        git('-C', str(clone), 'remote', 'add', 'origin', 'https://github.com/acme/widget.git')
+        text = (OPS / 'host/check-host.sh').read_text(encoding='utf-8')
+        functions = [re.search(rf'^{name}\(\) {{\n.*?^}}\n', text, re.M | re.S).group(0)
+                     for name in ('check_as', 'check_role_clone')]
+        probe = re.search(r"^ORIGIN_PROBE=.*\n", text, re.M).group(0)
+        defs = self.tmp / 'defs.sh'
+        defs.write_text(probe + ''.join(functions))
+
+        def check():
+            script = (f'. {shlex.quote(str(OPS / "lib.sh"))}; . {shlex.quote(str(defs))}; '
+                      'repo_public() { return 0; }; DRY_RUN=0; WARNINGS=0; FAILURES=0; '
+                      'REPO=acme/widget; APP_PREFIX=acme-devloop-; STATE_PATH=/srv/state; '
+                      f'check_role_clone supervisor {ME} {clone} {self.tmp}/keys '
+                      f'{self.tmp}/source; echo "failures=$FAILURES"')
+            return subprocess.run([BASH, '-c', script], capture_output=True, text=True,
+                                  env=dict(git_env, LC_ALL='C.UTF-8'),
+                                  stdin=subprocess.DEVNULL, timeout=60)
+
+        rewrite = 'url.{}.insteadOf'
+        git('-C', str(clone), 'config', rewrite.format(upstream),
+            'https://github.com/acme/widget.git')
+        before = sorted(p.relative_to(clone) for p in clone.rglob('*'))
+        done = check()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn(f'  ok: acme/widget si legge senza credenziali: {clone} si aggiorna con '
+                      "git fetch, senza l'app supervisor\nfailures=0\n", done.stdout)
+        self.assertNotIn('role-git.py', done.stdout)
+        self.assertEqual(sorted(p.relative_to(clone) for p in clone.rglob('*')), before)
+        # The clone's own config sends origin nowhere: an error, though GitHub reads.
+        git('-C', str(clone), 'config', '--unset', rewrite.format(upstream))
+        git('-C', str(clone), 'config', rewrite.format(self.tmp / 'nowhere'),
+            'https://github.com/acme/widget.git')
+        done = check()
+        self.assertIn(f'  ERRORE: acme/widget si legge senza credenziali: {clone} si aggiorna '
+                      "con git fetch, senza l'app supervisor: non riuscito\nfailures=1\n",
+                      done.stdout)
+        self.assertEqual(subprocess.run([real_git, '-C', str(clone), 'fetch', '-q', 'origin'],
+                                        capture_output=True, env=git_env).returncode, 128)
 
     def test_claude_code_of_the_roles_does_not_update_itself(self):
         # #643: the settings of Claude Code of the supervisor and of the coordinator turn the
