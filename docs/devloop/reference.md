@@ -1860,7 +1860,7 @@ Each agent and the dispatcher can act on GitHub with its own GitHub App (#65), c
 
 | Actor | Does |
 |---|---|
-| dispatcher | every read, labels, escalations, CI rounds, re-runs of failed CI jobs not pertinent to the PR (needs `actions: write`, see [CI failures not pertinent to the PR](#ci-failures-not-pertinent-to-the-pr)), finding closures, a PR's readiness for merge, the labels of the readiness check and its escalation to the supervisor, the record of a [conclave](guide.md#conclave-on-a-block), the restart after a `UNANIMOUS` decision and the suspension after a [veto](guide.md#veto), the summary of an [advisory review](guide.md#advisory-review-for-the-operator), the "blocked by" of a [missing prerequisite](guide.md#missing-prerequisites) with its `prerequisite` record (`issues: write`, as its labels) |
+| dispatcher | every read, the clone and the fetches of the managed repository (`contents: read`, see [Clone and fetch of the managed repository](#clone-and-fetch-of-the-managed-repository)), labels, escalations, CI rounds, re-runs of failed CI jobs not pertinent to the PR (needs `actions: write`, see [CI failures not pertinent to the PR](#ci-failures-not-pertinent-to-the-pr)), finding closures, a PR's readiness for merge, the labels of the readiness check and its escalation to the supervisor, the record of a [conclave](guide.md#conclave-on-a-block), the restart after a `UNANIMOUS` decision and the suspension after a [veto](guide.md#veto), the summary of an [advisory review](guide.md#advisory-review-for-the-operator), the "blocked by" of a [missing prerequisite](guide.md#missing-prerequisites) with its `prerequisite` record (`issues: write`, as its labels) |
 | readiness checker (`preflight`) | the outcome of the [readiness check](guide.md#readiness-check-before-implementation) on the issue, with its `preflight` record, also when a fallback model ran it |
 | implementer | commits (author and committer are its bot), push, opens the PR, fix and blocked comments |
 | reviewer | one native GitHub review (`APPROVE` or `REQUEST_CHANGES`; for `needs_operator`, `REQUEST_CHANGES` while blocking findings of its own stay open, else `APPROVE`, #418) on the reviewed commit, whose body is the review and its record (#325, see [Where a review is published](protocol.md#where-a-review-is-published)); an agent without an app publishes the review comment instead |
@@ -1878,7 +1878,9 @@ cannot push; labels are always set by the dispatcher.
 Private keys are read from `key_dir` (or `$DEVLOOP_APP_KEY_DIR`) as
 `<slug>.<date>.private-key.pem`, the newest one per app, and must have mode `600`. The JWT is
 signed with the `openssl` binary. Tokens stay in the dispatcher: they reach `gh` through
-`GH_TOKEN` and `git push` through an HTTP header in the environment of that single command, never
+`GH_TOKEN` and `git push` (and `git fetch`, see [Clone and fetch of the managed
+repository](#clone-and-fetch-of-the-managed-repository)) through an HTTP header in the
+environment of that single command, never
 through a file or the command line. No other credential can join the push: it refuses a URL that
 an `insteadOf` or `pushInsteadOf` rule would rewrite, allows only the HTTPS transport, and
 disables credential helpers, askpass programs and preconfigured authentication headers. The
@@ -1935,6 +1937,33 @@ environment are kept. `PYTHONDONTWRITEBYTECODE=1` is always set, whatever the op
 the commits](#generated-files-in-the-commits)). This prevents accidental use of the operator's credentials, not
 deliberate access: code running as the same system user can still read files. The isolation
 comes from the [agent user](#agent-user), which cannot read the keys at all.
+
+### Clone and fetch of the managed repository
+
+The managed repository may be private (#716). Every fetch of the dispatcher (the base branch
+before a worktree, a review, a sync or a conclave, with the PR branch when it is needed) goes,
+when `[apps]` has the dispatcher's app, to `https://github.com/<repo>.git` with a token of that
+app limited to `contents: read`, a permission its manifest
+(`ops/github/apps/dispatcher.json`) already has; the remote branches it updates are those of
+`origin`, as before. It is the one path, for a public repository too: a repository that becomes
+private breaks nothing. The defences are those of the push, in the same environment
+(`workspace.app_auth_env`): the token only in the environment of that one command, never in
+`.git/config`, on the command line or in the log; credential helpers reset, askpass programs and
+SSH off, only the HTTPS transport; a URL that an `insteadOf` or `pushInsteadOf` rule would
+rewrite is refused. A token that cannot be minted fails the fetch as a fetch that fails, with
+a message that says so (`git fetch: no token of the dispatcher app …`); a token GitHub refuses
+fails it with git's message. Without the dispatcher's app, the fetches use `origin` with the
+ambient credentials, as before. `tick --dry-run` does not fetch, so it mints no token. The
+agents are not concerned: their worktrees come from the dispatcher's clone and they stay
+without network credentials.
+
+`devloop clone DEST` makes the first clone of the managed repository the same way, with the
+same token and defences: `DEST` absent or empty, `origin` at `https://github.com/<repo>.git`,
+no token in its config. Since the clone may come before the checkout and the project file, it
+reads only the overlay given with `--local-config` (`repo`, `[apps.dispatcher]` and `[apps]
+key_dir`; `$DEVLOOP_APP_KEY_DIR` prevails), and stops without the dispatcher's app or its
+key. The scripts of the host use it in a later change; the clones of the installation's source
+(`SOURCE_REPO`), which is public, are not concerned.
 
 ### Host details in the published texts
 

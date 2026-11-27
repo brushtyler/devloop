@@ -58,6 +58,14 @@ PR_COMMENT = {'pull_requests': 'write'}
 ISSUE_COMMENT = {'issues': 'write'}
 MERGE = {'contents': 'write', 'pull_requests': 'write'}  # only the merger's token (#201)
 RERUN = {'actions': 'write'}  # only the dispatcher's, to re-run failed CI jobs (#200)
+# Only the dispatcher's, to clone and fetch the managed repository, private too (#716).
+FETCH = {'contents': 'read'}
+
+
+def repo_url(repo):
+    """The HTTPS URL of the GitHub repository ``repo`` (``owner/name``): the one devloop pushes
+    to, fetches and clones from with an app token."""
+    return f'https://github.com/{repo}.git'
 
 _REFRESH_MARGIN = 300  # seconds of validity a cached token must still have
 STEP_TIMEOUT = 30  # seconds, for each step of a token's mint (signature, HTTP request)
@@ -350,4 +358,14 @@ class Identities:
             return None
         token = app.token(permissions)
         return {'name': app.login, 'email': f'{app.user_id(token)}+{app.login}@users.noreply.github.com',
-                'url': f'https://github.com/{self.repo}.git', 'token': token}
+                'url': repo_url(self.repo), 'token': token}
+
+    def fetch_auth(self):
+        """The credentials of the fetches of the managed repository (#716, ``Workspace``):
+        ``{url, token}`` with a token of the dispatcher's app limited to ``FETCH``
+        (``contents=read``), minted, or reused, at each call; None without the dispatcher's app,
+        for the ambient ones."""
+        app = self.apps.get(DISPATCHER)
+        if app is None:
+            return None
+        return {'url': repo_url(self.repo), 'token': app.token(FETCH)}
