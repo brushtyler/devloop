@@ -2598,7 +2598,7 @@ on the host. Telegram takes the details of the host, never a secret nor a vulner
 # command (the launcher, scripts/devloop-pinned, passes them itself):
 devloop="python3 -m devloop --project-config .devloop/project.toml --local-config .devloop/config.local.toml"
 $devloop setup            # create the agent:* labels, the priority:* labels and the review level labels (reviews:0 only when level 0 is on)
-$devloop status           # running action, devloop PRs (with rounds counted on max_review_rounds, merge state and conflicts), ready issues in start order with their priority, planned actions; with [budget] on, the budget of the stories in progress; a pinned copy behind origin/main in the files of the installation; the operator's direction in force; the channel of the notices and operator_mentions; the label tracking:attiva of the tracking issues in use (see Tracking issues in use)
+$devloop status           # running action, devloop PRs (with rounds counted on max_review_rounds, merge state and conflicts), ready issues in start order with their priority, planned actions; with [budget] on, the budget of the stories in progress; a pinned copy behind origin/main in the files of the installation; the operator's direction in force; the channel of the notices and operator_mentions; the label tracking:attiva of the tracking issues in use (see Tracking issues in use); an agent that does not admit test_cmd or prompts.module_test_cmd (reference, "Test commands of the agents")
 $devloop apps             # check the GitHub App of each actor, on the project's repo and with its key_dir
 $devloop tick --dry-run   # print the ready issues in start order and the plan, change nothing (no lock: it runs beside a dispatcher)
 $devloop tick             # run one round

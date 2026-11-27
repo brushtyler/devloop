@@ -14,13 +14,13 @@ from pathlib import Path
 
 from . import (activity, direction, events, follow, notify, pin, redact, report, rest, runloop,
                token, unavailability, watch)
-from .agents import AgentRunner, isolated_env
+from .agents import AgentRunner, admits_command, command_key, isolated_env
 from .agentuser import GH_CONFIG, SHARED_DIR, WORKTREES_DIR, AgentUser, AgentUserError, SharedDir
 from .agentuser import check as check_isolation
 from .apps import DISPATCHER, MERGER, Identities
 from .config import (INSTALL_ROOT, PROJECT_CONFIG, ConfigError, Reloader, compose_sources,
-                     fingerprint, load_config, missing_project_tables, read_sources,
-                     repo_lock_name)
+                     fingerprint, key_role, load_config, missing_project_tables,
+                     read_sources, repo_lock_name)
 from .context import both_labels_warning, label_transition
 from .dispatch_actions import PendingPushes
 from .dispatch_advisory import AdvisoryFailures, AdvisoryResults
@@ -910,6 +910,46 @@ def tracking_lines(cfg, gh):
     return lines
 
 
+def agent_modes(cfg):
+    """The modes of the turns each agent of ``cfg`` may run, by its roles (#697): ``write`` for
+    the keys that may implement (``roles.implementer``, ``[roles.implementers]``, every
+    ``<kind>-implementer``), ``review`` for the reviewers of the pool, the reviewer keys, the
+    readiness check, the conclave, the advisory and the findings-only reviewer. An agent of
+    neither runs no turn, and has no mode."""
+    policy = cfg.review_policy
+    writers = ({cfg.implementer} | {key for _, key in cfg.implementers}
+               | {key for key in cfg.agents if key_role(key) == 'implementer'})
+    readers = ({*cfg.reviewers, cfg.preflight, *cfg.conclave, policy.advisory_reviewer,
+                policy.findings_reviewer}
+               | {key for key in cfg.agents if key_role(key) == 'reviewer'})
+    return {key: tuple(mode for mode, keys in (('write', writers), ('review', readers))
+                       if key in keys)
+            for key in cfg.agents}
+
+
+def command_lines(cfg):
+    """The warnings of ``devloop status`` on the test commands of the agents (#697): a line for
+    each agent whose turns may not run ``test_cmd``, or the command of one test module that the
+    prompts give (``[prompts] module_test_cmd``), with the key that admits them. Only a
+    warning: what an agent may run stays what its configuration says, and the loop goes on."""
+    commands = [(name, value) for name, value in (('test_cmd', cfg.test_cmd),
+                                                  ('prompts.module_test_cmd',
+                                                   cfg.prompts.module_test_cmd)) if value]
+    lines = []
+    for key, modes in agent_modes(cfg).items():
+        agent = cfg.agents[key]
+        parts = []
+        for mode in modes:
+            missing = [f'{name} `{value}`' for name, value in commands
+                       if admits_command(agent, mode, value) is False]
+            if missing:
+                parts.append(' and '.join(missing) + f' not admitted in its {mode} turns '
+                             f'({command_key(agent, mode)})')
+        if parts:
+            lines.append(f'agent commands: {key}: ' + '; '.join(parts))
+    return lines
+
+
 def attention_lines(cfg):
     """The lines of ``devloop status`` on how the operator is warned (#593): the channel of the
     notices, and the logins the requests for a decision mention, which the roles mention too."""
@@ -1263,6 +1303,8 @@ def _command(parser, args, argv, command, timeout):
         if label_transition(dispatcher.gh, cfg.labels) == 'both':
             log(f'labels: {both_labels_warning(cfg.labels)}')
         for line in tracking_lines(cfg, dispatcher.gh):  # #690: only warnings
+            log(line)
+        for line in command_lines(cfg):  # #697: only warnings
             log(line)
         snap = dispatcher.snapshot()
         for pr in snap.prs:

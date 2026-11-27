@@ -346,6 +346,67 @@ slug = "acme-widget-devloop-supervisor"
   prerequisite as a native block ("blocked by") rather than in words: the issue then waits for
   it by itself ([Dependencies between issues](guide.md#dependencies-between-issues)).
 
+### A project that is not Python
+
+The commands the agents may run by default are Python's (#697): the claude agents admit
+`python3 -m unittest …` and `git` reads, agy `python3 -m unittest` and `git` reads, and devloop
+does not derive them from the `test_cmd` of the project file. A command outside them is denied,
+and the turn finds out only by failing. For a project with other tests, `pytest` of the example
+above too, the overlay admits them, agent by agent:
+
+| Agent | Key | What to set |
+|---|---|---|
+| claude implementer (`claude-implementer`) | `[agents.claude-implementer] write_args` | the whole list, with a `Bash(…)` rule of `--allowedTools` for `test_cmd` and for the command of one module |
+| claude reviewer (`claude-reviewer`) | `[agents.claude-reviewer] review_args` | the same, in its read-only list (`--disallowedTools` keeps `Edit` and `Write`) |
+| codex (`codex-reviewer`) | none | codex runs any command in its sandbox; in review turns without network, so a command must not download what the worktree lacks |
+| agy (`agy-reviewer`) | `[agents.agy-reviewer] write_commands` and `review_commands` | the command prefixes, word by word, without `*` nor shell syntax ([agy permissions](reference.md#agy-permissions)) |
+
+An overlay list replaces the installation's whole: copy the rest of it from `devloop/config.toml`
+of the pinned copy. The `review_args` and `review_commands` of the reviewers enter the policy
+version: changing them voids the approvals given with the old ones, so set them before the first
+PR. For an npm project, the project file names its tests:
+
+<!-- quickstart: npm project.toml -->
+```toml
+test_cmd = "npm test"
+local_tests = "full"
+
+[prompts]
+module_test_cmd = "npx vitest run src/name.test.ts"
+```
+
+and the overlay admits them, beside its other keys (`[agents.agy-reviewer]` replaces the table
+of the example above):
+
+<!-- quickstart: npm config.local.toml -->
+```toml
+[agents.claude-implementer]
+write_args = ["--permission-mode", "acceptEdits",
+              "--allowedTools", "Bash(npm test *)", "Bash(npm run *)", "Bash(npx tsc *)",
+              "Bash(npx jest *)", "Bash(npx vitest *)", "Bash(git status *)",
+              "Bash(git diff *)", "Bash(git log *)", "Bash(git show *)",
+              "--disallowedTools", "WebFetch", "WebSearch"]
+
+[agents.claude-reviewer]
+review_args = ["--allowedTools", "Bash(git diff *)", "Bash(git log *)", "Bash(git show *)",
+               "Bash(npm test *)", "Bash(npm run *)", "Bash(npx tsc *)",
+               "Bash(npx jest *)", "Bash(npx vitest *)",
+               "--disallowedTools", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch"]
+
+[agents.agy-reviewer]
+write_commands = ["npm test", "npm run", "npx tsc", "npx jest", "npx vitest", "git status",
+                  "git diff", "git log", "git show"]
+review_commands = ["npm test", "npm run", "npx tsc", "npx jest", "npx vitest", "git status",
+                   "git diff", "git log", "git show"]
+```
+
+`Bash(npm run *)` admits every script of `package.json`; a narrower rule, such as
+`Bash(npm run test *)`, is the operator's choice. `devloop status` checks the result: for each
+agent whose turns may not run `test_cmd` or the `module_test_cmd` of the project file
+it prints a line `agent commands: <agent>: … not admitted in its <write|review> turns (<key>)`,
+with the key to look at. It is only a warning: it changes no permission and does not stop the
+loop.
+
 ## 5. Agent user and CLI logins
 
 First the single script again, now that the overlay and the project file are there: it gives the

@@ -498,6 +498,95 @@ def agy_commands(agent, mode):
     return agent.write_commands if mode == 'write' else agent.review_commands
 
 
+# The arguments of a claude turn that open every command (#697): no rule is checked then.
+_CLAUDE_EVERY_COMMAND = ('--dangerously-skip-permissions',)
+_CLAUDE_BYPASS_MODE = 'bypassPermissions'
+_CLAUDE_ALLOW = ('--allowedTools', '--allowed-tools')
+_CLAUDE_DENY = ('--disallowedTools', '--disallowed-tools')
+# The operators that split a shell command into the commands claude checks one by one.
+_SHELL_SPLIT = re.compile(r'\s*(?:&&|\|\||;|\|)\s*')
+
+
+def _claude_rules(args):
+    """``(every, allow, deny)`` of claude's arguments ``args``: whether they open every command,
+    and the rules of ``--allowedTools`` and ``--disallowedTools``, each argument one rule."""
+    every, allow, deny, target, mode = False, [], [], None, False
+    for arg in args:
+        if mode:
+            every, mode = every or arg == _CLAUDE_BYPASS_MODE, False
+            continue
+        if not arg.startswith('-'):
+            if target is not None:
+                target.append(arg)
+            continue
+        name, eq, value = arg.partition('=')
+        target = allow if name in _CLAUDE_ALLOW else deny if name in _CLAUDE_DENY else None
+        if eq and target is not None:
+            target.append(value)
+            target = None
+        if name in _CLAUDE_EVERY_COMMAND:
+            every = True
+        elif name == '--permission-mode':
+            if eq:
+                every = every or value == _CLAUDE_BYPASS_MODE
+            else:
+                mode = True
+    return every, allow, deny
+
+
+def _bash_match(rule, command):
+    """Whether claude's rule ``rule`` covers the single command ``command``: ``Bash`` (or
+    ``Bash(*)``) every command, ``Bash(<prefix>:*)`` and ``Bash(<prefix> *)`` ``<prefix>`` alone
+    or followed by any argument, ``Bash(<pattern>)`` the commands that ``<pattern>`` matches
+    whole, ``*`` standing for any text. A rule of another tool covers none."""
+    if rule == 'Bash':
+        return True
+    if not (rule.startswith('Bash(') and rule.endswith(')')):
+        return False
+    pattern = rule[len('Bash('):-1].strip()
+    if pattern in ('', '*'):
+        return True
+    for suffix in (':*', ' *'):
+        if pattern.endswith(suffix) and command == pattern[:-len(suffix)].rstrip():
+            return True
+    if pattern.endswith(':*'):
+        prefix = pattern[:-2]
+        return command.startswith(prefix + ' ')
+    regex = '.*'.join(re.escape(part) for part in pattern.split('*'))
+    return re.fullmatch(regex, command, re.S) is not None
+
+
+def admits_command(agent, mode, command):
+    """Whether a turn of ``agent`` in ``mode`` may run the shell command ``command`` as its
+    permissions read (#697), or None when devloop gives that agent no list of commands (codex
+    runs any command inside its sandbox). claude: its ``--allowedTools`` and
+    ``--disallowedTools`` of ``write_args`` or ``review_args``, each command of a ``&&``, ``||``,
+    ``;`` or ``|`` chain on its own, as claude checks them; agy: the prefixes of
+    ``write_commands`` or ``review_commands``, word by word. Read only: what the agent may run
+    stays what its configuration says, and ``devloop status`` only warns."""
+    if agent.kind == 'agy':
+        words = command.split()
+        return any(words[:len(p.split())] == p.split() for p in agy_commands(agent, mode))
+    if agent.kind != 'claude':
+        return None
+    every, allow, deny = _claude_rules(agent.write_args if mode == 'write' else agent.review_args)
+    parts = [part for part in _SHELL_SPLIT.split(command.strip()) if part]
+    return bool(parts) and all(
+        not any(_bash_match(rule, part) for rule in deny)
+        and (every or any(_bash_match(rule, part) for rule in allow)) for part in parts)
+
+
+def command_key(agent, mode):
+    """The key of the configuration that says which commands a turn of ``agent`` in ``mode``
+    may run (#697), '' for an agent without a list (``admits_command``)."""
+    if agent.kind == 'claude':
+        return (f'agents.{agent.key}.{"write_args" if mode == "write" else "review_args"} '
+                '(--allowedTools)')
+    if agent.kind == 'agy':
+        return f'agents.{agent.key}.{"write_commands" if mode == "write" else "review_commands"}'
+    return ''
+
+
 def agy_prompt_block(agent, mode):
     """What an agy turn is told about its shell commands (issue #155), generated from the same
     list as its ``--settings``: headless agy cannot ask for a permission, and a command outside
