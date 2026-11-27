@@ -53,7 +53,7 @@ from .review import (FINDINGS_ONLY, ci_failure_review, current_round, findings_o
                      round_verdict)
 from .review import TEXTS as REVIEW_TEXTS
 from .supervision import ESCALATE, PREREQUISITE, RETRY, SYNC_FAILED, TOOL_FAILURE
-from .workspace import TransientPushError, WorkspaceError
+from .workspace import PrepareFailed, TransientPushError, WorkspaceError
 
 
 # The texts of the actions the dispatcher composes itself (implementation, CI rerun, full suite
@@ -1418,6 +1418,11 @@ class ActionsMixin:
         if failures and closed_by_first(records):
             # The first reviewer closed the round without approving (#521): it waits for no
             # other reviewer, and the failure of one it no longer waits for escalates nothing.
+            # A failed step that prepares a copy (#696) still does: it is a fault of the
+            # project's step, a critical escalation to the operator, whatever the round.
+            prepare = [(key, exc) for key, exc in failures if isinstance(exc, PrepareFailed)]
+            if prepare:
+                raise _review_failure(prepare)
             self.log('  the round is closed by its first reviewer: the failures above do not '
                      'escalate')
             return

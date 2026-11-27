@@ -823,7 +823,9 @@ other escalation ([Commands on escalations to the operator](guide.md#commands-on
 The copy of the base commit of a branch (#459) is no exception: its step is recorded with the
 step whose tests it compares, and a failure there escalates `prepare_failed` as well. When
 several reviewers of a round fail, a failed step of any of them is the escalation, with its
-output, whatever failed for the others.
+output, whatever failed for the others; so it is in a round its first reviewer closed without
+approving ([When the second reviewer starts](#when-the-second-reviewer-starts)), where the
+other failures do not escalate.
 
 **The check after a review.** The PR worktree must come out of a review still at the reviewed
 commit, with no change and no new file. With `outputs`, a new file that git ignores and
@@ -1711,7 +1713,8 @@ devloop at startup (`review_policy.second_reviewer: unknown mode`).
   decision to the operator), and it counts against `max_review_rounds` as any round. It waits for
   no other reviewer, the [findings-only reviewer](#findings-only-reviewer) included, and lacks
   no verdict: the supervisor's `/devloop rereview` (#491) is refused on it, and the failure of
-  another reviewer of the same action does not escalate.
+  another reviewer of the same action does not escalate, except a failed step that
+  [prepares its copy](#preparing-the-worktree) (`prepare_failed`, #696).
 - **The cancelled turn.** With `parallel_cancel` the dispatcher kills the whole process group of
   the second's turn (checked every second) and closes its record in the round's register with
   the outcome `cancelled`: not a `tool_failure`, not uncertain, not a review. No fallback model
