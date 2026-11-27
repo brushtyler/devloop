@@ -18,6 +18,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import doc_contracts as docs
 from devloop import apps
 from devloop.github import GitHubError
 from helpers import ssdlc_project
@@ -272,6 +273,45 @@ class RoleScriptCheckTests(unittest.TestCase):
                 module = script(role)
                 self.assertEqual(module.MANIFEST, ROOT / 'ops/github/apps' / f'{role}.json')
                 self.assertTrue(module.MANIFEST.is_file())
+
+
+class DocumentationTests(unittest.TestCase):
+    """The reference of the role apps and ops/README.md describe ``--check`` (#726)."""
+
+    def test_the_reference_describes_the_check(self):
+        section = docs.plan_section('docs/devloop/reference.md',
+                                    '### The permissions of the role apps')
+        docs.assert_documented(self, section, phrases=(
+            'scripts/supervisor-token.py --state-dir <STATE_DIR> --check',
+            'scripts/coordinator-token.py --state-dir <STATE_DIR> --check',
+            "run as the role's user with its key",
+            "`GET /repos/{repo}/installation` with the app's JWT",
+            'It mints no installation token, prints none and runs no command',
+            'missing on the installation, or there at a lower level (not granted, or not yet '
+            'accepted by the owner of the installation), is an error',
+            'that the manifest does not have, a warning',
+            'its absence is a warning for a public repository, an error for a private one',
+            'It exits with 1 on an error, with 0 otherwise',
+            '`--no-apps` and `--read-only` skip it',
+        ), issues=(726, 717))
+
+    def test_the_ops_readme_describes_the_check_of_check_host(self):
+        verify = docs.plan_section('ops/README.md', '### 8. Verifica')
+        docs.assert_documented(self, verify, phrases=(
+            'i permessi delle app dei ruoli contro i loro manifest',
+            "come l'utente del ruolo, con la sua `key_dir`, `scripts/<ruolo>-token.py --check`",
+            'senza coniare token né eseguire comandi',
+            'un permesso di `ops/github/apps/<ruolo>.json` che manca o che il proprietario non '
+            'ha accettato è un errore, uno in più un avviso',
+            '`contents: read` mancante è un avviso per un repository pubblico, un errore per '
+            'uno privato',
+            'non con `--no-apps` né con `--read-only`',
+        ), issues=(726,))
+        apps_step = docs.plan_section('ops/README.md', '### 2. GitHub App')
+        docs.assert_documented(self, apps_step, phrases=(
+            '`--check` dei loro script dei token',
+            "legge i permessi dell'installazione e li confronta con il manifest",
+        ), issues=(726,))
 
 
 if __name__ == '__main__':
