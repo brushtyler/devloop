@@ -54,7 +54,9 @@
 # ferma e riavvia il servizio. Ogni cambio arriva al ruolo una volta (scelta M1), con o senza
 # --rest e da qualunque attesa (normale, a riposo, in pausa): l'inizio, con "manutenzione:
 # iniziata" (cominciata durante questa sveglia) o "manutenzione: in corso" (c'era già al suo
-# avvio: anche un ruolo appena ripartito la sa prima di qualunque azione); la scadenza, con
+# avvio: anche un ruolo appena ripartito la sa prima di qualunque azione); la scadenza fissata
+# dopo lo stop del servizio, con "manutenzione: scadenza fissata" (per il ruolo che ha avuto
+# l'inizio mentre il servizio si fermava, "scadenza non ancora fissata"); la scadenza, con
 # "manutenzione: scaduta"; la fine, con "manutenzione: finita". L'ultimo cambio avuto è nel suo
 # stato (maintenance). Rilanciata durante la manutenzione, la sveglia aspetta in manutenzione: lo
 # stato "<inizio> manutenzione" e il lock, che `maintenance start` e il watchdog leggono come la
@@ -650,16 +652,16 @@ rest_wait() {
 }
 
 # La manutenzione dell'host (#705), prima della pausa e del riposo: ogni cambio una volta,
-# MAINT_SEEN ("<inizio> <fase>", con la fase corso, scaduta o finita) dice qual è l'ultimo che
-# il ruolo ha avuto.
+# MAINT_SEEN ("<inizio> <fase> <scadenza>", con la fase corso, scaduta o finita, e la scadenza
+# che il ruolo ha avuto, "-" se non ancora fissata) dice qual è l'ultimo che il ruolo ha avuto.
 MAINT_SEEN=$MINE/maintenance
 LAUNCH=$(date +%s)
 
-# maintenance_exit FASE INIZIO RIGA: l'uscita su un cambio della manutenzione, salvato in
-# MAINT_SEEN, con lo stato del ruolo tolto e il battito: il ruolo legge la riga, poi rilancia la
-# sveglia.
+# maintenance_exit FASE INIZIO RIGA [SCADENZA]: l'uscita su un cambio della manutenzione,
+# salvato in MAINT_SEEN, con lo stato del ruolo tolto e il battito: il ruolo legge la riga, poi
+# rilancia la sveglia.
 maintenance_exit() {
-    save "$MAINT_SEEN" "$2 $1"$'\n'
+    save "$MAINT_SEEN" "$2 $1 ${4:--}"$'\n'
     end_rest
     beat_or_warn
     say "manutenzione: $3"
@@ -668,20 +670,24 @@ maintenance_exit() {
 
 # maintenance_check: esce, con maintenance_exit, su un cambio della manutenzione che il ruolo non
 # ha ancora avuto: l'inizio ("iniziata" se dopo l'avvio di questa sveglia, "in corso" se c'era
-# già), la scadenza, la fine. Vero (0) se la manutenzione c'è e il ruolo l'ha già avuta.
+# già), la scadenza fissata dopo lo stop del servizio (l'inizio avuto con "scadenza non ancora
+# fissata"), la scadenza, la fine. Vero (0) se la manutenzione c'è e il ruolo l'ha già avuta.
 maintenance_check() {
-    local m seen_start='' seen_phase='' start expiry rest
-    read -r seen_start seen_phase <"$MAINT_SEEN" 2>/dev/null
+    local m seen_start='' seen_phase='' seen_expiry='' start expiry rest
+    read -r seen_start seen_phase seen_expiry <"$MAINT_SEEN" 2>/dev/null
     if m=$(ops_maintenance); then
         read -r start expiry rest <<<"$m"
         if [ "$seen_start" != "$start" ]; then
             if [ "$start" -ge "$LAUNCH" ]; then
-                maintenance_exit corso "$start" "iniziata: l'host è in manutenzione $(ops_maintenance_text "$m"); devloop run non fa tick e devloop pin si rifiuta finché non finisce: rilanciare la sveglia, che aspetta in manutenzione"
+                maintenance_exit corso "$start" "iniziata: l'host è in manutenzione $(ops_maintenance_text "$m"); devloop run non fa tick e devloop pin si rifiuta finché non finisce: rilanciare la sveglia, che aspetta in manutenzione" "$expiry"
             fi
-            maintenance_exit corso "$start" "in corso: l'host è in manutenzione $(ops_maintenance_text "$m"); devloop run non fa tick e devloop pin si rifiuta finché non finisce: rilanciare la sveglia, che aspetta in manutenzione"
+            maintenance_exit corso "$start" "in corso: l'host è in manutenzione $(ops_maintenance_text "$m"); devloop run non fa tick e devloop pin si rifiuta finché non finisce: rilanciare la sveglia, che aspetta in manutenzione" "$expiry"
         fi
         if [ "$expiry" != - ] && [ "$(date +%s)" -ge "$expiry" ] && [ "$seen_phase" != scaduta ]; then
-            maintenance_exit scaduta "$start" "scaduta: la manutenzione dell'host $(ops_maintenance_text "$m") non è stata chiusa; devloop run e devloop pin restano fermi finché non la si chiude (maintenance end), e il watchdog dei ruoli avvisa l'operatore: rilanciare la sveglia, che aspetta in manutenzione"
+            maintenance_exit scaduta "$start" "scaduta: la manutenzione dell'host $(ops_maintenance_text "$m") non è stata chiusa; devloop run e devloop pin restano fermi finché non la si chiude (maintenance end), e il timer devloop-maintenance avvisa l'operatore: rilanciare la sveglia, che aspetta in manutenzione" "$expiry"
+        fi
+        if [ "$seen_phase" = corso ] && [ "$seen_expiry" = - ] && [ "$expiry" != - ]; then
+            maintenance_exit corso "$start" "scadenza fissata: il servizio è fermo, l'host è in manutenzione $(ops_maintenance_text "$m"): rilanciare la sveglia, che aspetta in manutenzione" "$expiry"
         fi
         return 0
     fi

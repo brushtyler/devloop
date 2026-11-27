@@ -558,7 +558,8 @@ def _reject(state, sha, tmp):
 
 
 def pin(root, state, ref, local=None, log=print, fetch=True, smoke=True, fetch_lock=None,
-        keep=None, in_use=None, managed=None, project=None, check=None, then=None):
+        keep=None, in_use=None, managed=None, project=None, check=None, ready=None,
+        then=None):
     """Pin ``ref``: the verified copy of its commit, which ``state/current`` now points at.
     ``local`` is the overlay and ``project`` the project file (ADR 0006, R2), each used when
     the file exists: the copy is checked with them. On any failure ``current`` is left as
@@ -578,7 +579,10 @@ def pin(root, state, ref, local=None, log=print, fetch=True, smoke=True, fetch_l
 
     ``check``, when given, is called with the commit once resolved, before anything is
     extracted: an exception it raises stops the pin with ``current`` as it was (the hold of the
-    auto-pin, ``PinHeld``, #462). ``then``, when given, is called with the commit once
+    auto-pin, ``PinHeld``, #462). ``ready``, when given, is called with the commit after the
+    checks and the smoke test, just before ``current`` moves, still under the lock of the pins:
+    an exception it raises stops the pin with ``current`` as it was (the maintenance of the host
+    begun during a pin by hand, #705). ``then``, when given, is called with the commit once
     ``current`` points at it, still under the lock of the pins: the release of the holds a pin
     by hand makes (#473), so that no auto-pin runs in between.
 
@@ -626,6 +630,8 @@ def pin(root, state, ref, local=None, log=print, fetch=True, smoke=True, fetch_l
                 raise SmokeError(f'smoke test of {sha[:12]} failed at {step}: {failed}; '
                                  + (f'the copy is kept in {kept}' if kept else
                                     'the copy could not be kept'), sha, step, kept)
+        if ready is not None:
+            ready(sha)
         point(state, dest)
         # From here on the pin stands (#453): a failure is logged, never raised, so that a
         # caller that sees an exception knows ``current`` did not move.

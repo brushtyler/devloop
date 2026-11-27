@@ -4,6 +4,7 @@ The scripts run here only with ``--dry-run`` and on temporary directories: a ``P
 records any command that would change the host (``sudo``, ``apt-get``, ``useradd``, …), and the
 tests check that none ran.
 """
+import configparser
 import datetime
 import getpass
 import grp
@@ -129,8 +130,12 @@ def render(template, values):
 def failed_unit(tmp):
     """The unit of the notice of a service down (#593) in ``tmp``/systemd, as setup-devloop.sh
     installs it with the devloop command of the tests' parameters."""
+    command = {'DEVLOOP_COMMAND': str(tmp / 'bin-root' / 'devloop')}
     (tmp / 'systemd/devloop-failed@.service').write_text(render(
-        'host/devloop-failed@.service', {'DEVLOOP_COMMAND': str(tmp / 'bin-root' / 'devloop')}))
+        'host/devloop-failed@.service', command))
+    # And those of the notice of the expiry of the maintenance of the host (#705).
+    for unit in ('devloop-maintenance@.service', 'devloop-maintenance@.timer'):
+        (tmp / 'systemd' / unit).write_text(render(f'host/{unit}', command))
 
 
 @unittest.skipIf(BASH is None, 'bash is not installed')
@@ -2165,6 +2170,11 @@ class DryRunTests(OpsTestCase):
         self.assertIn(f'    | ExecStart={launcher} run\n', out)
         self.assertIn('per togliere il progetto dal comando devloop: rimuovere '
                       f'{projects}/params-widget.env', out)
+        # The timer of the expiry of the maintenance of the host (#705), with its unit.
+        self.assertIn('[dry-run] systemctl enable --now devloop-maintenance@widget.timer', out)
+        for unit in ('devloop-maintenance@.service', 'devloop-maintenance@.timer'):
+            self.assertIn(f'[dry-run] scriverebbe {self.tmp}/systemd/{unit} (mode 644', out)
+        self.assertIn(f'    | STATE_PATH=/var/lib/devloop/widget\n', out)
         self.assertEqual(self.mutating_calls(), [])
 
     def test_setup_devloop_asks_for_the_implementer_key_only_with_its_app(self):
@@ -2249,6 +2259,11 @@ class DryRunTests(OpsTestCase):
             'STATE_PATH': f'{clone}/.devloop', 'OPS_INSTANCE': '_default',
             'DEVLOOP_PATH': f'{devloop}/.local/bin:/usr/local/bin:/usr/bin:/bin'}))
         failed_unit(self.tmp)
+        # The timer of the expiry of the maintenance (#705), enabled.
+        wants = self.tmp / 'systemd/timers.target.wants'
+        wants.mkdir()
+        (wants / 'devloop-maintenance@_default.timer').symlink_to(
+            self.tmp / 'systemd/devloop-maintenance@.timer')
         # The devloop command of the host and the file of the project (#588), as written.
         projects = self.tmp / 'etc-devloop/projects'
         projects.mkdir(parents=True)
@@ -2258,7 +2273,8 @@ class DryRunTests(OpsTestCase):
             'LAUNCHER_CMD': f'/usr/bin/python3 {clone}/scripts/devloop-pinned',
             # #685: the service and the mailbox, for pause and resume.
             'SERVICE_NAME': 'devloop', 'COORDINATION_DIR': str(self.tmp / 'coordination'),
-            # #705: the maintenance of the host, with the default parameters.
+            # #705: the maintenance of the host, with the state_dir and the default parameters.
+            'STATE_PATH': f'{clone}/.devloop',
             'MAINTENANCE_TIMEOUT': '7200', 'MAINTENANCE_ACK_TIMEOUT': '300'}))
         (self.tmp / 'bin-root').mkdir()
         (self.tmp / 'bin-root/devloop').write_text(render('host/devloop-command', {
@@ -4550,8 +4566,8 @@ exec {shlex.quote(STAT)} "$@"''')
                 ack='300'):
         """The file of the project ``name`` as setup-devloop.sh writes it, with its clone. Without
         ``service`` and ``box`` (#685), as it was written before #685: without SERVICE_NAME and
-        COORDINATION_DIR, nor the parameters of the maintenance (#705). ``ack`` is
-        MAINTENANCE_ACK_TIMEOUT."""
+        COORDINATION_DIR, nor the state_dir and the parameters of the maintenance (#705).
+        ``ack`` is MAINTENANCE_ACK_TIMEOUT; the state_dir is ``.devloop`` of the clone."""
         clone = self.tmp / 'clones' / name
         clone.mkdir(parents=True)
         path = self.projects / f'params-{name}.env'
@@ -4560,11 +4576,12 @@ exec {shlex.quote(STAT)} "$@"''')
             'DEVLOOP_PATH': f'/home/devloop-{name}/.local/bin:/usr/bin:/bin',
             'LAUNCHER_CMD': launcher or f'/usr/bin/python3 {clone}/scripts/devloop-pinned',
             'SERVICE_NAME': service or '', 'COORDINATION_DIR': str(box or ''),
+            'STATE_PATH': str(clone / '.devloop'),
             'MAINTENANCE_TIMEOUT': '7200', 'MAINTENANCE_ACK_TIMEOUT': ack})
         if service is None:
             text = ''.join(line for line in text.splitlines(True)
                            if not line.startswith(('SERVICE_NAME=', 'COORDINATION_DIR=',
-                                                   'MAINTENANCE_')))
+                                                   'STATE_PATH=', 'MAINTENANCE_')))
         path.write_text(text + extra)
         path.chmod(0o644)
         return clone
@@ -4894,7 +4911,7 @@ exec {shlex.quote(STAT)} "$@"''')
     def maintained_project(self, ack='1', stop_seconds=0):
         """A project with the service and the mailbox (#685), for the maintenance. ``systemctl``
         records what the maintenance file says when it runs, and its stop takes
-        ``stop_seconds``; ``systemd-run`` and ``logger`` record their arguments."""
+        ``stop_seconds``; ``logger`` records its arguments."""
         box = self.tmp / 'coordination-widget'
         (box / 'rest').mkdir(parents=True)
         box.chmod(0o3770)
@@ -4908,7 +4925,6 @@ exec {shlex.quote(STAT)} "$@"''')
 echo "systemctl $* ($at)" >> "$OPS_TEST_CALLS"
 [ "$1" = stop ] && [ "$2" = devloop@widget ] && sleep {stop_seconds}
 exit 0''')
-        self.shim('systemd-run', 'echo "systemd-run $*" >> "$OPS_TEST_CALLS"')
         self.shim('logger', f'echo "$*" >> {shlex.quote(str(self.tmp / "logger"))}')
         return maintenance
 
@@ -4953,14 +4969,9 @@ exec {shlex.quote(STAT)} "$@"''')
         self.assertEqual(calls[0], 'systemctl stop devloop@widget (manutenzione -)')
         self.assertGreaterEqual(int(expiry) - int(start), 7200 + 2)
         self.assertLessEqual(int(expiry), int(time.time()) + 7200)
-        # The notice of the expiry: a transient timer of systemd that runs this command again.
-        self.assertEqual(len(calls), 2, calls)
-        self.assertTrue(calls[1].startswith(
-            f'systemd-run --quiet --unit=devloop-maintenance-widget-{start} '), calls[1])
-        self.assertIn(f' -- {self.command} --project widget maintenance expired {start}',
-                      calls[1])
-        on_active = int(re.search(r'--on-active=(\d+)s', calls[1]).group(1))
-        self.assertLessEqual(abs(on_active - (int(expiry) - int(time.time()))), 2)
+        # The notice of the expiry is the timer of setup-devloop.sh, not one of start: nothing
+        # else changes on the host.
+        self.assertEqual(calls, ['systemctl stop devloop@widget (manutenzione -)'])
         self.assertIn(f'devloop: progetto widget in manutenzione dal ', done.stdout)
         self.assertIn(f'la manutenzione scade alle ', done.stdout)
         # Nothing of the launcher, no temporary file left.
@@ -5005,6 +5016,49 @@ exec {shlex.quote(STAT)} "$@"''')
         self.assertIn('devloop: il coordinator non aspetta ancora in manutenzione\n', done.stdout)
         self.assertIn('devloop: il coordinator aspetta in manutenzione\n', done.stdout)
         self.assertIn('devloop: tutti i ruoli aspettano in manutenzione\n', done.stdout)
+
+    def test_maintenance_start_waits_for_a_pin_in_progress(self):
+        # A pin that holds the lock of the pins passed its check before the maintenance: start
+        # returns only once it has ended (devloop pin checks the maintenance again under that
+        # lock, just before current moves, and refuses).
+        self.maintained_project()
+        state = self.tmp / 'clones/widget/.devloop'
+        state.mkdir()
+        lock = state / 'pin.lock'
+        lock.touch()
+        pin = subprocess.Popen(['flock', '-x', str(lock), 'sleep', '3'])
+        self.addCleanup(pin.wait)
+        self.addCleanup(pin.kill)
+        deadline = time.time() + 10
+        while subprocess.run(['flock', '-n', '-s', str(lock), 'true']).returncode == 0:
+            self.assertLess(time.time(), deadline, 'the lock of the pins is not held')
+            time.sleep(0.05)
+        done = self.devloop('maintenance', 'start', self.SECTIONS)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIsNotNone(pin.poll(), 'start returned while the pin held its lock')
+        self.assertIn('devloop: un pin è in corso: aspetto al più 600s che finisca', done.stdout)
+        self.assertIn('il pin in corso è finito: da qui nessun pin sposta la copia fissata',
+                      done.stdout)
+        # The maintenance first, then the service stopped, then the wait.
+        self.assertEqual(self.mutating_calls(), ['systemctl stop devloop@widget (manutenzione -)'])
+        # Without a pin in progress, no wait (the lock free, or no lock at all).
+        self.calls.unlink()
+        (self.rest / 'maintenance').unlink()
+        done = self.devloop('maintenance', 'start', self.SECTIONS)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertNotIn('un pin è in corso', done.stdout)
+
+    def test_maintenance_start_needs_the_state_dir_of_the_project(self):
+        maintenance = self.maintained_project()
+        path = self.projects / 'params-widget.env'
+        path.write_text(''.join(line for line in path.read_text().splitlines(True)
+                                if not line.startswith('STATE_PATH=')))
+        done = self.devloop('maintenance', 'start', self.SECTIONS)
+        self.assertEqual(done.returncode, 2)
+        self.assertIn('manca STATE_PATH, o non è valido, che maintenance start usa: rieseguire '
+                      'setup-devloop.sh', done.stderr)
+        self.assertFalse(maintenance.exists())
+        self.assertEqual(self.mutating_calls(), [])
 
     def test_maintenance_start_refuses_an_open_maintenance_or_pause(self):
         maintenance = self.maintained_project()
@@ -5057,9 +5111,7 @@ exec {shlex.quote(STAT)} "$@"''')
         done = self.devloop('maintenance', 'end')
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertFalse(maintenance.exists())
-        self.assertEqual(self.mutating_calls(), [
-            'systemctl stop devloop-maintenance-widget-1764115200.timer (none)',
-            'systemctl start devloop@widget (none)'])
+        self.assertEqual(self.mutating_calls(), ['systemctl start devloop@widget (none)'])
         self.assertIn('devloop: manutenzione del progetto widget tolta (dal '
                       '2025-11-26T00:00:00Z, sezioni: Il riposo (#684)', done.stdout)
         self.assertIn('devloop: devloop@widget avviato; i ruoli in manutenzione si svegliano\n',
@@ -5072,11 +5124,9 @@ exec {shlex.quote(STAT)} "$@"''')
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertFalse(maintenance.exists())
         self.assertTrue(pause.exists())
-        self.assertEqual(self.mutating_calls(), [
-            'systemctl stop devloop-maintenance-widget-1764115200.timer (none)'])
+        self.assertEqual(self.mutating_calls(), [])
         self.assertIn('la pausa dell\'operatore vince, devloop@widget resta fermo', done.stdout)
         # And the resume of that pause does not start the service during a maintenance.
-        self.calls.unlink()
         maintenance.write_text('1764115200 manutenzione 1764122400 Il riposo (#684)\n')
         done = self.devloop('resume')
         self.assertEqual(done.returncode, 0, done.stderr)
@@ -5092,34 +5142,60 @@ exec {shlex.quote(STAT)} "$@"''')
         self.assertIn('il progetto widget non era in manutenzione', done.stdout)
         self.assertEqual(self.mutating_calls(), ['systemctl start devloop@widget (none)'])
 
-    def test_the_expiry_tells_the_operator_once_with_devloop_notify(self):
+    def test_the_expiry_tells_the_operator_with_devloop_notify(self):
+        # The timer of setup-devloop.sh runs maintenance expired every 5 minutes, also after a
+        # reboot: the notice does not depend on maintenance start.
         maintenance = self.maintained_project()
         self.as_root(maintenance)
         now = int(time.time())
+        # No maintenance, or one not expired yet (also one whose service is being stopped):
+        # nothing, in silence.
+        for text in (None, f'{now - 60} manutenzione {now + 7000} Il riposo (#684)\n',
+                     f'{now - 60} manutenzione - Il riposo (#684)\n'):
+            with self.subTest(maintenance=text):
+                maintenance.unlink(missing_ok=True)
+                if text:
+                    maintenance.write_text(text)
+                done = self.devloop('maintenance', 'expired')
+                self.assertEqual((done.returncode, done.stdout), (0, ''), done.stderr)
+                self.assertIsNone(self.sudo_call())
         maintenance.write_text(f'{now - 7300} manutenzione {now - 100} Il riposo (#684)\n')
-        # The timer of another maintenance: no notice.
-        done = self.devloop('maintenance', 'expired', str(now - 1))
-        self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertIn("non c'è più: nessun avviso", done.stdout)
-        self.assertIsNone(self.sudo_call())
+        # Each run passes the same key: devloop notify sends it at most once per interval of
+        # [notify], and tries again after it when a send failed.
+        for _ in range(2):
+            done = self.devloop('maintenance', 'expired')
+            self.assertEqual(done.returncode, 0, done.stderr)
+            cwd, args = self.sudo_call()
+            self.assertEqual(args[:9], ['-u', 'devloop-widget', '-H', '--', '/usr/bin/env',
+                                        'PATH=/home/devloop-widget/.local/bin:/usr/bin:/bin',
+                                        'PYTHONUNBUFFERED=1', '/usr/bin/python3',
+                                        f'{self.tmp}/clones/widget/scripts/devloop-pinned'])
+            self.assertEqual(args[9:12], ['notify', '--key',
+                                          f'maintenance-expired:widget:{now - 7300}'])
+            self.assertIn('La manutenzione dell\'host del progetto widget', args[12])
+            self.assertIn('per le sezioni Il riposo (#684), è scaduta', args[12])
+            self.assertIn('devloop --project widget maintenance end', args[12])
         done = self.devloop('maintenance', 'expired', str(now - 7300))
-        self.assertEqual(done.returncode, 0, done.stderr)
-        cwd, args = self.sudo_call()
-        self.assertEqual(args[:9], ['-u', 'devloop-widget', '-H', '--', '/usr/bin/env',
-                                    'PATH=/home/devloop-widget/.local/bin:/usr/bin:/bin',
-                                    'PYTHONUNBUFFERED=1', '/usr/bin/python3',
-                                    f'{self.tmp}/clones/widget/scripts/devloop-pinned'])
-        self.assertEqual(args[9:12], ['notify', '--key',
-                                      f'maintenance-expired:widget:{now - 7300}'])
-        self.assertIn('La manutenzione dell\'host del progetto widget', args[12])
-        self.assertIn('per le sezioni Il riposo (#684), è scaduta', args[12])
-        self.assertIn('devloop --project widget maintenance end', args[12])
-        self.sudo.unlink()
-        maintenance.write_text(f'{now - 60} manutenzione {now + 7000} Il riposo (#684)\n')
-        done = self.devloop('maintenance', 'expired', str(now - 60))
-        self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertIn('non è ancora scaduta: nessun avviso', done.stdout)
-        self.assertIsNone(self.sudo_call())
+        self.assertEqual(done.returncode, 2)
+        self.assertIn('maintenance expired non vuole argomenti', done.stderr)
+
+    def test_the_timer_of_the_expiry_runs_the_devloop_command_as_root(self):
+        units = {name: configparser.ConfigParser(interpolation=None, strict=False)
+                 for name in ('service', 'timer')}
+        for name, parser in units.items():
+            parser.read_string(render(f'host/devloop-maintenance@.{name}',
+                                      {'DEVLOOP_COMMAND': '/usr/local/sbin/devloop'}))
+        service, timer = units['service'], units['timer']
+        self.assertEqual(service['Service']['ExecStart'],
+                         '/usr/local/sbin/devloop --project %i maintenance expired')
+        self.assertEqual(service['Service']['Type'], 'oneshot')
+        self.assertNotIn('User', service['Service'])
+        self.assertEqual((timer['Timer']['OnBootSec'], timer['Timer']['OnUnitActiveSec']),
+                         ('2min', '5min'))
+        self.assertEqual(timer['Install']['WantedBy'], 'timers.target')
+        # setup-devloop.sh installs both and enables the timer of the project.
+        setup = (OPS / 'host/setup-devloop.sh').read_text()
+        self.assertIn('run systemctl enable --now "$MAINTENANCE_UNIT.timer"', setup)
 
     def test_the_pin_of_the_host_command_passes_during_the_maintenance(self):
         # devloop pin refuses in maintenance (devloop/rest.py), but the pin of the step on the
@@ -5687,6 +5763,7 @@ class CheckHostTests(OpsTestCase):
             'DEVLOOP_PATH': f'{self.devloop}/.local/bin:/usr/local/bin:/usr/bin:/bin',
             'LAUNCHER_CMD': f'/usr/bin/python3 {clone}/scripts/devloop-pinned',
             'SERVICE_NAME': 'devloop', 'COORDINATION_DIR': str(self.tmp / 'coordination'),
+            'STATE_PATH': f'{clone}/.devloop',
             'MAINTENANCE_TIMEOUT': '7200', 'MAINTENANCE_ACK_TIMEOUT': '300'}))
         entry.chmod(0o644)
         # Outside root, the files are the user's: an error each, and the contents coincide.
@@ -8194,6 +8271,36 @@ class RoleWaitTests(WakeUpCase):
                 self.prime(role)
                 done = self.wait('--period', '1')
                 self.assertFalse(done.stdout.startswith('manutenzione:'), done.stdout)
+
+    def test_the_expiry_set_after_a_slow_stop_reaches_the_role(self):
+        # The start came while the service was stopping ("scadenza non ancora fissata"): once
+        # maintenance start writes the expiry, the role has it, once.
+        self.as_role('supervisor')
+        now = int(time.time())
+        maintenance = host_maintenance(self, self.rest, now - 5, '-', 'Comando devloop (#588)')
+        done = self.wait()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertTrue(done.stdout.startswith("manutenzione: in corso: "), done.stdout)
+        self.assertIn('scadenza non ancora fissata', done.stdout)
+        proc = self.background()
+        self.until(lambda: self.in_maintenance('supervisor'), 'the wait in maintenance')
+        expiry = now + 7200
+        maintenance.write_text(f'{now - 5} manutenzione {expiry} Comando devloop (#588)\n')
+        out, err = proc.communicate(timeout=20)
+        when = datetime.datetime.fromtimestamp(expiry, datetime.timezone.utc)
+        self.assertEqual((proc.returncode, out.count('\n')), (0, 1), out + err)
+        self.assertTrue(out.startswith("manutenzione: scadenza fissata: il servizio è fermo, "
+                                       "l'host è in manutenzione dal "), out)
+        self.assertIn(f'sezioni: Comando devloop (#588), scadenza {when:%Y-%m-%dT%H:%M:%SZ}',
+                      out)
+        self.assertNotIn('non ancora fissata', out)
+        # Launched again, it waits in maintenance: the expiry is not said again.
+        proc = self.background()
+        self.until(lambda: self.in_maintenance('supervisor'), 'the wait in maintenance')
+        time.sleep(1.5)
+        self.assertIsNone(proc.poll())
+        proc.kill()
+        proc.communicate()
 
     def test_a_maintenance_not_of_root_is_no_maintenance(self):
         self.as_role('supervisor')

@@ -41,8 +41,8 @@
 # legge da sé la casella); il lock non tenuto e il messaggio vecchio nella casella restano
 # anomalie. Del progetto, una volta per manutenzione, un'informazione nel journal, «in
 # manutenzione dal …, sezioni …, scadenza …»; alla scadenza, se nessuno l'ha chiusa, una volta,
-# la riga "allarme all'operatore:" (l'avviso con devloop notify lo manda il timer di
-# `maintenance start`).
+# la riga "allarme all'operatore:" (l'avviso con devloop notify lo manda il timer
+# devloop-maintenance@<progetto>.timer, come root, che sopravvive a un riavvio).
 # Un ruolo fermo o in anomalia:
 # - il supervisore, con il coordinatore attivo o a riposo: un messaggio in to-coordinator/;
 # - il coordinatore, con il supervisore attivo o a riposo: un messaggio in to-supervisor/ e un
@@ -359,15 +359,16 @@ if [ -n "$PAUSE" ] && [[ " $OLD " != *" pause=$PAUSE "* ]]; then
 fi
 # La manutenzione dell'host (#705): un'informazione, non un allarme, una volta per manutenzione;
 # alla scadenza, se nessuno l'ha chiusa, un allarme all'operatore, una volta. devloop notify lo
-# manda il timer di `maintenance start` (ops/host/devloop-command), come root: il watchdog non
-# ha chiavi né sudo.
+# manda il timer devloop-maintenance@<progetto>.timer (ops/host/devloop-maintenance@.timer, con
+# `maintenance expired` di ops/host/devloop-command), come root, ogni 5 minuti e dopo un riavvio:
+# il watchdog non ha chiavi né sudo.
 if [ -n "$MAINT" ]; then
     if [[ " $OLD " != *" maintenance=$MAINT_START "* && " $OLD " != *" maintenance=$MAINT_START:"* ]]
     then
         say "informazione: $WHO: in manutenzione $(ops_maintenance_text "$MAINT"); devloop run non fa tick e devloop pin si rifiuta finché non la si chiude (devloop maintenance end)"
     fi
     if [ "$MAINT_EXPIRED" = 1 ] && [[ " $OLD " != *" maintenance=$MAINT_START:scaduta "* ]]; then
-        say "allarme all'operatore: $WHO: la manutenzione dell'host $(ops_maintenance_text "$MAINT") è scaduta senza essere chiusa: devloop run e devloop pin restano fermi finché non la si chiude (devloop maintenance end); l'avviso parte con devloop notify dal timer di maintenance start"
+        say "allarme all'operatore: $WHO: la manutenzione dell'host $(ops_maintenance_text "$MAINT") è scaduta senza essere chiusa: devloop run e devloop pin restano fermi finché non la si chiude (devloop maintenance end); l'avviso parte con devloop notify dal timer $MAINTENANCE_UNIT.timer"
     fi
 fi
 

@@ -3083,10 +3083,14 @@ on, also after its expiry, `devloop run` (with `[run] rest_dir`) starts no tick 
 maintenance (#705) since …: no tick runs until it ends` in the log; a loop that sees it begin
 stops after the tick in progress, `stop requested (the maintenance of the host)`), and `devloop
 pin` refuses (`pin refused, the pinned copy is unchanged: the host is in maintenance (#705) …`),
-whoever runs them. Only the pin of the step itself passes: `devloop pin` from the devloop command
-of the host, as root, which gives it the start of the maintenance. The roles are told of each
-change (the start, the expiry, the end) by their wake-up, and wait in maintenance; at the expiry
-the operator gets a notice. The procedure is in
+whoever runs them. A pin already running when the maintenance begins checks it again under the
+lock of the pins, after its fetch and its smoke test, and refuses before the pinned copy moves;
+`start` waits for it to end. Only the pin of the step itself passes: `devloop pin` from the
+devloop command of the host, as root, which gives it the start of the maintenance. The roles are
+told of each change (the start, the expiry once the service is stopped, the expiry, the end) by
+their wake-up, and wait in maintenance; at the expiry the operator gets a notice with `devloop
+notify`, from a timer of root that `setup-devloop.sh` enables (`devloop-maintenance@<project>`),
+every 5 minutes and also after a reboot, until the maintenance is ended. The procedure is in
 [ops/README.md](../../ops/README.md#10-coordinatore-facoltativo), "La manutenzione dell'host".
 
 ### Continuous mode

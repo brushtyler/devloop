@@ -3,14 +3,16 @@
 # di root, con i parametri risolti del progetto, e lo riscrive a ogni esecuzione. Il comando
 # devloop (ops/host/devloop-command) lo legge riga per riga, non lo esegue: sono i valori della
 # drop-in o dell'unità del servizio, con il nome del servizio e la casella fra i ruoli per la
-# pausa dell'operatore (pause e resume, #685) e per la manutenzione dell'host, con la sua durata e
-# l'attesa delle conferme dei ruoli (maintenance, #705). Rimuovere il file toglie il progetto dal
-# comando devloop; il servizio e l'installazione restano.
+# pausa dell'operatore (pause e resume, #685) e per la manutenzione dell'host, con lo state_dir
+# (il lock dei pin che maintenance start aspetta), la sua durata e l'attesa delle conferme dei
+# ruoli (maintenance, #705). Rimuovere il file toglie il progetto dal comando devloop; il servizio
+# e l'installazione restano.
 DEVLOOP_USER=@DEVLOOP_USER@
 DEVLOOP_CLONE=@DEVLOOP_CLONE@
 DEVLOOP_PATH=@DEVLOOP_PATH@
 LAUNCHER_CMD=@LAUNCHER_CMD@
 SERVICE_NAME=@SERVICE_NAME@
 COORDINATION_DIR=@COORDINATION_DIR@
+STATE_PATH=@STATE_PATH@
 MAINTENANCE_TIMEOUT=@MAINTENANCE_TIMEOUT@
 MAINTENANCE_ACK_TIMEOUT=@MAINTENANCE_ACK_TIMEOUT@

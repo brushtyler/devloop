@@ -24,15 +24,19 @@
 # accompagna un passo sull'host (le sezioni di ops/host/migrate.md) e si chiude alla sua fine.
 # start si rifiuta con una manutenzione o una pausa già aperte; crea in modo esclusivo, come root,
 # COORDINATION_DIR/rest/maintenance ("<inizio> manutenzione - <sezioni>", 644 di root), poi ferma
-# il servizio e scrive la scadenza, MAINTENANCE_TIMEOUT secondi (due ore) dopo lo stop; programma
-# con un timer transitorio di systemd l'avviso della scadenza all'operatore (maintenance expired,
-# devloop notify); poi dice quali ruoli aspettano già in manutenzione (lo stato e il lock della
-# loro sveglia, ops/host/role-wait.sh) e aspetta al più MAINTENANCE_ACK_TIMEOUT secondi (300) le
-# conferme degli altri, poi prosegue comunque e scrive nell'output e nel log di sistema chi non ha
-# confermato. Mentre la manutenzione c'è, anche dopo la scadenza, devloop run non fa tick e
-# devloop pin si rifiuta, salvo il pin di questo comando, come root (DEVLOOP_MAINTENANCE_PIN).
-# end toglie la manutenzione e riavvia il servizio, salvo una pausa dell'operatore, che vince; il
-# resume di una pausa durante la manutenzione non lo riavvia.
+# il servizio e scrive la scadenza, MAINTENANCE_TIMEOUT secondi (due ore) dopo lo stop; aspetta che
+# finisca un pin già in corso (il lock dei pin, STATE_PATH/pin.lock: devloop pin ricontrolla la
+# manutenzione sotto quel lock prima di spostare current, e si rifiuta); poi dice quali ruoli
+# aspettano già in manutenzione (lo stato e il lock della loro sveglia, ops/host/role-wait.sh) e
+# aspetta al più MAINTENANCE_ACK_TIMEOUT secondi (300) le conferme degli altri, poi prosegue
+# comunque e scrive nell'output e nel log di sistema chi non ha confermato. Mentre la manutenzione
+# c'è, anche dopo la scadenza, devloop run non fa tick e devloop pin si rifiuta, salvo il pin di
+# questo comando, come root (DEVLOOP_MAINTENANCE_PIN). end toglie la manutenzione e riavvia il
+# servizio, salvo una pausa dell'operatore, che vince; il resume di una pausa durante la
+# manutenzione non lo riavvia. maintenance expired è l'avviso della scadenza all'operatore (devloop
+# notify, una volta per intervallo di [notify]): lo esegue ogni 5 minuti, come root, il timer
+# devloop-maintenance@<progetto>.timer (ops/host/devloop-maintenance@.timer), che setup-devloop.sh
+# installa e abilita, e che sopravvive a un riavvio; senza una manutenzione scaduta non fa nulla.
 #
 # I progetti sono i file params-<progetto>.env della directory dei progetti (params-_default.env
 # per l'installazione senza PROJECT), che setup-devloop.sh scrive da ops/host/devloop-command-project:
@@ -141,6 +145,7 @@ fi
 file=$PROJECTS_DIR/params-$project.env
 trusted "$file" || die "$file deve essere di root e non scrivibile da altri"
 DEVLOOP_USER='' DEVLOOP_CLONE='' DEVLOOP_PATH='' LAUNCHER_CMD='' SERVICE_NAME='' COORDINATION_DIR=''
+STATE_PATH=''
 # I default di ops/lib.sh, per un file scritto prima di #705.
 MAINTENANCE_TIMEOUT=7200 MAINTENANCE_ACK_TIMEOUT=300
 while IFS= read -r line || [ -n "$line" ]; do
@@ -148,7 +153,7 @@ while IFS= read -r line || [ -n "$line" ]; do
     key=${line%%=*}
     case $key in
         DEVLOOP_USER | DEVLOOP_CLONE | DEVLOOP_PATH | LAUNCHER_CMD | SERVICE_NAME | COORDINATION_DIR \
-            | MAINTENANCE_TIMEOUT | MAINTENANCE_ACK_TIMEOUT)
+            | STATE_PATH | MAINTENANCE_TIMEOUT | MAINTENANCE_ACK_TIMEOUT)
             printf -v "$key" '%s' "${line#*=}" ;;
         *) die "$file: riga non riconosciuta: $key (rieseguire setup-devloop.sh)" ;;
     esac
@@ -165,6 +170,10 @@ for key in MAINTENANCE_TIMEOUT MAINTENANCE_ACK_TIMEOUT; do
 done
 
 utc() { date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ; }
+
+# Quanto maintenance start aspetta, al più, un pin già in corso (#705): il suo smoke test ha
+# limiti propri, molto più brevi.
+PIN_WAIT=600
 
 # box_ready SOTTOCOMANDO SEZIONE: il servizio e la casella fra i ruoli del file del progetto, che
 # pause, resume (#685) e maintenance (#705) usano; SEZIONE è quella di ops/host/migrate.md che li
@@ -277,6 +286,9 @@ if [ "$1" = maintenance ]; then
             sections=$(printf '%s' "$sections" | tr -s ' ')
             sections=${sections# }
             rest_ready 'la manutenzione' "La manutenzione dell'host (#705)"
+            # Lo state_dir del progetto, con il lock dei pin che start aspetta.
+            [[ $STATE_PATH =~ ^/[A-Za-z0-9._/-]+$ ]] \
+                || die "$file: manca STATE_PATH, o non è valido, che maintenance start usa: rieseguire setup-devloop.sh (ops/host/migrate.md, \"La manutenzione dell'host (#705)\")"
             if pause_valid; then
                 die "il progetto $project è in pausa dal $(utc "$start"): la manutenzione non si apre durante la pausa dell'operatore, che la toglie con devloop --project $project resume"
             fi
@@ -306,15 +318,23 @@ if [ "$1" = maintenance ]; then
             put_maintenance mine "$now manutenzione $expiry $sections" \
                 || die "non scrivo la scadenza nella manutenzione $maintenance_file: la manutenzione c'è senza scadenza; chiuderla con devloop --project $project maintenance end e ripetere"
             note "$SERVICE_NAME fermo alle $(utc "$stopped"): la manutenzione scade alle $(utc "$expiry") (MAINTENANCE_TIMEOUT, ${MAINTENANCE_TIMEOUT}s); per chiuderla: devloop --project $project maintenance end"
-            # L'avviso della scadenza (#705): un timer di systemd transitorio, come root, che
-            # alla scadenza riesegue questo comando con maintenance expired; maintenance end lo
-            # ferma. Senza, il watchdog dei ruoli dice la scadenza nel suo journal.
-            self=$(readlink -f -- "$0")
-            systemd-run --quiet --unit="devloop-maintenance-$project-$now" \
-                --description="devloop: scadenza della manutenzione del progetto $project" \
-                --on-active="$((expiry - $(date +%s)))s" --timer-property=AccuracySec=10s \
-                -- "$self" --project "$project" maintenance expired "$now" \
-                || note "avviso: il timer dell'avviso della scadenza non è partito (systemd-run): alla scadenza solo il watchdog dei ruoli la dice, nel suo journal"
+            # I pin già avviati (#705): devloop pin ricontrolla la manutenzione sotto il lock dei
+            # pin, dopo il fetch e dopo lo smoke test, e si rifiuta prima di spostare current.
+            # Un pin che tiene il lock adesso ha passato il controllo prima della manutenzione:
+            # start aspetta che finisca, così dopo start nessun pin sposta current. Senza il file
+            # del lock nessun pin lo tiene, e quello che lo crea vede la manutenzione. Il lock si
+            # apre solo se è un file regolare, come quelli dei ruoli.
+            pin_lock=$STATE_PATH/pin.lock
+            if [ -f "$pin_lock" ] && ! [ -L "$pin_lock" ] \
+                && ! flock -n -s "$pin_lock" true 2>/dev/null; then
+                printf 'devloop: un pin è in corso: aspetto al più %ss che finisca (si rifiuta prima di spostare la copia fissata)\n' \
+                    "$PIN_WAIT"
+                if flock -w "$PIN_WAIT" -s "$pin_lock" true 2>/dev/null; then
+                    note "il pin in corso è finito: da qui nessun pin sposta la copia fissata durante la manutenzione"
+                else
+                    note "avviso: il pin in corso non è finito entro ${PIN_WAIT}s: si rifiuta prima di spostare la copia fissata, ma controllare devloop status prima del passo"
+                fi
+            fi
             # Le conferme dei ruoli: un'informazione, non una condizione (l'ok non è una difesa).
             pending=''
             for role in supervisor coordinator; do
@@ -360,7 +380,6 @@ if [ "$1" = maintenance ]; then
                 rm -f -- "$maintenance_file" || die "non tolgo la manutenzione $maintenance_file"
                 if [ -n "$found" ]; then
                     note "manutenzione del progetto $project tolta ($found)"
-                    systemctl stop "devloop-maintenance-$project-$m_start.timer" 2>/dev/null || true
                 else
                     note "tolto $maintenance_file, che non era una manutenzione di root"
                 fi
@@ -377,17 +396,14 @@ if [ "$1" = maintenance ]; then
             exit 0
             ;;
         expired)
-            # Dal timer di maintenance start: l'avviso all'operatore, se quella manutenzione c'è
-            # ancora ed è scaduta.
-            [ $# -eq 3 ] && [[ $3 =~ ^[0-9]{1,12}$ ]] \
-                || die 'maintenance expired vuole l'"'"'inizio della manutenzione (lo usa il timer di maintenance start)'
-            if ! maintenance_valid || [ "$m_start" != "$3" ]; then
-                printf 'devloop: la manutenzione del progetto %s cominciata alle %s non c'"'"'è più: nessun avviso\n' \
-                    "$project" "$(utc "$3")"
-                exit 0
-            fi
+            # Dal timer devloop-maintenance@<progetto>.timer, ogni 5 minuti e dopo un riavvio:
+            # l'avviso all'operatore, se c'è una manutenzione scaduta. Senza, nulla, in silenzio.
+            # devloop notify lo manda al più una volta per intervallo di [notify], con la chiave
+            # di quella manutenzione: un invio fallito si ritenta all'intervallo dopo, e finché la
+            # manutenzione resta aperta l'avviso si ripete a ogni intervallo.
+            [ $# -eq 2 ] || die 'maintenance expired non vuole argomenti (lo esegue il timer devloop-maintenance@<progetto>.timer)'
+            maintenance_valid || exit 0
             if [ "$m_expiry" = - ] || [ "$(date +%s)" -lt "$m_expiry" ]; then
-                printf 'devloop: la manutenzione del progetto %s non è ancora scaduta: nessun avviso\n' "$project"
                 exit 0
             fi
             note "la manutenzione del progetto $project è scaduta senza essere chiusa ($(maintenance_text)): l'avviso all'operatore"
