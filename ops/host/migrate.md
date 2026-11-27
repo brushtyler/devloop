@@ -662,7 +662,8 @@ dei ruoli"; [ADR 0002](../../docs/adr/0002-ruoli-e-responsabilita.md), precisazi
 Nei comandi, `<checkout>` è il checkout dell'operatore e `<parametri>` il file di parametri del
 progetto. devloop mergia la PR di #684 come le altre, ma non fa il pin automatico di quel commit
 né dei successivi finché l'operatore non fa il pin a mano
-([Ogni cambio con un passo sull'host](#ogni-cambio-con-un-passo-sullhost)): qui è il passo 3.
+([Ogni cambio con un passo sull'host](#ogni-cambio-con-un-passo-sullhost)): qui è il passo 3,
+che fa il pin prima di scrivere `rest_dir` nell'overlay e avvia il servizio dopo.
 
 ### Comandi
 
@@ -687,12 +688,19 @@ procedura](#un-progetto-con-la-sorgente-a-un-tag-nuovo-666)):
 
    Il secondo script trova già fatto ciò che il primo ha fatto;
 
-3. **l'overlay e il pin a mano**: come l'operatore (l'overlay è suo), in `[run]` di
-   `<state_dir>/config.local.toml` la riga `rest_dir = "<COORDINATION_DIR>/rest"`, con il valore
-   di `COORDINATION_DIR` dei parametri; `rest_wake_timeout` (300 secondi per default) solo per
-   un'altra soglia. Poi, come utente `DEVLOOP_USER`, `devloop pin origin/main` (con più progetti
-   `devloop --project <progetto> pin origin/main`) e `systemctl start <SERVICE_NAME>`. Il pin a
-   mano fa riprendere il pin automatico;
+3. **il pin a mano, l'overlay e l'avvio**, in quest'ordine, con il loop ancora fermo. Il pin si
+   fa con l'overlay ancora senza `rest_dir`: il codice fissato prima del pin non conosce la
+   chiave, rifiuta le chiavi sconosciute di `[run]` e il pin si fermerebbe con `devloop: invalid
+   config: local config: unknown key 'run.rest_dir'`
+   ([Ogni cambio con un passo sull'host](#ogni-cambio-con-un-passo-sullhost)):
+
+   1. come utente `DEVLOOP_USER`, `devloop pin origin/main` (con più progetti
+      `devloop --project <progetto> pin origin/main`). Il pin a mano fa riprendere il pin
+      automatico;
+   2. come l'operatore (l'overlay è suo), in `[run]` di `<state_dir>/config.local.toml` la riga
+      `rest_dir = "<COORDINATION_DIR>/rest"`, con il valore di `COORDINATION_DIR` dei parametri;
+      `rest_wake_timeout` (300 secondi per default) solo per un'altra soglia;
+   3. `systemctl start <SERVICE_NAME>`, che legge l'overlay con `rest_dir` al suo avvio;
 
 4. **la verifica**: nessun `ERRORE` nei passi `Casella fra supervisore e coordinatore`,
    `Watchdog dei ruoli`, `Sentinella dei ruoli a riposo` e `Flusso degli eventi`, con la riga
@@ -725,8 +733,9 @@ procedura](#un-progetto-con-la-sorgente-a-un-tag-nuovo-666)):
 rieseguono gli script del passo 2, che ne aggiornano la copia.
 
 **Rollback**: senza `rest_dir` nell'overlay (e un riavvio del servizio) `devloop run` non guarda
-più il riposo; un ruolo a riposo si sveglia con un messaggio nella sua casella finché la
-sentinella è attiva, e poi usa la sveglia normale. `systemctl disable --now
+più il riposo; per il pin della copia di prima, che rifiuta la chiave, `rest_dir` (e
+`rest_wake_timeout`) si toglie **prima** del pin. Un ruolo a riposo si sveglia con un messaggio
+nella sua casella finché la sentinella è attiva, e poi usa la sveglia normale. `systemctl disable --now
 devloop-role-sentinel@<progetto>.service` ferma la sentinella; il passo 2 dal checkout della
 versione di prima rimette le copie e le ACL di prima del watchdog. La directory `rest/` e
 l'utente della sentinella restano senza effetto; per toglierli, come root, `rm -r
@@ -736,8 +745,8 @@ l'utente della sentinella restano senza effetto; per toglierli, come root, `rm -
 
 Il passo sull'host di #685, su un host con il riposo dei ruoli di
 [#684](#il-riposo-dei-ruoli-684) già fatto (la directory `rest/`, la sentinella e `rest_dir`
-nell'overlay). Con #685 l'operatore ferma tutto, anche con issue e PR aperte, con il comando
-`devloop` dell'host ([#588](#comando-devloop-dellhost-588)): `devloop --project <progetto> pause`
+nell'overlay, scritto dopo il pin a mano del passo 3 di #684). Con #685 l'operatore ferma tutto,
+anche con issue e PR aperte, con il comando `devloop` dell'host ([#588](#comando-devloop-dellhost-588)): `devloop --project <progetto> pause`
 scrive come root la pausa `$COORDINATION_DIR/rest/pause` e ferma il servizio; `resume` la toglie
 e riavvia il servizio. In pausa i ruoli aspettano con `role-wait.sh` come a riposo, con il motivo
 `pausa`, la sentinella li sveglia solo per un messaggio o un allarme, il watchdog dei ruoli li vede
@@ -1019,6 +1028,15 @@ Se la PR cambia il launcher (`scripts/devloop-pinned`) o ciò che il pin deve pa
 nuova (un argomento, un file dello `state_dir`), la descrizione dice anche di aggiornare il clone
 di devloop prima del pin e del riavvio e di fare il pin con il codice nuovo, dal clone aggiornato,
 come al passo 6: la copia in uso non sa passare alla copia nuova ciò che ancora non conosce.
+
+Una chiave nuova dell'overlay si scrive **dopo** il pin del codice che la conosce, e il servizio
+si avvia dopo averla scritta: il codice fissato rifiuta le chiavi dell'overlay che non conosce
+(`devloop: invalid config: local config: unknown key …`), e con la chiave già scritta si
+fermerebbero sia il pin a mano sia il servizio, che systemd riavvierebbe in ciclo. Fa eccezione
+solo un pin fatto con il codice nuovo, dal clone aggiornato, come al passo 6 o in [Chiavi per
+ruolo su un host attivo](#chiavi-per-ruolo-su-un-host-attivo): lì è il codice nuovo a leggere
+l'overlay. Nel rollback vale il contrario: la chiave si toglie **prima** del pin della copia di
+prima.
 
 Dal #462 il passo è anche dichiarato nell'output strutturato dell'implementer (`host_step`: un
 testo breve con il rimando a questa guida), e il reviewer controlla che ci sia. Dal #531 il
