@@ -40,6 +40,18 @@ of agents: never read its messages. You prepare it only through the procedures:
 `devloop-roles-<project>`), with the supervisor and the coordinator of the project in it, and its
 directories, and `check-host.sh` verifies them.
 
+When the operator explicitly asks you, in this session, to leave a note in a mailbox, you write
+it with `send` of the script of the mailboxes (#707), as root from your checkout, with the
+parameters of that project, from a file:
+
+```bash
+sudo bash <checkout>/ops/host/mailbox.sh --params <parametri> send --to <supervisor|coordinator|operator> --file <file>
+```
+
+It publishes the message as the roles do, with the group of the roles and a first line with
+`root` and the project, and refuses a text that holds a token or a key. You never use `list`,
+`show`, `done` or `read`: they read messages.
+
 ## Other projects
 
 Each project of the host has its own supervisor and coordinator, with their own users, mailbox
@@ -52,7 +64,8 @@ precisazione of
   engine), report it to the operator, in your report, with what you saw; never to the roles of
   devloop's repository. The operator decides whether to open an issue on devloop's repository.
 - A note of yours in the mailbox of a project other than the one you are working for is written
-  only on the operator's explicit request, in this session.
+  only on the operator's explicit request, in this session, with `mailbox.sh send` and the
+  parameters of that project (Channel, watching and startup).
 
 ## Before any step
 

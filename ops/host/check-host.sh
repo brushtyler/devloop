@@ -207,11 +207,12 @@ default_key_dirs() {
         return
     fi
     for other in "$SYSTEMD_DIR"/devloop*.service; do
-        # Le unità del watchdog dei ruoli (#602), dell'avviso di un servizio caduto (#593) e della
-        # scadenza della manutenzione (#705) non sono un'installazione.
+        # Le unità del watchdog dei ruoli (#602), dell'avviso di un servizio caduto (#593), della
+        # scadenza della manutenzione (#705) e della pulizia delle caselle (#707) non sono
+        # un'installazione.
         case $(basename "$other") in
             devloop-role-watchdog* | devloop-role-sentinel* | devloop-failed@* \
-                | devloop-maintenance@*) continue ;;
+                | devloop-maintenance@* | devloop-mailbox-prune@*) continue ;;
         esac
         if [ -f "$other" ] && [ "$other" != "$UNIT_FILE" ]; then
             printf '%s\n' "$home/.ghapps-$PROJECT"
@@ -759,6 +760,53 @@ else
         check_acls "$SENTINEL_USER" sentinel_acls
     fi
     check_acls "$DEVLOOP_USER" rest_devloop_acls
+fi
+
+# La pulizia di done/ delle caselle (#707): le unità template dell'host, la drop-in dell'istanza
+# del progetto, con la copia di root da cui gira mailbox.sh prune (quella del coordinatore, o del
+# supervisore se il progetto non ha il coordinatore), e il timer abilitato e attivo. La copia di
+# mailbox.sh si verifica con le copie di root, sopra.
+step "Pulizia di done/ delle caselle: $MAILBOX_UNIT (#707)"
+for unit in $OPS_MAILBOX_UNITS; do
+    if ! [ -f "$SYSTEMD_DIR/$unit" ]; then
+        fail "$SYSTEMD_DIR/$unit non esiste (setup-coordinator.sh, o setup-supervisor.sh senza coordinatore)"
+    elif cmp -s "$SYSTEMD_DIR/$unit" <(render "$OPS_DIR/host/$unit"); then
+        ok "$SYSTEMD_DIR/$unit coincide con ops/host/$unit"
+    else
+        warn "$SYSTEMD_DIR/$unit è diverso da ops/host/$unit"
+    fi
+done
+if [ "$PROJECT_COORDINATOR" = 1 ] && user_exists "$COORDINATOR_USER"; then
+    expected=$COORDINATOR_OPS_DIR other=$SUPERVISOR_OPS_DIR
+else
+    expected=$SUPERVISOR_OPS_DIR other=$COORDINATOR_OPS_DIR
+fi
+if ! [ -f "$MAILBOX_DROPIN" ]; then
+    fail "$MAILBOX_DROPIN non esiste (setup-coordinator.sh, o setup-supervisor.sh senza coordinatore)"
+elif MAILBOX_OPS_DIR=$expected \
+    && cmp -s "$MAILBOX_DROPIN" <(render "$OPS_DIR/host/mailbox-prune-project.conf"); then
+    ok "$MAILBOX_DROPIN coincide con ops/host/mailbox-prune-project.conf, dalla copia $expected"
+elif MAILBOX_OPS_DIR=$other \
+    && cmp -s "$MAILBOX_DROPIN" <(render "$OPS_DIR/host/mailbox-prune-project.conf"); then
+    if [ "$other" = "$COORDINATOR_OPS_DIR" ]; then
+        ok "$MAILBOX_DROPIN coincide con ops/host/mailbox-prune-project.conf, dalla copia $other"
+    else
+        warn "$MAILBOX_DROPIN usa la copia del supervisore, $other: il progetto ha il coordinatore, rieseguire setup-coordinator.sh"
+    fi
+else
+    warn "$MAILBOX_DROPIN è diverso da ops/host/mailbox-prune-project.conf con questi parametri"
+fi
+enabled=$(systemctl is-enabled "$MAILBOX_UNIT.timer" 2>/dev/null)
+if [ "$enabled" = enabled ]; then
+    ok "$MAILBOX_UNIT.timer è abilitato"
+else
+    fail "$MAILBOX_UNIT.timer non è abilitato (${enabled:-sconosciuto}): setup-coordinator.sh o setup-supervisor.sh"
+fi
+active=$(systemctl is-active "$MAILBOX_UNIT.timer" 2>/dev/null)
+if [ "$active" = active ]; then
+    ok "$MAILBOX_UNIT.timer è attivo"
+else
+    fail "$MAILBOX_UNIT.timer non è attivo (${active:-sconosciuto}): done/ delle caselle non si pulisce (systemctl start $MAILBOX_UNIT.timer)"
 fi
 
 # Il flusso degli eventi (#683): devloop run lo scrive nello state_dir, le sveglie dei ruoli lo

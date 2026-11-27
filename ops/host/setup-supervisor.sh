@@ -3,7 +3,9 @@
 # di devloop (per leggere i log) e di sola lettura sull'overlay e sul file di progetto dello
 # state_dir (#543) e sul flusso degli eventi del progetto (#683), che la sveglia legge come utente
 # del supervisore, la casella fra supervisore e coordinatore (#543), sudoers minimale, la copia
-# di root del risveglio role-wait.sh e il watchdog dei ruoli (#602), clone,
+# di root del risveglio role-wait.sh e dello script delle caselle mailbox.sh (#707), il watchdog
+# dei ruoli (#602), il timer della pulizia di done/ delle caselle se il progetto non ha il
+# coordinatore (#707), clone,
 # key_dir 700, impostazioni di Claude Code senza aggiornamenti automatici; con SOURCE_REPO anche un
 # clone della sorgente al tag SOURCE_REF, da cui lanciare scripts/supervisor-token.py (#571).
 # Idempotente: si può rieseguire, fa solo ciò che manca. Non scrive segreti. Claude Code, il suo
@@ -119,18 +121,28 @@ fi
 put_file "$SUDOERS_FILE" 440 root "$SUDOERS" || true
 
 # Il risveglio del supervisore (#602): una copia di root di role-wait.sh, con i file che legge e i
-# parametri, fuori dal clone e dalle home, da cui il supervisore lo esegue come suo utente.
-step "Copia di root di role-wait.sh ($SUPERVISOR_OPS_DIR)"
+# parametri, fuori dal clone e dalle home, da cui il supervisore lo esegue come suo utente. Con
+# lui lo script delle caselle, mailbox.sh (#707).
+step "Copia di root di role-wait.sh e mailbox.sh ($SUPERVISOR_OPS_DIR)"
 # shellcheck disable=SC2086  # nomi di file senza spazi
 ops_root_copy "$SUPERVISOR_OPS_DIR" $OPS_SUPERVISOR_FILES
 
 # Il watchdog dei ruoli (#602): le unità template, una volta per host, e l'istanza del progetto
 # quando il progetto ha anche il coordinatore (l'overlay lo dichiara e l'utente c'è, #571).
 step "Watchdog dei ruoli ($WATCHDOG_UNIT, #602)"
+HAS_COORDINATOR=0
 if user_exists "$COORDINATOR_USER" && overlay_declares_coordinator "$STATE_PATH/config.local.toml"; then
-    ensure_role_watchdog 1
+    HAS_COORDINATOR=1
+fi
+ensure_role_watchdog "$HAS_COORDINATOR"
+
+# La pulizia di done/ delle caselle (#707): il timer del progetto, dalla copia del supervisore solo
+# se il progetto non ha il coordinatore; altrimenti la installa setup-coordinator.sh, dalla sua.
+step "Pulizia di done/ delle caselle ($MAILBOX_UNIT, #707)"
+if [ "$HAS_COORDINATOR" = 1 ]; then
+    ok "il progetto ha il coordinatore: $MAILBOX_UNIT gira dalla sua copia (setup-coordinator.sh)"
 else
-    ensure_role_watchdog 0
+    ensure_mailbox_prune "$SUPERVISOR_OPS_DIR"
 fi
 
 step "Clone di $REPO per $SUPERVISOR_USER"
@@ -189,3 +201,5 @@ step 'Fatto'
 say "Poi: ops/host/check-host.sh per verificare utenti, permessi, ACL, sudoers e servizio."
 say "Il supervisore aspetta i suoi eventi con il risveglio dei ruoli (#602):"
 say "  bash $SUPERVISOR_OPS_DIR/host/role-wait.sh --role supervisor"
+say "e scrive e legge le caselle con (#707):"
+say "  bash $SUPERVISOR_OPS_DIR/host/mailbox.sh send --to coordinator"

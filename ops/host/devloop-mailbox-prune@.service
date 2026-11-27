@@ -1,0 +1,23 @@
+# Unità template della pulizia di done/ delle caselle fra i ruoli (#707,
+# ops/host/devloop-mailbox-prune@.service): la avvia il timer devloop-mailbox-prune@<progetto>.timer,
+# una volta al giorno. L'istanza è il progetto (_default senza PROJECT). Esegue, come root,
+# `mailbox.sh prune` dalla copia di root dei ruoli del progetto: toglie dalle done/ di
+# to-supervisor/, to-coordinator/ e to-operator/ i messaggi più vecchi di MAILBOX_DONE_DAYS giorni,
+# mai un messaggio non letto. Non è il watchdog dei ruoli, che rileva e non cambia nulla.
+# setup-coordinator.sh (o setup-supervisor.sh, se il progetto non ha il coordinatore) la installa
+# in SYSTEMD_DIR, una volta per host, e la copia e la casella del progetto in una drop-in della sua
+# istanza, SYSTEMD_DIR/devloop-mailbox-prune@<progetto>.service.d/project.conf
+# (ops/host/mailbox-prune-project.conf). Un'istanza senza drop-in non parte: manca ExecStart.
+[Unit]
+Description=devloop mailbox of the roles, cleanup of done/ (%i)
+
+[Service]
+Type=oneshot
+UMask=0027
+NoNewPrivileges=yes
+PrivateTmp=yes
+# I parametri si leggono come gli altri script di ops/, anche sotto /home (lo state_dir).
+ProtectHome=read-only
+# Scrive solo nella casella del progetto (ReadWritePaths= della drop-in).
+ProtectSystem=strict
+TimeoutStartSec=120

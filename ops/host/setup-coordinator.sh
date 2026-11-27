@@ -8,6 +8,8 @@
 # coordinator-wait.sh, #543) con i file che leggono e i parametri, un sudoers con soli comandi di
 # lettura (ops/host/sudoers-coordinator; senza devloop watch dal #683), e il watchdog dei ruoli (#602): le unità
 # template, e l'istanza del progetto, con il suo utente e le sue ACL, quando c'è il supervisore;
+# nella copia anche lo script delle caselle mailbox.sh, e il timer della pulizia di done/ delle
+# caselle, che gira da lì (#707);
 # il clone del repository gestito, da cui parte la sessione (#643), e con SOURCE_REPO anche un
 # clone della sorgente al tag SOURCE_REF, da cui lanciare scripts/coordinator-token.py (#571);
 # le impostazioni di Claude Code senza aggiornamenti automatici, come per il supervisore (#643).
@@ -191,6 +193,11 @@ else
     ensure_role_watchdog 0
 fi
 
+# La pulizia di done/ delle caselle (#707): il timer del progetto, dalla copia del coordinatore,
+# una volta al giorno, come root (mailbox.sh prune).
+step "Pulizia di done/ delle caselle ($MAILBOX_UNIT, #707)"
+ensure_mailbox_prune "$COORDINATOR_OPS_DIR"
+
 step 'Claude Code senza aggiornamenti automatici'
 ensure_dir "$COORDINATOR_HOME/.local" 755 "$COORDINATOR_USER"
 ensure_dir "$COORDINATOR_HOME/.local/bin" 755 "$COORDINATOR_USER"
@@ -224,3 +231,5 @@ say "Il coordinatore verifica l'host con:"
 say "  sudo /usr/bin/bash $COORDINATOR_OPS_DIR/host/check-host.sh --read-only"
 say "e aspetta i suoi eventi con il risveglio dei ruoli (#602):"
 say "  bash $COORDINATOR_OPS_DIR/host/role-wait.sh --role coordinator"
+say "e scrive e legge le caselle con (#707):"
+say "  bash $COORDINATOR_OPS_DIR/host/mailbox.sh send --to supervisor"
