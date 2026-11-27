@@ -394,8 +394,9 @@ was removed and applied again, if a comment starting with the attribution header
 identity allowed to write devloop records, came after the check (another escalation, or
 anything that may be one, marker or not; the dispatcher's [ledger records](#evidence-and-telemetry),
 such as the turn of a recheck, and its [supervision traces](#supervision-trace), such as the
-answer to a command that does not apply, and its `recheck` and (#483) `approve` answers do not
-count, nor, since #468,
+answer to a command that does not apply, its `recheck` and (#483) `approve` answers and (#722)
+its `authorize` records of a `/devloop authorize`, so that a text the coordinator changes and
+authorizes again is checked again, do not count, nor, since #468,
 a comment of the supervisor's identity that carries neither a `notice` nor a `preflight`
 marker), or if the attribution is uncertain. A comment from
 anyone else, header or not, never touches the attribution. A label already present when the

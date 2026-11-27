@@ -937,7 +937,9 @@ owns: when the check owns `agent:needs-operator` is described in
 [Readiness check records](protocol.md#readiness-check-records). A note of the supervisor, such as
 its "Decisione per l'operatore" listing the options, does not take the block away from the
 check: only a comment of the supervisor with an escalation or a readiness check record does
-(#468).
+(#468). Nor does the dispatcher's record of a `/devloop authorize` (#722): when the coordinator
+changes the text of an issue the check blocked and authorizes it again, the changed text is
+checked again.
 
 A request of a person, `/devloop recheck` from a trusted user or `agent:ready` added again by
 someone who may admit the issue, needs less (#468): the block need only be still the issue's

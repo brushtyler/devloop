@@ -152,6 +152,12 @@ class PreflightMixin:
         return (read_marker(comment.get('body', ''), 'approve') is not None
                 and self._signed((comment.get('author') or {}).get('login')))
 
+    def _authorize_record(self, comment):
+        """Whether ``comment`` is the dispatcher's record of a ``/devloop authorize`` (#607),
+        signed by it: an authorization or a refusal, never an escalation (#722)."""
+        return (read_marker(comment.get('body', ''), 'authorize') is not None
+                and self._signed((comment.get('author') or {}).get('login')))
+
     def _answered_approvals(self, comments, records):
         """The ids of the comments with a ``/devloop approve`` already answered as refused
         (#483): those a readiness check of ``records`` (``_preflight_records``) lists in its
@@ -311,7 +317,8 @@ class PreflightMixin:
         since, and no other text devloop may have published (another escalation,
         ``_published``) came after that check: an identity that writes no devloop record cannot
         void the block's attribution, nor can a note of the supervisor (``_supervisor_note``,
-        #468). The label counts under both its names (#248), the events
+        #468) or the dispatcher's record of a ``/devloop authorize`` (``_authorize_record``,
+        #722). The label counts under both its names (#248), the events
         of the old one included (``_operator_labelers``). Anything else, or anything uncertain,
         leaves the block to the operator."""
         if not records:
@@ -322,11 +329,14 @@ class PreflightMixin:
         # to a recheck that runs no check (#468) are no escalation: they leave the block's
         # attribution as it is. Nor does a comment of the supervisor that carries neither an
         # escalation nor a readiness check (#468), such as its note on a decision for the
-        # operator, nor its answer to a ``/devloop approve`` refused (#483).
+        # operator, nor its answer to a ``/devloop approve`` refused (#483), nor its record of
+        # a ``/devloop authorize`` (#607, #722): after a new authorization of a changed text the
+        # block stays the check's, and the check runs again for that text.
         if not record['blocked'] or any(self._published(c) and not self._ledger_record(c)
                                         and not self._supervision_record(c)
                                         and not self._recheck_record(c)
                                         and not self._approve_record(c)
+                                        and not self._authorize_record(c)
                                         and not self._supervisor_note(c)
                                         for c in comments[position + 1:]):
             return False
