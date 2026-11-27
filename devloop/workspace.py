@@ -216,6 +216,73 @@ def git_config_env(pairs):
     return env
 
 
+# Set beside the variables of ``app_auth_env``: `git -c` settings inherited from a parent git
+# are applied after GIT_CONFIG_*, so they are dropped.
+APP_AUTH_UNSET = ('GIT_CONFIG_PARAMETERS',)
+# The pattern of the URL rewrites that could send a command with the app token elsewhere.
+_REWRITES = r'^url\..*\.(push)?insteadof$'
+
+
+def app_auth_env(url, token):
+    """The environment of one git command that talks to ``url`` over HTTPS with ``token`` only
+    (#716: push, fetch and clone), with ``APP_AUTH_UNSET`` removed: the token travels in this
+    environment, never in a config file or on the command line. No other credential can take
+    part: only the HTTPS transport is allowed, and credential helpers, askpass programs, SSH and
+    preconfigured authentication headers are disabled. URL rewrites are refused apart
+    (``rewrite_of``)."""
+    basic = base64.b64encode(f'x-access-token:{token}'.encode()).decode()
+    # Git applies the http.<url>.* entries of the most specific URL that matches and drops the
+    # others, whatever their order. Keyed on the exact URL, the reset and the header win over
+    # every config file (a tie goes to the later entry, and these come last); a less specific key
+    # would lose to, say, a repository-level http.<this url>.extraHeader. Credential helpers are
+    # reset by the plain key: git applies every matching credential.* entry in order.
+    env = git_config_env([
+        ('credential.helper', ''),
+        (f'http.{url}.extraHeader', ''),
+        (f'http.{url}.extraHeader', f'AUTHORIZATION: basic {basic}')])
+    env.update({'GIT_TERMINAL_PROMPT': '0', 'GIT_ASKPASS': 'false', 'SSH_ASKPASS': 'false',
+                'GIT_ALLOW_PROTOCOL': 'https', 'GIT_SSH_COMMAND': 'false'})
+    return env
+
+
+def rewrite_of(config, url):
+    """The key of the ``url.<base>.insteadOf`` or ``pushInsteadOf`` rule of ``config`` (the
+    output of ``git config --null --get-regexp _REWRITES``) that matches ``url``, or None: such
+    a rule could send the command elsewhere, for example over SSH with a personal key."""
+    for entry in config.split('\0'):
+        key, _, prefix = entry.partition('\n')
+        if prefix and url.startswith(prefix):
+            return key
+    return None
+
+
+def clone(url, token, dest, run=subprocess.run, timeout=1800):
+    """Clone ``url`` into ``dest`` (which must not exist, or be empty) over HTTPS with ``token``
+    only, as the fetches of the workspace (#716, ``app_auth_env``): the token is never written
+    in the clone's config, which keeps ``url`` as ``origin``, nor on the command line. Raises
+    WorkspaceError when a URL rewrite of the configuration of git matches ``url``, or the clone
+    fails."""
+    dest = Path(dest)
+    where = dest.parent if dest.parent.is_dir() else Path.cwd()
+    env = {k: v for k, v in os.environ.items() if k not in APP_AUTH_UNSET}
+    try:
+        found = run(['git', 'config', '--null', '--get-regexp', _REWRITES], cwd=where,
+                    capture_output=True, text=True, timeout=60, env=env)
+        key = rewrite_of(found.stdout or '', url)
+        if key:
+            raise WorkspaceError(f'git config {key} rewrites {url}: refusing to clone with '
+                                 'credentials other than the app token')
+        done = run(['git', 'clone', '--quiet', '--', url, str(dest)], cwd=where,
+                   capture_output=True, text=True, timeout=timeout,
+                   env=dict(env, **app_auth_env(url, token)))
+    except subprocess.TimeoutExpired as exc:
+        raise WorkspaceError(f'git clone: timed out after {exc.timeout}s') from exc
+    except OSError as exc:
+        raise WorkspaceError(f'git could not start: {exc}') from exc
+    if done.returncode != 0:
+        raise WorkspaceError(f'git clone {url}: {done.stderr.strip()[:500]}')
+
+
 # Applied to every git command the dispatcher runs in a worktree (#415), over every config file:
 # no hook and no fsmonitor program runs, whatever a config says.
 WORKTREE_GIT_CONFIG = (('core.hooksPath', os.devnull), ('core.fsmonitor', 'false'))
@@ -262,10 +329,15 @@ class Workspace:
     worktree included, could point git to a configuration or a hook of its own, which the
     dispatcher's user would then run. ``GIT_DIR``, ``GIT_COMMON_DIR`` and ``GIT_WORK_TREE`` are
     set to the metadata of the repository (:meth:`common_dir`) the dispatcher created with
-    ``git worktree add``, and ``WORKTREE_GIT_CONFIG`` turns hooks and fsmonitor off."""
+    ``git worktree add``, and ``WORKTREE_GIT_CONFIG`` turns hooks and fsmonitor off.
+
+    ``fetch_auth`` (#716), if given, returns the credentials of the fetches of the managed
+    repository, ``{url, token}`` (``Identities.fetch_auth``: a token of the dispatcher's app
+    limited to ``contents=read``), or None for the ambient ones: every fetch then goes to ``url``
+    with that token only (``app_auth_env``), into the remote branches of ``origin``."""
 
     def __init__(self, repo_root, state_dir, base_branch, run=subprocess.run, test_env=None,
-                 private_tmp=False, agent_user=None):
+                 private_tmp=False, agent_user=None, fetch_auth=None):
         self.repo_root = Path(repo_root)
         self.root = self.repo_root / state_dir / 'worktrees'
         self.base_branch = base_branch
@@ -273,6 +345,7 @@ class Workspace:
         self._test_env = test_env
         self.private_tmp = private_tmp
         self.agent_user = agent_user
+        self.fetch_auth = fetch_auth
         self._shared_dir = SharedDir(self.root.parent / SHARED_DIR)
         self._shared = threading.RLock()
         self._read_only = None
@@ -420,6 +493,28 @@ class Workspace:
             raise WorkspaceError(f'git {" ".join(args[:2])}: {done.stderr.strip()[:500]}')
         return done
 
+    def _fetch(self, *refs):
+        """Fetch the base branch of the managed repository, and the refspecs ``refs``, into the
+        remote branches of ``origin``. With :attr:`fetch_auth` (#716) the fetch goes to its URL
+        with its token only (``app_auth_env``), after the same refusal of URL rewrites as a push;
+        a token that cannot be had fails the fetch, as a fetch that fails, with a message that
+        says so. Nothing in a read-only workspace: the remote branches are those last fetched."""
+        if self._read_only is not None:
+            return
+        try:
+            auth = self.fetch_auth() if self.fetch_auth is not None else None
+        except Exception as exc:  # whatever the mint raised: the fetch fails, as on git's errors
+            raise WorkspaceError(f'git fetch: no token of the dispatcher app to fetch '
+                                 f'{self.base_branch}: {exc}') from exc
+        if not auth:
+            self._git('fetch', 'origin', self.base_branch, *refs)
+            return
+        url = auth['url']
+        self._refuse_rewrites(None, url, 'fetch')
+        self._git('fetch', url,
+                  f'+refs/heads/{self.base_branch}:refs/remotes/origin/{self.base_branch}', *refs,
+                  env=app_auth_env(url, auth['token']), unset=APP_AUTH_UNSET)
+
     def path(self, name):
         return self.root / name
 
@@ -470,7 +565,7 @@ class Workspace:
 
     def new_branch(self, name, branch):
         """A worktree on ``branch`` reset to the latest remote base branch."""
-        self._git('fetch', 'origin', self.base_branch)
+        self._fetch()
         path = self.path(name)
         self._fresh(path)
         self._git('worktree', 'add', '--force', '-B', branch, str(path),
@@ -479,8 +574,7 @@ class Workspace:
 
     def existing_branch(self, name, branch):
         """A worktree on ``branch`` at its pushed head."""
-        self._git('fetch', 'origin', self.base_branch,
-                  f'+refs/heads/{branch}:refs/remotes/origin/{branch}')
+        self._fetch(f'+refs/heads/{branch}:refs/remotes/origin/{branch}')
         path = self.path(name)
         self._fresh(path)
         self._git('worktree', 'add', '--force', '-B', branch, str(path), f'origin/{branch}')
@@ -489,7 +583,7 @@ class Workspace:
     def base_copy(self, name):
         """A disposable worktree detached at the latest remote base branch, for a read-only
         turn such as the readiness check; removed with :meth:`remove`."""
-        self._git('fetch', 'origin', self.base_branch)
+        self._fetch()
         path = self.path(name)
         self._fresh(path)
         self._git('worktree', 'add', '--force', '--detach', str(path),
@@ -499,7 +593,7 @@ class Workspace:
     def base_head(self):
         """The commit of the latest remote base branch: the base an issue's step starts from,
         part of the key of the supervisor's retries (#182)."""
-        self._git('fetch', 'origin', self.base_branch)
+        self._fetch()
         return self._git('rev-parse', f'origin/{self.base_branch}').strip()
 
     def commit_copy(self, name, commit, branch=None):
@@ -507,7 +601,7 @@ class Workspace:
         (#141); removed with :meth:`remove`. ``branch``: the PR branch to fetch with the base,
         where the commit is."""
         refs = [f'+refs/heads/{branch}:refs/remotes/origin/{branch}'] if branch else []
-        self._git('fetch', 'origin', self.base_branch, *refs)
+        self._fetch(*refs)
         path = self.path(name)
         self._fresh(path)
         self._git('worktree', 'add', '--force', '--detach', str(path), commit)
@@ -721,8 +815,7 @@ class Workspace:
         ``changes`` holds one ``{path, links}`` per path: added, modified and deleted files,
         and both the old and the new path of a rename (renames are not detected). ``links``
         holds the target of the path on each side of the diff where it is a symlink."""
-        self._git('fetch', 'origin', self.base_branch,
-                  f'+refs/heads/{branch}:refs/remotes/origin/{branch}')
+        self._fetch(f'+refs/heads/{branch}:refs/remotes/origin/{branch}')
         base = self._git('rev-parse', f'origin/{self.base_branch}^{{commit}}').strip()
         head = self._git('rev-parse', f'origin/{branch}^{{commit}}').strip()
         out = self._git('diff', '--raw', '-z', '--no-renames', '--no-abbrev', '--no-ext-diff',
@@ -861,8 +954,7 @@ class Workspace:
         conflicts (``clean_resync``). None when ``head`` is ``approved``, another commit is in
         between, or ``approved`` is not reached. Fetches ``branch`` and the base first. Raises
         WorkspaceError when git cannot tell."""
-        self._git('fetch', 'origin', self.base_branch,
-                  f'+refs/heads/{branch}:refs/remotes/origin/{branch}')
+        self._fetch(f'+refs/heads/{branch}:refs/remotes/origin/{branch}')
         base = f'origin/{self.base_branch}'
         commit, resolved = head, []
         for _ in range(limit):
@@ -1004,7 +1096,7 @@ class Workspace:
         token travels in the environment of this one command, never in a config file or on the
         command line. No other credential can take part: URL rewrites are refused, only the
         HTTPS transport is allowed, and credential helpers, askpass programs and preconfigured
-        authentication headers are disabled.
+        authentication headers are disabled (``app_auth_env``, the same of the fetches, #716).
 
         A push that fails for a transient error of the remote (``transient_push``, #645) raises
         ``TransientPushError``; any other failure a ``WorkspaceError``."""
@@ -1012,21 +1104,7 @@ class Workspace:
         if auth:
             remote = auth['url']
             self._refuse_rewrites(path, remote)
-            basic = base64.b64encode(f'x-access-token:{auth["token"]}'.encode()).decode()
-            # Git applies the http.<url>.* entries of the most specific URL that matches and
-            # drops the others, whatever their order. Keyed on the exact push URL, the reset and
-            # the header win over every config file (a tie goes to the later entry, and these
-            # come last); a less specific key would lose to, say, a repository-level
-            # http.<this url>.extraHeader. Credential helpers are reset by the plain key: git
-            # applies every matching credential.* entry in order.
-            env = git_config_env([
-                ('credential.helper', ''),
-                (f'http.{remote}.extraHeader', ''),
-                (f'http.{remote}.extraHeader', f'AUTHORIZATION: basic {basic}')])
-            env.update({'GIT_TERMINAL_PROMPT': '0', 'GIT_ASKPASS': 'false', 'SSH_ASKPASS': 'false',
-                        'GIT_ALLOW_PROTOCOL': 'https', 'GIT_SSH_COMMAND': 'false'})
-            # `git -c` settings inherited from a parent git are applied after GIT_CONFIG_*.
-            unset = ('GIT_CONFIG_PARAMETERS',)
+            env, unset = app_auth_env(remote, auth['token']), APP_AUTH_UNSET
         try:
             self._git('push', *(['--force'] if replace else []), remote,
                       f'HEAD:refs/heads/{branch}', cwd=path, env=env, unset=unset)
@@ -1035,16 +1113,14 @@ class Workspace:
                 raise TransientPushError(str(exc)) from exc
             raise
 
-    def _refuse_rewrites(self, path, url):
+    def _refuse_rewrites(self, path, url, action='push'):
         """A ``url.<base>.insteadOf`` or ``pushInsteadOf`` rule matching ``url`` could send the
-        push elsewhere, for example over SSH with a personal key."""
-        out = self._git('config', '--null', '--get-regexp', r'^url\..*\.(push)?insteadof$',
-                        cwd=path, check=False)
-        for entry in out.split('\0'):
-            key, _, prefix = entry.partition('\n')
-            if prefix and url.startswith(prefix):
-                raise WorkspaceError(f'git config {key} rewrites {url}: refusing to push with '
-                                     'credentials other than the app token')
+        push, or the fetch (#716), elsewhere, for example over SSH with a personal key."""
+        out = self._git('config', '--null', '--get-regexp', _REWRITES, cwd=path, check=False)
+        key = rewrite_of(out, url)
+        if key:
+            raise WorkspaceError(f'git config {key} rewrites {url}: refusing to {action} with '
+                                 'credentials other than the app token')
 
     def run_tests(self, path, command, timeout):
         """``(passed, output_tail)`` for the project test command in ``path``. With an agent

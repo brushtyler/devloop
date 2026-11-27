@@ -1,5 +1,6 @@
 """devloop command line: python3 -m devloop
-{setup,status,apps,tick,run,cleanup,gc,follow,watch,pin,report,direction,fallback,token,notify}."""
+{setup,status,apps,tick,run,cleanup,gc,follow,watch,pin,report,direction,fallback,token,clone,
+notify}."""
 
 import argparse
 import fcntl
@@ -17,10 +18,10 @@ from . import (activity, direction, events, follow, notify, pin, redact, report,
 from .agents import AgentRunner, admits_command, command_key, isolated_env
 from .agentuser import GH_CONFIG, SHARED_DIR, WORKTREES_DIR, AgentUser, AgentUserError, SharedDir
 from .agentuser import check as check_isolation
-from .apps import DISPATCHER, MERGER, Identities
-from .config import (INSTALL_ROOT, PROJECT_CONFIG, ConfigError, Reloader, compose_sources,
-                     fingerprint, key_role, load_config, missing_project_tables,
-                     read_sources, repo_lock_name)
+from .apps import DISPATCHER, FETCH, MERGER, AppAuth, Identities, find_key, repo_url
+from .config import (INSTALL_ROOT, PROJECT_CONFIG, AppConfig, Config, ConfigError, Reloader,
+                     compose_sources, fingerprint, key_role, load_config,
+                     missing_project_tables, read_sources, read_toml, repo_lock_name)
 from .context import both_labels_warning, label_transition
 from .dispatch_actions import PendingPushes
 from .dispatch_advisory import AdvisoryFailures, AdvisoryResults
@@ -36,7 +37,8 @@ from .markdown import dispatcher_header, publishable
 from .outbox import for_identities
 from .planning import plan, queue_lines
 from .stall import StallWatch
-from .workspace import NO_BYTECODE, Workspace
+from .workspace import NO_BYTECODE, Workspace, WorkspaceError
+from .workspace import clone as workspace_clone
 
 # The descriptor of the dispatcher lock, passed on by a restart from a new pinned copy (#174).
 LOCK_FD = 'DEVLOOP_LOCK_FD'
@@ -487,9 +489,12 @@ def build(args):
         gh_config = state / 'agent-gh-config'
         gh_config.mkdir(parents=True, exist_ok=True)
     agent_env = agent_environment(cfg, gh_config, agent_user)
-    # With parallel actions (#176) each test run gets a temporary directory of its own.
+    # With parallel actions (#176) each test run gets a temporary directory of its own. The
+    # fetches of the managed repository, private too, go with a token of the dispatcher's app
+    # limited to contents=read (#716), when [apps] has one.
     ws = Workspace(root, cfg.state_dir, cfg.base_branch, test_env=agent_env,
-                   private_tmp=cfg.max_parallel_actions > 1, agent_user=agent_user)
+                   private_tmp=cfg.max_parallel_actions > 1, agent_user=agent_user,
+                   fetch_auth=identities.fetch_auth)
     current = activity.Activity(state)
     # One log for the whole tick: each line whole, with the number of its action (#176).
     tick_log = TickLog(log)
@@ -750,6 +755,64 @@ def run_token(args, command):
     except (token.TokenError, OSError, GitHubError) as exc:
         sys.exit(f'devloop: token: {exc}')
     sys.exit(code)
+
+
+def clone_identity(local):
+    """``(repo, app, key_dir)`` of the overlay ``local`` alone (#716): its ``repo``, its
+    ``[apps.dispatcher]`` (``AppConfig``, None without it) and its ``[apps] key_dir``. The rest
+    of the configuration is not needed for a clone, and the project file, which the whole
+    configuration needs, may not be there yet. ``ConfigError`` for a value that is not valid."""
+    if not local:
+        raise ConfigError('clone: give the overlay with --local-config: its repo and '
+                          '[apps.dispatcher]')
+    data = read_toml(local, 'local config')
+    repo = data.get('repo')
+    if repo is None:
+        raise ConfigError(f"config: missing 'repo': set it in the overlay {local}")
+    repo_lock_name(repo)  # owner/name, or ConfigError
+    table = data.get('apps') or {}
+    if not isinstance(table, dict):
+        raise ConfigError('apps: expected a table')
+    key_dir = table.get('key_dir', Config.app_key_dir)
+    if not isinstance(key_dir, str):
+        raise ConfigError('apps.key_dir: expected str')
+    app = table.get(DISPATCHER)
+    if app is None:
+        return repo, None, key_dir
+    if (not isinstance(app, dict) or not isinstance(app.get('app_id'), int)
+            or isinstance(app.get('app_id'), bool) or not isinstance(app.get('slug'), str)):
+        raise ConfigError(f'apps.{DISPATCHER}: expected a table with app_id (int) and slug (str)')
+    return repo, AppConfig(app_id=app['app_id'], slug=app['slug']), key_dir
+
+
+def run_clone(args, auth=AppAuth, clone=workspace_clone):
+    """``devloop clone DEST`` (#716): the first clone of the managed repository, private too,
+    into ``DEST``, with a token of the dispatcher's app limited to ``contents=read``
+    (``apps.FETCH``) and the defences of the fetches (``workspace.clone``). The repository and
+    the app are ``repo`` and ``[apps.dispatcher]`` of the overlay given with ``--local-config``,
+    read alone (``clone_identity``); the key is read from ``$DEVLOOP_APP_KEY_DIR`` or ``[apps]
+    key_dir``. No checkout is needed and the project file is not read: the clone may come
+    before them. ``auth`` and ``clone`` are there for the tests. Returns 0, or exits with a
+    message."""
+    try:
+        repo, configured, key_dir = clone_identity(args.local_config)
+    except ConfigError as exc:
+        sys.exit(f'devloop: invalid config: {exc}')
+    if configured is None:
+        sys.exit(f'devloop: clone: no GitHub App of the dispatcher in [apps] of the overlay of '
+                 f'{repo}: set [apps.dispatcher] and its key first')
+    key_dir = os.environ.get('DEVLOOP_APP_KEY_DIR') or key_dir
+    try:
+        app = auth(configured.app_id, configured.slug, find_key(key_dir, configured.slug), repo)
+        secret = app.token(FETCH)
+    except (OSError, GitHubError, ValueError, KeyError) as exc:
+        sys.exit(f'devloop: clone: no token of the dispatcher app: {exc}')
+    try:
+        clone(repo_url(repo), secret, args.dest)
+    except WorkspaceError as exc:
+        sys.exit(f'devloop: clone: {exc}')
+    log(f'clone: {repo} in {args.dest}')
+    return 0
 
 
 def run_watch(parser, args):
@@ -1104,6 +1167,10 @@ def main(argv=None):
     token_cmd.add_argument('actor', help=f'one of {", ".join(token.ACTORS)}')
     token_cmd.add_argument('--perm', action='append', metavar='NAME=LEVEL',
                            help='a permission of the token; repeat it for more')
+    clone_cmd = sub.add_parser('clone', help='clone the managed repository (repo of the '
+                                             'configuration) with a token of the dispatcher '
+                                             'app limited to contents=read')
+    clone_cmd.add_argument('dest', help='the directory of the clone: absent, or empty')
     notify_cmd = sub.add_parser('notify', help='send a notice to the operator on the channel '
                                                'of [notify] of the overlay (Telegram, outbound '
                                                'only), once per key and interval')
@@ -1208,6 +1275,8 @@ def _command(parser, args, argv, command, timeout):
         return run_pin(args)
     if args.command == 'token':
         return run_token(args, command)
+    if args.command == 'clone':
+        sys.exit(run_clone(args))
     if args.command == 'fallback':
         return run_fallback(args)
     if args.command == 'report':
