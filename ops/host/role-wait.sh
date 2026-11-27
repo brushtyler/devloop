@@ -674,7 +674,9 @@ maintenance_exit() {
 # fissata"), la scadenza, la fine. Vero (0) se la manutenzione c'è e il ruolo l'ha già avuta.
 maintenance_check() {
     local m seen_start='' seen_phase='' seen_expiry='' start expiry rest
-    read -r seen_start seen_phase seen_expiry <"$MAINT_SEEN" 2>/dev/null
+    # Il file manca finché il ruolo non ha visto una manutenzione: lo si legge solo se c'è, perché
+    # l'errore di "<" va su stderr prima che "2>/dev/null" valga, a ogni giro dell'attesa (#711).
+    [ -f "$MAINT_SEEN" ] && read -r seen_start seen_phase seen_expiry <"$MAINT_SEEN" 2>/dev/null
     if m=$(ops_maintenance); then
         read -r start expiry rest <<<"$m"
         if [ "$seen_start" != "$start" ]; then

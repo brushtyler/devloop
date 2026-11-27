@@ -1056,6 +1056,65 @@ come root, `systemctl disable --now devloop-mailbox-prune@<progetto>.timer`, `rm
 `systemctl daemon-reload`. I messaggi che la pulizia ha già tolto da `done/` non tornano: erano
 solo storico.
 
+## Sveglia dei ruoli senza errori su stderr (#711)
+
+Il passo sull'host di #711. Con il codice di #705, `role-wait.sh` scriveva su stderr una riga di
+errore a ogni giro dell'attesa finché il ruolo non aveva mai visto una manutenzione (il file
+`maintenance` dello stato della sveglia del ruolo mancava, e la redirezione d'ingresso falliva
+prima di `2>/dev/null`): un output della sveglia pieno di righe inutili, che il ruolo legge a ogni
+risveglio. Con #711 la sveglia legge quel file solo se c'è. Il comportamento non cambia: serve solo
+`host/role-wait.sh` nuovo nelle copie di root dei ruoli (`SUPERVISOR_OPS_DIR` e
+`COORDINATOR_OPS_DIR`).
+
+Nessun parametro, nessuna chiave dell'overlay, nessun sudoers, nessuna ACL e nessuna unità nuovi;
+la sentinella e il watchdog non girano `role-wait.sh`, e non si riavviano. Il codice di devloop non
+cambia: devloop mergia la PR di #711 come le altre, ma non fa il pin automatico di quel commit né
+dei successivi finché l'operatore non fa il pin a mano ([Ogni cambio con un passo
+sull'host](#ogni-cambio-con-un-passo-sullhost)): qui è il passo 3.
+
+### Comandi
+
+Come root, dal checkout dell'operatore aggiornato (`git -C <checkout> fetch origin` e
+`git -C <checkout> checkout --detach origin/main`, con il merge di #711), **per ogni progetto
+dell'host** con il supervisore, con il suo file di parametri `<parametri>` (uno con `SOURCE_REF`
+al tag successivo, con [la sua procedura](#un-progetto-con-la-sorgente-a-un-tag-nuovo-666)):
+
+1. **il loop fermo**: `systemctl stop <SERVICE_NAME>`. Le sessioni dei ruoli restano;
+
+2. **le copie di root di `ops/`**, prima con `--dry-run`: le azioni nuove sono solo le copie
+   (`SUPERVISOR_OPS_DIR`, `COORDINATOR_OPS_DIR`, `WATCHDOG_OPS_DIR`), con `host/role-wait.sh`
+   nuovo. `setup-coordinator.sh` si esegue solo se il progetto ha il coordinatore, e trova già
+   fatto ciò che `setup-supervisor.sh` ha fatto. Un'altra azione che il passo non spiega vuol dire
+   che l'host non corrisponde ai parametri: ci si ferma e si chiede all'operatore:
+
+   ```bash
+   sudo bash <checkout>/ops/host/setup-supervisor.sh --params <parametri> --dry-run
+   sudo bash <checkout>/ops/host/setup-supervisor.sh --params <parametri>
+   sudo bash <checkout>/ops/host/setup-coordinator.sh --params <parametri> --dry-run
+   sudo bash <checkout>/ops/host/setup-coordinator.sh --params <parametri>
+   ```
+
+3. **il pin a mano**: come utente `DEVLOOP_USER`, `devloop pin origin/main` (con più progetti
+   `devloop --project <progetto> pin origin/main`), poi `systemctl start <SERVICE_NAME>`. Il pin a
+   mano fa riprendere il pin automatico;
+
+4. **la verifica**: nessun `ERRORE`, e nelle copie di root la riga `ok: …/host/role-wait.sh
+   coincide con …`:
+
+   ```bash
+   sudo bash <checkout>/ops/host/check-host.sh --params <parametri> --no-apps
+   ```
+
+5. **le sessioni dei ruoli**: le sveglie già in attesa girano la copia di prima finché il ruolo non
+   le rilancia, al prossimo risveglio; da lì l'output della sveglia non ha più quelle righe.
+
+**Un progetto con `SOURCE_REF`** (#687) ha la sveglia del suo tag: finché il tag non contiene
+#711, le righe su stderr restano, senza altro effetto. Questa sezione la applica al tag che la
+contiene, con [la sua procedura](#un-progetto-con-la-sorgente-a-un-tag-nuovo-666).
+
+**Rollback**: il passo 2 dal checkout della versione di prima rimette le copie di prima, e il pin
+della versione di prima il codice di prima.
+
 ## Configurazione di ssdlc nel suo file di progetto
 
 Con l'ADR 0006, R3, `devloop/config.toml` non contiene più i fatti di ssdlc né le restrizioni che
