@@ -1354,8 +1354,9 @@ agent commands: claude-reviewer: test_cmd `npm test` and prompts.module_test_cmd
   or `review_args` (review turns), each argument one rule. `Bash` and `Bash(*)` admit every
   command; `Bash(<command> *)` and `Bash(<command>:*)` the command alone or followed by any
   argument; any other `Bash(<pattern>)` the commands it matches whole, `*` standing for any
-  text. A rule of `--disallowedTools` that matches wins. Each command of a `&&`, `||`, `;` or `|`
-  chain must be admitted on its own. `--permission-mode bypassPermissions` and
+  text. A rule of `--disallowedTools` that matches wins. Each command of a chain must be admitted
+  on its own: devloop splits at `&&`, `||`, `;`, `|`, `|&`, `&` and at newlines, outside quotes
+  and escapes, not at the `&` of a redirection such as `2>&1`. `--permission-mode bypassPermissions` and
   `--dangerously-skip-permissions` admit everything.
 - **agy**: the prefixes of `write_commands` or `review_commands`, word by word
   ([agy permissions](#agy-permissions)).

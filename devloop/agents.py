@@ -503,8 +503,48 @@ _CLAUDE_EVERY_COMMAND = ('--dangerously-skip-permissions',)
 _CLAUDE_BYPASS_MODE = 'bypassPermissions'
 _CLAUDE_ALLOW = ('--allowedTools', '--allowed-tools')
 _CLAUDE_DENY = ('--disallowedTools', '--disallowed-tools')
-# The operators that split a shell command into the commands claude checks one by one.
-_SHELL_SPLIT = re.compile(r'\s*(?:&&|\|\||;|\|)\s*')
+
+
+def _shell_commands(command):
+    """The commands of the shell line ``command`` that claude checks one by one (#697): split at
+    the operators ``&&``, ``||``, ``;``, ``|``, ``|&``, ``&`` and at newlines, outside single and
+    double quotes and not after a backslash. The ``&`` of a redirection (``2>&1``, ``&>``, ``<&``)
+    splits nothing. Each command stripped, the empty ones left out."""
+    parts, current, quote, i = [], [], None, 0
+    while i < len(command):
+        ch = command[i]
+        if quote:
+            current.append(ch)
+            if ch == '\\' and quote == '"' and i + 1 < len(command):
+                current.append(command[i + 1])
+                i += 1
+            elif ch == quote:
+                quote = None
+        elif ch == '\\' and i + 1 < len(command):
+            if command[i + 1] != '\n':  # A backslash before a newline joins the two lines.
+                current.append(command[i:i + 2])
+            i += 1
+        elif ch in '\'"':
+            quote = ch
+            current.append(ch)
+        elif ((ch == '&' and (_last(current) in ('<', '>') or command[i + 1:i + 2] == '>'))
+              or (ch == '|' and _last(current) == '>')):
+            current.append(ch)
+        elif ch in ';\n|&':
+            parts.append(''.join(current))
+            current = []
+            if command[i + 1:i + 2] in ('&', '|') and ch in '&|':
+                i += 1
+        else:
+            current.append(ch)
+        i += 1
+    parts.append(''.join(current))
+    return [part.strip() for part in parts if part.strip()]
+
+
+def _last(current):
+    """The last character of the command being read, '' at its start."""
+    return current[-1][-1:] if current else ''
 
 
 def _claude_rules(args):
@@ -560,8 +600,8 @@ def admits_command(agent, mode, command):
     """Whether a turn of ``agent`` in ``mode`` may run the shell command ``command`` as its
     permissions read (#697), or None when devloop gives that agent no list of commands (codex
     runs any command inside its sandbox). claude: its ``--allowedTools`` and
-    ``--disallowedTools`` of ``write_args`` or ``review_args``, each command of a ``&&``, ``||``,
-    ``;`` or ``|`` chain on its own, as claude checks them; agy: the prefixes of
+    ``--disallowedTools`` of ``write_args`` or ``review_args``, each command of a chain on its
+    own (``_shell_commands``), as claude checks them; agy: the prefixes of
     ``write_commands`` or ``review_commands``, word by word. Read only: what the agent may run
     stays what its configuration says, and ``devloop status`` only warns."""
     if agent.kind == 'agy':
@@ -570,7 +610,7 @@ def admits_command(agent, mode, command):
     if agent.kind != 'claude':
         return None
     every, allow, deny = _claude_rules(agent.write_args if mode == 'write' else agent.review_args)
-    parts = [part for part in _SHELL_SPLIT.split(command.strip()) if part]
+    parts = _shell_commands(command)
     return bool(parts) and all(
         not any(_bash_match(rule, part) for rule in deny)
         and (every or any(_bash_match(rule, part) for rule in allow)) for part in parts)

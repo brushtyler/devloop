@@ -79,6 +79,28 @@ class AdmitsCommandTests(unittest.TestCase):
         self.assertTrue(admits_command(claude, 'write', 'npm test'))
         self.assertFalse(admits_command(claude, 'write', 'npm publish --tag x'))
 
+    def test_claude_splits_the_chain_as_the_shell_does(self):
+        # Review of PR #698: an operator between quotes splits nothing, a newline and `&` do.
+        claude = agent('claude', write_args=['--allowedTools', 'Bash(npx vitest *)',
+                                             'Bash(npm test *)'])
+        for command in ("npx vitest run --testNamePattern='foo|bar'",
+                        'npx vitest run -t "a && b; c"', r'npx vitest run -t a\;b',
+                        'npm test 2>&1', 'npm test &> out.log', 'npm test >| out.log',
+                        'npm test -- --run \\\n  --silent', 'npm test |& npx vitest run'):
+            with self.subTest(command=command):
+                self.assertTrue(admits_command(claude, 'write', command))
+        for command in ('npm test -- --run\nnpx tsc --noEmit', 'npm test & npx tsc --noEmit',
+                        'npm test |& npx tsc', "npm test 'x' ; npx tsc", 'npm test "a\\"" | tsc'):
+            with self.subTest(command=command):
+                self.assertFalse(admits_command(claude, 'write', command))
+
+    def test_a_quoted_vitest_filter_in_the_npm_recipe_warns_nothing(self):
+        project = example('npm project.toml').replace(
+            '"npx vitest run src/name.test.ts"', '''"npx vitest run --testNamePattern='foo|bar'"''')
+        cfg = composed(project, example('npm config.local.toml'))
+        self.assertEqual(cfg.prompts.module_test_cmd, "npx vitest run --testNamePattern='foo|bar'")
+        self.assertEqual(cli.command_lines(cfg), [])
+
     def test_claude_without_permission_prompts_admits_everything(self):
         for args in (['--permission-mode', 'bypassPermissions'],
                      ['--permission-mode=bypassPermissions'], ['--dangerously-skip-permissions']):
