@@ -442,7 +442,14 @@ DEVLOOP_APP_KEY_DIR=<key_dir> python3 scripts/coordinator-token.py --state-dir <
 - **Reads** with the read permissions only: `--perm issues=read`, `--perm pull_requests=read`,
   and `--perm actions=read`, `checks=read` or `statuses=read` for the diagnosis of the CI.
 - **Writes** (comments, issues, labels, commands) with the default, `issues=write` and
-  `pull_requests=write`. No other permission exists for your app: no `contents`, no push.
+  `pull_requests=write`. No other permission exists for your app: no `contents` write, no push.
+- **Your clone.** `contents` read only with an explicit `--perm contents=read`, and only to
+  clone or update your clone of a private managed repository (#717); a public one updates with a
+  plain `git fetch` (or `git pull`). For a private one, through `scripts/role-git.py`, which
+  passes the token to `git` only ([The clone of a role](../reference.md#the-clone-of-a-role)):
+  `DEVLOOP_APP_KEY_DIR=<key_dir> python3 scripts/coordinator-token.py --state-dir <state_dir>
+  --perm contents=read -- python3 scripts/role-git.py fetch <your clone>`. Never ask
+  `contents=read` for anything else.
 - **The attribution header.** Every text you publish (issue, comment, command) starts with the
   header of AGENTS.md ("Intestazione di Issue e Pull Request"), with the values of your session:
   your CLI and its version, your model and your reasoning level.
@@ -489,7 +496,8 @@ the mailbox.
 - On GitHub, only the coordinator's role app `[apps.coordinator]`, counted with
   `[roles.coordinator]` ([The coordinator app](../reference.md#the-coordinator-app)), through
   `scripts/coordinator-token.py` (GitHub): `issues` and `pull_requests`, and `actions`, `checks`
-  and `statuses` in read. Its commands count only inside the closed perimeter of the table of
+  and `statuses` in read; `contents` in read only for your clone of a private managed repository
+  (#717). Its commands count only inside the closed perimeter of the table of
   [The coordinator](../guide.md#the-coordinator): any other is refused.
 - On the host, **read only**: the commands of `ops/host/sudoers-coordinator`
   ([ops/README.md](../../../ops/README.md), step 10), that is `devloop-pinned status` and

@@ -22,15 +22,19 @@ supervisor's system user ($DEVLOOP_APP_KEY_DIR, else apps.key_dir of the configu
 devloop's.
 
 Without --perm the token gets issues=write and pull_requests=write: enough for comments and
-labels. Only issues and pull_requests (read or write), and actions, checks, statuses and metadata
-read, may be asked for: the supervisor neither implements nor merges, and its app has no contents
-permission. The supervisor reads GitHub with this script too, asking only the read permissions it
-needs (#643): it has no personal token of gh.
+labels. Only issues and pull_requests (read or write), and actions, checks, statuses, metadata
+and contents read, may be asked for: the supervisor neither implements nor merges, and its app
+never writes contents. The supervisor reads GitHub with this script too, asking only the read
+permissions it needs (#643): it has no personal token of gh. contents=read (#717) only with an
+explicit --perm, for the clone and the fetch of its clone of a private managed repository, which
+scripts/role-git.py makes with the token in the environment of git alone:
 
     python3 scripts/supervisor-token.py --state-dir <state_dir> \\
         --perm issues=read --perm pull_requests=read -- gh pr view 76 --comments
     python3 scripts/supervisor-token.py --state-dir <state_dir> \\
         --perm actions=read --perm checks=read -- gh pr checks 76
+    python3 scripts/supervisor-token.py --state-dir <state_dir> \\
+        --perm contents=read -- python3 scripts/role-git.py fetch <clone>
 
 The token reaches the command through GH_TOKEN only; it is never printed.
 
@@ -65,10 +69,11 @@ from devloop.redact import allow_option, publication_check  # noqa: E402
 DEFAULT = {'issues': 'write', 'pull_requests': 'write'}
 # The permissions of ops/github/apps/supervisor.json, none above its level. actions, checks and
 # statuses are read only, and only with an explicit --perm (#643): the supervisor reads GitHub
-# with its app, with no personal token.
+# with its app, with no personal token. contents too (#717), for the clone of a private managed
+# repository: read only, never in DEFAULT.
 ALLOWED = {'issues': {'read', 'write'}, 'pull_requests': {'read', 'write'},
            'actions': {'read'}, 'checks': {'read'}, 'statuses': {'read'},
-           'metadata': {'read'}}
+           'metadata': {'read'}, 'contents': {'read'}}
 # The launcher's default state_dir, of this clone.
 STATE = REPO_ROOT / '.devloop'
 LOCAL_CONFIG = 'config.local.toml'

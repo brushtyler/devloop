@@ -77,8 +77,12 @@ class CoordinatorTokenTests(unittest.TestCase):
             with self.subTest(perm=perm):
                 self.assertEqual(self.script.parse(['--perm', perm, '--', 'gh', 'x']),
                                  (state, {name: level}, ['gh', 'x']))
+        # #717: contents read, for the clone of a private repository, only when asked.
+        self.assertEqual(self.script.parse(['--perm', 'contents=read', '--', 'gh', 'x']),
+                         (state, {'contents': 'read'}, ['gh', 'x']))
+        self.assertNotIn('contents', default)
         # The coordinator neither implements nor merges: nothing above its manifest.
-        for perm in ('contents=read', 'contents=write', 'actions=write', 'checks=write',
+        for perm in ('contents=write', 'actions=write', 'checks=write',
                      'statuses=write', 'administration=write', 'workflows=write',
                      'metadata=write', 'issues=admin'):
             with self.subTest(perm=perm), self.assertRaisesRegex(SystemExit, 'not allowed'):
@@ -106,7 +110,9 @@ class CoordinatorTokenTests(unittest.TestCase):
             self.assertLessEqual(levels, {'read', 'write'} if granted[name] == 'write'
                                  else {'read'}, name)
         self.assertEqual(set(self.script.ALLOWED), set(granted))
-        self.assertNotIn('contents', self.script.ALLOWED)
+        # #717: contents read only, never write, never by default.
+        self.assertEqual(self.script.ALLOWED['contents'], {'read'})
+        self.assertNotIn('contents', self.script.DEFAULT)
 
     def test_only_the_coordinators_key_is_read_and_the_token_is_never_printed(self):
         # Another app's key beside it is never read.

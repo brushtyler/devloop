@@ -1596,7 +1596,7 @@ class TagUpgradeGuideTests(unittest.TestCase):
 
     def test_the_releases_say_who_when_and_how(self):
         releases = ' '.join(self.releases().split())
-        for phrase in ('The operator creates and pushes the tag', 'no `contents` permission',
+        for phrase in ('The operator creates and pushes the tag', 'no `contents: write` permission',
                        'at least an hour', 'no `Traceback` and no `ALERT:` in `run.log`',
                        '`v0.MINOR.PATCH`', 'The tag is annotated',
                        "git tag -a '<new tag>' <commit> --cleanup=verbatim -F <message file>",
@@ -1771,7 +1771,7 @@ class CoordinatorGuideTests(unittest.TestCase):
                        'mai `/usr/bin/test`', '**Overlay sostituito.**', '`install -m 600`'):
             self.assertIn(phrase, flat)
         self.assertIn('| `coordinator` | issues: write, pull_requests: write, '
-                      'actions/checks/statuses: read |', text)
+                      'actions/checks/statuses/contents: read |', text)
         self.assertIn('### Precisazione del 2026-11-22: modello a quattro ruoli (#524, #527)',
                       (ROOT / 'docs/adr/0002-ruoli-e-responsabilita.md').read_text())
         flat = ' '.join(text.split())
@@ -1829,32 +1829,62 @@ class ManifestTests(unittest.TestCase):
                     self.assertIn(name, granted, f'{role}: {name}')
                     self.assertGreaterEqual(LEVEL[granted[name]], LEVEL[level], f'{role}: {name}')
 
-    def test_no_workflows_to_the_implementer_and_no_contents_to_the_supervisor(self):
+    def test_no_workflows_to_the_implementer_and_no_contents_write_to_the_roles(self):
         self.assertNotIn('workflows', manifest('implementer')['default_permissions'])
-        self.assertNotIn('contents', manifest('supervisor')['default_permissions'])
-        self.assertNotIn('contents', manifest('coordinator')['default_permissions'])
+        # #717: the apps of the roles read the contents, for the clone of a private repository,
+        # and never write them.
+        self.assertEqual(manifest('supervisor')['default_permissions']['contents'], 'read')
+        self.assertEqual(manifest('coordinator')['default_permissions']['contents'], 'read')
         for role in REQUIRED:  # no app pushes workflows or administers the repository
             granted = manifest(role)['default_permissions']
             self.assertNotIn('workflows', granted, role)
             self.assertNotIn('administration', granted, role)
 
-    def test_the_coordinator_has_no_contents_and_reads_the_ci(self):
+    def test_the_coordinator_reads_the_ci_and_the_contents(self):
         # #549: issues and pull_requests to write, actions, checks and statuses to read for the
-        # diagnosis of the CI, no contents; exactly what scripts/coordinator-token.py may ask.
+        # diagnosis of the CI; #717: contents to read, for the clone of a private repository;
+        # exactly what scripts/coordinator-token.py may ask.
         granted = manifest('coordinator')['default_permissions']
         self.assertEqual(granted, {'issues': 'write', 'pull_requests': 'write',
                                    'metadata': 'read', 'actions': 'read', 'checks': 'read',
-                                   'statuses': 'read'})
+                                   'statuses': 'read', 'contents': 'read'})
         self.assertEqual(granted, highest(coordinator_token().ALLOWED))
+        self.assertEqual(coordinator_token().DEFAULT,
+                         {'issues': 'write', 'pull_requests': 'write'})
 
-    def test_the_supervisor_reads_with_its_app_and_has_no_contents(self):
+    def test_the_supervisor_reads_with_its_app_and_reads_the_contents(self):
         # #643 (S2): the supervisor reads GitHub with its app, as the coordinator: actions,
-        # checks and statuses to read, no contents; exactly what scripts/supervisor-token.py may
-        # ask, and the read permissions only with an explicit --perm.
+        # checks and statuses to read; #717: contents to read; exactly what
+        # scripts/supervisor-token.py may ask, and the read permissions only with an explicit
+        # --perm.
         granted = manifest('supervisor')['default_permissions']
         self.assertEqual(granted, manifest('coordinator')['default_permissions'])
         self.assertEqual(granted, highest(supervisor_token().ALLOWED))
         self.assertEqual(supervisor_token().DEFAULT, {'issues': 'write', 'pull_requests': 'write'})
+
+    def test_contents_read_to_the_roles_is_documented_with_when_it_is_needed(self):
+        # #717: where the manifests and the rules of the tokens of the roles are described, that
+        # contents: read is needed only for a private managed repository.
+        agents = ' '.join((ROOT / 'AGENTS.md').read_text(encoding='utf-8').split())
+        self.assertIn('**`contents: read` alle app di ruolo serve solo per un repository gestito '
+                      'privato** (#717)', agents)
+        self.assertIn('Per un repository pubblico, compreso quello di devloop, non serve', agents)
+        readme = ' '.join((OPS / 'README.md').read_text(encoding='utf-8').split())
+        self.assertIn('**Quando serve `contents: read` alle app di ruolo** (#717)', readme)
+        self.assertIn('un insieme di app usato solo per repository pubblici può non averlo',
+                      readme)
+        reference = ' '.join((ROOT / 'docs/devloop/reference.md').read_text(
+            encoding='utf-8').split())
+        self.assertIn('#### The clone of a role', reference)
+        self.assertIn('**When the permission is needed.** `contents: read` to the role apps is '
+                      'needed only for a private managed repository.', reference)
+        for role in ('supervisor', 'coordinator'):
+            runbook = ' '.join((ROOT / f'docs/devloop/roles/{role}.md').read_text(
+                encoding='utf-8').split())
+            with self.subTest(role=role):
+                self.assertIn('--perm contents=read -- python3 scripts/role-git.py fetch '
+                              '<your clone>', runbook)
+                self.assertIn('Never ask `contents=read` for anything else.', runbook)
 
     def test_no_personal_token_for_the_roles(self):
         # #643: no fine-grained token of gh for the supervisor nor for the coordinator.
@@ -3660,8 +3690,9 @@ esac''')
                                '--out', str(page))
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertIn(f'[dry-run] scriverebbe {page}', done.stdout)
-        self.assertIn('brushtyler-devloop-supervisor: actions: read, checks: read, issues: write, '
-                      'metadata: read, pull_requests: write, statuses: read', done.stderr)
+        self.assertIn('brushtyler-devloop-supervisor: actions: read, checks: read, contents: read, '
+                      'issues: write, metadata: read, pull_requests: write, statuses: read',
+                      done.stderr)
         self.assertFalse(page.exists())
         self.assertEqual(self.mutating_calls(), [])
 
@@ -3673,8 +3704,9 @@ esac''')
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         permissions = ', '.join(f'{k}: {v}' for k, v in
                                 sorted(manifest('coordinator')['default_permissions'].items()))
-        self.assertEqual(permissions, 'actions: read, checks: read, issues: write, '
-                                      'metadata: read, pull_requests: write, statuses: read')
+        self.assertEqual(permissions, 'actions: read, checks: read, contents: read, '
+                                      'issues: write, metadata: read, pull_requests: write, '
+                                      'statuses: read')
         self.assertIn(f'  brushtyler-devloop-coordinator: {permissions}\n', done.stderr)
         listed = re.findall(r'^  brushtyler-devloop-([a-z-]+): ', done.stderr, re.M)
         self.assertEqual(sorted(listed), sorted(REQUIRED))
@@ -4381,6 +4413,118 @@ esac''')
                     self.assertIn(f'-C {clone} checkout --quiet --detach refs/tags/v1.2.0',
                                   done.stdout)
         self.assertEqual(self.mutating_calls(), [])
+
+    def test_the_clone_of_each_role_of_a_private_repository_is_made_with_its_app(self):
+        # #717: a dry run does not reach GitHub: beside the clone without credentials, the clone
+        # with the role's app for a private repository, contents=read asked explicitly, from the
+        # clone of the token script (the source's with SOURCE_REPO); with the clone already there,
+        # its fetch. The source is cloned first: the token script is there.
+        source = dict(SOURCE_REPO='brushtyler/devloop', SOURCE_REF='v1.2.0',
+                      STATE_DIR='/var/lib/devloop/widget')
+        params = self.project_params(COORDINATOR_OPS_DIR=self.root_copy(), **source)
+        sup, coord = self.home / 'supervisor', self.home / 'coordinator'
+        for script, role, user, home, clone in (
+                ('host/setup-supervisor.sh', 'supervisor', 'supervisor-acme-devloop', sup,
+                 sup / 'devloop-widget'),
+                ('host/setup-coordinator.sh', 'coordinator', FAKE_COORDINATOR, coord,
+                 coord / 'widget')):
+            with self.subTest(script=script):
+                done = self.run_script(script, '--dry-run', '--params', str(params))
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                out = done.stdout
+                source_clone = home / 'devloop-source-widget'
+                command = (f'[dry-run] sudo -u {user} -H -- env -C {source_clone} '
+                           f'DEVLOOP_APP_KEY_DIR={home}/.ghapps /usr/bin/python3 '
+                           f'scripts/{role}-token.py --state-dir /var/lib/devloop/widget '
+                           '--perm contents=read -- /usr/bin/python3 scripts/role-git.py')
+                self.assertIn(f'==> Clone di acme/widget per {user}\n'
+                              f'  [dry-run] sudo -u {user} -H -- git clone '
+                              f'https://github.com/acme/widget.git {clone}\n'
+                              '  se acme/widget non si legge senza credenziali (repository '
+                              f'privato, #717), il clone con l\'app {role} (contents: read):\n'
+                              f'  {command} clone {clone}\n', out)
+                self.assertLess(out.index(f'clone --quiet https://github.com/brushtyler/'
+                                          f'devloop.git {source_clone}'),
+                                out.index(f'==> Clone di acme/widget per {user}'))
+                (clone / '.git').mkdir(parents=True)
+                (clone / '.git/config').write_text(
+                    '[remote "origin"]\n\turl = https://github.com/acme/widget.git\n')
+                done = self.run_script(script, '--dry-run', '--params', str(params))
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                self.assertIn(f'  ok: {clone} è già un clone di acme/widget\n'
+                              '  se acme/widget non si legge senza credenziali (repository '
+                              f'privato, #717), il fetch con l\'app {role} (contents: read):\n'
+                              f'  {command} fetch {clone}\n', done.stdout)
+                self.assertNotIn(f'git clone https://github.com/acme/widget.git', done.stdout)
+        self.assertEqual(self.mutating_calls(), [])
+
+    def test_the_clone_of_a_role_reads_github_to_choose_the_app(self):
+        # #717, ensure_role_clone of ops/lib.sh outside a dry run: a repository that reads
+        # without credentials is cloned as before; a private one with the role's app, once its
+        # key and scripts/role-git.py are there, else a step to do; an existing clone of a
+        # private repository is fetched, of a public one left as it is.
+        self.fake_host('classic sudo', users=(FAKE_SUPERVISOR,))
+        real_git = shutil.which('git')
+        self.shim('git', 'for a in "$@"; do [ "$a" = ls-remote ] && exit "$OPS_TEST_LS"; done\n'
+                         f'exec {shlex.quote(real_git)} "$@"')
+        clone, keys, tokens = self.tmp / 'clone', self.tmp / 'keys', self.tmp / 'source'
+        keys.mkdir()
+
+        def ensure(public):
+            env = dict(os.environ, PATH=f'{self.bin}:{os.environ.get("PATH", "/usr/bin:/bin")}',
+                       OPS_TEST_CALLS=str(self.calls), OPS_TEST_LS='0' if public else '128',
+                       LC_ALL='C.UTF-8')
+            script = (f'. {shlex.quote(str(OPS / "lib.sh"))}; DRY_RUN=0; WARNINGS=0; '
+                      'REPO=acme/widget; APP_PREFIX=acme-devloop-; STATE_PATH=/srv/state; '
+                      f'ensure_role_clone supervisor {FAKE_SUPERVISOR} {clone} {keys} {tokens} '
+                      'SUPERVISOR_CLONE')
+            if self.calls.exists():
+                self.calls.unlink()
+            return subprocess.run([BASH, '-c', script], capture_output=True, text=True, env=env,
+                                  stdin=subprocess.DEVNULL, timeout=60)
+
+        sudo = f'sudo -u {FAKE_SUPERVISOR} -H --'
+        app = (f'{sudo} env -C {tokens} DEVLOOP_APP_KEY_DIR={keys} /usr/bin/python3 '
+               'scripts/supervisor-token.py --state-dir /srv/state --perm contents=read -- '
+               '/usr/bin/python3 scripts/role-git.py')
+        done = ensure(public=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.mutating_calls(),
+                         [f'{sudo} git clone https://github.com/acme/widget.git {clone}'])
+        # Private: without role-git.py in the clone of the token script, nothing but a step.
+        done = ensure(public=False)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn('  acme/widget non si legge senza credenziali: repository privato, il '
+                      "clone con l'app supervisor (contents: read, #717)\n", done.stdout)
+        self.assertIn(f'  da fare a mano: {tokens} non ha scripts/role-git.py', done.stdout)
+        self.assertEqual(self.mutating_calls(), [])
+        # Without the key of the role, a step too.
+        (tokens / 'scripts').mkdir(parents=True)
+        (tokens / 'scripts/role-git.py').write_text('')
+        done = ensure(public=False)
+        self.assertIn(f'  da fare a mano: copiare la chiave di acme-devloop-supervisor in {keys}, '
+                      'poi rieseguire questo script', done.stdout)
+        self.assertEqual(self.mutating_calls(), [])
+        (keys / 'acme-devloop-supervisor.2026-11-27.private-key.pem').write_text('k')
+        done = ensure(public=False)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.mutating_calls(), [f'{app} clone {clone}'])
+        # The clone there: fetched with the app when private, left as it is when public.
+        (clone / '.git').mkdir(parents=True)
+        (clone / '.git/config').write_text(
+            '[remote "origin"]\n\turl = https://github.com/acme/widget.git\n')
+        done = ensure(public=False)
+        self.assertIn(f'  ok: {clone} è già un clone di acme/widget\n', done.stdout)
+        self.assertEqual(self.mutating_calls(), [f'{app} fetch {clone}'])
+        done = ensure(public=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.mutating_calls(), [])
+        # A fetch that fails is a warning, and the script goes on.
+        self.shim('sudo', 'echo "sudo $*" >> "$OPS_TEST_CALLS"; exit 1')
+        done = ensure(public=False)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("  ATTENZIONE: il fetch di acme/widget con l'app acme-devloop-supervisor non "
+                      'è riuscito', done.stdout)
 
     # The users of the host of this repository (#563): written in params.env beside PROJECT.
     HOST_USERS = {'DEVLOOP_USER': 'devloop', 'AGENT_USER': 'devloop-agent',
@@ -5535,6 +5679,30 @@ class CheckHostTests(OpsTestCase):
                   if 'ERRORE' in line and 'sudoers' not in line
                   and line not in roots and line != home and line not in cli_dirs]
         return done, errors
+
+    def test_the_clone_of_each_role_updates(self):
+        # #717: the clone of a role of a private repository updates with the role's app,
+        # contents=read only: role-git.py check, as the role's user, from the clone of the token
+        # script. A dry run does not reach GitHub: it prints the command; --no-apps skips it.
+        step = '==> Aggiornamento dei clone dei ruoli (#717)\n'
+        clone = self.supervisor / 'devloop'
+        done, errors = self.check()
+        self.assertIn(f'{step}  {clone} non è un clone: nessun aggiornamento da verificare '
+                      '(setup-supervisor.sh)\n', done.stdout)
+        (clone / '.git').mkdir(parents=True)
+        done, errors = self.check()
+        self.assertEqual(errors, [])
+        self.assertIn(f'{step}  se brushtyler/devloop non si legge senza credenziali (repository '
+                      f'privato, #717):\n  [dry-run] sudo -u {ME} -H -- env -C {clone} '
+                      f'DEVLOOP_APP_KEY_DIR={self.supervisor}/.ghapps /usr/bin/python3 '
+                      f'scripts/supervisor-token.py --state-dir {self.state} --perm contents=read '
+                      f'-- /usr/bin/python3 scripts/role-git.py check {clone}\n', done.stdout)
+        for flag, why in (('--no-apps', '--no-apps'), ('--read-only', '--read-only')):
+            with self.subTest(flag=flag):
+                done, _ = self.check(flag)
+                self.assertIn(f'{step}  saltato ({why})\n', done.stdout)
+                self.assertNotIn('role-git.py', done.stdout)
+        self.assertEqual(self.mutating_calls(), [])
 
     def test_claude_code_of_the_roles_does_not_update_itself(self):
         # #643: the settings of Claude Code of the supervisor and of the coordinator turn the

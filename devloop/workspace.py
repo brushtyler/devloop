@@ -265,23 +265,49 @@ def clone(url, token, dest, run=subprocess.run, timeout=1800):
     # Absolute before the command runs in its parent: a relative DEST would be resolved twice.
     dest = Path(dest).absolute()
     where = dest.parent if dest.parent.is_dir() else Path.cwd()
+    _app_git('clone', ['clone', '--quiet', '--', url, str(dest)], url, token, where, run,
+             timeout)
+
+
+def fetch_clone(url, token, path, run=subprocess.run, timeout=1800):
+    """Fetch the branches of ``url`` into the remote branches of ``origin`` of the clone
+    ``path``, over HTTPS with ``token`` only, as :func:`clone` (#717: the clone of a role of a
+    private managed repository): the token is never written in the clone's config. Raises
+    WorkspaceError when a URL rewrite of the configuration of git, the clone's included, matches
+    ``url``, or the fetch fails."""
+    _app_git('fetch', ['fetch', '--quiet', url, '+refs/heads/*:refs/remotes/origin/*'], url,
+             token, Path(path).absolute(), run, timeout)
+
+
+def reach(url, token, path, run=subprocess.run, timeout=300):
+    """Whether ``url`` reads with ``token`` only, as :func:`fetch_clone` would, from the clone
+    ``path`` (its config included), without writing anything there: ``git ls-remote`` of the
+    head of ``url`` (#717, the check of the host). Raises WorkspaceError as
+    :func:`fetch_clone`."""
+    _app_git('ls-remote', ['ls-remote', '--quiet', '--exit-code', url, 'HEAD'], url, token,
+             Path(path).absolute(), run, timeout)
+
+
+def _app_git(what, args, url, token, where, run, timeout):
+    """``git args`` in ``where`` with ``token`` only (``app_auth_env``), after the refusal of
+    the URL rewrites of the configuration of git that match ``url`` (``rewrite_of``). Raises
+    WorkspaceError, named after ``what``, when one matches or git fails."""
     env = {k: v for k, v in os.environ.items() if k not in APP_AUTH_UNSET}
     try:
         found = run(['git', 'config', '--null', '--get-regexp', _REWRITES], cwd=where,
                     capture_output=True, text=True, timeout=60, env=env)
         key = rewrite_of(found.stdout or '', url)
         if key:
-            raise WorkspaceError(f'git config {key} rewrites {url}: refusing to clone with '
+            raise WorkspaceError(f'git config {key} rewrites {url}: refusing to {what} with '
                                  'credentials other than the app token')
-        done = run(['git', 'clone', '--quiet', '--', url, str(dest)], cwd=where,
-                   capture_output=True, text=True, timeout=timeout,
+        done = run(['git', *args], cwd=where, capture_output=True, text=True, timeout=timeout,
                    env=dict(env, **app_auth_env(url, token)))
     except subprocess.TimeoutExpired as exc:
-        raise WorkspaceError(f'git clone: timed out after {exc.timeout}s') from exc
+        raise WorkspaceError(f'git {what}: timed out after {exc.timeout}s') from exc
     except OSError as exc:
         raise WorkspaceError(f'git could not start: {exc}') from exc
     if done.returncode != 0:
-        raise WorkspaceError(f'git clone {url}: {done.stderr.strip()[:500]}')
+        raise WorkspaceError(f'git {what} {url}: {done.stderr.strip()[:500]}')
 
 
 # Applied to every git command the dispatcher runs in a worktree (#415), over every config file:

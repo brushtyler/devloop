@@ -292,8 +292,13 @@ class SupervisorTokenTests(unittest.TestCase):
                                             '--perm', 'statuses=read', '--', 'gh', 'x']),
                          (state, {'actions': 'read', 'checks': 'read', 'statuses': 'read'},
                           ['gh', 'x']))
-        # The supervisor neither implements nor merges: no contents, no other permission.
-        for perm in ('contents=read', 'contents=write', 'actions=write', 'checks=write',
+        # #717: contents read, for the clone of a private repository, only when asked, never by
+        # default.
+        self.assertEqual(self.script.parse(['--perm', 'contents=read', '--', 'gh', 'x']),
+                         (state, {'contents': 'read'}, ['gh', 'x']))
+        self.assertNotIn('contents', self.script.DEFAULT)
+        # The supervisor neither implements nor merges: no contents write, no other permission.
+        for perm in ('contents=write', 'actions=write', 'checks=write',
                      'statuses=write', 'administration=write', 'metadata=write'):
             with self.subTest(perm=perm), self.assertRaisesRegex(SystemExit, 'not allowed'):
                 self.script.parse(['--perm', perm, '--', 'gh', 'x'])

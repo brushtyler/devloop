@@ -5,7 +5,8 @@
 # del supervisore, la casella fra supervisore e coordinatore (#543), sudoers minimale, la copia
 # di root del risveglio role-wait.sh e dello script delle caselle mailbox.sh (#707), il watchdog
 # dei ruoli (#602), il timer della pulizia di done/ delle caselle se il progetto non ha il
-# coordinatore (#707), clone,
+# coordinatore (#707), clone (per un repository privato, con un token della sua app limitato a
+# contents=read, e aggiornato se c'è già, #717),
 # key_dir 700, impostazioni di Claude Code senza aggiornamenti automatici; con SOURCE_REPO anche un
 # clone della sorgente al tag SOURCE_REF, da cui lanciare scripts/supervisor-token.py (#571).
 # Idempotente: si può rieseguire, fa solo ciò che manca. Non scrive segreti. Claude Code, il suo
@@ -145,28 +146,22 @@ else
     ensure_mailbox_prune "$SUPERVISOR_OPS_DIR"
 fi
 
-step "Clone di $REPO per $SUPERVISOR_USER"
-if [ -d "$SUPERVISOR_CLONE/.git" ]; then
-    # Un clone per progetto (ADR 0006, R8): uno di un altro repository è di un altro progetto,
-    # e non si condivide. L'origin si legge dal file, senza eseguire git nel clone d'altri.
-    origin=$(clone_origin "$SUPERVISOR_CLONE")
-    slug=$(origin_slug "$origin")
-    [ "${slug,,}" = "${REPO,,}" ] \
-        || die "$SUPERVISOR_CLONE è un clone di '${origin:-origine sconosciuta}', non di $REPO: è di un altro progetto, scegliere un altro SUPERVISOR_CLONE"
-    ok "$SUPERVISOR_CLONE è già un clone di $REPO"
-else
-    as_user "$SUPERVISOR_USER" git clone "https://github.com/$REPO.git" "$SUPERVISOR_CLONE"
-fi
-
 # Il repository gestito di un progetto con la sorgente a parte non contiene devloop, quindi
 # nemmeno scripts/supervisor-token.py (#571): il supervisore lo lancia da un clone della
-# sorgente, al tag SOURCE_REF del progetto.
+# sorgente, al tag SOURCE_REF del progetto. Prima del clone del repository gestito, che per un
+# repository privato si fa con quello script (#717).
 TOKEN_CLONE=$SUPERVISOR_CLONE
 if [ -n "$SOURCE_REPO" ]; then
     step "Clone di $SOURCE_REPO al tag $SOURCE_REF per $SUPERVISOR_USER (i token della sua app)"
     ensure_source_clone "$SUPERVISOR_USER" "$SUPERVISOR_SOURCE_CLONE"
     TOKEN_CLONE=$SUPERVISOR_SOURCE_CLONE
 fi
+
+# Un clone per progetto (ADR 0006, R8); per un repository privato con l'app del supervisore,
+# limitata a contents=read (#717).
+step "Clone di $REPO per $SUPERVISOR_USER"
+ensure_role_clone supervisor "$SUPERVISOR_USER" "$SUPERVISOR_CLONE" "$SUPERVISOR_KEY_DIR" \
+    "$TOKEN_CLONE" SUPERVISOR_CLONE
 
 step 'Directory private (700)'
 ensure_dir "$SUPERVISOR_KEY_DIR" 700 "$SUPERVISOR_USER"

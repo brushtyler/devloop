@@ -9,7 +9,8 @@
 # Le app sono quelle di APPS (params.env): per default dispatcher, merger, claude-agent,
 # codex-agent, agy-agent, implementer, supervisor e coordinator. Quella del coordinatore (#549;
 # ADR 0002, precisazione del 2026-11-22) ha issues e pull_requests in scrittura e actions, checks
-# e statuses in sola lettura, per la diagnosi della CI, senza contents; la sua chiave va nella
+# e statuses in sola lettura, per la diagnosi della CI, e contents in sola lettura, per il clone
+# di un repository gestito privato (#717), come quella del supervisore; la sua chiave va nella
 # key_dir dell'utente coordinator (COORDINATOR_KEY_DIR), e il coordinatore ne conia i token con
 # scripts/coordinator-token.py.
 #

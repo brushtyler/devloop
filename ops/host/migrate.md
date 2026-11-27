@@ -1116,6 +1116,78 @@ contiene, con [la sua procedura](#un-progetto-con-la-sorgente-a-un-tag-nuovo-666
 **Rollback**: il passo 2 dal checkout della versione di prima rimette le copie di prima, e il pin
 della versione di prima il codice di prima.
 
+## Clone dei ruoli di un repository privato (#717)
+
+Il passo sull'host di #717. Supervisore e coordinatore lavorano in un clone del repository gestito
+(`SUPERVISOR_CLONE`, `COORDINATOR_CLONE`), che `setup-supervisor.sh` e `setup-coordinator.sh`
+facevano senza credenziali: un repository privato non si clonava né si aggiornava. Con #717 i
+manifest delle app `supervisor` e `coordinator` hanno `contents: read`, che
+`scripts/supervisor-token.py` e `scripts/coordinator-token.py` concedono solo con un `--perm
+contents=read` esplicito, e i due script dell'host, quando il repository non si legge senza
+credenziali, clonano il clone del ruolo, o lo aggiornano se c'è già, con un token della sua app
+limitato a `contents=read` (`scripts/role-git.py`: il token solo nell'ambiente di `git`, come nei
+fetch di devloop, #716). `check-host.sh` verifica che il clone di ogni ruolo si aggiorni.
+
+Per un repository pubblico, come quello di devloop, nulla cambia sull'host: il clone si legge senza
+credenziali, e gli script lo trovano già fatto. Nessun parametro, nessuna chiave dell'overlay,
+nessun sudoers, nessuna ACL e nessuna unità nuovi. Il codice del loop non cambia: devloop mergia
+la PR di #717 come le altre, ma non fa il pin automatico di quel commit né dei successivi finché
+l'operatore non fa il pin a mano ([Ogni cambio con un passo
+sull'host](#ogni-cambio-con-un-passo-sullhost)): qui è il passo 4.
+
+### Comandi
+
+Come root, dal checkout dell'operatore aggiornato (`git -C <checkout> fetch origin` e
+`git -C <checkout> checkout --detach origin/main`, con il merge di #717), **per ogni progetto
+dell'host** con il supervisore, con il suo file di parametri `<parametri>` (uno con `SOURCE_REF`
+al tag successivo, con [la sua procedura](#un-progetto-con-la-sorgente-a-un-tag-nuovo-666)):
+
+1. **i permessi delle app reali** (dell'operatore, sul sito di GitHub): per un insieme di app che
+   serve un repository privato, le app `<APP_PREFIX>supervisor` e `<APP_PREFIX>coordinator` hanno
+   `Contents: Read-only` (impostazioni dell'app, "Permissions & events"), e la richiesta dei
+   permessi nuovi è accettata sull'installazione. Per l'insieme di devloop l'operatore li ha già
+   aggiunti (2026-11-27); un insieme usato solo per repository pubblici può non averli;
+
+2. **il loop fermo**: `systemctl stop <SERVICE_NAME>`. Le sessioni dei ruoli restano;
+
+3. **i clone dei ruoli**, prima con `--dry-run`: le azioni nuove sono, per un clone che manca, il
+   clone senza credenziali e la riga `se … non si legge senza credenziali (repository privato,
+   #717)` con il comando dell'app del ruolo (`--perm contents=read -- … role-git.py clone`), e per
+   un clone che c'è la stessa riga con `role-git.py fetch`. Senza `--dry-run`, per un repository
+   pubblico nulla cambia (`ok: … è già un clone di …`); per uno privato lo script aggiorna il
+   clone con l'app del ruolo, o dice fra le cose da fare (`da fare a mano`) cosa manca: la chiave
+   del ruolo, o `scripts/role-git.py` nel clone dello script dei token. `setup-coordinator.sh` si
+   esegue solo se il progetto ha il coordinatore. Un'altra azione che il passo non spiega vuol
+   dire che l'host non corrisponde ai parametri: ci si ferma e si chiede all'operatore:
+
+   ```bash
+   sudo bash <checkout>/ops/host/setup-supervisor.sh --params <parametri> --dry-run
+   sudo bash <checkout>/ops/host/setup-supervisor.sh --params <parametri>
+   sudo bash <checkout>/ops/host/setup-coordinator.sh --params <parametri> --dry-run
+   sudo bash <checkout>/ops/host/setup-coordinator.sh --params <parametri>
+   ```
+
+4. **il pin a mano**: come utente `DEVLOOP_USER`, `devloop pin origin/main` (con più progetti
+   `devloop --project <progetto> pin origin/main`), poi `systemctl start <SERVICE_NAME>`. Il pin a
+   mano fa riprendere il pin automatico;
+
+5. **la verifica**: nessun `ERRORE`, e nel passo "Aggiornamento dei clone dei ruoli (#717)" una
+   riga `ok:` per ogni ruolo (per un repository pubblico, `… si legge senza credenziali`). Senza
+   `--no-apps`, perché la verifica interroga GitHub:
+
+   ```bash
+   sudo bash <checkout>/ops/host/check-host.sh --params <parametri>
+   ```
+
+**Un progetto con `SOURCE_REF`** (#687) conia i token dei ruoli dal clone della sorgente al suo
+tag: finché il tag non contiene #717, `scripts/role-git.py` non c'è e il clone di un repository
+privato resta fra le cose da fare. Questa sezione la applica al tag che la contiene, con [la sua
+procedura](#un-progetto-con-la-sorgente-a-un-tag-nuovo-666).
+
+**Rollback**: il pin della versione di prima rimette il codice di prima; i clone dei ruoli restano
+come sono, senza token nella loro configurazione. `contents: read` sulle app reali si toglie dalle
+loro impostazioni.
+
 ## Configurazione di ssdlc nel suo file di progetto
 
 Con l'ADR 0006, R3, `devloop/config.toml` non contiene più i fatti di ssdlc né le restrizioni che

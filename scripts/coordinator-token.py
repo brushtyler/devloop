@@ -25,8 +25,14 @@ DEVLOOP_APP_KEY_DIR to its own (COORDINATOR_KEY_DIR of ops/params.env).
 
 Without --perm the token gets issues=write and pull_requests=write: enough for commands,
 comments and labels. Only issues and pull_requests (read or write), and actions, checks,
-statuses and metadata read, for the diagnosis of the CI, may be asked for: the coordinator
-neither implements nor merges, and its app has no contents permission.
+statuses and metadata read, for the diagnosis of the CI, and contents read, may be asked for:
+the coordinator neither implements nor merges, and its app never writes contents. contents=read
+(#717) only with an explicit --perm, for the clone and the fetch of its clone of a private
+managed repository, which scripts/role-git.py makes with the token in the environment of git
+alone:
+
+    python3 scripts/coordinator-token.py --state-dir <state_dir> \\
+        --perm contents=read -- python3 scripts/role-git.py fetch <clone>
 
 The token reaches the command through GH_TOKEN only; it is never printed.
 
@@ -59,10 +65,11 @@ from devloop.config import (DEFAULT_CONFIG, ConfigError, apply_overlay, parse_co
 from devloop.redact import allow_option, publication_check  # noqa: E402
 
 DEFAULT = {'issues': 'write', 'pull_requests': 'write'}
-# The permissions of ops/github/apps/coordinator.json, none above its level.
+# The permissions of ops/github/apps/coordinator.json, none above its level. contents (#717), for
+# the clone of a private managed repository: read only, never in DEFAULT.
 ALLOWED = {'issues': {'read', 'write'}, 'pull_requests': {'read', 'write'},
            'actions': {'read'}, 'checks': {'read'}, 'statuses': {'read'},
-           'metadata': {'read'}}
+           'metadata': {'read'}, 'contents': {'read'}}
 # The launcher's default state_dir, of this clone.
 STATE = REPO_ROOT / '.devloop'
 LOCAL_CONFIG = 'config.local.toml'

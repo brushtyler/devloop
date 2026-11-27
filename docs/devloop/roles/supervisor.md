@@ -349,8 +349,10 @@ one of five states (the fifth, in maintenance, from #705). It only detects: it h
   `scripts/supervisor-token.py`, with `--state-dir` on devloop's `state_dir`, when
   `[roles.supervisor]` is the table; otherwise the app of the agent named in `roles.supervisor`,
   through `scripts/agent-token.py` (AGENTS.md, "Identità GitHub degli agent"). Only `issues` and
-  `pull_requests`, and `actions`, `checks` and `statuses` read only: no push, no `contents`. The
-  reads too go through that identity (GitHub): you have no personal token of `gh`.
+  `pull_requests`, and `actions`, `checks` and `statuses` read only: no push, no `contents`
+  write. `contents` read only with an explicit `--perm contents=read`, and only to clone or
+  update your clone of a private managed repository (#717). The reads too go through that
+  identity (GitHub): you have no personal token of `gh`.
 - On the host, only the commands of `ops/host/sudoers-supervisor`: `devloop-pinned` with
   `status`, `report`, `direction` (#604), `tick --dry-run`, `pin` and `notify` (#593), as
   devloop's user (no `watch` since #683: you read the stream of the events with a read-only
@@ -388,6 +390,13 @@ DEVLOOP_APP_KEY_DIR=<key_dir> python3 scripts/supervisor-token.py --state-dir <s
   and `--perm actions=read`, `checks=read` or `statuses=read` for the CI.
 - **Writes** (comments, reviews, labels, commands) with the default, `issues=write` and
   `pull_requests=write`.
+- **Your clone.** A public managed repository updates with a plain `git fetch` (or `git pull`).
+  A private one does not read without credentials: update it with your app, `--perm
+  contents=read`, through `scripts/role-git.py`, which passes the token to `git` only
+  ([The clone of a role](../reference.md#the-clone-of-a-role)):
+  `DEVLOOP_APP_KEY_DIR=<key_dir> python3 scripts/supervisor-token.py --state-dir <state_dir>
+  --perm contents=read -- python3 scripts/role-git.py fetch <your clone>`. Never ask
+  `contents=read` for anything else.
 - The token reaches the command only in `GH_TOKEN`: never print it, never export it in an
   assignment, never pass it to another command. Never use the operator's `gh` login, the
   coordinator's app or a token of another user.
