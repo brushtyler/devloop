@@ -110,6 +110,9 @@ class FakeGH:
     def add_blocked_by(self, number, issue_id):
         self.added_blocks = getattr(self, 'added_blocks', []) + [(number, issue_id)]
 
+    def remove_blocked_by(self, number, issue_id):
+        self.removed_blocks = getattr(self, 'removed_blocks', []) + [(number, issue_id)]
+
     # Logins of the `labeled` events of a label on a PR, oldest first: for the level-2 label
     # those a test sets, for any other those of ``edit_labels`` (``label_log``), each written
     # by ``labeler``, the login the dispatcher acts with.
